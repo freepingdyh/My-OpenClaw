@@ -57,11 +57,11 @@ class LobsterBot(commands.Bot):
         super().__init__(command_prefix='/', intents=intents)
 
     async def setup_hook(self):
-        # 啟動 FastAPI 服務，對應大俠設定的 Port 18789
-        config = uvicorn.Config(api_app, host="0.0.0.0", port=18789, log_level="warning")
+        # 啟動 FastAPI 服務，對應大俠設定的 Port 8080
+        config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
         server = uvicorn.Server(config)
         asyncio.create_task(server.serve())
-        print("🌐 網頁展示服務已在 Port 18789 啟動")
+        print("🌐 網頁展示服務已在 Port 8080 啟動")
 
 bot = LobsterBot()
 
