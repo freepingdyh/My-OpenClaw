@@ -1,59 +1,18 @@
-# =========================
-# 🔧 Core 基礎套件
-# =========================
-openai>=1.30.0
+# Lobster Discord Bot Core
 python-dotenv>=1.0.1
-requests>=2.31.0
-requests-cache>=1.2.0
-distro>=1.9.0
 
-# =========================
-# 🧠 Google / Gemini
-# =========================
-google-generativeai>=0.8.5
+# Async Network 
+aiohttp>=3.9.0
+requests>=2.31.0
+
+# Dual Brain SDK
+openai>=1.30.0
 google-genai>=0.3.0
 
-google-api-python-client>=2.100.0
-google-auth>=2.27.0
-google-auth-httplib2>=0.2.0
-google-auth-oauthlib>=1.2.0
+# Discord Bot
+discord.py>=2.3.2
 
-# =========================
-# 📊 Data / 分析
-# =========================
-pandas>=2.2.0
-matplotlib>=3.8.0
-
-# =========================
-# 🖼️ Image / Media
-# =========================
-Pillow>=10.0.0
-pydub>=0.25.1
-
-# =========================
-# 🌐 Web / Parsing
-# =========================
-beautifulsoup4>=4.12.0
-httplib2>=0.22.0
-
-# =========================
-# 📍 地圖 / 路徑
-# =========================
-polyline>=2.0.0
-staticmap>=0.5.0
-
-# =========================
-# 📩 Messaging / Bot
-# =========================
-line-bot-sdk>=3.0
-
-# =========================
-# 📊 Google Sheets
-# =========================
-gspread>=5.0.0
-
-# =========================
-# 🤖 其他模型（保留）
-# =========================
-anthropic==0.93.0
-discord.py
+# --- 新增的 Web 與金庫存取依賴 ---
+fastapi>=0.110.0
+uvicorn>=0.27.0
+aiofiles>=23.2.1
