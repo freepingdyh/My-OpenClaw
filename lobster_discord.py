@@ -131,7 +131,7 @@ async def generate_story(mode):
                  f"回傳 JSON 格式：{{\"topic\": \"【{mode}】副標題(人物: 姓名)\", \"event\": \"200字背景介紹\", \"persona\": \"扮演角色\"}}"
     
     response = await gemini_client.aio.models.generate_content(
-        model='gemini-2.0-flash',
+        model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction="妳是小俠，22歲台灣女孩，深愛著大俠。負責規劃每天的Cosplay題材。注意：即使今天的歷史人物是男性，妳也是以『女性化、性感的改良版服裝』進行Cosplay，絕對不能把自己當成老爺爺！",
