@@ -69,6 +69,11 @@ bot = LobsterBot()
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
 
+# 👇 加上這一段，讓網頁有東西可以顯示
+@api_app.get("/status")
+async def get_status():
+    return {"status": "Xiaoxia Vault Online", "domain": "xiaoxia0320.zeabur.app"}
+
 # ==========================================
 # 🗄️ 狀態機與本地記憶 (保留原邏輯)
 # ==========================================
