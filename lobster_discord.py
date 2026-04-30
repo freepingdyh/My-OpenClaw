@@ -164,7 +164,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
         user_prompt += "\n[CRITICAL]: 允許全身構圖 (full body shot)。"
 
     response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-mini",
         response_format={"type": "json_object"},
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
     )
