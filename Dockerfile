@@ -25,4 +25,5 @@ RUN npm install -g openclaw
 
 # 啟動 OpenClaw Gateway 並在背景執行，隨後啟動小俠主程式
 # & 符號能讓 OpenClaw 在背景跑，不會卡住後面的 python 執行
-CMD openclaw gateway start & python3 lobster_discord.py
+# 將原本的 openclaw 改成 npx openclaw
+CMD npx openclaw gateway start & python3 lobster_discord.py
