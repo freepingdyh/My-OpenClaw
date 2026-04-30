@@ -14,7 +14,8 @@ WORKDIR /workspace
 COPY requirements.txt .
 
 # 安裝 Python 依賴套件 (為了避免污染系統環境，我們設定不使用快取)
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+# 移除 --break-system-packages 即可順利安裝
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # 複製專案內的所有檔案到容器的工作目錄
 COPY . .
