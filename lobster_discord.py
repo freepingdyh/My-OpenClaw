@@ -68,6 +68,11 @@ bot = LobsterBot()
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
 
+# 🌟 新增：掛載訓練集專用的靜態資料夾
+DATASET_DIR = os.path.join(BASE_DIR, "dataset")
+os.makedirs(DATASET_DIR, exist_ok=True)
+api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
+
 @api_app.get("/", response_class=HTMLResponse)
 async def read_index():
     index_path = os.path.join(BASE_DIR, "index.html")
@@ -76,6 +81,15 @@ async def read_index():
             return f.read()
     except FileNotFoundError:
         return "<h1>⚠️ 找不到 index.html 檔案，請確認已上傳。</h1>"
+
+# 🌟 新增：提供記憶碎片(訓練集) JSON 給前端網頁
+@api_app.get("/api/dataset")
+async def get_dataset():
+    json_path = os.path.join(BASE_DIR, "dataset.json")
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
 @api_app.get("/api/photos")
 async def get_photos():

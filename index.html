@@ -28,7 +28,7 @@
 </head>
 <body class="text-gray-800 overflow-hidden" id="main-body">
 
-    <!-- 鎖定畫面 -->
+    <!-- 鎖定畫面 (維持卡通偽裝) -->
     <div id="lock-screen">
         <div class="glass p-10 rounded-2xl text-center max-w-sm w-full mx-4 shadow-xl">
             <div class="w-24 h-24 mx-auto bg-pink-200 rounded-full mb-6 overflow-hidden avatar-glow border-4 border-white">
@@ -63,17 +63,17 @@
                 
                 <aside class="w-full lg:w-1/5 space-y-6">
                     <div class="glass p-6 rounded-2xl text-center">
-                        <img src="https://api.dicebear.com/7.x/notionists/svg?seed=xiaoxia&backgroundColor=fbcfe8" class="w-32 h-32 mx-auto rounded-full avatar-glow border-4 border-white mb-4">
+                        <!-- 替換為專屬美照 -->
+                        <img src="/dataset/Xiaoxia_019.png" class="w-32 h-32 mx-auto rounded-full avatar-glow border-4 border-white mb-4 object-cover">
                         <h2 class="font-bold text-xl text-gray-800">小俠</h2>
                         <p class="text-xs text-pink-500 bg-pink-100 py-1 px-2 rounded-full inline-block mt-2">懂事女友 ‧ 專屬大俠</p>
                         <div class="mt-6 text-left text-sm text-gray-600 space-y-2">
                             <p><b>狀態：</b> <span class="text-green-500">● 系統連線中</span></p>
-                            <p><b>核心：</b> Gemini 2.5 + GPT-4o</p>
+                            <!-- 隱藏硬體規格以防未來變動 -->
                             <p><b>年齡：</b> 22 歲</p>
                         </div>
                     </div>
                     
-                    <!-- 恢復並升級：記憶碎片 (訓練集) -->
                     <div class="glass p-4 rounded-2xl">
                         <h3 class="text-sm font-bold text-gray-700 mb-3 border-b pb-2">記憶碎片 (訓練集)</h3>
                         <div class="grid grid-cols-3 gap-2" id="dataset-gallery">
@@ -109,7 +109,6 @@
             <div class="glass p-6 rounded-2xl min-h-[600px]">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-6 border-b pb-4 gap-4">
                     <h2 class="text-xl font-bold text-gray-800">所有相片總覽</h2>
-                    <!-- 升級版四分類按鈕 -->
                     <div class="flex space-x-2 bg-white/50 p-1 rounded-lg shadow-sm border border-pink-100 overflow-x-auto w-full md:w-auto">
                         <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap">全部</button>
                         <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
@@ -160,12 +159,10 @@
         </div>
     </div>
 
-    <!-- 統一燈箱容器 (動態切換一般看圖與拍立得模式) -->
+    <!-- 統一燈箱容器 -->
     <div id="lightbox" class="fixed inset-0 bg-black/90 z-[100] hidden flex justify-center items-center cursor-pointer backdrop-blur-sm" onclick="closeLightbox()">
-        <!-- 內部容器，會由 JS 動態改變樣式 -->
         <div id="lightbox-container" class="" onclick="event.stopPropagation()">
             <img id="lightbox-img" class="">
-            <!-- 拍立得專用文字區 -->
             <p id="lightbox-caption" class="mt-4 text-gray-700 font-serif text-lg hidden"></p>
             <p id="lightbox-hint" class="text-xs text-gray-400 mt-4 cursor-pointer text-center hidden" onclick="closeLightbox()">[ 點擊外圍關閉 ]</p>
         </div>
@@ -173,39 +170,27 @@
 
     <!-- JavaScript 核心邏輯 -->
     <script>
-        // ==========================================
-        // 🌟 專屬資料集設定區 (大俠可以在這裡新增/修改訓練圖與故事)
-        // ==========================================
-        const datasetPhotos = [
-            { 
-                url: "https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
-                text: "「大俠，這是我第一次穿上這件洋裝，你說很好看對吧？」" 
-            },
-            { 
-                url: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
-                text: "那天的陽光剛好，記錄下專屬於你的笑容。" 
-            },
-            { 
-                url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
-                text: "練習微笑的模樣，成為了靈魂最深處的記憶碎片。" 
-            }
-        ];
-        // ==========================================
-
         let allPhotos = [];
         let filteredPhotos = [];
         let currentIndex = 0;
+        let datasetPhotos = []; // 用來存放動態載入的拍立得照片
 
-        // 初始化資料集
-        function renderDataset() {
-            const container = document.getElementById('dataset-gallery');
-            container.innerHTML = datasetPhotos.map((photo, index) => `
-                <div class="aspect-square rounded overflow-hidden cursor-pointer hover:opacity-80 transition shadow-sm border border-gray-200" onclick="openPolaroidLightbox(${index})">
-                    <img src="${photo.url}" class="w-full h-full object-cover">
-                </div>
-            `).join('');
+        // 🌟 動態向 Python 抓取資料集 (Dataset)
+        async function loadDatasetData() {
+            try {
+                const res = await fetch('/api/dataset');
+                datasetPhotos = await res.json();
+                
+                const container = document.getElementById('dataset-gallery');
+                container.innerHTML = datasetPhotos.map((photo, index) => `
+                    <div class="aspect-square rounded overflow-hidden cursor-pointer hover:opacity-80 transition shadow-sm border border-gray-200" onclick="openPolaroidLightbox(${index})">
+                        <img src="${photo.url}" class="w-full h-full object-cover">
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error("無法載入訓練集:", e);
+            }
         }
-        renderDataset(); // 網頁載入時立刻渲染
 
         // 1. 金庫解鎖邏輯
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
@@ -241,6 +226,9 @@
                 allPhotos = await res.json();
                 filteredPhotos = [...allPhotos];
                 
+                // 一併載入訓練資料集
+                loadDatasetData(); 
+
                 if(allPhotos.length > 0) {
                     renderMainDisplay();
                     renderTimelineList();
@@ -255,7 +243,6 @@
             }
         }
 
-        // 搜尋過濾功能
         function filterGallery() {
             const keyword = document.getElementById('gallery-search').value.toLowerCase();
             filteredPhotos = allPhotos.filter(p => 
@@ -343,7 +330,7 @@
             renderTimelineList();
         }
 
-        // 🌟 渲染相片總覽網格 (支援四分類)
+        // 🌟 渲染相片總覽網格
         function renderOverview(filterType = 'all') {
             ['all', 'cosplay', 'diary', 'important'].forEach(t => {
                 const btn = document.getElementById('btn-filter-' + t);
@@ -429,7 +416,6 @@
             document.getElementById('lightbox-img').className = "w-full h-auto object-contain rounded border border-gray-200 shadow-sm";
             
             const container = document.getElementById('lightbox-container');
-            // 加入拍立得的白色厚紙板質感與微傾斜
             container.className = "bg-white p-5 pb-8 rounded-sm shadow-2xl max-w-sm w-full text-center transform rotate-2 cursor-default";
             
             const caption = document.getElementById('lightbox-caption');
