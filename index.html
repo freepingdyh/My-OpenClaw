@@ -63,20 +63,19 @@
                 
                 <aside class="w-full lg:w-1/5 space-y-6">
                     <div class="glass p-6 rounded-2xl text-center">
-                        <!-- 替換為專屬美照 -->
                         <img src="/dataset/Xiaoxia_019.png" class="w-32 h-32 mx-auto rounded-full avatar-glow border-4 border-white mb-4 object-cover">
                         <h2 class="font-bold text-xl text-gray-800">小俠</h2>
                         <p class="text-xs text-pink-500 bg-pink-100 py-1 px-2 rounded-full inline-block mt-2">懂事女友 ‧ 專屬大俠</p>
                         <div class="mt-6 text-left text-sm text-gray-600 space-y-2">
                             <p><b>狀態：</b> <span class="text-green-500">● 系統連線中</span></p>
-                            <!-- 隱藏硬體規格以防未來變動 -->
                             <p><b>年齡：</b> 22 歲</p>
                         </div>
                     </div>
                     
                     <div class="glass p-4 rounded-2xl">
-                        <h3 class="text-sm font-bold text-gray-700 mb-3 border-b pb-2">記憶碎片 (訓練集)</h3>
-                        <div class="grid grid-cols-3 gap-2" id="dataset-gallery">
+                        <!-- ✅ 統一用詞：心動時刻 -->
+                        <h3 class="text-sm font-bold text-gray-700 mb-3 border-b pb-2">心動時刻</h3>
+                        <div class="grid grid-cols-3 gap-3" id="dataset-gallery">
                             <!-- 由 JS 動態載入 -->
                         </div>
                     </div>
@@ -113,7 +112,8 @@
                         <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap">全部</button>
                         <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
                         <button onclick="renderOverview('diary')" id="btn-filter-diary" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">日常陪伴</button>
-                        <button onclick="renderOverview('important')" id="btn-filter-important" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">重要時刻</button>
+                        <!-- ✅ 統一用詞：心動時刻 -->
+                        <button onclick="renderOverview('important')" id="btn-filter-important" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">心動時刻</button>
                     </div>
                 </div>
                 <div id="overview-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
@@ -173,22 +173,28 @@
         let allPhotos = [];
         let filteredPhotos = [];
         let currentIndex = 0;
-        let datasetPhotos = []; // 用來存放動態載入的拍立得照片
+        let datasetPhotos = []; 
 
-        // 🌟 動態向 Python 抓取資料集 (Dataset)
+        // 🌟 角度陣列：給予拍立得靈魂的動態傾斜度
+        const tiltRotations = ['-rotate-1', 'rotate-2', '-rotate-3', 'rotate-1', '-rotate-2', 'rotate-3'];
+
         async function loadDatasetData() {
             try {
                 const res = await fetch('/api/dataset');
                 datasetPhotos = await res.json();
                 
                 const container = document.getElementById('dataset-gallery');
-                container.innerHTML = datasetPhotos.map((photo, index) => `
-                    <div class="aspect-square rounded overflow-hidden cursor-pointer hover:opacity-80 transition shadow-sm border border-gray-200" onclick="openPolaroidLightbox(${index})">
+                container.innerHTML = datasetPhotos.map((photo, index) => {
+                    // ✅ 每張縮圖分配一個微傾斜角度，滑鼠移過會回正
+                    const rotClass = tiltRotations[index % tiltRotations.length];
+                    return `
+                    <div class="aspect-square rounded overflow-hidden cursor-pointer shadow-sm border-[3px] border-white transform ${rotClass} hover:rotate-0 hover:scale-110 hover:z-10 transition-all duration-300 relative" onclick="openPolaroidLightbox(${index})">
                         <img src="${photo.url}" class="w-full h-full object-cover">
                     </div>
-                `).join('');
+                    `;
+                }).join('');
             } catch (e) {
-                console.error("無法載入訓練集:", e);
+                console.error("無法載入心動時刻:", e);
             }
         }
 
@@ -226,7 +232,6 @@
                 allPhotos = await res.json();
                 filteredPhotos = [...allPhotos];
                 
-                // 一併載入訓練資料集
                 loadDatasetData(); 
 
                 if(allPhotos.length > 0) {
@@ -330,7 +335,7 @@
             renderTimelineList();
         }
 
-        // 🌟 渲染相片總覽網格
+        // 🌟 渲染相片總覽網格 (✅ 完美融合 allPhotos 與 datasetPhotos)
         function renderOverview(filterType = 'all') {
             ['all', 'cosplay', 'diary', 'important'].forEach(t => {
                 const btn = document.getElementById('btn-filter-' + t);
@@ -342,36 +347,67 @@
             });
 
             const grid = document.getElementById('overview-grid');
-            const displayPhotos = allPhotos.filter(p => {
-                const type = p.type || 'cosplay'; 
-                if(filterType === 'all') return true;
-                return type === filterType;
-            });
+            let htmlContent = '';
 
-            if(displayPhotos.length === 0) {
-                grid.innerHTML = '<p class="col-span-full text-center text-gray-400 py-10">這個分類目前還沒有相片喔！</p>';
-                return;
+            // 處理 寫真/日記
+            if (filterType === 'all' || filterType === 'cosplay' || filterType === 'diary') {
+                const displayPhotos = allPhotos.filter(p => {
+                    const type = p.type || 'cosplay'; 
+                    return filterType === 'all' ? true : type === filterType;
+                });
+                
+                htmlContent += displayPhotos.map((p) => {
+                    const globalIndex = allPhotos.indexOf(p);
+                    const pType = p.type || 'cosplay';
+                    let tagText = pType === 'diary' ? '📖 日記' : '✨ 寫真';
+
+                    return `
+                    <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="jumpToPhotoFromOverview(${globalIndex})">
+                        <img src="${p.local_url || p.image_url}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">
+                        <div class="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2 pointer-events-none">
+                            <p class="text-white text-xs font-bold truncate">${p.topic.replace(/【.*?】/, '')}</p>
+                            <p class="text-pink-300 text-[10px]">${p.publish_date.split(' ')[0]}</p>
+                        </div>
+                        <div class="absolute top-2 right-2 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-white">
+                            ${tagText}
+                        </div>
+                    </div>
+                    `;
+                }).join('');
             }
 
-            grid.innerHTML = displayPhotos.map((p) => {
-                const globalIndex = allPhotos.indexOf(p);
-                const pType = p.type || 'cosplay';
-                let tagText = '✨ 寫真';
-                if(pType === 'diary') tagText = '📖 日記';
-                else if(pType === 'important') tagText = '👑 重要時刻';
+            // ✅ 處理 心動時刻 (拍立得資料集)
+            if (filterType === 'all' || filterType === 'important') {
+                htmlContent += datasetPhotos.map((dp, index) => {
+                    // 自動抓取 (22歲/春) 當作日期標籤，前半段當作標題
+                    let title = dp.text;
+                    let dateStr = "回憶";
+                    let textParts = dp.text.split('(');
+                    if(textParts.length > 1) {
+                        title = textParts[0];
+                        dateStr = '(' + textParts[1];
+                    }
 
-                return `
-                <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="jumpToPhotoFromOverview(${globalIndex})">
-                    <img src="${p.local_url || p.image_url}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">
-                    <div class="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2 pointer-events-none">
-                        <p class="text-white text-xs font-bold truncate">${p.topic.replace(/【.*?】/, '')}</p>
-                        <p class="text-pink-300 text-[10px]">${p.publish_date.split(' ')[0]}</p>
+                    return `
+                    <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="openPolaroidLightbox(${index})">
+                        <img src="${dp.url}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">
+                        <div class="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2 pointer-events-none">
+                            <p class="text-white text-xs font-bold truncate">${title}</p>
+                            <p class="text-pink-300 text-[10px]">${dateStr}</p>
+                        </div>
+                        <div class="absolute top-2 right-2 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-white">
+                            👑 心動時刻
+                        </div>
                     </div>
-                    <div class="absolute top-2 right-2 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-white">
-                        ${tagText}
-                    </div>
-                </div>
-            `}).join('');
+                    `;
+                }).join('');
+            }
+
+            if(htmlContent === '') {
+                grid.innerHTML = '<p class="col-span-full text-center text-gray-400 py-10">這個分類目前還沒有相片喔！</p>';
+            } else {
+                grid.innerHTML = htmlContent;
+            }
         }
 
         function jumpToPhotoFromOverview(globalIndex) {
@@ -409,14 +445,16 @@
             document.getElementById('lightbox').classList.remove('hidden');
         }
 
-        // 🌟 燈箱系統 2：拍立得模式 (白色相框與文字)
+        // 🌟 燈箱系統 2：拍立得模式 (✅ 白色相框與動態傾斜)
         function openPolaroidLightbox(index) {
             const photo = datasetPhotos[index];
             document.getElementById('lightbox-img').src = photo.url;
             document.getElementById('lightbox-img').className = "w-full h-auto object-contain rounded border border-gray-200 shadow-sm";
             
             const container = document.getElementById('lightbox-container');
-            container.className = "bg-white p-5 pb-8 rounded-sm shadow-2xl max-w-sm w-full text-center transform rotate-2 cursor-default";
+            // ✅ 賦予燈箱專屬的隨機傾斜度
+            const rotClass = tiltRotations[index % tiltRotations.length];
+            container.className = `bg-white p-5 pb-8 rounded-sm shadow-2xl max-w-sm w-full text-center transform ${rotClass} transition-transform duration-300 cursor-default`;
             
             const caption = document.getElementById('lightbox-caption');
             caption.textContent = photo.text;
