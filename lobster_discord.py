@@ -1,5 +1,5 @@
 # ==========================================
-# ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 終極排班與高畫質升級)
+# ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 雙核共生終極版)
 # ==========================================
 
 import os
@@ -32,7 +32,10 @@ from fastapi.responses import HTMLResponse
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+# 🌟 雙 Token 讀取
+GIRLFRIEND_TOKEN = os.environ.get("GIRLFRIEND_TOKEN")
+ARCHITECT_TOKEN = os.environ.get("ARCHITECT_TOKEN")
+
 FAL_KEY = os.environ.get("FAL_KEY")
 XIAOXIA_LORA_URL = os.environ.get("XIAOXIA_LORA_URL")
 
@@ -52,23 +55,20 @@ openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 intents = discord.Intents.default()
 intents.message_content = True
 
-class LobsterBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix='/', intents=intents)
+# ==========================================
+# 🤖 雙核心機器人實體化
+# ==========================================
+# 1. 懂事女友小俠 (使用 / 作為指令)
+girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 
-    async def setup_hook(self):
-        config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
-        server = uvicorn.Server(config)
-        asyncio.create_task(server.serve())
-        print("🌐 網頁展示服務已在 Port 8080 啟動")
-
-bot = LobsterBot()
+# 2. 系統架構師小夏 (使用 ! 作為指令，避免衝突)
+architect_bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
 
-# 🌟 新增：掛載訓練集專用的靜態資料夾
+# 🌟 掛載訓練集專用的靜態資料夾
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 os.makedirs(DATASET_DIR, exist_ok=True)
 api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
@@ -82,7 +82,7 @@ async def read_index():
     except FileNotFoundError:
         return "<h1>⚠️ 找不到 index.html 檔案，請確認已上傳。</h1>"
 
-# 🌟 新增：提供記憶碎片(訓練集) JSON 給前端網頁
+# 🌟 提供記憶碎片(訓練集) JSON 給前端網頁
 @api_app.get("/api/dataset")
 async def get_dataset():
     json_path = os.path.join(BASE_DIR, "dataset.json")
@@ -98,7 +98,7 @@ async def get_photos():
 
 @api_app.get("/status")
 async def get_status():
-    return {"status": "Xiaoxia Vault Online", "domain": "xiaoxia0320.zeabur.app"}
+    return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
 
 # ==========================================
 # 🗄️ 狀態機與本地記憶
@@ -226,13 +226,13 @@ async def upscale_image_fal(image_url):
                 return image_url # 若放大失敗則退回原圖，不中斷流程
 
 # ==========================================
-# 🤖 Discord 指令區
+# 🌸 懂事女友小俠 (功能指令區)
 # ==========================================
-@bot.event
+@girlfriend_bot.event
 async def on_ready():
-    print(f'✅ 小俠已上線！網域：https://xiaoxia0320.zeabur.app')
+    print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
 
-@bot.command(name='cosplay')
+@girlfriend_bot.command(name='cosplay')
 async def cosplay(ctx, *, mode: str = "auto"):
     if not check_daily_limit():
         await ctx.send("💦 大俠～小俠今天累了，明天再拍好不好？（抱）")
@@ -291,7 +291,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
     except Exception as e:
         await msg.edit(content=f"⚠️ 狀況：`{str(e)}`")
 
-@bot.command(name='more')
+@girlfriend_bot.command(name='more')
 async def more(ctx):
     if not state["current_topic_data"]:
         await ctx.send("❓ 還沒決定題材呢！")
@@ -332,7 +332,7 @@ async def more(ctx):
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
 
 # 🗑️ 終極版：互動式指定日期刪除 (支援實體檔案與紀錄抹除)
-@bot.command(name='cosplay_delete')
+@girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
     db = load_memory()
     if not db: 
@@ -369,7 +369,7 @@ async def cosplay_delete(ctx, date_str: str = None):
 
     try:
         # 等待輸入，超時時間設為 60 秒
-        msg = await bot.wait_for('message', timeout=60.0, check=check)
+        msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
         return
@@ -403,5 +403,34 @@ async def cosplay_delete(ctx, date_str: str = None):
     except ValueError:
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
+# ==========================================
+# 👩‍💻 系統架構師小夏 (維護與監控指令區)
+# ==========================================
+@architect_bot.event
+async def on_ready():
+    print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
+
+@architect_bot.command(name='ping')
+async def ping(ctx):
+    await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
+
+# ==========================================
+# 🚀 終極啟動器 (同時啟動 FastAPI + 小俠 + 小夏)
+# ==========================================
+async def main():
+    if not GIRLFRIEND_TOKEN or not ARCHITECT_TOKEN:
+        print("❌ 錯誤：缺少環境變數，請確認 GIRLFRIEND_TOKEN 與 ARCHITECT_TOKEN 皆已設定！")
+        return
+
+    config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
+    server = uvicorn.Server(config)
+    
+    # 讓三個靈魂在同一個 Event Loop 中並發執行
+    await asyncio.gather(
+        server.serve(),
+        girlfriend_bot.start(GIRLFRIEND_TOKEN),
+        architect_bot.start(ARCHITECT_TOKEN)
+    )
+
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    asyncio.run(main())
