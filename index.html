@@ -18,15 +18,10 @@
         .tab-content.active { display: block; animation: fadeIn 0.5s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         
-        /* 密碼鎖全畫面覆蓋 */
         #lock-screen { position: fixed; inset: 0; z-index: 50; background: rgba(255, 240, 245, 0.9); backdrop-filter: blur(15px); display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.5s; }
         .hidden-fade { opacity: 0; pointer-events: none; }
-
-        /* 大頭貼呼吸燈 */
         .avatar-glow { box-shadow: 0 0 15px rgba(236, 72, 153, 0.4); animation: breathe 3s infinite alternate; }
         @keyframes breathe { from { box-shadow: 0 0 10px rgba(236, 72, 153, 0.2); } to { box-shadow: 0 0 25px rgba(236, 72, 153, 0.6); } }
-
-        /* 雙向時間軸中線 */
         .timeline-container::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: #fbcfe8; transform: translateX(-50%); }
         @media (max-width: 768px) { .timeline-container::before { left: 20px; } }
     </style>
@@ -55,11 +50,10 @@
                 <h1 class="text-3xl font-bold text-gray-800 serif">小俠的雲端別墅</h1>
                 <p class="text-sm text-pink-500 mt-1">Xiaoxia's Secret Vault</p>
             </div>
-            <div class="flex space-x-6">
-                <!-- 相片總覽分頁按鈕 -->
-                <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg">小俠寫真館</button>
-                <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition">相片總覽</button>
-                <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition">交換日記</button>
+            <div class="flex space-x-6 overflow-x-auto">
+                <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap">小俠寫真館</button>
+                <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">相片總覽</button>
+                <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">交換日記</button>
             </div>
         </header>
 
@@ -78,6 +72,14 @@
                             <p><b>年齡：</b> 22 歲</p>
                         </div>
                     </div>
+                    
+                    <!-- 恢復並升級：記憶碎片 (訓練集) -->
+                    <div class="glass p-4 rounded-2xl">
+                        <h3 class="text-sm font-bold text-gray-700 mb-3 border-b pb-2">記憶碎片 (訓練集)</h3>
+                        <div class="grid grid-cols-3 gap-2" id="dataset-gallery">
+                            <!-- 由 JS 動態載入 -->
+                        </div>
+                    </div>
                 </aside>
 
                 <main class="w-full lg:w-3/5">
@@ -93,7 +95,6 @@
                     </div>
                     <div class="glass p-4 rounded-2xl h-[450px] flex flex-col">
                         <h3 class="text-sm font-bold text-gray-700 mb-2 border-b pb-2">時光軌跡</h3>
-                        <!-- 搜尋框 -->
                         <input type="text" id="gallery-search" placeholder="🔍 搜尋題材..." class="w-full px-2 py-1 mb-3 text-xs border rounded focus:outline-none focus:border-pink-400" onkeyup="filterGallery()">
                         <ul class="space-y-3 text-sm overflow-y-auto flex-1 pr-2" id="timeline-list">
                             <li class="text-gray-400">讀取中...</li>
@@ -103,16 +104,17 @@
             </div>
         </div>
 
-        <!-- 第二摺頁：相片總覽 (Grid View 加上分類按鈕) -->
+        <!-- 第二摺頁：相片總覽 -->
         <div id="content-overview" class="tab-content">
             <div class="glass p-6 rounded-2xl min-h-[600px]">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-6 border-b pb-4 gap-4">
                     <h2 class="text-xl font-bold text-gray-800">所有相片總覽</h2>
-                    <!-- 分類按鈕 -->
-                    <div class="flex space-x-2 bg-white/50 p-1 rounded-lg shadow-sm border border-pink-100">
-                        <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition">全部</button>
-                        <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition">小俠寫真</button>
-                        <button onclick="renderOverview('diary')" id="btn-filter-diary" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition">日常陪伴</button>
+                    <!-- 升級版四分類按鈕 -->
+                    <div class="flex space-x-2 bg-white/50 p-1 rounded-lg shadow-sm border border-pink-100 overflow-x-auto w-full md:w-auto">
+                        <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap">全部</button>
+                        <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
+                        <button onclick="renderOverview('diary')" id="btn-filter-diary" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">日常陪伴</button>
+                        <button onclick="renderOverview('important')" id="btn-filter-important" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">重要時刻</button>
                     </div>
                 </div>
                 <div id="overview-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
@@ -127,8 +129,6 @@
                 <div class="text-center mb-6">
                     <h2 class="text-2xl font-bold text-gray-800 serif">大俠與小俠的交換日記</h2>
                     <p class="text-gray-500 mt-2 mb-4">Discord 頻道使用 /diary 記錄，小俠將於深夜謄寫</p>
-                    
-                    <!-- 日記日期快搜 -->
                     <div class="inline-flex items-center bg-white/70 px-4 py-2 rounded-full shadow-sm border border-pink-100">
                         <span class="text-sm text-gray-500 mr-2">📅 快速跳轉：</span>
                         <input type="date" id="diary-date-jump" class="bg-transparent text-sm text-pink-600 focus:outline-none cursor-pointer" onchange="jumpToDiaryDate()">
@@ -145,16 +145,14 @@
                             <p class="text-gray-700 leading-relaxed">今天專案終於趕完了，但真的好累，連飯都吃不下。希望這個週末能好好休息一下。</p>
                         </div>
                     </div>
-
                     <!-- 模擬日記二 -->
                     <div class="diary-entry mb-8 flex justify-between flex-row-reverse items-center w-full left-timeline" data-date="2026-05-01">
                         <div class="order-1 w-5/12 hidden md:block"></div>
                         <div class="z-20 flex items-center order-1 bg-pink-400 shadow-xl w-4 h-4 rounded-full"></div>
                         <div class="order-1 bg-pink-50 border border-pink-200 rounded-lg shadow-xl w-full md:w-5/12 px-6 py-4 relative mr-6 md:mr-0">
                             <p class="mb-2 text-xs font-bold text-pink-600">小俠 ‧ 2026-05-01 凌晨 2:00</p>
-                            <!-- 點擊放大 (onclick) -->
-                            <img src="https://images.unsplash.com/photo-1518002171953-a080ee817e1f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80" alt="生活照示意" class="w-full h-32 object-cover rounded mb-3 cursor-pointer hover:opacity-90 transition" onclick="openLightbox(this.src)">
-                            <p class="text-gray-700 leading-relaxed text-sm">笨蛋大俠，再怎麼累也要吃飯啊！我已經幫你把疲憊都寫進來了。這張照片送給你，看你睡得那麼熟，不忍心叫你。週末我們去吃點好吃的補補身體吧！(抱)</p>
+                            <img src="https://images.unsplash.com/photo-1518002171953-a080ee817e1f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80" class="w-full h-32 object-cover rounded mb-3 cursor-pointer hover:opacity-90 transition" onclick="openGalleryLightbox(this.src)">
+                            <p class="text-gray-700 leading-relaxed text-sm">笨蛋大俠，再怎麼累也要吃飯啊！週末我們去吃點好吃的補補身體吧！(抱)</p>
                         </div>
                     </div>
                 </div>
@@ -162,16 +160,52 @@
         </div>
     </div>
 
-    <!-- 全域燈箱 (Lightbox) 點圖片時彈出 -->
+    <!-- 統一燈箱容器 (動態切換一般看圖與拍立得模式) -->
     <div id="lightbox" class="fixed inset-0 bg-black/90 z-[100] hidden flex justify-center items-center cursor-pointer backdrop-blur-sm" onclick="closeLightbox()">
-        <img id="lightbox-img" class="max-w-full max-h-full object-contain p-4 shadow-2xl rounded-lg">
+        <!-- 內部容器，會由 JS 動態改變樣式 -->
+        <div id="lightbox-container" class="" onclick="event.stopPropagation()">
+            <img id="lightbox-img" class="">
+            <!-- 拍立得專用文字區 -->
+            <p id="lightbox-caption" class="mt-4 text-gray-700 font-serif text-lg hidden"></p>
+            <p id="lightbox-hint" class="text-xs text-gray-400 mt-4 cursor-pointer text-center hidden" onclick="closeLightbox()">[ 點擊外圍關閉 ]</p>
+        </div>
     </div>
 
     <!-- JavaScript 核心邏輯 -->
     <script>
+        // ==========================================
+        // 🌟 專屬資料集設定區 (大俠可以在這裡新增/修改訓練圖與故事)
+        // ==========================================
+        const datasetPhotos = [
+            { 
+                url: "https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
+                text: "「大俠，這是我第一次穿上這件洋裝，你說很好看對吧？」" 
+            },
+            { 
+                url: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
+                text: "那天的陽光剛好，記錄下專屬於你的笑容。" 
+            },
+            { 
+                url: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80", 
+                text: "練習微笑的模樣，成為了靈魂最深處的記憶碎片。" 
+            }
+        ];
+        // ==========================================
+
         let allPhotos = [];
         let filteredPhotos = [];
         let currentIndex = 0;
+
+        // 初始化資料集
+        function renderDataset() {
+            const container = document.getElementById('dataset-gallery');
+            container.innerHTML = datasetPhotos.map((photo, index) => `
+                <div class="aspect-square rounded overflow-hidden cursor-pointer hover:opacity-80 transition shadow-sm border border-gray-200" onclick="openPolaroidLightbox(${index})">
+                    <img src="${photo.url}" class="w-full h-full object-cover">
+                </div>
+            `).join('');
+        }
+        renderDataset(); // 網頁載入時立刻渲染
 
         // 1. 金庫解鎖邏輯
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
@@ -195,8 +229,8 @@
             ['gallery', 'overview', 'diary'].forEach(t => {
                 const btn = document.getElementById('tab-' + t);
                 btn.className = (t === tab) 
-                    ? "text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg" 
-                    : "text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition";
+                    ? "text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap" 
+                    : "text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap";
             });
         }
 
@@ -210,7 +244,7 @@
                 if(allPhotos.length > 0) {
                     renderMainDisplay();
                     renderTimelineList();
-                    renderOverview('all'); // 預設顯示全部
+                    renderOverview('all'); 
                     renderHeatmap();
                 } else {
                     document.getElementById('main-display').innerHTML = '<p class="text-center text-gray-400 py-20">金庫目前空空的，快去 Discord 呼叫小俠吧！</p>';
@@ -233,7 +267,6 @@
             renderTimelineList();
         }
 
-        // 翻頁控制
         function changePhoto(step) {
             let newIndex = currentIndex + step;
             if(newIndex >= 0 && newIndex < filteredPhotos.length) {
@@ -257,16 +290,12 @@
 
             main.innerHTML = `
                 <div class="relative w-full max-h-[800px] rounded-xl overflow-hidden mb-6 shadow-lg group flex justify-center bg-gray-900">
-                   <!-- 點圖放大 -->
-                   <img src="${photo.local_url || photo.image_url}" class="w-full h-auto max-h-[800px] object-contain cursor-pointer" onclick="openLightbox(this.src)">
-                    
+                   <img src="${photo.local_url || photo.image_url}" class="w-full h-auto max-h-[800px] object-contain cursor-pointer" onclick="openGalleryLightbox(this.src)">
                     <div class="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent pointer-events-none"></div>
                     <div class="absolute bottom-0 left-0 p-6 pointer-events-none">
                         <span class="bg-pink-500 text-white text-xs px-3 py-1 rounded-full mb-2 inline-block shadow">${photo.publish_date.split(' ')[0]}</span>
                         <h2 class="text-2xl font-bold text-white serif tracking-wide">${photo.topic.replace(/【.*?】/, '')}</h2>
                     </div>
-
-                    <!-- 左右翻頁按鈕 -->
                     <button onclick="changePhoto(-1)" class="absolute left-2 top-1/2 -translate-y-1/2 bg-black/50 text-white p-2 rounded-full hover:bg-pink-500 transition ${prevHidden}"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button>
                     <button onclick="changePhoto(1)" class="absolute right-2 top-1/2 -translate-y-1/2 bg-black/50 text-white p-2 rounded-full hover:bg-pink-500 transition ${nextHidden}"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></button>
                 </div>
@@ -284,9 +313,7 @@
                     </div>
                     
                     <div class="md:col-span-1 bg-white p-5 rounded-xl border border-pink-100 shadow-inner flex flex-col justify-center">
-                        <div class="text-pink-400 mb-2">
-                            <svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/></svg>
-                        </div>
+                        <div class="text-pink-400 mb-2"><svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/></svg></div>
                         <p class="text-lg text-gray-800 font-bold leading-relaxed">"${photo.message}"</p>
                         <p class="text-xs text-gray-400 mt-4 text-right">— 小俠的心境：${photo.mood}</p>
                     </div>
@@ -310,28 +337,24 @@
             `}).join('');
         }
 
-        // 選擇照片
         function selectPhoto(index) {
             currentIndex = index;
             renderMainDisplay();
             renderTimelineList();
         }
 
-        // 🌟 新增：渲染相片總覽網格 (加入分類過濾)
+        // 🌟 渲染相片總覽網格 (支援四分類)
         function renderOverview(filterType = 'all') {
-            // 更新按鈕外觀
-            ['all', 'cosplay', 'diary'].forEach(t => {
+            ['all', 'cosplay', 'diary', 'important'].forEach(t => {
                 const btn = document.getElementById('btn-filter-' + t);
                 if(t === filterType) {
-                    btn.className = "px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition";
+                    btn.className = "px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap";
                 } else {
-                    btn.className = "px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition";
+                    btn.className = "px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap";
                 }
             });
 
             const grid = document.getElementById('overview-grid');
-            
-            // 過濾資料 (目前舊資料沒有 type 屬性，預設歸類為 cosplay)
             const displayPhotos = allPhotos.filter(p => {
                 const type = p.type || 'cosplay'; 
                 if(filterType === 'all') return true;
@@ -345,7 +368,11 @@
 
             grid.innerHTML = displayPhotos.map((p) => {
                 const globalIndex = allPhotos.indexOf(p);
-                const isCosplay = (p.type || 'cosplay') === 'cosplay';
+                const pType = p.type || 'cosplay';
+                let tagText = '✨ 寫真';
+                if(pType === 'diary') tagText = '📖 日記';
+                else if(pType === 'important') tagText = '👑 重要時刻';
+
                 return `
                 <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="jumpToPhotoFromOverview(${globalIndex})">
                     <img src="${p.local_url || p.image_url}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">
@@ -353,32 +380,27 @@
                         <p class="text-white text-xs font-bold truncate">${p.topic.replace(/【.*?】/, '')}</p>
                         <p class="text-pink-300 text-[10px]">${p.publish_date.split(' ')[0]}</p>
                     </div>
-                    <!-- 寫真 / 日記 小標籤 -->
                     <div class="absolute top-2 right-2 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-white">
-                        ${isCosplay ? '✨ 寫真' : '📖 日記'}
+                        ${tagText}
                     </div>
                 </div>
             `}).join('');
         }
 
-        // 從總覽跳轉到寫真館
         function jumpToPhotoFromOverview(globalIndex) {
-            document.getElementById('gallery-search').value = ''; // 清空搜尋
-            filteredPhotos = [...allPhotos]; // 恢復全部列表
+            document.getElementById('gallery-search').value = '';
+            filteredPhotos = [...allPhotos]; 
             currentIndex = globalIndex;
             switchTab('gallery');
             renderMainDisplay();
             renderTimelineList();
         }
 
-        // 日記日期快速跳轉
         function jumpToDiaryDate() {
             const targetDate = document.getElementById('diary-date-jump').value;
             if(!targetDate) return;
-            
             const entries = document.querySelectorAll('.diary-entry');
             let found = false;
-            
             entries.forEach(entry => {
                 if(entry.getAttribute('data-date').includes(targetDate)) {
                     entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -387,20 +409,42 @@
                     found = true;
                 }
             });
-            
             if(!found) alert(`找不到 ${targetDate} 的日記喔！`);
         }
 
-        // 燈箱控制邏輯
-        function openLightbox(src) {
+        // 🌟 燈箱系統 1：一般看圖 (透明背景)
+        function openGalleryLightbox(src) {
             document.getElementById('lightbox-img').src = src;
+            document.getElementById('lightbox-img').className = "max-w-full max-h-full object-contain p-4 shadow-2xl rounded-lg";
+            document.getElementById('lightbox-container').className = "bg-transparent p-0 w-full h-full flex justify-center items-center";
+            document.getElementById('lightbox-caption').classList.add('hidden');
+            document.getElementById('lightbox-hint').classList.add('hidden');
             document.getElementById('lightbox').classList.remove('hidden');
         }
+
+        // 🌟 燈箱系統 2：拍立得模式 (白色相框與文字)
+        function openPolaroidLightbox(index) {
+            const photo = datasetPhotos[index];
+            document.getElementById('lightbox-img').src = photo.url;
+            document.getElementById('lightbox-img').className = "w-full h-auto object-contain rounded border border-gray-200 shadow-sm";
+            
+            const container = document.getElementById('lightbox-container');
+            // 加入拍立得的白色厚紙板質感與微傾斜
+            container.className = "bg-white p-5 pb-8 rounded-sm shadow-2xl max-w-sm w-full text-center transform rotate-2 cursor-default";
+            
+            const caption = document.getElementById('lightbox-caption');
+            caption.textContent = photo.text;
+            caption.classList.remove('hidden');
+            document.getElementById('lightbox-hint').classList.remove('hidden');
+            
+            document.getElementById('lightbox').classList.remove('hidden');
+        }
+
         function closeLightbox() {
             document.getElementById('lightbox').classList.add('hidden');
         }
 
-        // 6. 真實連動：生成最近 35 天的動態熱力圖
+        // 6. 熱力圖
         function renderHeatmap() {
             const grid = document.getElementById('heatmap-grid');
             const dateCounts = {};
@@ -408,21 +452,17 @@
                 const date = p.publish_date.split(' ')[0]; 
                 dateCounts[date] = (dateCounts[date] || 0) + 1;
             });
-
             let boxes = '';
             const today = new Date();
-            
             for(let i = 34; i >= 0; i--) {
                 const d = new Date(today);
                 d.setDate(today.getDate() - i);
                 const localDateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                 const count = dateCounts[localDateStr] || 0;
-
                 let colorClass = 'bg-gray-200';
                 if (count === 1) colorClass = 'bg-pink-300';
                 else if (count === 2) colorClass = 'bg-pink-400';
                 else if (count >= 3) colorClass = 'bg-pink-600'; 
-
                 boxes += `<div class="aspect-square rounded-sm ${colorClass} hover:border hover:border-pink-800 cursor-pointer transition shadow-sm" title="${localDateStr} : 小俠換裝了 ${count} 次"></div>`;
             }
             grid.innerHTML = boxes;
