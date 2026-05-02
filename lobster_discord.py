@@ -142,51 +142,89 @@ async def save_to_vault(url):
 # ==========================================
 # 🧠 雙腦架構與生圖引擎
 # ==========================================
+
+# ==========================================
+# 🧠 雙腦架構與生圖引擎 (已經過去蕪存菁，修復括號衝突)
+# ==========================================
+
 async def generate_story(mode):
     today = datetime.now()
     year, month, day = today.year, today.month, today.day
+    weekday = today.weekday()  # 0=週一, 5=週六
+    
+    # 🌟 第一層邏輯：決定「性感的程度與姿態 (雙軌制)」
+    if weekday == 5:
+        # 週六：全解放魅惑模式
+        style_desc = "服裝極度大膽、露骨，姿態誘惑，展現極致魅惑。"
+        system_mod = "今天妳要展現最極致的魅惑力，動作與表情要勾人心魂，徹底解放妳的性感。"
+    else:
+        # 平日與週日：端莊性感模式
+        style_desc = "服裝可以大膽露(如深V、短裙)，但姿態必須端莊專業，神韻自信大方，不可有搔首弄姿之感。"
+        system_mod = "妳要展現一種『高級的性感』：穿著大膽吸睛，但行為舉止知性大方，展現端莊的神聖感與專業氣息。注意：即使今天的歷史人物是男性，妳也必須將服裝爆改為『極度性感、突顯深邃事業線與修長美腿』的女體化戰袍！言語間要帶點撫媚與自信，絕對不能把自己包得緊緊的！"
+
+    # 🌟 第二層邏輯：決定「題材與日期處理」
     if "歷史" in mode:
         prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
                  f"[絕對限制]：\n1. 必須挑選歷史上真實在「{month}月{day}日」發生的事件！\n" \
                  f"2. 內文若要計算『幾年前』，必須用 {year} 減去歷史發生年份，絕對不可算錯！\n" \
-                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)\", \"event\": \"200字背景介紹\", \"persona\": \"扮演角色\"}}"
+                 f"3. {style_desc}\n" \
+                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
     else:
         prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
                  f"請發想一個適合小俠Cosplay的題材。\n" \
-                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】副標題(人物: 姓名)\", \"event\": \"200字背景介紹\", \"persona\": \"扮演角色\"}}"
+                 f"[絕對限制]：{style_desc}\n" \
+                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
     
+    # 🌟 呼叫 Gemini 大腦
     response = await gemini_client.aio.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
-            system_instruction="妳是小俠，22歲台灣女孩，深愛著大俠。負責規劃每天的Cosplay題材。注意：即使今天的歷史人物是男性，妳也是以『女性化、性感的改良版服裝』進行Cosplay，絕對不能把自己當成老爺爺！",
+            system_instruction=f"妳是小俠，22歲台灣女孩，擁有豐滿傲人的完美身材，深愛著大俠。負責規劃每天的Cosplay題材。{system_mod}",
             response_mime_type="application/json"
         )
     )
     return json.loads(response.text)
 
+
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
-    system_prompt = """你是一位專精於 FLUX 模型的視覺總監。
-    核心不可變條件：
-    1. [終極臉部鎖定] 提示詞開頭必須嚴格是：`xiaoxia_girl, 1girl, solo, masterpiece, extremely detailed beautiful face, heavy eyelids, bedroom eyes, smooth fair skin, `。
-    2. [絕對禁止]：絕對不可生成男性(boy, man, old man)、不可生成老人、不可長鬍子！
-    3. [強制女體化]：將服裝強制轉譯為「為性感年輕女性量身訂做的 Cosplay 服裝」(例如：sexy plunging neckline, revealing, tight fit)。
-    4. 其餘特徵：強調 `slender yet voluptuous hourglass figure`。
-    5. 品質後綴：`ultra clean image, soft cinematic lighting.` (這段必須加在 image_prompt 的最後面，絕對不可跑到 message 裡！)
+    weekday = datetime.now().weekday()
+    # 根據星期幾定義控制標籤
+    if weekday == 5:
+        pose_tags = "seductive pose, alluring gaze, playful expression, suggestive posture, winking"
+        outfit_tags = "extremely revealing, provocative, cleavage, tight fit"
+    else:
+        # 平日與週日：露但不搔首弄姿
+        pose_tags = "dignified posture, confident gaze, natural expression, professional, elegant, not suggestive"
+        outfit_tags = "sexy yet theme-appropriate, deep V-neck, plunging neckline, tight fit, revealing but elegant"
+
+    # 注意這裡：加入了 f 字首，將 GPT 的填空提示改為 ()，並將 JSON 結構用 {{ }} 包起來防止報錯
+    system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。
+    請嚴格遵循以下【角色專用穩定模板】的結構，[BODY CONTROL] 永遠保持火辣。
+    注意：絕對不可輸出完整的敘述句，必須是逗號分隔的標籤 (Tags)。
+
+    模板骨架如下（請將生成的內容依此順序組合）：
+    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, defined nose bridge, bright eyes, natural lips, 
+    [HAIR & FACE DETAILS] long dark wavy hair, smooth and slightly voluminous, natural makeup, clean skin, face fully visible, 
+    [BODY CONTROL - CRITICAL] slim tall body, extremely voluptuous hourglass figure, large breasts, narrow waist, extremely curvy, proportional shoulders and hips, elegant posture, long legs,
+    [POSE & EXPRESSION] {pose_tags}, (在此填入符合題材的動作),
+    [OUTFIT] {outfit_tags}, (在此填入符合題材的服裝細節),
+    [SCENE] (在此填入背景與場景細節),
+    [LIGHTING & STYLE] cinematic lighting, soft key light on face, subtle rim light to enhance body shape, photorealistic, ultra detailed, 8k resolution, natural skin texture, sharp focus
     
     回傳 JSON 格式限制：
-    {
-        "image_prompt": "(必須是英文) 逗號分隔的英文標籤。臉部鎖定放最前面，品質後綴放最後面。",
+    {{
+        "image_prompt": "(必須是英文) 請將上述模板完整組合。請直接輸出純逗號分隔的標籤字串，不要保留 [IDENTITY LOCK] 這種括號標題文字。",
         "composition": "(必須是繁體中文) 說明構圖與光影發想，100字內。",
         "mood": "(必須是繁體中文) 描述小俠的微表情與肢體心境，50字內。",
         "message": "(必須是繁體中文) 以懂事女友的口吻對大俠說的話，50字內。"
-    }"""
+    }}"""
 
     user_prompt = f"Topic: {topic}\nEvent: {event}\nPersona: {persona}\n"
     if force_half_body:
-        user_prompt += "\n[CRITICAL]: 強制使用半身構圖 (upper body shot, cowboy shot)，不允許全身照。"
+        user_prompt += "\n[CRITICAL]: 在 [POSE & EXPRESSION] 區塊強制加入標籤 `upper body shot, `, 強制使用半身構圖，不允許全身照。"
     else:
-        user_prompt += "\n[CRITICAL]: 允許全身構圖 (full body shot)。"
+        user_prompt += "\n[CRITICAL]: 在 [POSE & EXPRESSION] 區塊加入標籤 `full body shot, `, 允許全身構圖。"
 
     response = await openai_client.chat.completions.create(
         model="gpt-5-mini",
@@ -194,6 +232,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
     )
     return json.loads(response.choices[0].message.content)
+
 
 async def generate_image_fal(prompt):
     if not XIAOXIA_LORA_URL: raise ValueError("XIAOXIA_LORA_URL 尚未在 .env 中設定！")
