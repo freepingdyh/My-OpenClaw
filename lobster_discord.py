@@ -51,27 +51,31 @@ DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
 
 # --- 小俠聊天與日記系統變數 ---
 DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
-diary_buffers = {}            # 存放「正在記錄日記中」的對話緩衝區
-girlfriend_chat_sessions = {} # 存放每個大俠/頻道的「短期對話記憶」
+diary_buffers = {}            # 改為 dict 結構: {"date": "...", "content": []}
+girlfriend_chat_sessions = {} 
+pending_inputs = set()        # 🛑 新增：防止小俠在選單操作時插嘴
 
-def save_diary_entry(content):
+def save_diary_entry(content, target_date=None):
     try:
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        # 如果有指定日期就用指定的，否則用今天
+        date_str = target_date if target_date else datetime.now().strftime("%Y-%m-%d")
         diary_db = []
         if os.path.exists(DIARY_DATA_PATH):
             with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
                 diary_db = json.load(f)
         
-        # 尋找今天是否已經有紀錄，有的話就接在後面 (支援一天寫多次)
         found = False
         for entry in diary_db:
-            if entry.get("date") == today_str:
+            if entry.get("date") == date_str:
                 entry["content"] += f"\n\n{content}"
                 found = True
                 break
         
         if not found:
-            diary_db.append({"date": today_str, "content": content})
+            diary_db.append({"date": date_str, "content": content})
+            
+        # 🌟 新增：存檔前依日期排序，確保補登的日記在網頁時間軸上位置正確
+        diary_db = sorted(diary_db, key=lambda x: x["date"])
             
         with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
             json.dump(diary_db, f, ensure_ascii=False, indent=2)
@@ -412,7 +416,7 @@ async def more(ctx):
         await ctx.send(embed=embed)
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
 
-# 🗑️ 終極版：互動式指定日期刪除 (支援實體檔案與紀錄抹除)
+# 🗑️ 終極版：互動式指定日期刪除 (支援實體檔案與紀錄抹除，並防止小俠插嘴)
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
     db = load_memory()
@@ -448,12 +452,15 @@ async def cosplay_delete(ctx, date_str: str = None):
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
+    pending_inputs.add(ctx.author.id) # 🔒 鎖上聊天大腦，防止小俠插嘴
     try:
         # 等待輸入，超時時間設為 60 秒
         msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
         return
+    finally:
+        pending_inputs.discard(ctx.author.id) # 🔓 解開聊天大腦
 
     # 處理取消
     if msg.content.lower() == 'c':
@@ -485,10 +492,23 @@ async def cosplay_delete(ctx, date_str: str = None):
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
 @girlfriend_bot.command(name='diary_start')
-async def diary_start(ctx):
-    # 開啟該大俠的專屬日記緩衝區
-    diary_buffers[ctx.author.id] = []
-    await ctx.send("Ok，我準備好了！📝 請告訴我今天發生了什麼事吧～")
+async def diary_start(ctx, date_str: str = None):
+    # 如果有輸入日期 (如 2026.04.25 或 2026-04-25)，就轉為標準格式
+    target_date = datetime.now().strftime("%Y-%m-%d")
+    if date_str:
+        target_date = date_str.replace(".", "-")
+
+    # 將目標日期與內容一起存入緩衝區
+    diary_buffers[ctx.author.id] = {
+        "date": target_date,
+        "content": []
+    }
+    
+    msg = f"Ok，我準備好了！📝 這次要記錄的是 **{target_date}** 的日記，請告訴我發生了什麼事吧～"
+    if date_str:
+        msg = f"收到！小俠幫你翻開 **{target_date}** 那天的空白頁📝，請告訴我發生了什麼事吧～"
+        
+    await ctx.send(msg)
 
 @girlfriend_bot.command(name='diary_end')
 async def diary_end(ctx):
@@ -497,21 +517,22 @@ async def diary_end(ctx):
         await ctx.send("❓ 大俠，我們還沒開始記錄呢！請先輸入 `/diary_start`。")
         return
 
-    # 取出內容並清除緩衝區 (關閉聆聽模式)
-    content_list = diary_buffers.pop(user_id)
+    # 取出資料並清除緩衝區
+    buffer_data = diary_buffers.pop(user_id)
+    content_list = buffer_data["content"]
+    target_date = buffer_data["date"]
+
     if not content_list:
         await ctx.send("收到！不過大俠剛剛什麼都沒寫呢，已取消本次紀錄。")
         return
 
     diary_content = "\n".join(content_list)
-    
-    # 執行存檔
-    success = save_diary_entry(diary_content)
+    success = save_diary_entry(diary_content, target_date)
     
     if success:
-        await ctx.send("收到！\n✅ 網頁熱力圖資料庫紀錄成功！")
+        await ctx.send(f"收到！\n✅ **{target_date}** 的紀錄已成功更新至網頁資料庫！")
     else:
-        await ctx.send("收到！\n❌ 網頁熱力圖資料庫紀錄失敗，請檢查後端日誌！")
+        await ctx.send("收到！\n❌ 網頁資料庫紀錄失敗，請檢查後端日誌！")
 
 @girlfriend_bot.command(name='diary_delete')
 async def diary_delete(ctx, date_str: str = None):
@@ -554,11 +575,14 @@ async def diary_delete(ctx, date_str: str = None):
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
+    pending_inputs.add(ctx.author.id) # 🔒 鎖上聊天大腦，防止小俠插嘴
     try:
         msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
         return
+    finally:
+        pending_inputs.discard(ctx.author.id) # 🔓 解開聊天大腦
 
     # 處理取消
     if msg.content.lower() == 'c':
@@ -586,17 +610,19 @@ async def diary_delete(ctx, date_str: str = None):
 
 @girlfriend_bot.event
 async def on_message(message):
-    # 1. 避免機器人自言自語陷入無限迴圈
     if message.author == girlfriend_bot.user:
         return
 
-    # 2. 確保原本的 /cosplay 等指令還能運作
+    # 🛑 如果大俠正在操作選單 (等待輸入數字或C)，小俠全面靜音不介入
+    if message.author.id in pending_inputs:
+        return
+
     await girlfriend_bot.process_commands(message)
 
-    # 🛑 3. 【日記攔截器】：如果大俠正在寫日記，就將訊息存入緩衝區，並直接結束處理
+    # 🛑 日記攔截器 (注意這裡也更新了 content 寫入字典的結構)
     if message.author.id in diary_buffers and not message.content.startswith('/'):
-        diary_buffers[message.author.id].append(message.content)
-        return 
+        diary_buffers[message.author.id]["content"].append(message.content)
+        return
 
     # 💬 4. 【聊天系統】：限定只在「唐分糕」頻道或被 Tag 時才回話
     if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
