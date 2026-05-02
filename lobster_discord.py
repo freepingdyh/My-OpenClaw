@@ -191,7 +191,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     weekday = datetime.now().weekday()
     # 根據星期幾定義控制標籤
     if weekday == 5:
-        pose_tags = "seductive pose, alluring gaze, playful expression, suggestive posture, winking"
+        pose_tags = "dynamic confident pose, heavy eyelids, looking through eyelashes, teasing soft smile, mysterious vibe"
         outfit_tags = "extremely revealing, provocative, cleavage, tight fit"
     else:
         # 平日與週日：露但不搔首弄姿
@@ -206,7 +206,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     模板骨架如下（請將生成的內容依此順序組合）：
     [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, defined nose bridge, bright eyes, natural lips, 
     [HAIR & FACE DETAILS] long dark wavy hair, smooth and slightly voluminous, natural makeup, clean skin, face fully visible, 
-    [BODY CONTROL - CRITICAL] slim tall body, extremely voluptuous hourglass figure, large breasts, narrow waist, extremely curvy, proportional shoulders and hips, elegant posture, long legs,
+    [BODY CONTROL - CRITICAL] slim and slender body, large breasts, very narrow waist, flat stomach, long slender legs, perfect S-curve figure, elegant posture, 
     [POSE & EXPRESSION] {pose_tags}, (在此填入符合題材的動作),
     [OUTFIT] {outfit_tags}, (在此填入符合題材的服裝細節),
     [SCENE] (在此填入背景與場景細節),
