@@ -189,24 +189,27 @@ async def generate_story(mode):
 
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
     weekday = datetime.now().weekday()
-    # 根據星期幾定義控制標籤
+    
+    # 🌟 核心策略：身體退回昨天的「苗條唯美」，把「豐滿」的任務全部交給「服裝剪裁」來逼出效果！
     if weekday == 5:
-        pose_tags = "dynamic confident pose, heavy eyelids, looking through eyelashes, teasing soft smile, mysterious vibe"
-        outfit_tags = "extremely revealing, provocative, cleavage, tight fit"
+        # 週六：全解放
+        body_tags = "slender body, delicate figure, narrow waist, long legs"
+        pose_tags = "confident posture, soft smile, looking at viewer" # 昨天最美的自然神韻
+        outfit_tags = "extremely sexy cosplay outfit, very tight fit heavily emphasizing exceptionally large breasts and deep cleavage, revealing"
     else:
-        # 平日與週日：露但不搔首弄姿
-        pose_tags = "dignified posture, confident gaze, natural expression, professional, elegant, not suggestive"
-        outfit_tags = "sexy yet theme-appropriate, deep V-neck, plunging neckline, tight fit, revealing but elegant"
+        # 平日與週日：端莊性感
+        body_tags = "slender body, narrow waist, long legs"
+        pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
+        outfit_tags = "sexy yet theme-appropriate, deep V-neck heavily emphasizing large breasts and cleavage, tight fit, elegant"
 
-    # 注意這裡：加入了 f 字首，將 GPT 的填空提示改為 ()，並將 JSON 結構用 {{ }} 包起來防止報錯
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。
-    請嚴格遵循以下【角色專用穩定模板】的結構，[BODY CONTROL] 永遠保持火辣。
+    請嚴格遵循以下【角色專用穩定模板】的結構。
     注意：絕對不可輸出完整的敘述句，必須是逗號分隔的標籤 (Tags)。
 
     模板骨架如下（請將生成的內容依此順序組合）：
     [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, defined nose bridge, bright eyes, natural lips, 
     [HAIR & FACE DETAILS] long dark wavy hair, smooth and slightly voluminous, natural makeup, clean skin, face fully visible, 
-    [BODY CONTROL - CRITICAL] slim and slender body, large breasts, very narrow waist, flat stomach, long slender legs, perfect S-curve figure, elegant posture, 
+    [BODY CONTROL - CRITICAL] {body_tags},
     [POSE & EXPRESSION] {pose_tags}, (在此填入符合題材的動作),
     [OUTFIT] {outfit_tags}, (在此填入符合題材的服裝細節),
     [SCENE] (在此填入背景與場景細節),
