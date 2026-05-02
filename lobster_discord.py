@@ -127,6 +127,13 @@ async def get_photos():
     db = load_memory()
     return db[:30]
 
+@api_app.get("/api/diary")
+async def get_diary():
+    if os.path.exists(DIARY_DATA_PATH):
+        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
 @api_app.get("/status")
 async def get_status():
     return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
@@ -505,6 +512,76 @@ async def diary_end(ctx):
         await ctx.send("收到！\n✅ 網頁熱力圖資料庫紀錄成功！")
     else:
         await ctx.send("收到！\n❌ 網頁熱力圖資料庫紀錄失敗，請檢查後端日誌！")
+
+@girlfriend_bot.command(name='diary_delete')
+async def diary_delete(ctx, date_str: str = None):
+    if not os.path.exists(DIARY_DATA_PATH):
+        await ctx.send("❓ 大俠，我們的交換日記本目前是空的喔！")
+        return
+
+    with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+        diary_db = json.load(f)
+
+    if not diary_db:
+        await ctx.send("❓ 大俠，我們的交換日記本目前是空的喔！")
+        return
+
+    # 1. 處理日期與搜尋
+    if date_str:
+        # 支援 2026.05.01 轉換為 JSON 內的 2026-05-01
+        search_date = date_str.replace(".", "-")
+        matching_records = [(idx, rec) for idx, rec in enumerate(diary_db) if rec["date"] == search_date]
+        msg_prefix = f"📅 找到 {date_str} 的日記："
+    else:
+        # 預設撈出最新的 5 筆 (因為 append 是加在最後面，所以反向取最新)
+        matching_records = [(len(diary_db) - 1 - i, rec) for i, rec in enumerate(reversed(diary_db))][:5]
+        msg_prefix = f"📅 這是最近的 {len(matching_records)} 筆日記："
+
+    if not matching_records:
+        await ctx.send(f"找不到符合的紀錄喔！(格式範例: /diary_delete 2026.05.01)")
+        return
+
+    # 2. 組裝互動選單
+    msg_content = f"{msg_prefix}\n大俠，你要撕掉哪一天的日記？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
+    for i, (original_idx, record) in enumerate(matching_records):
+        # 擷取前20個字當作預覽
+        content_preview = record['content'][:20].replace('\n', ' ') + "..." if len(record['content']) > 20 else record['content'].replace('\n', ' ')
+        msg_content += f"**{i+1}.** [{record['date']}] {content_preview}\n"
+
+    await ctx.send(msg_content)
+
+    # 3. 等待大俠輸入回覆
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
+    except asyncio.TimeoutError:
+        await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
+        return
+
+    # 處理取消
+    if msg.content.lower() == 'c':
+        await ctx.send("✅ 已取消刪除。")
+        return
+
+    # 4. 執行精準刪除
+    try:
+        choice = int(msg.content) - 1
+        if 0 <= choice < len(matching_records):
+            # 取得原始陣列中的位置並拔除
+            target_idx = matching_records[choice][0]
+            deleted_record = diary_db.pop(target_idx)
+            
+            # 存回 JSON
+            with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+                json.dump(diary_db, f, ensure_ascii=False, indent=2)
+
+            await ctx.send(f"🗑️ 成功撕毀：**{deleted_record['date']}** 的日記紀錄已徹底抹除。")
+        else:
+            await ctx.send("⚠️ 輸入的數字不在選項內，操作已取消。")
+    except ValueError:
+        await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
 
 @girlfriend_bot.event

@@ -18,7 +18,7 @@
         .tab-content.active { display: block; animation: fadeIn 0.5s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         
-        #lock-screen { position: fixed; inset: 0; z-index: 50; background: rgba(255, 240, 245, 0.9); backdrop-filter: blur(15px); display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.5s; }
+        #lock-screen { position: fixed; inset: 0; z-index: 50; background: rgba(243, 244, 246, 0.98); display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.5s; }
         .hidden-fade { opacity: 0; pointer-events: none; }
         .avatar-glow { box-shadow: 0 0 15px rgba(236, 72, 153, 0.4); animation: breathe 3s infinite alternate; }
         @keyframes breathe { from { box-shadow: 0 0 10px rgba(236, 72, 153, 0.2); } to { box-shadow: 0 0 25px rgba(236, 72, 153, 0.6); } }
@@ -28,21 +28,19 @@
 </head>
 <body class="text-gray-800 overflow-hidden" id="main-body">
 
-    <!-- 鎖定畫面 (維持卡通偽裝) -->
     <div id="lock-screen">
-        <div class="glass p-10 rounded-2xl text-center max-w-sm w-full mx-4 shadow-xl">
-            <div class="w-24 h-24 mx-auto bg-pink-200 rounded-full mb-6 overflow-hidden avatar-glow border-4 border-white">
-                <img src="https://api.dicebear.com/7.x/notionists/svg?seed=xiaoxia&backgroundColor=fbcfe8" alt="小俠" class="w-full h-full object-cover">
+        <div class="bg-white p-8 rounded-lg text-center max-w-sm w-full mx-4 shadow-sm border border-gray-200">
+            <div class="w-16 h-16 mx-auto bg-gray-100 rounded-full mb-6 flex items-center justify-center text-gray-400">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
             </div>
-            <h1 class="text-2xl font-bold text-gray-700 mb-2">大俠</h1>
-            <p class="text-sm text-gray-500 mb-6">歡迎回來，請驗證身份</p>
-            <input type="password" id="vault-pass" placeholder="輸入金庫密碼" class="w-full px-4 py-3 rounded-lg border focus:outline-none focus:ring-2 focus:ring-pink-400 mb-4 text-center tracking-widest" onkeypress="handleEnter(event)">
-            <button onclick="unlockVault()" class="w-full bg-pink-500 text-white font-bold py-3 rounded-lg hover:bg-pink-600 transition shadow-lg">解鎖</button>
-            <p id="lock-error" class="text-red-500 text-sm mt-3 hidden">密碼錯誤，小俠不認識你喔！</p>
+            <h1 class="text-xl font-bold text-gray-600 mb-1">System Login</h1>
+            <p class="text-xs text-gray-400 mb-6">Database Management Portal</p>
+            <input type="password" id="vault-pass" placeholder="Access Key" class="w-full px-4 py-2 rounded border border-gray-300 focus:outline-none focus:border-gray-500 mb-4 text-center tracking-widest text-gray-700 font-mono" onkeypress="handleEnter(event)">
+            <button onclick="unlockVault()" class="w-full bg-gray-600 text-white font-bold py-2 rounded hover:bg-gray-800 transition text-sm shadow-none">Login</button>
+            <p id="lock-error" class="text-red-500 text-xs mt-3 hidden">Access Denied</p>
         </div>
     </div>
 
-    <!-- 主容器 -->
     <div class="max-w-7xl mx-auto p-4 md:p-8">
         
         <header class="flex justify-between items-end border-b border-gray-300 pb-4 mb-8">
@@ -57,7 +55,6 @@
             </div>
         </header>
 
-        <!-- 第一摺頁：小俠寫真館 -->
         <div id="content-gallery" class="tab-content active">
             <div class="flex flex-col lg:flex-row gap-6">
                 
@@ -73,11 +70,9 @@
                     </div>
                     
                     <div class="glass p-4 rounded-2xl">
-                        <!-- ✅ 統一用詞：心動時刻 -->
                         <h3 class="text-sm font-bold text-gray-700 mb-3 border-b pb-2">心動時刻</h3>
                         <div class="grid grid-cols-3 gap-3" id="dataset-gallery">
-                            <!-- 由 JS 動態載入 -->
-                        </div>
+                            </div>
                     </div>
                 </aside>
 
@@ -103,7 +98,6 @@
             </div>
         </div>
 
-        <!-- 第二摺頁：相片總覽 -->
         <div id="content-overview" class="tab-content">
             <div class="glass p-6 rounded-2xl min-h-[600px]">
                 <div class="flex flex-col md:flex-row justify-between items-center mb-6 border-b pb-4 gap-4">
@@ -112,17 +106,14 @@
                         <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap">全部</button>
                         <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
                         <button onclick="renderOverview('diary')" id="btn-filter-diary" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">日常陪伴</button>
-                        <!-- ✅ 統一用詞：心動時刻 -->
                         <button onclick="renderOverview('important')" id="btn-filter-important" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">心動時刻</button>
                     </div>
                 </div>
                 <div id="overview-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                    <!-- JS 動態生成相片 -->
-                </div>
+                    </div>
             </div>
         </div>
 
-        <!-- 第三摺頁：交換日記 -->
         <div id="content-diary" class="tab-content">
             <div class="glass p-6 md:p-10 rounded-2xl min-h-[600px] relative">
                 <div class="text-center mb-6">
@@ -135,31 +126,12 @@
                 </div>
                 
                 <div class="relative timeline-container w-full max-w-4xl mx-auto py-8" id="diary-timeline">
-                    <!-- 模擬日記一 -->
-                    <div class="diary-entry mb-8 flex justify-between items-center w-full right-timeline" data-date="2026-04-30">
-                        <div class="order-1 w-5/12 hidden md:block"></div>
-                        <div class="z-20 flex items-center order-1 bg-gray-800 shadow-xl w-4 h-4 rounded-full"></div>
-                        <div class="order-1 glass rounded-lg shadow-xl w-full md:w-5/12 px-6 py-4 relative ml-6 md:ml-0">
-                            <p class="mb-2 text-xs font-bold text-gray-500">大俠 ‧ 2026-04-30 下午 4:30</p>
-                            <p class="text-gray-700 leading-relaxed">今天專案終於趕完了，但真的好累，連飯都吃不下。希望這個週末能好好休息一下。</p>
-                        </div>
-                    </div>
-                    <!-- 模擬日記二 -->
-                    <div class="diary-entry mb-8 flex justify-between flex-row-reverse items-center w-full left-timeline" data-date="2026-05-01">
-                        <div class="order-1 w-5/12 hidden md:block"></div>
-                        <div class="z-20 flex items-center order-1 bg-pink-400 shadow-xl w-4 h-4 rounded-full"></div>
-                        <div class="order-1 bg-pink-50 border border-pink-200 rounded-lg shadow-xl w-full md:w-5/12 px-6 py-4 relative mr-6 md:mr-0">
-                            <p class="mb-2 text-xs font-bold text-pink-600">小俠 ‧ 2026-05-01 凌晨 2:00</p>
-                            <img src="https://images.unsplash.com/photo-1518002171953-a080ee817e1f?ixlib=rb-4.0.3&auto=format&fit=crop&w=500&q=80" class="w-full h-32 object-cover rounded mb-3 cursor-pointer hover:opacity-90 transition" onclick="openGalleryLightbox(this.src)">
-                            <p class="text-gray-700 leading-relaxed text-sm">笨蛋大俠，再怎麼累也要吃飯啊！週末我們去吃點好吃的補補身體吧！(抱)</p>
-                        </div>
-                    </div>
+                    <p class="text-center text-gray-400 py-10">載入日記資料中...</p>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 統一燈箱容器 -->
     <div id="lightbox" class="fixed inset-0 bg-black/90 z-[100] hidden flex justify-center items-center cursor-pointer backdrop-blur-sm" onclick="closeLightbox()">
         <div id="lightbox-container" class="" onclick="event.stopPropagation()">
             <img id="lightbox-img" class="">
@@ -168,7 +140,6 @@
         </div>
     </div>
 
-    <!-- JavaScript 核心邏輯 -->
     <script>
         let allPhotos = [];
         let filteredPhotos = [];
@@ -208,6 +179,7 @@
                 document.getElementById('main-body').classList.remove('hidden', 'overflow-hidden');
                 setTimeout(() => lockScreen.style.display = 'none', 500);
                 loadGalleryData(); 
+                loadDiaryData(); // ✅ 加入載入日記資料
             } else {
                 document.getElementById('lock-error').classList.remove('hidden');
             }
@@ -490,6 +462,53 @@
                 boxes += `<div class="aspect-square rounded-sm ${colorClass} hover:border hover:border-pink-800 cursor-pointer transition shadow-sm" title="${localDateStr} : 小俠換裝了 ${count} 次"></div>`;
             }
             grid.innerHTML = boxes;
+        }
+
+        // ✅ 7. 載入與渲染交換日記資料
+        async function loadDiaryData() {
+            try {
+                const res = await fetch('/api/diary');
+                const diaryEntries = await res.json();
+                renderDiaryTimeline(diaryEntries);
+            } catch (e) {
+                console.error("無法載入交換日記:", e);
+                document.getElementById('diary-timeline').innerHTML = '<p class="text-center text-red-400 py-10">無法讀取日記資料，請確認後端 API 是否正常運作。</p>';
+            }
+        }
+
+        function renderDiaryTimeline(entries) {
+            const timeline = document.getElementById('diary-timeline');
+            if (!entries || entries.length === 0) {
+                timeline.innerHTML = '<p class="text-center text-gray-400 py-10">目前還沒有交換日記喔！快去 Discord 呼叫 /diary_start 記錄吧。</p>';
+                return;
+            }
+
+            let htmlContent = '';
+            // 反轉陣列，讓最新日期的日記排在最上面
+            const sortedEntries = [...entries].reverse();
+
+            sortedEntries.forEach((entry, index) => {
+                // 為了視覺豐富，讓每天的日記左右交錯排列
+                const isRight = index % 2 === 0;
+                const alignmentClass = isRight ? "flex-row right-timeline" : "flex-row-reverse left-timeline";
+                const dotColor = isRight ? "bg-gray-800" : "bg-pink-400";
+                const boxStyle = isRight 
+                    ? "glass rounded-lg shadow-md w-full md:w-5/12 px-6 py-4 relative ml-6 md:ml-0 border border-gray-200" 
+                    : "bg-pink-50 border border-pink-200 rounded-lg shadow-md w-full md:w-5/12 px-6 py-4 relative mr-6 md:mr-0";
+                const titleStyle = isRight ? "text-gray-600" : "text-pink-600";
+
+                htmlContent += `
+                    <div class="diary-entry mb-8 flex justify-between items-center w-full ${alignmentClass}" data-date="${entry.date}">
+                        <div class="order-1 w-5/12 hidden md:block"></div>
+                        <div class="z-20 flex items-center order-1 ${dotColor} shadow-xl w-4 h-4 rounded-full"></div>
+                        <div class="order-1 ${boxStyle}">
+                            <p class="mb-2 text-sm font-bold ${titleStyle}">📅 ${entry.date}</p>
+                            <p class="text-gray-700 leading-relaxed text-sm whitespace-pre-wrap">${entry.content}</p>
+                        </div>
+                    </div>
+                `;
+            });
+            timeline.innerHTML = htmlContent;
         }
     </script>
 </body>
