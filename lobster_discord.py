@@ -1,35 +1,3 @@
-# --- 小俠聊天與日記系統變數 ---
-DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
-diary_buffers = {}            # 存放「正在記錄日記中」的對話緩衝區
-girlfriend_chat_sessions = {} # 存放每個大俠/頻道的「短期對話記憶」
-
-def save_diary_entry(content):
-    try:
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        diary_db = []
-        if os.path.exists(DIARY_DATA_PATH):
-            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-                diary_db = json.load(f)
-        
-        # 尋找今天是否已經有紀錄，有的話就接在後面 (支援一天寫多次)
-        found = False
-        for entry in diary_db:
-            if entry.get("date") == today_str:
-                entry["content"] += f"\n\n{content}"
-                found = True
-                break
-        
-        if not found:
-            diary_db.append({"date": today_str, "content": content})
-            
-        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump(diary_db, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"日記寫入失敗: {e}")
-        return False
-
-
 # ==========================================
 # ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 雙核共生終極版)
 # ==========================================
@@ -80,6 +48,37 @@ MEMORY_DIR = os.path.join(VAULT_DIR, "memory")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(MEMORY_DIR, exist_ok=True)
 DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
+
+# --- 小俠聊天與日記系統變數 ---
+DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
+diary_buffers = {}            # 存放「正在記錄日記中」的對話緩衝區
+girlfriend_chat_sessions = {} # 存放每個大俠/頻道的「短期對話記憶」
+
+def save_diary_entry(content):
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        diary_db = []
+        if os.path.exists(DIARY_DATA_PATH):
+            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+                diary_db = json.load(f)
+        
+        # 尋找今天是否已經有紀錄，有的話就接在後面 (支援一天寫多次)
+        found = False
+        for entry in diary_db:
+            if entry.get("date") == today_str:
+                entry["content"] += f"\n\n{content}"
+                found = True
+                break
+        
+        if not found:
+            diary_db.append({"date": today_str, "content": content})
+            
+        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(diary_db, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"日記寫入失敗: {e}")
+        return False
 
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
