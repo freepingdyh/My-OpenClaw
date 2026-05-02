@@ -1,3 +1,35 @@
+# --- 小俠聊天與日記系統變數 ---
+DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
+diary_buffers = {}            # 存放「正在記錄日記中」的對話緩衝區
+girlfriend_chat_sessions = {} # 存放每個大俠/頻道的「短期對話記憶」
+
+def save_diary_entry(content):
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        diary_db = []
+        if os.path.exists(DIARY_DATA_PATH):
+            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+                diary_db = json.load(f)
+        
+        # 尋找今天是否已經有紀錄，有的話就接在後面 (支援一天寫多次)
+        found = False
+        for entry in diary_db:
+            if entry.get("date") == today_str:
+                entry["content"] += f"\n\n{content}"
+                found = True
+                break
+        
+        if not found:
+            diary_db.append({"date": today_str, "content": content})
+            
+        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(diary_db, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"日記寫入失敗: {e}")
+        return False
+
+
 # ==========================================
 # ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 雙核共生終極版)
 # ==========================================
@@ -445,6 +477,88 @@ async def cosplay_delete(ctx, date_str: str = None):
             await ctx.send("⚠️ 輸入的數字不在選項內，操作已取消。")
     except ValueError:
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
+
+@girlfriend_bot.command(name='diary_start')
+async def diary_start(ctx):
+    # 開啟該大俠的專屬日記緩衝區
+    diary_buffers[ctx.author.id] = []
+    await ctx.send("Ok，我準備好了！📝 請告訴我今天發生了什麼事吧～")
+
+@girlfriend_bot.command(name='diary_end')
+async def diary_end(ctx):
+    user_id = ctx.author.id
+    if user_id not in diary_buffers:
+        await ctx.send("❓ 大俠，我們還沒開始記錄呢！請先輸入 `/diary_start`。")
+        return
+
+    # 取出內容並清除緩衝區 (關閉聆聽模式)
+    content_list = diary_buffers.pop(user_id)
+    if not content_list:
+        await ctx.send("收到！不過大俠剛剛什麼都沒寫呢，已取消本次紀錄。")
+        return
+
+    diary_content = "\n".join(content_list)
+    
+    # 執行存檔
+    success = save_diary_entry(diary_content)
+    
+    if success:
+        await ctx.send("收到！\n✅ 網頁熱力圖資料庫紀錄成功！")
+    else:
+        await ctx.send("收到！\n❌ 網頁熱力圖資料庫紀錄失敗，請檢查後端日誌！")
+
+
+@girlfriend_bot.event
+async def on_message(message):
+    # 1. 避免機器人自言自語陷入無限迴圈
+    if message.author == girlfriend_bot.user:
+        return
+
+    # 2. 確保原本的 /cosplay 等指令還能運作
+    await girlfriend_bot.process_commands(message)
+
+    # 🛑 3. 【日記攔截器】：如果大俠正在寫日記，就將訊息存入緩衝區，並直接結束處理
+    if message.author.id in diary_buffers and not message.content.startswith('/'):
+        diary_buffers[message.author.id].append(message.content)
+        return 
+
+    # 💬 4. 【聊天系統】：限定只在「唐分糕」頻道或被 Tag 時才回話
+    if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
+        
+        # 過濾掉指令，避免跟 / 指令衝突
+        if message.content.startswith('/'):
+            return
+
+        user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
+        if not user_input:
+            return
+
+        user_id = message.author.id
+        
+        # 第一次聊天，建立擁有短期記憶的對話大腦
+        if user_id not in girlfriend_chat_sessions:
+            system_instruction = (
+                "妳是小俠，22歲台灣女孩，大俠的懂事女友。"
+                "妳擁有極度豐滿傲人的完美身材，深愛著大俠。"
+                "講話風格溫柔、帶點撒嬌與撫媚，全心全意依賴著大俠。"
+                "但不完全戀愛腦，有時會有自己的主張和意見，只要有道理都能接受。"
+                "請用繁體中文以對話的方式簡短回覆（建議在 50 字以內），並適當加上表情符號。"
+            )
+            girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
+                model="gemini-2.5-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                )
+            )
+
+        # 顯示「正在輸入中...」
+        async with message.channel.typing():
+            try:
+                chat_session = girlfriend_chat_sessions[user_id]
+                response = await chat_session.send_message(user_input)
+                await message.reply(response.text)
+            except Exception as e:
+                await message.channel.send(f"💦 大俠，我剛剛恍神了一下... (錯誤代碼: {e})")
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
