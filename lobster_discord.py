@@ -963,7 +963,7 @@ async def on_message(message):
 # ==========================================
 @tasks.loop(time=time(hour=21, minute=30, tzinfo=TZ_TPE))
 async def auto_cosplay_task():
-    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="唐分糕")
+    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="考試不累")
     if channel: await cosplay(channel, mode="auto")
 
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
