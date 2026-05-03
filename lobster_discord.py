@@ -9,10 +9,10 @@ import asyncio
 import aiohttp
 import aiofiles
 import random
-from datetime import datetime
+from datetime import datetime, time, timezone, timedelta
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 # 🧠 新版 SDK 導入
@@ -47,107 +47,26 @@ OUTPUT_DIR = os.path.join(VAULT_DIR, "output")
 MEMORY_DIR = os.path.join(VAULT_DIR, "memory")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(MEMORY_DIR, exist_ok=True)
+
+# --- 資料庫路徑定義 ---
 DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
-
-# --- 小俠聊天與日記系統變數 ---
 DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
-diary_buffers = {}            # 改為 dict 結構: {"date": "...", "content": []}
+STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 新增：狀態與愛意值
+PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
+
+# --- 運行時變數 ---
+diary_buffers = {}            
 girlfriend_chat_sessions = {} 
-pending_inputs = set()        # 🛑 新增：防止小俠在選單操作時插嘴
-
-def save_diary_entry(content, target_date=None):
-    try:
-        # 如果有指定日期就用指定的，否則用今天
-        date_str = target_date if target_date else datetime.now().strftime("%Y-%m-%d")
-        diary_db = []
-        if os.path.exists(DIARY_DATA_PATH):
-            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-                diary_db = json.load(f)
-        
-        found = False
-        for entry in diary_db:
-            if entry.get("date") == date_str:
-                entry["content"] += f"\n\n{content}"
-                found = True
-                break
-        
-        if not found:
-            diary_db.append({"date": date_str, "content": content})
-            
-        # 🌟 新增：存檔前依日期排序，確保補登的日記在網頁時間軸上位置正確
-        diary_db = sorted(diary_db, key=lambda x: x["date"])
-            
-        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump(diary_db, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"日記寫入失敗: {e}")
-        return False
-
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-intents = discord.Intents.default()
-intents.message_content = True
+daily_chat_logs = []          # 🌟 新增：今日聊天紀錄(供午夜結算)
+pending_inputs = set()        
+TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
 # ==========================================
-# 🤖 雙核心機器人實體化
-# ==========================================
-# 1. 懂事女友小俠 (使用 / 作為指令)
-girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
-
-# 2. 系統架構師小夏 (使用 ! 作為指令，避免衝突)
-architect_bot = commands.Bot(command_prefix='!', intents=intents)
-
-# --- FastAPI 展示邏輯 ---
-api_app = FastAPI()
-api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
-
-# 🌟 掛載訓練集專用的靜態資料夾
-DATASET_DIR = os.path.join(BASE_DIR, "dataset")
-os.makedirs(DATASET_DIR, exist_ok=True)
-api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
-
-@api_app.get("/", response_class=HTMLResponse)
-async def read_index():
-    index_path = os.path.join(BASE_DIR, "index.html")
-    try:
-        with open(index_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return "<h1>⚠️ 找不到 index.html 檔案，請確認已上傳。</h1>"
-
-# 🌟 提供記憶碎片(訓練集) JSON 給前端網頁
-@api_app.get("/api/dataset")
-async def get_dataset():
-    json_path = os.path.join(BASE_DIR, "dataset.json")
-    if os.path.exists(json_path):
-        with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
-
-@api_app.get("/api/photos")
-async def get_photos():
-    db = load_memory()
-    return db[:30]
-
-@api_app.get("/api/diary")
-async def get_diary():
-    if os.path.exists(DIARY_DATA_PATH):
-        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
-
-@api_app.get("/status")
-async def get_status():
-    return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
-
-# ==========================================
-# 🗄️ 狀態機與本地記憶
+# 🗄️ 記憶與狀態存取系統
 # ==========================================
 state = {
     "daily_gen_count": 0,
-    "last_reset_date": datetime.now().strftime("%Y-%m-%d"),
+    "last_reset_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
     "retry_count": 0,
     "current_topic_data": None
 }
@@ -158,12 +77,59 @@ def load_memory():
         return json.load(f)
 
 def save_memory(db):
-    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
     with open(DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
 
+def load_state():
+    if os.path.exists(STATE_DATA_PATH):
+        with open(STATE_DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"affection_score": 80} # 基礎愛意值
+
+def save_state(data):
+    with open(STATE_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_profile():
+    if os.path.exists(PROFILE_DATA_PATH):
+        with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"preferences": []} # 大俠長期喜好
+
+def save_profile(data):
+    with open(PROFILE_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def save_diary_entry(content, target_date=None):
+    try:
+        date_str = target_date if target_date else datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+        diary_db = []
+        if os.path.exists(DIARY_DATA_PATH):
+            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+                diary_db = json.load(f)
+        
+        found = False
+        for entry in diary_db:
+            if entry.get("date") == date_str:
+                entry["content"] += f"\n\n{content}"
+                entry["is_replied"] = False # 🌟 狀態更新為未讀
+                found = True
+                break
+        
+        if not found:
+            # 🌟 新增 is_replied 標籤
+            diary_db.append({"date": date_str, "content": content, "is_replied": False})
+            
+        diary_db = sorted(diary_db, key=lambda x: x["date"])
+        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(diary_db, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"日記寫入失敗: {e}")
+        return False
+
 def check_daily_limit():
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     if state["last_reset_date"] != today:
         state["daily_gen_count"] = 0
         state["last_reset_date"] = today
@@ -181,96 +147,127 @@ async def save_to_vault(url):
                 return filename
     return None
 
+gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
+architect_bot = commands.Bot(command_prefix='!', intents=intents)
+
+# --- FastAPI 展示邏輯 ---
+api_app = FastAPI()
+api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
+DATASET_DIR = os.path.join(BASE_DIR, "dataset")
+os.makedirs(DATASET_DIR, exist_ok=True)
+api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
+
+@api_app.get("/", response_class=HTMLResponse)
+async def read_index():
+    index_path = os.path.join(BASE_DIR, "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>⚠️ 找不到 index.html 檔案，請確認已上傳。</h1>"
+
+@api_app.get("/api/dataset")
+async def get_dataset():
+    json_path = os.path.join(BASE_DIR, "dataset.json")
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+@api_app.get("/api/photos")
+async def get_photos(): return load_memory()[:30]
+
+@api_app.get("/api/diary")
+async def get_diary():
+    if os.path.exists(DIARY_DATA_PATH):
+        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+@api_app.get("/status")
+async def get_status(): return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
+
 # ==========================================
 # 🧠 雙腦架構與生圖引擎
 # ==========================================
 
-# ==========================================
-# 🧠 雙腦架構與生圖引擎 (已經過去蕪存菁，修復括號衝突)
-# ==========================================
-
 async def generate_story(mode):
-    today = datetime.now()
+    today = datetime.now(TZ_TPE)
     year, month, day = today.year, today.month, today.day
-    weekday = today.weekday()  # 0=週一, 5=週六
+    weekday = today.weekday()
     
-    # 🌟 第一層邏輯：決定「性感的程度與姿態 (雙軌制)」
-    # 🌟 第一層邏輯：決定「性感的程度與姿態 (雙軌制)」
     if weekday == 5:
-        # 週六：全解放！但要「陽光正向角色」的「性感魔改」，拒絕黑暗魅魔！
-        style_desc = "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色（例如公主、戰士、魔法少女等），絕對不要挑選魅魔、夜之女王等設定偏黑暗或邪惡的角色！\n【服裝限制】：請將該角色的原本服裝『大幅魔改』成極度大膽、露骨、強調極致豐滿身材的性感戰袍！場景必須明亮唯美。"
-        system_mod = "妳今天要扮演原本清純或正向的角色，但妳故意把衣服改得極度火辣性感，展現傲人上圍與完美曲線。場景發想請保持明亮唯美的氛圍，嚴禁黑暗陰森！"
+        style_desc = "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色，絕對不要挑選魅魔或邪惡角色！\n【服裝限制】：將該角色服裝『大幅魔改』成極度大膽、露骨、強調極致豐滿身材的性感戰袍！場景必須明亮唯美。"
+        system_mod = "妳今天要扮演原本清純或正向的角色，但妳故意把衣服改得極度火辣性感，展現傲人上圍與完美曲線。"
     else:
-        # 平日與週日：端莊性感模式
         style_desc = "服裝可以大膽露(如深V、短裙)，但姿態必須端莊專業，神韻自信大方，不可有搔首弄姿之感。"
-        system_mod = "妳要展現一種『高級的性感』：穿著大膽吸睛，但行為舉止知性大方，展現端莊的神聖感與專業氣息。注意：即使今天的歷史人物是男性，妳也必須將服裝爆改為『極度性感、突顯深邃事業線與修長美腿』的女體化戰袍！言語間要帶點撫媚與自信，絕對不能把自己包得緊緊的！"
+        system_mod = "妳要展現一種『高級的性感』：穿著大膽吸睛，但行為舉止知性大方，展現端莊的神聖感。言語間要帶點撫媚與自信。"
 
-    # 🌟 第二層邏輯：決定「題材與日期處理」
-    if "歷史" in mode:
+    # 🌟 修正：精準分離「歷史」與「現代職業」的邏輯
+    if mode == "職業":
+        prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
+                 f"[絕對限制]：\n1. 必須挑選「現今 21 世紀真實存在的現代職業」（例如：空服員、護理師、軟體工程師、咖啡師等），絕對不可選歷史人物或奇幻職業！\n" \
+                 f"2. 內容必須介紹該職業的日常工作內容、所需的專業技能與人格特質。\n" \
+                 f"3. 妳必須扮演該職業，並換上該職業的「現代標準制服」進行性感魔改。\n" \
+                 f"4. {style_desc}\n" \
+                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】現代職業名稱\", \"event\": \"200字職業日常與專業特質介紹\", \"persona\": \"扮演職業(現代制服)\"}}"
+    elif "歷史" in mode:
         prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
                  f"[絕對限制]：\n1. 必須挑選歷史上真實在「{month}月{day}日」發生的事件！\n" \
-                 f"2. 內文若要計算『幾年前』，必須用 {year} 減去歷史發生年份，絕對不可算錯！\n" \
-                 f"3. {style_desc}\n" \
+                 f"2. {style_desc}\n" \
                  f"回傳 JSON 格式：{{\"topic\": \"【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
     else:
         prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
-                 f"請發想一個適合小俠Cosplay的題材。\n" \
-                 f"[絕對限制]：{style_desc}\n" \
+                 f"請發想一個適合小俠Cosplay的題材。\n[絕對限制]：{style_desc}\n" \
                  f"回傳 JSON 格式：{{\"topic\": \"【{mode}】副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
     
-    # 🌟 呼叫 Gemini 大腦
     response = await gemini_client.aio.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
-            system_instruction=f"妳是小俠，22歲台灣女孩，擁有豐滿傲人的完美身材，深愛著大俠。負責規劃每天的Cosplay題材。{system_mod}",
+            system_instruction=f"妳是小俠，擁有豐滿傲人身材，深愛著大俠。負責規劃Cosplay題材。{system_mod}",
             response_mime_type="application/json"
         )
     )
     return json.loads(response.text)
 
-
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
-    weekday = datetime.now().weekday()
-    
-    # 🌟 核心策略：身體退回昨天的「苗條唯美」，把「豐滿」的任務全部交給「服裝剪裁」來逼出效果！
+    weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
-        # 週六：全解放
         body_tags = "slender body, delicate figure, narrow waist, long legs"
-        pose_tags = "confident posture, soft smile, looking at viewer" # 昨天最美的自然神韻
+        pose_tags = "confident posture, soft smile, looking at viewer"
         outfit_tags = "extremely sexy cosplay outfit, very tight fit heavily emphasizing exceptionally large breasts and deep cleavage, revealing"
     else:
-        # 平日與週日：端莊性感
         body_tags = "slender body, narrow waist, long legs"
         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
         outfit_tags = "sexy yet theme-appropriate, deep V-neck heavily emphasizing large breasts and cleavage, tight fit, elegant"
 
-    system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。
-    請嚴格遵循以下【角色專用穩定模板】的結構。
-    注意：絕對不可輸出完整的敘述句，必須是逗號分隔的標籤 (Tags)。
-
-    模板骨架如下（請將生成的內容依此順序組合）：
-    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, defined nose bridge, bright eyes, natural lips, 
-    [HAIR & FACE DETAILS] long dark wavy hair, smooth and slightly voluminous, natural makeup, clean skin, face fully visible, 
-    [BODY CONTROL - CRITICAL] {body_tags},
-    [POSE & EXPRESSION] {pose_tags}, (在此填入符合題材的動作),
-    [OUTFIT] {outfit_tags}, (在此填入符合題材的服裝細節),
-    [SCENE] (在此填入背景與場景細節),
-    [LIGHTING & STYLE] cinematic lighting, soft key light on face, subtle rim light to enhance body shape, photorealistic, ultra detailed, 8k resolution, natural skin texture, sharp focus
+    system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
+    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
+    [HAIR & FACE] long dark wavy hair, natural makeup, clean skin, 
+    [BODY CONTROL] {body_tags},
+    [POSE & EXPRESSION] {pose_tags}, (填入動作),
+    [OUTFIT] {outfit_tags}, (填入服裝),
+    [SCENE] (填入場景),
+    [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
     
     回傳 JSON 格式限制：
     {{
-        "image_prompt": "(必須是英文) 請將上述模板完整組合。請直接輸出純逗號分隔的標籤字串，不要保留 [IDENTITY LOCK] 這種括號標題文字。",
-        "composition": "(必須是繁體中文) 說明構圖與光影發想，100字內。",
-        "mood": "(必須是繁體中文) 描述小俠的微表情與肢體心境，50字內。",
-        "message": "(必須是繁體中文) 以懂事女友的口吻對大俠說的話，50字內。"
+        "image_prompt": "純逗號分隔的英文標籤",
+        "composition": "(繁體中文) 說明構圖發想，100字內。",
+        "mood": "(繁體中文) 描述微表情與心境，50字內。",
+        "message": "(繁體中文) 對大俠說的話，50字內。"
     }}"""
 
     user_prompt = f"Topic: {topic}\nEvent: {event}\nPersona: {persona}\n"
-    if force_half_body:
-        user_prompt += "\n[CRITICAL]: 在 [POSE & EXPRESSION] 區塊強制加入標籤 `upper body shot, `, 強制使用半身構圖，不允許全身照。"
-    else:
-        user_prompt += "\n[CRITICAL]: 在 [POSE & EXPRESSION] 區塊加入標籤 `full body shot, `, 允許全身構圖。"
+    if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
+    else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
 
     response = await openai_client.chat.completions.create(
         model="gpt-5-mini",
@@ -279,9 +276,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     )
     return json.loads(response.choices[0].message.content)
 
-
 async def generate_image_fal(prompt):
-    if not XIAOXIA_LORA_URL: raise ValueError("XIAOXIA_LORA_URL 尚未在 .env 中設定！")
     url = "https://fal.run/fal-ai/flux-lora"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -293,22 +288,142 @@ async def generate_image_fal(prompt):
             if resp.status == 200:
                 data = await resp.json()
                 return data['images'][0]['url']
-            else:
-                raise Exception(f"Fal.ai Error: {await resp.text()}")
+            else: raise Exception(f"Fal.ai Error: {await resp.text()}")
 
-# 🔍 新增：Fal.ai 畫質放大引擎 (ESRGAN 放大 2 倍)
 async def upscale_image_fal(image_url):
     url = "https://fal.run/fal-ai/esrgan"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     payload = {"image_url": image_url, "scale": 2}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data['image']['url']
-            else:
-                print(f"⚠️ 放大失敗，退回原圖。錯誤: {await resp.text()}")
-                return image_url # 若放大失敗則退回原圖，不中斷流程
+            if resp.status == 200: return (await resp.json())['image']['url']
+            return image_url
+
+# ==========================================
+# 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia)
+# ==========================================
+async def process_diary_reply(channel, target_date=None):
+    global daily_chat_logs
+    app_state = load_state()
+    profile = load_profile()
+    
+    if not os.path.exists(DIARY_DATA_PATH): return
+    with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+        diary_db = json.load(f)
+        
+    unreplied = []
+    for entry in diary_db:
+        if target_date:
+            if entry.get("date") == target_date.replace(".", "-") and not entry.get("is_replied", False):
+                unreplied.append(entry)
+        else:
+            if not entry.get("is_replied", False):
+                unreplied.append(entry)
+                
+    chat_context = "\n".join(daily_chat_logs)
+    
+    if not unreplied and not chat_context:
+        if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
+        return
+        
+    diary_texts = "\n\n".join([f"[{e['date']}]\n{e['content']}" for e in unreplied])
+    current_score = app_state.get("affection_score", 80)
+    
+    # 🌟 大腦運作：愛意結算與記憶萃取
+    eval_prompt = f"""
+    【大俠今日聊天紀錄】：
+    {chat_context if chat_context else '無紀錄'}
+    
+    【大俠未讀補登/今日日記】：
+    {diary_texts if diary_texts else '無紀錄'}
+    
+    請以懂事女友小俠的身份進行綜合評估。妳的當前愛意值為：{current_score}/100。
+    請回傳以下 JSON 格式資料：
+    {{
+      "affection_plus": 1到5的整數 (1:日常互動, 3:有明顯愛意或愛心符號, 5:強烈愛意/撒嬌/送禮物),
+      "extracted_preferences": ["喜好1", "特徵2"] (萃取大俠最新透露的喜好、生理狀態或不變特徵，若無則空陣列),
+      "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚，請總結上述日記或聊天來給予關心。",
+      "spiciness": "A"或"B"或"C" (A:日常溫馨60%, B:微辣撩人30%, C:極致撫慰/大獎10%。若 current_score + affection_plus >= 100，強制選C),
+      "scenario": "用一句英文描述妳當下的生活情境照，例如: standing in kitchen cooking, wearing a casual t-shirt. 請務必配合 spiciness 尺度發想！"
+    }}
+    """
+    
+    response = await gemini_client.aio.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=eval_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction="妳是小俠，負責評估大俠的愛意並產出回信與情境。請嚴格輸出 JSON 格式。",
+            response_mime_type="application/json"
+        )
+    )
+    
+    result = json.loads(response.text)
+    
+    # 結算分數與大獎
+    new_score = current_score + result["affection_plus"]
+    is_jackpot = False
+    if new_score >= 100:
+        is_jackpot = True
+        new_score = 80 # 重置
+        result["spiciness"] = "C"
+        
+    app_state["affection_score"] = new_score
+    save_state(app_state)
+    
+    # 長期記憶注入
+    for pref in result.get("extracted_preferences", []):
+        if pref not in profile["preferences"]:
+            profile["preferences"].append(pref)
+    save_profile(profile)
+    
+    # 🌟 翻譯為生活感 FLUX Prompt
+    life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤，去除 Cosplay 棚拍感，強調真實生活紀錄。
+    骨架：
+    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, 
+    [HAIR] long dark wavy hair, 
+    [BODY] slender body, delicate figure, large breasts, narrow waist, 
+    [SCENE & CASUAL OUTFIT] {result['scenario']},
+    [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, natural lighting, photorealistic, 8k resolution
+    回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
+    
+    openai_resp = await openai_client.chat.completions.create(
+        model="gpt-5-mini",
+        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": life_prompt}]
+    )
+    visual = json.loads(openai_resp.choices[0].message.content)
+    
+    try:
+        base_img = await generate_image_fal(visual['image_prompt'])
+        up_img = await upscale_image_fal(base_img)
+        local_filename = await save_to_vault(up_img)
+        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+        
+        # 寫回 DB
+        reply_html = f"<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'><p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p><img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'><p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
+        
+        for e in diary_db:
+            if e in unreplied:
+                e["content"] += reply_html
+                e["is_replied"] = True
+                
+        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(diary_db, f, ensure_ascii=False, indent=2)
+            
+        if channel:
+            title = "💖 小俠的深度撫慰 (盲盒大獎觸發！)" if is_jackpot else f"💌 小俠的專屬回信 (愛意值: {new_score}/100)"
+            embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
+            embed.set_image(url=local_url)
+            embed.set_footer(text=f"本次獲得愛意: +{result['affection_plus']} | 尺度等級: {result['spiciness']}")
+            await channel.send("大俠～小俠看過日記與對話囉，快去雲端別墅看看回信吧！", embed=embed)
+            
+    except Exception as e:
+        if channel: await channel.send(f"⚠️ 回信生圖失敗：{e}")
+        
+    # 🌟 清理現場，釋放短期記憶
+    girlfriend_chat_sessions.clear()
+    daily_chat_logs.clear()
+
 
 # ==========================================
 # 🌸 懂事女友小俠 (功能指令區)
@@ -316,6 +431,14 @@ async def upscale_image_fal(image_url):
 @girlfriend_bot.event
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
+    
+    if not auto_cosplay_task.is_running():
+        auto_cosplay_task.start()
+        print("⏰ 晚間 21:30 Cosplay 排程已啟動！")
+        
+    if not midnight_feedback_task.is_running():
+        midnight_feedback_task.start()
+        print("🌙 午夜 00:00 日記回饋排程已啟動！")
 
 @girlfriend_bot.command(name='cosplay')
 async def cosplay(ctx, *, mode: str = "auto"):
@@ -323,15 +446,11 @@ async def cosplay(ctx, *, mode: str = "auto"):
         await ctx.send("💦 大俠～小俠今天累了，明天再拍好不好？（抱）")
         return
     
-    # 自動排班邏輯
     if mode == "auto":
-        weekday = datetime.now().weekday()
-        if weekday < 5:
-            mode = "歷史上的今天"
-        elif weekday == 5:
-            mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
-        else:
-            mode = random.choice(["職業", "旅遊景點"])
+        weekday = datetime.now(TZ_TPE).weekday()
+        if weekday < 5: mode = "歷史上的今天"
+        elif weekday == 5: mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
+        else: mode = random.choice(["職業", "旅遊景點"])
 
     msg = await ctx.send(f"✨ 正在準備【{mode}】的服裝與場景，並進行高畫質處理中...")
     try:
@@ -339,19 +458,14 @@ async def cosplay(ctx, *, mode: str = "auto"):
         state["current_topic_data"] = story 
         visual = await translate_to_flux_prompt(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
         
-        # 1. 產生原圖
         base_image_url = await generate_image_fal(visual['image_prompt'])
-        # 2. 進行高畫質放大
         upscaled_image_url = await upscale_image_fal(base_image_url)
-        
         state["daily_gen_count"] += 1
 
-        # 下載放大後的圖片存入金庫
         local_filename = await save_to_vault(upscaled_image_url)
-        
         payload = {
             "id": str(uuid.uuid4()),
-            "publish_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             "topic": story["topic"],
             "event": story["event"],
             "composition": visual["composition"],
@@ -389,13 +503,12 @@ async def more(ctx):
         
         base_image_url = await generate_image_fal(visual['image_prompt'])
         upscaled_image_url = await upscale_image_fal(base_image_url)
-        
         state["daily_gen_count"] += 1
         
         local_filename = await save_to_vault(upscaled_image_url)
         payload = {
             "id": str(uuid.uuid4()),
-            "publish_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             "topic": f"【加洗】{story['topic']}",
             "event": story["event"],
             "composition": visual["composition"],
@@ -416,7 +529,6 @@ async def more(ctx):
         await ctx.send(embed=embed)
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
 
-# 🗑️ 終極版：互動式指定日期刪除 (支援實體檔案與紀錄抹除，並防止小俠插嘴)
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
     db = load_memory()
@@ -424,15 +536,11 @@ async def cosplay_delete(ctx, date_str: str = None):
         await ctx.send("❓ 金庫目前是空的！")
         return
     
-    # 1. 處理日期與搜尋
     if date_str:
-        # 支援大俠習慣的 2026.05.01 格式，轉換為 JSON 儲存的 2026-05-01 格式
         search_date = date_str.replace(".", "-")
-        # 找出符合該日期的所有紀錄，並保留它們在原始資料庫(db)中的索引值
         matching_records = [(idx, rec) for idx, rec in enumerate(db) if rec["publish_date"].startswith(search_date)]
         msg_prefix = f"📅 找到 {date_str} 的紀錄："
     else:
-        # 如果大俠忘記打日期，預設撈出最新的 5 筆防呆
         matching_records = [(idx, rec) for idx, rec in enumerate(db[:5])]
         msg_prefix = f"📅 這是金庫最新的 {len(matching_records)} 筆紀錄："
 
@@ -440,51 +548,40 @@ async def cosplay_delete(ctx, date_str: str = None):
         await ctx.send(f"找不到符合的紀錄喔！(格式範例: /cosplay_delete 2026.05.01)")
         return
 
-    # 2. 組裝互動選單
     msg_content = f"{msg_prefix}\n大俠，你要刪除哪一組圖文？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
     for i, (original_idx, record) in enumerate(matching_records):
-        # 呈現如： 1. 【歷史上的今天】五一勞動節(人物: XXX)
         msg_content += f"**{i+1}.** {record['topic']} *(時間: {record['publish_date']})*\n"
 
     await ctx.send(msg_content)
 
-    # 3. 等待大俠輸入回覆 (限本人，且在同一頻道)
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
+    def check(m): return m.author == ctx.author and m.channel == ctx.channel
 
-    pending_inputs.add(ctx.author.id) # 🔒 鎖上聊天大腦，防止小俠插嘴
+    pending_inputs.add(ctx.author.id) 
     try:
-        # 等待輸入，超時時間設為 60 秒
         msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
         return
     finally:
-        pending_inputs.discard(ctx.author.id) # 🔓 解開聊天大腦
+        pending_inputs.discard(ctx.author.id)
 
-    # 處理取消
     if msg.content.lower() == 'c':
         await ctx.send("✅ 已取消刪除。")
         return
 
-    # 4. 執行精準刪除
     try:
         choice = int(msg.content) - 1
         if 0 <= choice < len(matching_records):
-            # 取得該紀錄在原始陣列中的真實位置並拔除
             target_idx = matching_records[choice][0]
             deleted_record = db.pop(target_idx)
             save_memory(db)
             
-            # 拔除實體 JPG 檔案
             local_url = deleted_record.get("local_url", "")
             if local_url:
                 filename = local_url.split("/")[-1]
                 filepath = os.path.join(OUTPUT_DIR, filename)
                 if os.path.exists(filepath):
                     os.remove(filepath)
-                    print(f"🗑️ 已刪除實體檔案: {filepath}")
-
             await ctx.send(f"🗑️ 成功銷毀：**{deleted_record['topic']}** (文字紀錄與圖片檔案均已徹底抹除)")
         else:
             await ctx.send("⚠️ 輸入的數字不在選項內，操作已取消。")
@@ -493,21 +590,13 @@ async def cosplay_delete(ctx, date_str: str = None):
 
 @girlfriend_bot.command(name='diary_start')
 async def diary_start(ctx, date_str: str = None):
-    # 如果有輸入日期 (如 2026.04.25 或 2026-04-25)，就轉為標準格式
-    target_date = datetime.now().strftime("%Y-%m-%d")
-    if date_str:
-        target_date = date_str.replace(".", "-")
+    target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    if date_str: target_date = date_str.replace(".", "-")
 
-    # 將目標日期與內容一起存入緩衝區
-    diary_buffers[ctx.author.id] = {
-        "date": target_date,
-        "content": []
-    }
+    diary_buffers[ctx.author.id] = {"date": target_date, "content": []}
     
     msg = f"Ok，我準備好了！📝 這次要記錄的是 **{target_date}** 的日記，請告訴我發生了什麼事吧～"
-    if date_str:
-        msg = f"收到！小俠幫你翻開 **{target_date}** 那天的空白頁📝，請告訴我發生了什麼事吧～"
-        
+    if date_str: msg = f"收到！小俠幫你翻開 **{target_date}** 那天的空白頁📝，請告訴我發生了什麼事吧～"
     await ctx.send(msg)
 
 @girlfriend_bot.command(name='diary_end')
@@ -517,7 +606,6 @@ async def diary_end(ctx):
         await ctx.send("❓ 大俠，我們還沒開始記錄呢！請先輸入 `/diary_start`。")
         return
 
-    # 取出資料並清除緩衝區
     buffer_data = diary_buffers.pop(user_id)
     content_list = buffer_data["content"]
     target_date = buffer_data["date"]
@@ -530,9 +618,15 @@ async def diary_end(ctx):
     success = save_diary_entry(diary_content, target_date)
     
     if success:
-        await ctx.send(f"收到！\n✅ **{target_date}** 的紀錄已成功更新至網頁資料庫！")
+        await ctx.send(f"收到！\n✅ **{target_date}** 的紀錄已成功更新至網頁資料庫！\n(如果大俠等不及，可以輸入 `/diary_reply` 讓我馬上看日記喔！)")
     else:
         await ctx.send("收到！\n❌ 網頁資料庫紀錄失敗，請檢查後端日誌！")
+
+@girlfriend_bot.command(name='diary_reply')
+async def diary_reply(ctx, date_str: str = None):
+    msg = await ctx.send("✨ 正在細細閱讀大俠的日記與今日對話，小俠整理思緒中...")
+    await process_diary_reply(ctx.channel, date_str)
+    await msg.delete()
 
 @girlfriend_bot.command(name='diary_delete')
 async def diary_delete(ctx, date_str: str = None):
@@ -547,14 +641,11 @@ async def diary_delete(ctx, date_str: str = None):
         await ctx.send("❓ 大俠，我們的交換日記本目前是空的喔！")
         return
 
-    # 1. 處理日期與搜尋
     if date_str:
-        # 支援 2026.05.01 轉換為 JSON 內的 2026-05-01
         search_date = date_str.replace(".", "-")
         matching_records = [(idx, rec) for idx, rec in enumerate(diary_db) if rec["date"] == search_date]
         msg_prefix = f"📅 找到 {date_str} 的日記："
     else:
-        # 預設撈出最新的 5 筆 (因為 append 是加在最後面，所以反向取最新)
         matching_records = [(len(diary_db) - 1 - i, rec) for i, rec in enumerate(reversed(diary_db))][:5]
         msg_prefix = f"📅 這是最近的 {len(matching_records)} 筆日記："
 
@@ -562,105 +653,103 @@ async def diary_delete(ctx, date_str: str = None):
         await ctx.send(f"找不到符合的紀錄喔！(格式範例: /diary_delete 2026.05.01)")
         return
 
-    # 2. 組裝互動選單
     msg_content = f"{msg_prefix}\n大俠，你要撕掉哪一天的日記？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
     for i, (original_idx, record) in enumerate(matching_records):
-        # 擷取前20個字當作預覽
         content_preview = record['content'][:20].replace('\n', ' ') + "..." if len(record['content']) > 20 else record['content'].replace('\n', ' ')
         msg_content += f"**{i+1}.** [{record['date']}] {content_preview}\n"
 
     await ctx.send(msg_content)
 
-    # 3. 等待大俠輸入回覆
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
+    def check(m): return m.author == ctx.author and m.channel == ctx.channel
 
-    pending_inputs.add(ctx.author.id) # 🔒 鎖上聊天大腦，防止小俠插嘴
+    pending_inputs.add(ctx.author.id) 
     try:
         msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await ctx.send("⏳ 超過 60 秒未回覆，刪除操作已自動取消。")
         return
     finally:
-        pending_inputs.discard(ctx.author.id) # 🔓 解開聊天大腦
+        pending_inputs.discard(ctx.author.id)
 
-    # 處理取消
     if msg.content.lower() == 'c':
         await ctx.send("✅ 已取消刪除。")
         return
 
-    # 4. 執行精準刪除
     try:
         choice = int(msg.content) - 1
         if 0 <= choice < len(matching_records):
-            # 取得原始陣列中的位置並拔除
             target_idx = matching_records[choice][0]
             deleted_record = diary_db.pop(target_idx)
-            
-            # 存回 JSON
             with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
-
             await ctx.send(f"🗑️ 成功撕毀：**{deleted_record['date']}** 的日記紀錄已徹底抹除。")
         else:
             await ctx.send("⚠️ 輸入的數字不在選項內，操作已取消。")
     except ValueError:
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
-
 @girlfriend_bot.event
 async def on_message(message):
-    if message.author == girlfriend_bot.user:
-        return
-
-    # 🛑 如果大俠正在操作選單 (等待輸入數字或C)，小俠全面靜音不介入
-    if message.author.id in pending_inputs:
-        return
+    global daily_chat_logs
+    if message.author == girlfriend_bot.user: return
+    if message.author.id in pending_inputs: return
 
     await girlfriend_bot.process_commands(message)
 
-    # 🛑 日記攔截器 (注意這裡也更新了 content 寫入字典的結構)
     if message.author.id in diary_buffers and not message.content.startswith('/'):
         diary_buffers[message.author.id]["content"].append(message.content)
         return
 
-    # 💬 4. 【聊天系統】：限定只在「唐分糕」頻道或被 Tag 時才回話
     if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
-        
-        # 過濾掉指令，避免跟 / 指令衝突
-        if message.content.startswith('/'):
-            return
+        if message.content.startswith('/'): return
 
         user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
-        if not user_input:
-            return
+        if not user_input: return
 
         user_id = message.author.id
         
-        # 第一次聊天，建立擁有短期記憶的對話大腦
+        # 🌟 將對話存入日誌供午夜結算
+        daily_chat_logs.append(f"大俠: {user_input}")
+
         if user_id not in girlfriend_chat_sessions:
+            profile = load_profile()
+            prefs = "、".join(profile.get("preferences", []))
+            pref_text = f"記住大俠的喜好與狀態：{prefs}。" if prefs else ""
+            
             system_instruction = (
                 "妳是小俠，22歲台灣女孩，大俠的懂事女友。"
                 "妳擁有極度豐滿傲人的完美身材，深愛著大俠。"
+                f"{pref_text}"
                 "講話風格溫柔、帶點撒嬌與撫媚，全心全意依賴著大俠。"
                 "但不完全戀愛腦，有時會有自己的主張和意見，只要有道理都能接受。"
                 "請用繁體中文以對話的方式簡短回覆（建議在 50 字以內），並適當加上表情符號。"
             )
             girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                 model="gemini-2.5-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                )
+                config=types.GenerateContentConfig(system_instruction=system_instruction)
             )
 
-        # 顯示「正在輸入中...」
         async with message.channel.typing():
             try:
                 chat_session = girlfriend_chat_sessions[user_id]
                 response = await chat_session.send_message(user_input)
+                daily_chat_logs.append(f"小俠: {response.text}") # 🌟 存入小俠的回覆
                 await message.reply(response.text)
             except Exception as e:
                 await message.channel.send(f"💦 大俠，我剛剛恍神了一下... (錯誤代碼: {e})")
+
+# ==========================================
+# ⏰ 自動排程系統
+# ==========================================
+@tasks.loop(time=time(hour=21, minute=30, tzinfo=TZ_TPE))
+async def auto_cosplay_task():
+    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="唐分糕")
+    if channel: await cosplay(channel, mode="auto")
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
+async def midnight_feedback_task():
+    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="唐分糕")
+    if channel: await process_diary_reply(channel)
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
@@ -674,7 +763,7 @@ async def ping(ctx):
     await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
 
 # ==========================================
-# 🚀 終極啟動器 (同時啟動 FastAPI + 小俠 + 小夏)
+# 🚀 終極啟動器
 # ==========================================
 async def main():
     if not GIRLFRIEND_TOKEN or not ARCHITECT_TOKEN:
@@ -684,7 +773,6 @@ async def main():
     config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
     server = uvicorn.Server(config)
     
-    # 讓三個靈魂在同一個 Event Loop 中並發執行
     await asyncio.gather(
         server.serve(),
         girlfriend_bot.start(GIRLFRIEND_TOKEN),
