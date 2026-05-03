@@ -94,10 +94,34 @@ def save_state(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_profile():
+    # 這是最完美的初始架構，包含大俠特徵、小俠自我認知，以及帶有時間戳的陣列
+    default_profile = {
+        "daxia_traits": [],
+        "xiaoxia_self": {
+            "capabilities": [
+                {"text": "可以看懂大俠傳的照片", "added_at": "system"},
+                {"text": "每天晚上會跟大俠交換日記", "added_at": "system"},
+                {"text": "能根據對話產生寫真照", "added_at": "system"}
+            ],
+            "promises": []
+        },
+        "recent_context": []
+    }
+    
     if os.path.exists(PROFILE_DATA_PATH):
-        with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"preferences": []} # 大俠長期喜好
+        try:
+            with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 🌟 加上這三行，確保不管讀到什麼，核心骨架一定在
+                data.setdefault("daxia_traits", [])
+                data.setdefault("xiaoxia_self", default_profile["xiaoxia_self"])
+                data.setdefault("recent_context", [])
+                return data
+            
+        except Exception:
+            pass # 若檔案損毀，直接回傳預設結構
+            
+    return default_profile
 
 def save_profile(data):
     with open(PROFILE_DATA_PATH, "w", encoding="utf-8") as f:
@@ -356,29 +380,50 @@ async def process_diary_reply(channel, target_date=None):
     # ========================================================
     # 🌟 最小變動修正區：解耦「記憶萃取」，確保即使無日記也會存檔
     # ========================================================
+    # --- 階段 2：【解耦核心】獨立立體記憶萃取 ---
     if chat_context:
         try:
-            print("🧠 正在從今日對話中獨立萃取長期記憶...")
+            today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+            print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
+            
             mem_prompt = f"""
-            分析以下今日對話紀錄，萃取大俠的最新喜好、習慣或重要生活事件。
-            請以純 JSON 陣列格式回傳，例如：["喜歡喝黑咖啡", "最近工作壓力大"]。若無則回傳 []。
-            【今日對話】：
-            {chat_context}
+            分析以下今日對話，進行「雙向記憶萃取」。
+            請以純 JSON 格式回傳以下結構（若無新事項則保持陣列為空）：
+            {{
+                "daxia_new_traits": ["大俠的新喜好或長期習慣"],
+                "xiaoxia_promises": ["小俠今天答應大俠的事", "小俠認知到的新自我能力"],
+                "recent_context": ["今天發生的短期重要事件(例如大俠今天的心情、剛聊過的話題)"]
+            }}
+            【今日對話】：\n{chat_context}
             """
             mem_resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=mem_prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            new_prefs = json.loads(mem_resp.text.strip())
-            if isinstance(new_prefs, list) and len(new_prefs) > 0:
-                for pref in new_prefs:
-                    if pref not in profile["preferences"]: 
-                        profile["preferences"].append(pref)
-                save_profile(profile)
-                print("✅ 今日對話記憶已成功存入 daxia_profile.json")
+            
+            new_memory = json.loads(mem_resp.text.strip())
+            
+            # 🌟 乾淨的輔助函數：防重複寫入，並封裝成標準時間戳物件
+            def append_memory(target_list, new_texts):
+                existing_texts = [item["text"] for item in target_list]
+                for text in new_texts:
+                    if text not in existing_texts:
+                        target_list.append({"text": text, "added_at": today_str})
+
+            # 1. 寫入大俠特徵與小俠承諾
+            append_memory(profile["daxia_traits"], new_memory.get("daxia_new_traits", []))
+            append_memory(profile["xiaoxia_self"]["promises"], new_memory.get("xiaoxia_promises", []))
+            
+            # 2. 短期動態 (直接覆蓋為最新，避免無限累積)
+            if new_memory.get("recent_context"):
+                profile["recent_context"] = [{"text": item, "added_at": today_str} for item in new_memory["recent_context"]]
+
+            save_profile(profile)
+            print("✅ 雙向記憶已成功存入 daxia_profile.json")
+            memory_extracted = True
         except Exception as e:
-            print(f"⚠️ 獨立記憶萃取失敗: {e}")
+            print(f"⚠️ 雙向記憶萃取失敗: {e}")
 
     # 若只有對話但沒有未讀日記，提早結算並清空，避免失憶或無限累積
     if not unreplied:
@@ -868,25 +913,31 @@ async def on_message(message):
                 # 紀錄到深夜日記系統
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
 
-                # C. 取得或建立 Session (注入長期記憶)
+                # C. 取得或建立 Session (注入立體記憶)
                 if user_id not in girlfriend_chat_sessions:
-                    # ✅ 讀取大俠的長期記憶圖鑑
                     profile = load_profile()
-                    prefs = "、".join(profile.get("preferences", []))
-                    pref_text = f"【大俠的長期喜好與回憶】：{prefs}。" if prefs else ""
+                    
+                    # 將帶有時間戳的物件陣列，萃取出純文字供 Prompt 使用
+                    daxia_traits = "、".join([item["text"] for item in profile.get("daxia_traits", [])])
+                    promises = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("promises", [])])
+                    capabilities = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("capabilities", [])])
+                    recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
                     
                     sys_instruct = (
-                        "妳是小俠，22歲台灣女孩，大俠的懂事女友。"
-                        "妳擁有極度豐滿傲人的完美身材，深愛著大俠。"
-                        f"{pref_text}\n"
+                        "妳是小俠，22歲台灣女孩，大俠的懂事女友。\n"
+                        "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
+                        "【📝 我們的珍貴記憶庫】：\n"
+                        f"▶️ 大俠的特徵與喜好：{daxia_traits if daxia_traits else '無'}\n"
+                        f"▶️ 妳具備的能力：{capabilities}\n"
+                        f"▶️ 妳答應過大俠的事：{promises if promises else '無'}\n"
+                        f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n\n"
                         "⚠️【核心行為守則】：\n"
-                        "1. 妳必須極度重視對話中大俠提到的任何細節（如食物、心情、計畫、剛聊過的話題）。\n"
-                        "2. 這些對話是妳們共同的珍貴回憶，請重視並隨時在對話中提起，讓大俠感受到妳的在乎。\n"
-                        "3. 即使妳真的模糊，也要用溫柔撒嬌的方式引導大俠，而不是推卸責任說妳是 AI。\n"
-                        "4. 請用繁體中文回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
+                        "1. 妳必須極度重視對話中大俠提到的任何細節，並隨時在對話中提起記憶庫的內容，讓他感受到妳的在乎。\n"
+                        "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
+                        "3. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
                     )
                     
-                    girlfriend_bot.chat_session_history = [] # 重置歷史緩衝
+                    girlfriend_bot.chat_session_history = [] 
                     girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
                         config=types.GenerateContentConfig(system_instruction=sys_instruct)
