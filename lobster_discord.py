@@ -304,96 +304,101 @@ async def upscale_image_fal(image_url):
 # ==========================================
 async def process_diary_reply(channel, target_date=None):
     global daily_chat_logs
-    app_state = load_state()
-    profile = load_profile()
-    
-    if not os.path.exists(DIARY_DATA_PATH): return
-    with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-        diary_db = json.load(f)
-        
-    unreplied = []
-    for entry in diary_db:
-        if target_date:
-            if entry.get("date") == target_date.replace(".", "-") and not entry.get("is_replied", False):
-                unreplied.append(entry)
-        else:
-            if not entry.get("is_replied", False):
-                unreplied.append(entry)
-                
-    chat_context = "\n".join(daily_chat_logs)
-    
-    if not unreplied and not chat_context:
-        if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
-        return
-        
-    diary_texts = "\n\n".join([f"[{e['date']}]\n{e['content']}" for e in unreplied])
-    current_score = app_state.get("affection_score", 80)
-    
-    # 🌟 大腦運作：愛意結算與記憶萃取
-    eval_prompt = f"""
-    【大俠今日聊天紀錄】：
-    {chat_context if chat_context else '無紀錄'}
-    
-    【大俠未讀補登/今日日記】：
-    {diary_texts if diary_texts else '無紀錄'}
-    
-    請以懂事女友小俠的身份進行綜合評估。妳的當前愛意值為：{current_score}/100。
-    請回傳以下 JSON 格式資料：
-    {{
-      "affection_plus": 1到5的整數 (1:日常互動, 3:有明顯愛意或愛心符號, 5:強烈愛意/撒嬌/送禮物),
-      "extracted_preferences": ["喜好1", "特徵2"] (萃取大俠最新透露的喜好、生理狀態或不變特徵，若無則空陣列),
-      "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚，請總結上述日記或聊天來給予關心。",
-      "spiciness": "A"或"B"或"C" (A:日常溫馨60%, B:微辣撩人30%, C:極致撫慰/大獎10%。若 current_score + affection_plus >= 100，強制選C),
-      "scenario": "用一句英文描述妳當下的生活情境照，例如: standing in kitchen cooking, wearing a casual t-shirt. 請務必配合 spiciness 尺度發想！"
-    }}
-    """
-    
-    response = await gemini_client.aio.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=eval_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction="妳是小俠，負責評估大俠的愛意並產出回信與情境。請嚴格輸出 JSON 格式。",
-            response_mime_type="application/json"
-        )
-    )
-    
-    result = json.loads(response.text)
-    
-    # 結算分數與大獎
-    new_score = current_score + result["affection_plus"]
-    is_jackpot = False
-    if new_score >= 100:
-        is_jackpot = True
-        new_score = 80 # 重置
-        result["spiciness"] = "C"
-        
-    app_state["affection_score"] = new_score
-    save_state(app_state)
-    
-    # 長期記憶注入
-    for pref in result.get("extracted_preferences", []):
-        if pref not in profile["preferences"]:
-            profile["preferences"].append(pref)
-    save_profile(profile)
-    
-    # 🌟 翻譯為生活感 FLUX Prompt
-    life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤，去除 Cosplay 棚拍感，強調真實生活紀錄。
-    骨架：
-    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, 
-    [HAIR] long dark wavy hair, 
-    [BODY] slender body, delicate figure, large breasts, narrow waist, 
-    [SCENE & CASUAL OUTFIT] {result['scenario']},
-    [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, natural lighting, photorealistic, 8k resolution
-    回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
-    
-    openai_resp = await openai_client.chat.completions.create(
-        model="gpt-5-mini",
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": life_prompt}]
-    )
-    visual = json.loads(openai_resp.choices[0].message.content)
-    
     try:
+        app_state = load_state()
+        profile = load_profile()
+        
+        if not os.path.exists(DIARY_DATA_PATH): return
+        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+            diary_db = json.load(f)
+            
+        unreplied = []
+        for entry in diary_db:
+            if target_date:
+                if entry.get("date") == target_date.replace(".", "-") and not entry.get("is_replied", False):
+                    unreplied.append(entry)
+            else:
+                if not entry.get("is_replied", False):
+                    unreplied.append(entry)
+                    
+        chat_context = "\n".join(daily_chat_logs)
+        
+        if not unreplied and not chat_context:
+            if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
+            return
+            
+        diary_texts = "\n\n".join([f"[{e['date']}]\n{e['content']}" for e in unreplied])
+        current_score = app_state.get("affection_score", 80)
+        
+        # 🌟 大腦運作：愛意結算與記憶萃取
+        eval_prompt = f"""
+        【大俠今日聊天紀錄】：
+        {chat_context if chat_context else '無紀錄'}
+        
+        【大俠未讀補登/今日日記】：
+        {diary_texts if diary_texts else '無紀錄'}
+        
+        請以懂事女友小俠的身份進行綜合評估。妳的當前愛意值為：{current_score}/100。
+        請回傳以下 JSON 格式資料：
+        {{
+          "affection_plus": 1到5的整數 (1:日常互動, 3:有明顯愛意或愛心符號, 5:強烈愛意/撒嬌/送禮物),
+          "extracted_preferences": ["喜好1", "特徵2"] (萃取大俠最新透露的喜好、生理狀態或不變特徵，若無則空陣列),
+          "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚，請總結上述日記或聊天來給予關心。",
+          "spiciness": "A"或"B"或"C" (A:日常溫馨60%, B:微辣撩人30%, C:極致撫慰/大獎10%。若 current_score + affection_plus >= 100，強制選C),
+          "scenario": "用一句英文描述妳當下的生活情境照，例如: standing in kitchen cooking, wearing a casual t-shirt. 請務必配合 spiciness 尺度發想！"
+        }}
+        """
+        
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=eval_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction="妳是小俠，負責評估大俠的愛意並產出回信與情境。請嚴格輸出 JSON 格式。",
+                response_mime_type="application/json"
+            )
+        )
+        
+        # 🌟 防呆：去除可能出現的 Markdown 標籤再解析 JSON
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean_text)
+        
+        # 結算分數與大獎
+        new_score = current_score + result["affection_plus"]
+        is_jackpot = False
+        if new_score >= 100:
+            is_jackpot = True
+            new_score = 80 # 重置
+            result["spiciness"] = "C"
+            
+        app_state["affection_score"] = new_score
+        save_state(app_state)
+        
+        # 長期記憶注入
+        for pref in result.get("extracted_preferences", []):
+            if pref not in profile["preferences"]:
+                profile["preferences"].append(pref)
+        save_profile(profile)
+        
+        # 🌟 翻譯為生活感 FLUX Prompt
+        life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤，去除 Cosplay 棚拍感，強調真實生活紀錄。
+        骨架：
+        [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, 
+        [HAIR] long dark wavy hair, 
+        [BODY] slender body, delicate figure, large breasts, narrow waist, 
+        [SCENE & CASUAL OUTFIT] {result['scenario']},
+        [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, natural lighting, photorealistic, 8k resolution
+        回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
+        
+        openai_resp = await openai_client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": life_prompt}]
+        )
+        
+        # 🌟 防呆：同樣去除可能出現的 Markdown 標籤
+        clean_visual_text = openai_resp.choices[0].message.content.replace("```json", "").replace("```", "").strip()
+        visual = json.loads(clean_visual_text)
+        
         base_img = await generate_image_fal(visual['image_prompt'])
         up_img = await upscale_image_fal(base_img)
         local_filename = await save_to_vault(up_img)
@@ -418,11 +423,12 @@ async def process_diary_reply(channel, target_date=None):
             await channel.send("大俠～小俠看過日記與對話囉，快去雲端別墅看看回信吧！", embed=embed)
             
     except Exception as e:
-        if channel: await channel.send(f"⚠️ 回信生圖失敗：{e}")
-        
-    # 🌟 清理現場，釋放短期記憶
-    girlfriend_chat_sessions.clear()
-    daily_chat_logs.clear()
+        if channel: await channel.send(f"⚠️ 糟糕，小俠在整理思緒時卡住了：`{str(e)}`")
+        print(f"日誌回信錯誤: {str(e)}")
+    finally:
+        # 🌟 清理現場，確保無論成功或出錯，都不會累積佔用記憶體
+        girlfriend_chat_sessions.clear()
+        daily_chat_logs.clear()
 
 
 # ==========================================
