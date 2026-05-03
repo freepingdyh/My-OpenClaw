@@ -353,6 +353,41 @@ async def process_diary_reply(channel, target_date=None):
         if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
         return
 
+    # ========================================================
+    # 🌟 最小變動修正區：解耦「記憶萃取」，確保即使無日記也會存檔
+    # ========================================================
+    if chat_context:
+        try:
+            print("🧠 正在從今日對話中獨立萃取長期記憶...")
+            mem_prompt = f"""
+            分析以下今日對話紀錄，萃取大俠的最新喜好、習慣或重要生活事件。
+            請以純 JSON 陣列格式回傳，例如：["喜歡喝黑咖啡", "最近工作壓力大"]。若無則回傳 []。
+            【今日對話】：
+            {chat_context}
+            """
+            mem_resp = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=mem_prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            new_prefs = json.loads(mem_resp.text.strip())
+            if isinstance(new_prefs, list) and len(new_prefs) > 0:
+                for pref in new_prefs:
+                    if pref not in profile["preferences"]: 
+                        profile["preferences"].append(pref)
+                save_profile(profile)
+                print("✅ 今日對話記憶已成功存入 daxia_profile.json")
+        except Exception as e:
+            print(f"⚠️ 獨立記憶萃取失敗: {e}")
+
+    # 若只有對話但沒有未讀日記，提早結算並清空，避免失憶或無限累積
+    if not unreplied:
+        if channel: await channel.send("✅ 今日對話記憶已成功吸取，小俠先休息囉！")
+        girlfriend_chat_sessions.clear()
+        daily_chat_logs.clear()
+        return
+    # ========================================================
+
     if channel and len(unreplied) > 0:
         await channel.send(f"⏳ 發現 {len(unreplied)} 篇未讀日記！小俠正在一篇一篇認真閱讀與回信，大俠請稍候喔...")
 
