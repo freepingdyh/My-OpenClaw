@@ -312,6 +312,7 @@ async def upscale_image_fal(image_url):
 async def process_diary_reply(channel, target_date=None):
     global daily_chat_logs
     
+    # --- 階段 1：本機資料庫讀取與防呆 ---
     try:
         app_state = load_state()
     except Exception as e:
@@ -333,6 +334,7 @@ async def process_diary_reply(channel, target_date=None):
             if channel: await channel.send(f"⚠️ 嚴重錯誤：日記檔案損毀！\n錯誤：`{e}`")
             return
             
+    # --- 階段 2：篩選未讀日記 ---
     unreplied = []
     for entry in diary_db:
         if target_date:
@@ -356,7 +358,6 @@ async def process_diary_reply(channel, target_date=None):
 
     # --- 階段 3：迴圈「獨立裝甲處理」每一篇日記 ---
     for entry in unreplied:
-        # 🛡️ 將 Try 放進迴圈內！就算一篇報錯，也會繼續處理下一篇！
         try:
             current_score = app_state.get("affection_score", 80)
             entry_date = entry['date']
@@ -377,14 +378,19 @@ async def process_diary_reply(channel, target_date=None):
               "extracted_preferences": ["喜好1"],
               "reply": "50字內給大俠的專屬回信",
               "spiciness": "A",
-              "scenario": "standing in kitchen cooking, wearing a casual t-shirt, looking at viewer"
+              "scenario": "standing in kitchen cooking, wearing a red off-shoulder sweater, looking at viewer",
+              "scenario_tw": "穿著紅色露肩毛衣在廚房做菜，深情看著大俠"
             }}
             
             - affection_plus: 1到5的整數。
-            - extracted_preferences: 字串陣列，萃取大俠喜好，無則 []。
+            - extracted_preferences: 萃取大俠喜好，無則 []。
             - reply: 給大俠的專屬回信 (必須扣緊這篇日記的內容)。
             - spiciness: "A", "B" 或 "C"。若 current_score + affection_plus >= 100，強制選 "C"。
-            - scenario: 一句英文情境照描述。【極度重要警告】：必須是單人場景 (1girl solo)！照片中絕對不可出現男人或其他人物！如果要表現陪伴大俠，請一律用「看著鏡頭 (looking at viewer / boyfriend POV)」來表現！
+            - scenario: 一句英文情境照描述。【極度重要警告】：
+              1. 必須是單人場景 (1girl solo)！絕對不可出現男人或其他人物！請一律用「看著鏡頭 (looking at viewer)」來表現陪伴！
+              2. 必須具體描述服裝的「顏色與款式」(例如 red dress, black silk pajama)，不要只寫 casual clothes！
+              3. 【防黑屏機制】：若尺度為 C，請著重於「誘惑姿態、性感睡衣、男友襯衫」，但「絕對不可裸露點位或過度暴露」，以免被生圖系統判定違規變成黑畫面！
+            - scenario_tw: 用繁體中文描述上述的寫真構想，讓大俠知道妳為什麼想拍這張照片。
             """
             
             print(f"💡 正在處理 {entry_date} 的日記...")
@@ -392,7 +398,7 @@ async def process_diary_reply(channel, target_date=None):
                 model='gemini-2.5-flash',
                 contents=eval_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction="妳是小俠，負責產出回信與情境。嚴格輸出 JSON，且情境絕對不可包含其他人物。",
+                    system_instruction="妳是小俠，負責產出回信與情境。嚴格輸出 JSON，防黑屏且必須指定服裝顏色。",
                     response_mime_type="application/json"
                 )
             )
@@ -407,17 +413,22 @@ async def process_diary_reply(channel, target_date=None):
                 result = {
                     "affection_plus": 1, "extracted_preferences": [],
                     "reply": "大俠，小俠讀這篇日記時有點恍神了... 但不管多忙多累，小俠都會在這裡陪你喔！（抱）",
-                    "spiciness": "A", "scenario": "sitting on a cozy sofa, wearing a warm sweater, looking at viewer"
+                    "spiciness": "A", "scenario": "sitting on a cozy sofa, wearing a warm pink oversized sweater, looking at viewer",
+                    "scenario_tw": "穿著溫暖的粉紅色寬大毛衣坐在沙發上，靜靜陪著大俠"
                 }
             
+            # 🌟 邏輯修正：拆分「顯示用分數」與「底層存檔分數」
             new_score = current_score + result["affection_plus"]
+            display_score = new_score # 讓 Discord 顯示滿分
             is_jackpot = False
+            
             if new_score >= 100:
                 is_jackpot = True
-                new_score = 80 
                 result["spiciness"] = "C"
+                app_state["affection_score"] = 80 # 底層默默重置回 80
+            else:
+                app_state["affection_score"] = new_score # 沒破百就正常存檔
                 
-            app_state["affection_score"] = new_score
             save_state(app_state)
             
             for pref in result.get("extracted_preferences", []):
@@ -429,8 +440,8 @@ async def process_diary_reply(channel, target_date=None):
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly one person, completely alone in frame, NO MEN, NO OTHER PEOPLE, same person, east asian female, soft oval face, delicate facial structure, clear skin texture, 
             [HAIR] long dark wavy hair, natural makeup, clean skin, 
             [BODY] slender body, delicate figure, large breasts, narrow waist, 
-            [SCENE & CASUAL OUTFIT] {result['scenario']},
-            [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, boyfriend POV, natural lighting, photorealistic, 8k resolution
+            [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
+            [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
             
             openai_resp = await openai_client.chat.completions.create(
@@ -449,7 +460,6 @@ async def process_diary_reply(channel, target_date=None):
             up_img = await upscale_image_fal(base_img)
             local_filename = await save_to_vault(up_img)
             
-            # 🛡️ 雙重備援：如果金庫存檔失敗，就直接用 Fal.ai 的原圖網址，保證不破圖！
             if local_filename:
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
             else:
@@ -466,7 +476,6 @@ async def process_diary_reply(channel, target_date=None):
             entry["content"] += reply_html
             entry["is_replied"] = True
             
-            # 存檔當下進度
             with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
                 
@@ -474,18 +483,19 @@ async def process_diary_reply(channel, target_date=None):
                 title = f"💖 小俠的深度撫慰 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的專屬回信 [{entry_date}]"
                 embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
                 embed.set_image(url=local_url)
-                embed.set_footer(text=f"愛意值: {new_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
+                scenario_tw_text = result.get("scenario_tw", "與大俠享受專屬的兩人時光")
+                embed.add_field(name="📸 寫真構想", value=scenario_tw_text, inline=False)
+                # 🌟 這裡換成 display_score，秀出 100 分的榮耀！
+                embed.set_footer(text=f"愛意值: {display_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
                 await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
 
         except Exception as e:
-            # 🛡️ 如果這篇真的發生無法預期的嚴重錯誤，立刻通報，但絕不影響下一篇！
             if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{str(e)}`。跳過此篇，馬上為您處理下一篇！")
             print(f"[{entry.get('date')}] 處理錯誤: {e}")
             continue
 
     girlfriend_chat_sessions.clear()
     daily_chat_logs.clear()
-
 
 # ==========================================
 # 🌸 懂事女友小俠 (功能指令區)
