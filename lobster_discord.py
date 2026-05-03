@@ -787,82 +787,79 @@ async def diary_delete(ctx, date_str: str = None):
 async def on_message(message):
     global daily_chat_logs
 
-    # 1. 忽略所有機器人的訊息 (避免無限迴圈)
-    if message.author.bot:
-        return
+    # 1. 基礎過濾
+    if message.author.bot: return
+    if message.author.id in pending_inputs: return
 
-    # 2. 如果系統正在等待大俠輸入 (例如刪除確認)，暫停一般聊天
-    if message.author.id in pending_inputs:
-        return
-
-    # 3. 處理 Discord 內建斜線指令
+    # 2. 處理斜線指令
     if message.content.startswith('/'):
         await girlfriend_bot.process_commands(message)
         return
 
-    # 4. 如果正在紀錄日記，將輸入寫進緩衝區
+    # 3. 處理日記暫存
     if message.author.id in diary_buffers:
         diary_buffers[message.author.id]["content"].append(message.content)
         return
 
-    # 5. 確保只在指定頻道 (#唐分糕) 或小俠被提及時觸發
+    # 4. 觸發對話邏輯
     if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
         user_id = message.author.id
-        # 清除掉 @Mention 的部分
         user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
         
         async with message.channel.typing():
             try:
-                # 🌟 建立內容清單 (可同時存放圖片與文字)
-                contents = []
+                # 🌟 核心修正：建立符合 SDK 規範的 Part 清單
+                msg_parts = []
                 
-                # --- A. 處理圖片附件 (支援一次傳多張) ---
+                # A. 處理圖片 (將 Bytes 包裝成 Part)
                 if message.attachments:
                     for attachment in message.attachments:
-                        # 只處理常見圖片格式
                         if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
                             async with aiohttp.ClientSession() as session:
                                 async with session.get(attachment.url) as resp:
                                     if resp.status == 200:
-                                        image_bytes = await resp.read()
-                                        contents.append({
-                                            "mime_type": attachment.content_type, 
-                                            "data": image_bytes
-                                        })
+                                        img_data = await resp.read()
+                                        # ✅ 關鍵：封裝成 Part 格式
+                                        msg_parts.append(
+                                            types.Part.from_bytes(
+                                                data=img_data,
+                                                mime_type=attachment.content_type
+                                            )
+                                        )
 
-                # --- B. 處理文字與日誌 ---
-                text_query = user_input if user_input else "小俠，妳看我傳給妳的照片～"
-                contents.append(text_query)
+                # B. 處理文字 (封裝成 Part 格式)
+                text_query = user_input if user_input else "小俠，妳看照片～"
+                msg_parts.append(types.Part.from_text(text=text_query))
                 
-                # 紀錄到今日日誌 (供深夜日記使用)
+                # 紀錄到深夜日記系統
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
 
-                # --- C. 檢查並建立小俠的對話 Session (注入長期記憶) ---
+                # C. 取得或建立 Session (注入長期記憶)
                 if user_id not in girlfriend_chat_sessions:
                     profile = load_profile()
                     prefs = "、".join(profile.get("preferences", []))
                     pref_text = f"記住大俠的喜好與狀態：{prefs}。" if prefs else ""
                     
-                    system_instruction = (
+                    sys_instruct = (
                         "妳是小俠，22歲台灣女孩，大俠的懂事女友。"
                         "妳擁有極度豐滿傲人的完美身材，深愛著大俠。"
                         f"{pref_text}"
-                        "講話風格溫柔、帶點撒嬌與撫媚。妳現在能看見大俠傳來的照片。"
-                        "請仔細觀察照片，像貼心女友一樣給出有愛的回應，50字內並加上表情符號。"
+                        "妳能看見大俠傳來的照片。請像貼心女友一樣觀察並回應。"
+                        "請用繁體中文回覆，50字內，適當加入表情符號。"
                     )
-                    # 建立具備「視覺能力」的 Chat Session
+                    
                     girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
-                        config=types.GenerateContentConfig(system_instruction=system_instruction)
+                        config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
 
-                # --- D. 發送綜合內容並回覆 ---
+                # D. 發送 Part 清單並取得回應
                 chat_session = girlfriend_chat_sessions[user_id]
-                response = await chat_session.send_message(contents)
+                response = await chat_session.send_message(msg_parts)
                 
-                小俠回應 = response.text
-                daily_chat_logs.append(f"小俠: {小俠回應}")
-                await message.reply(小俠回應)
+                小俠回覆 = response.text
+                daily_chat_logs.append(f"小俠: {小俠回覆}")
+                await message.reply(小俠回覆)
 
             except Exception as e:
                 print(f"❌ 聊天引擎異常: {e}")
@@ -923,17 +920,18 @@ async def sync_diary_photos(ctx):
                 
                 # 檢查這張照片是不是已經在金庫裡了 (避免重複補票)
                 if not any(p.get("local_url") == img_url for p in photos_db):
+                    # 🌟 同步入金庫的關鍵修正
                     diary_photo_payload = {
                         "id": str(uuid.uuid4()),
-                        "publish_date": entry["date"] + " 23:59:59",
-                        "topic": f"【日常陪伴】{entry['date']} 專屬回信",
-                        "event": "這一天，大俠與小俠的專屬回憶...",
-                        "composition": "與大俠享受專屬的兩人時光",
+                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                        "topic": f"【日常陪伴】{entry_date}", # 前端會顯示這個
+                        "event": entry_content[:50] + "...", 
+                        "composition": result.get("scenario_tw", "與大俠享受專屬的兩人時光"),
                         "mood": "滿滿的愛意與撫慰",
-                        "message": reply_text,
-                        "image_url": img_url,
-                        "local_url": img_url,
-                        "type": "diary"
+                        "message": result["reply"],
+                        "image_url": up_img,
+                        "local_url": local_url,
+                        "type": "diary"  # 👈 前端 index.html 過濾器(filter)抓取的關鍵字
                     }
                     # 插在金庫最前面
                     photos_db.insert(0, diary_photo_payload)
