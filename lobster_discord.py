@@ -330,7 +330,7 @@ async def process_diary_reply(channel, target_date=None):
         diary_texts = "\n\n".join([f"[{e['date']}]\n{e['content']}" for e in unreplied])
         current_score = app_state.get("affection_score", 80)
         
-        # 🌟 大腦運作：愛意結算與記憶萃取
+        # 🌟 大腦運作：愛意結算與記憶萃取 (防呆優化版 Prompt)
         eval_prompt = f"""
         【大俠今日聊天紀錄】：
         {chat_context if chat_context else '無紀錄'}
@@ -339,14 +339,22 @@ async def process_diary_reply(channel, target_date=None):
         {diary_texts if diary_texts else '無紀錄'}
         
         請以懂事女友小俠的身份進行綜合評估。妳的當前愛意值為：{current_score}/100。
-        請回傳以下 JSON 格式資料：
+        
+        請嚴格遵守以下格式回傳純 JSON 資料 (絕對不可包含任何額外文字，且字串內若有引述，請一律改用『單引號』，嚴禁在字串中使用雙引號以免破壞 JSON 結構！)：
         {{
-          "affection_plus": 1到5的整數 (1:日常互動, 3:有明顯愛意或愛心符號, 5:強烈愛意/撒嬌/送禮物),
-          "extracted_preferences": ["喜好1", "特徵2"] (萃取大俠最新透露的喜好、生理狀態或不變特徵，若無則空陣列),
-          "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚，請總結上述日記或聊天來給予關心。",
-          "spiciness": "A"或"B"或"C" (A:日常溫馨60%, B:微辣撩人30%, C:極致撫慰/大獎10%。若 current_score + affection_plus >= 100，強制選C),
-          "scenario": "用一句英文描述妳當下的生活情境照，例如: standing in kitchen cooking, wearing a casual t-shirt. 請務必配合 spiciness 尺度發想！"
+          "affection_plus": 1,
+          "extracted_preferences": ["喜好1", "喜好2"],
+          "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚...",
+          "spiciness": "A",
+          "scenario": "standing in kitchen cooking, wearing a casual t-shirt"
         }}
+        
+        【JSON 欄位嚴格定義】：
+        - affection_plus: (整數) 1=日常互動, 3=有明顯愛意或愛心符號, 5=強烈愛意/撒嬌/送禮物。
+        - extracted_preferences: (字串陣列) 萃取大俠最新透露的喜好、生理狀態或特徵，無則輸出空陣列 []。
+        - reply: (字串) 給大俠的專屬回信，總結上述日記或聊天。
+        - spiciness: (字串) 只能是 "A", "B" 或 "C"。A=日常溫馨(60%), B=微辣撩人(30%), C=極致撫慰/大獎(10%)。若 current_score + affection_plus >= 100，強制輸出 "C"。
+        - scenario: (字串) 用一句英文描述妳當下的生活情境照，必須配合 spiciness 尺度發想。
         """
         
         response = await gemini_client.aio.models.generate_content(
@@ -360,6 +368,10 @@ async def process_diary_reply(channel, target_date=None):
         
         # 🌟 防呆：去除可能出現的 Markdown 標籤再解析 JSON
         clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        
+        # 除錯用：如果還是報錯，可以在終端機看到 Gemini 到底回傳了什麼鬼東西
+        print(f"--- Gemini 原始回傳 --- \n{clean_text}\n------------------------")
+        
         result = json.loads(clean_text)
         
         # 結算分數與大獎
@@ -382,8 +394,8 @@ async def process_diary_reply(channel, target_date=None):
         # 🌟 翻譯為生活感 FLUX Prompt
         life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤，去除 Cosplay 棚拍感，強調真實生活紀錄。
         骨架：
-        [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, 
-        [HAIR] long dark wavy hair, 
+        [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
+        [HAIR] long dark wavy hair, natural makeup, clean skin, 
         [BODY] slender body, delicate figure, large breasts, narrow waist, 
         [SCENE & CASUAL OUTFIT] {result['scenario']},
         [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, natural lighting, photorealistic, 8k resolution
@@ -395,7 +407,6 @@ async def process_diary_reply(channel, target_date=None):
             messages=[{"role": "user", "content": life_prompt}]
         )
         
-        # 🌟 防呆：同樣去除可能出現的 Markdown 標籤
         clean_visual_text = openai_resp.choices[0].message.content.replace("```json", "").replace("```", "").strip()
         visual = json.loads(clean_visual_text)
         
@@ -426,7 +437,7 @@ async def process_diary_reply(channel, target_date=None):
         if channel: await channel.send(f"⚠️ 糟糕，小俠在整理思緒時卡住了：`{str(e)}`")
         print(f"日誌回信錯誤: {str(e)}")
     finally:
-        # 🌟 清理現場，確保無論成功或出錯，都不會累積佔用記憶體
+        # 🌟 清理現場
         girlfriend_chat_sessions.clear()
         daily_chat_logs.clear()
 
