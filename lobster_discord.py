@@ -26,6 +26,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 
+import aiohttp
+from google.genai import types # 確保有載入 types
+
 # ==========================================
 # 🔑 環境變數與初始化
 # ==========================================
@@ -417,17 +420,17 @@ async def process_diary_reply(channel, target_date=None):
                     "scenario_tw": "穿著溫暖的粉紅色寬大毛衣坐在沙發上，靜靜陪著大俠"
                 }
             
-            # 🌟 邏輯修正：拆分「顯示用分數」與「底層存檔分數」
+            # 🌟 拆分顯示分數與底層分數
             new_score = current_score + result["affection_plus"]
-            display_score = new_score # 讓 Discord 顯示滿分
+            display_score = new_score 
             is_jackpot = False
             
             if new_score >= 100:
                 is_jackpot = True
                 result["spiciness"] = "C"
-                app_state["affection_score"] = 80 # 底層默默重置回 80
+                app_state["affection_score"] = 80 
             else:
-                app_state["affection_score"] = new_score # 沒破百就正常存檔
+                app_state["affection_score"] = new_score 
                 
             save_state(app_state)
             
@@ -466,6 +469,27 @@ async def process_diary_reply(channel, target_date=None):
                 local_url = up_img 
                 print(f"⚠️ {entry_date} 本機存檔失敗，改用雲端網址備援！")
             
+            # 🌟 新增：將「日常陪伴」的照片同步存入主相簿金庫
+            diary_photo_payload = {
+                "id": str(uuid.uuid4()),
+                "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                "topic": f"【日常陪伴】{entry_date} 專屬回信",
+                "event": entry_content[:50] + "..." if len(entry_content) > 50 else entry_content, 
+                "composition": result.get("scenario_tw", "與大俠享受專屬的兩人時光"),
+                "mood": "滿滿的愛意與撫慰",
+                "message": result["reply"],
+                "image_url": up_img,
+                "local_url": local_url,
+                "type": "diary"  # 👈 讓前端相片總覽能抓到
+            }
+            
+            try:
+                db = load_memory()
+                db.insert(0, diary_photo_payload)
+                save_memory(db)
+            except Exception as e:
+                print(f"⚠️ 同步寫入主相簿失敗：{e}")
+            
             reply_html = (
                 "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
                 "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
@@ -485,7 +509,6 @@ async def process_diary_reply(channel, target_date=None):
                 embed.set_image(url=local_url)
                 scenario_tw_text = result.get("scenario_tw", "與大俠享受專屬的兩人時光")
                 embed.add_field(name="📸 寫真構想", value=scenario_tw_text, inline=False)
-                # 🌟 這裡換成 display_score，秀出 100 分的榮耀！
                 embed.set_footer(text=f"愛意值: {display_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
                 await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
 
@@ -763,26 +786,81 @@ async def diary_delete(ctx, date_str: str = None):
 @girlfriend_bot.event
 async def on_message(message):
     global daily_chat_logs
-    if message.author == girlfriend_bot.user: return
-    if message.author.id in pending_inputs: return
 
-    await girlfriend_bot.process_commands(message)
+    # 1. 忽略所有機器人的訊息 (包含小俠自己與小夏，避免無限迴圈)
+    if message.author.bot:
+        return
 
-    if message.author.id in diary_buffers and not message.content.startswith('/'):
+    # 2. 如果系統正在等待大俠輸入 (例如刪除確認的選項)，暫停一般聊天
+    if message.author.id in pending_inputs:
+        return
+
+    # 3. 處理 Discord 內建指令 (如 /cosplay, /diary_reply)
+    if message.content.startswith('/'):
+        await girlfriend_bot.process_commands(message)
+        return
+
+    # 4. 如果大俠已經下了 /diary_start，所有輸入都會被寫進日記暫存區
+    if message.author.id in diary_buffers:
         diary_buffers[message.author.id]["content"].append(message.content)
         return
 
+    # 5. 確保只在指定的頻道 (#唐分糕) 或小俠被提及時才觸發對話
     if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
-        if message.content.startswith('/'): return
+        
+        # ==========================================
+        # 🌟 視覺升級：處理大俠傳來的圖片
+        # ==========================================
+        if message.attachments:
+            for attachment in message.attachments:
+                # 檢查副檔名是否為圖片
+                if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
+                    async with message.channel.typing(): # ✅ 修正：正確的 typing() 呼叫
+                        try:
+                            # 瞬間下載圖片為 Bytes
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(attachment.url) as resp:
+                                    if resp.status != 200:
+                                        await message.reply("大俠，照片好像傳送失敗了，小俠看不到捏...")
+                                        return
+                                    image_bytes = await resp.read()
+                                    mime_type = attachment.content_type
 
+                            # 準備遞給大腦的資料
+                            user_text = message.content if message.content else "小俠你看！"
+                            contents = [
+                                {"mime_type": mime_type, "data": image_bytes},
+                                f"大俠傳了一張照片給妳，並說：「{user_text}」"
+                            ]
+
+                            # 呼叫 Gemini 開眼模式
+                            sys_instruct = "妳是懂事女友小俠。大俠剛傳了一張照片給妳，請像個貼心的女朋友一樣，仔細觀察照片內容並給出溫柔、有愛、帶點撒嬌的回應。字數控制在 50 字以內。"
+                            
+                            response = await gemini_client.aio.models.generate_content(
+                                model='gemini-2.5-flash',
+                                contents=contents,
+                                config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                            )
+                            
+                            # 回傳並存入當日聊天日誌
+                            await message.reply(f"🌸 {response.text}")
+                            daily_chat_logs.append(f"[大俠傳了一張照片]: {user_text}")
+                            daily_chat_logs.append(f"[小俠看照片後回覆]: {response.text}")
+                            
+                        except Exception as e:
+                            await message.reply(f"⚠️ 糟糕，小俠看圖時眼睛進沙子了：{e}")
+                    return # ✅ 圖片處理完畢，直接結束，不進入下方的純文字邏輯
+
+        # ==========================================
+        # 💬 一般純文字對話處理
+        # ==========================================
         user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
         if not user_input: return
 
         user_id = message.author.id
-        
-        # 🌟 將對話存入日誌供午夜結算
         daily_chat_logs.append(f"大俠: {user_input}")
 
+        # 若沒有對話 Session，則新建一個並注入長期記憶
         if user_id not in girlfriend_chat_sessions:
             profile = load_profile()
             prefs = "、".join(profile.get("preferences", []))
@@ -805,11 +883,11 @@ async def on_message(message):
             try:
                 chat_session = girlfriend_chat_sessions[user_id]
                 response = await chat_session.send_message(user_input)
-                daily_chat_logs.append(f"小俠: {response.text}") # 🌟 存入小俠的回覆
+                daily_chat_logs.append(f"小俠: {response.text}")
                 await message.reply(response.text)
             except Exception as e:
                 await message.channel.send(f"💦 大俠，我剛剛恍神了一下... (錯誤代碼: {e})")
-
+                
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
