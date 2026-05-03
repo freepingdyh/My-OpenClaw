@@ -896,53 +896,62 @@ import re
 async def sync_diary_photos(ctx):
     msg = await ctx.send("🔍 小夏正在掃描日記本，幫大俠把遺漏的照片搬進金庫中...")
     
-    # 讀取日記本與金庫
-    diary_db = []
-    if os.path.exists(DIARY_DATA_PATH):
-        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-            diary_db = json.load(f)
-            
-    photos_db = load_memory()
-    synced_count = 0
-    
-    # 掃描每一篇已回覆的日記
-    for entry in diary_db:
-        if entry.get("is_replied"):
-            content = entry.get("content", "")
-            
-            # 用正規表達式 (Regex) 把圖片網址跟小俠的回信挖出來
-            img_match = re.search(r"<img src='([^']+)'", content)
-            reply_match = re.search(r"<p style='color:#be185d; font-size: 14px;'>([^<]+)</p>", content)
-            
-            if img_match and reply_match:
-                img_url = img_match.group(1)
-                reply_text = reply_match.group(1)
+    try:
+        # 讀取日記本與金庫
+        diary_db = []
+        if os.path.exists(DIARY_DATA_PATH):
+            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+                diary_db = json.load(f)
                 
-                # 檢查這張照片是不是已經在金庫裡了 (避免重複補票)
-                if not any(p.get("local_url") == img_url for p in photos_db):
-                    # 🌟 同步入金庫的關鍵修正
-                    diary_photo_payload = {
-                        "id": str(uuid.uuid4()),
-                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                        "topic": f"【日常陪伴】{entry_date}", # 前端會顯示這個
-                        "event": entry_content[:50] + "...", 
-                        "composition": result.get("scenario_tw", "與大俠享受專屬的兩人時光"),
-                        "mood": "滿滿的愛意與撫慰",
-                        "message": result["reply"],
-                        "image_url": up_img,
-                        "local_url": local_url,
-                        "type": "diary"  # 👈 前端 index.html 過濾器(filter)抓取的關鍵字
-                    }
-                    # 插在金庫最前面
-                    photos_db.insert(0, diary_photo_payload)
-                    synced_count += 1
+        photos_db = load_memory()
+        synced_count = 0
+        
+        # 掃描每一篇已回覆的日記
+        for entry in diary_db:
+            if entry.get("is_replied"):
+                content = entry.get("content", "")
+                entry_date = entry.get("date", "未知日期")
+                
+                # 🌟 用正規表達式 (Regex) 準確挖出圖片網址、回信文字、與寫真構想
+                img_match = re.search(r"<img src='([^']+)'", content)
+                reply_match = re.search(r"<p style='color:#be185d; font-size: 14px;'>([^<]+)</p>", content)
+                scenario_match = re.search(r"📸 寫真構想<\/h4><p[^>]*>([^<]+)<\/p>", content) # 匹配 HTML 中的寫真構想
+                
+                if img_match and reply_match:
+                    img_url = img_match.group(1)
+                    reply_text = reply_match.group(1)
+                    # 嘗試抓取構想，若無則用保底文字
+                    scenario_text = scenario_match.group(1) if scenario_match else "與大俠享受專屬的兩人時光"
                     
-    # 存檔並回報
-    if synced_count > 0:
-        save_memory(photos_db)
-        await msg.edit(content=f"✅ 報告大俠！成功為 **{synced_count}** 張舊日記照片補票，快去網頁的「相片總覽」看看吧！")
-    else:
-        await msg.edit(content="⚠️ 報告大俠！沒有找到需要補票的照片，或是都已經存好囉！")
+                    # 檢查這張照片是不是已經在金庫裡了 (避免重複補票)
+                    if not any(p.get("local_url") == img_url or p.get("image_url") == img_url for p in photos_db):
+                        # ✅ 修正：使用 entry 提供的實際資料，而非不存在的變數
+                        diary_photo_payload = {
+                            "id": str(uuid.uuid4()),
+                            "publish_date": entry_date + " 23:59:59",
+                            "topic": f"【日常陪伴】{entry_date} 專屬回信",
+                            "event": "大俠這天的日記回憶...", 
+                            "composition": scenario_text,
+                            "mood": "滿滿的愛意與撫慰",
+                            "message": reply_text,
+                            "image_url": img_url,
+                            "local_url": img_url,
+                            "type": "diary"  # 👈 關鍵標籤：讓前端 index.html 顯示在「日常陪伴」
+                        }
+                        # 插在金庫最前面
+                        photos_db.insert(0, diary_photo_payload)
+                        synced_count += 1
+                        
+        # 存檔並回報
+        if synced_count > 0:
+            save_memory(photos_db)
+            await msg.edit(content=f"✅ 報告大俠！成功為 **{synced_count}** 張舊日記照片補票，快去網頁的「相片總覽」看看吧！")
+        else:
+            await msg.edit(content="⚠️ 報告大俠！沒有找到需要補票的照片，或是都已經存好囉！")
+            
+    except Exception as e:
+        await msg.edit(content=f"❌ 補票過程發生錯誤：{str(e)}")
+        print(f"Sync error: {e}")
 
 
 # ==========================================
