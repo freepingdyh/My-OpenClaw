@@ -137,15 +137,20 @@ def check_daily_limit():
     return state["daily_gen_count"] < 6
 
 async def save_to_vault(url):
-    filename = f"xiaoxia_{uuid.uuid4().hex[:8]}.jpg"
-    filepath = os.path.join(OUTPUT_DIR, filename)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                async with aiofiles.open(filepath, mode='wb') as f:
-                    await f.write(await resp.read())
-                return filename
-    return None
+    try:
+        filename = f"xiaoxia_{uuid.uuid4().hex[:8]}.jpg"
+        filepath = os.path.join(OUTPUT_DIR, filename)
+        async with aiohttp.ClientSession() as session:
+            # 加入 30 秒逾時保護
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    async with aiofiles.open(filepath, mode='wb') as f:
+                        await f.write(await resp.read())
+                    return filename
+        return None
+    except Exception as e:
+        print(f"Vault save error: {e}")
+        return None
 
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -284,7 +289,8 @@ async def generate_image_fal(prompt):
         "guidance_scale": 3.5, "loras": [{"path": XIAOXIA_LORA_URL, "scale": 1.15}]
     }
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
+        # 加上 90 秒等待保護
+        async with session.post(url, headers=headers, json=payload, timeout=90) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return data['images'][0]['url']
@@ -295,7 +301,8 @@ async def upscale_image_fal(image_url):
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     payload = {"image_url": image_url, "scale": 2}
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
+        # 加上 60 秒等待保護
+        async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
 
@@ -305,7 +312,6 @@ async def upscale_image_fal(image_url):
 async def process_diary_reply(channel, target_date=None):
     global daily_chat_logs
     
-    # --- 階段 1：本機資料庫讀取與防呆 ---
     try:
         app_state = load_state()
     except Exception as e:
@@ -327,7 +333,6 @@ async def process_diary_reply(channel, target_date=None):
             if channel: await channel.send(f"⚠️ 嚴重錯誤：日記檔案損毀！\n錯誤：`{e}`")
             return
             
-    # --- 階段 2：篩選未讀日記 ---
     unreplied = []
     for entry in diary_db:
         if target_date:
@@ -346,132 +351,137 @@ async def process_diary_reply(channel, target_date=None):
     if channel and len(unreplied) > 0:
         await channel.send(f"⏳ 發現 {len(unreplied)} 篇未讀日記！小俠正在一篇一篇認真閱讀與回信，大俠請稍候喔...")
 
-    # 定義反引號標記 (破解複製貼上被截斷的 Bug)
     md_json_tag = chr(96) * 3 + "json"
     md_end_tag = chr(96) * 3
 
-    # --- 階段 3：迴圈「逐篇處理」每一篇日記 ---
+    # --- 階段 3：迴圈「獨立裝甲處理」每一篇日記 ---
     for entry in unreplied:
-        current_score = app_state.get("affection_score", 80)
-        entry_date = entry['date']
-        entry_content = entry['content']
-        
-        eval_prompt = f"""
-        【大俠的這篇日記 ({entry_date})】：
-        {entry_content}
-        
-        【今日聊天紀錄補充 (提供當下情緒)】：
-        {chat_context if chat_context else '無紀錄'}
-        
-        請以懂事女友小俠的身份進行評估，並「專門針對這篇日記的內容」給予回覆。妳的當前愛意值為：{current_score}/100。
-        
-        【重要限制】：請回傳純 JSON 格式。文字內「絕對不可」使用雙引號 (") 與實體換行符號。
-        {{
-          "affection_plus": 1,
-          "extracted_preferences": ["喜好1"],
-          "reply": "50字內給大俠的專屬回信",
-          "spiciness": "A",
-          "scenario": "standing in kitchen cooking, wearing a casual t-shirt, looking at viewer"
-        }}
-        
-        - affection_plus: 1到5的整數 (1=日常, 3=有愛意, 5=強烈愛意/送禮)。
-        - extracted_preferences: 字串陣列，萃取大俠喜好，無則 []。
-        - reply: 給大俠的專屬回信 (必須扣緊這篇日記的內容)。
-        - spiciness: "A", "B" 或 "C"。A=溫馨(60%), B=微辣(30%), C=大獎(10%)。若 current_score + affection_plus >= 100，強制選 "C"。
-        - scenario: 一句英文情境照描述。【極度重要警告】：必須是單人場景 (1girl solo)！照片中絕對不可出現男人或其他人物！如果要表現陪伴大俠，請一律用「看著鏡頭 (looking at viewer / boyfriend POV)」來表現！
-        """
-        
-        print(f"💡 正在處理 {entry_date} 的日記...")
-        response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=eval_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction="妳是小俠，負責產出回信與情境。嚴格輸出 JSON，且情境絕對不可包含其他人物。",
-                response_mime_type="application/json"
+        # 🛡️ 將 Try 放進迴圈內！就算一篇報錯，也會繼續處理下一篇！
+        try:
+            current_score = app_state.get("affection_score", 80)
+            entry_date = entry['date']
+            entry_content = entry['content']
+            
+            eval_prompt = f"""
+            【大俠的這篇日記 ({entry_date})】：
+            {entry_content}
+            
+            【今日聊天紀錄補充】：
+            {chat_context if chat_context else '無紀錄'}
+            
+            請以懂事女友小俠的身份進行評估，並「專門針對這篇日記的內容」給予回覆。妳的當前愛意值為：{current_score}/100。
+            
+            【重要限制】：請回傳純 JSON 格式。文字內「絕對不可」使用雙引號 (") 與實體換行符號。
+            {{
+              "affection_plus": 1,
+              "extracted_preferences": ["喜好1"],
+              "reply": "50字內給大俠的專屬回信",
+              "spiciness": "A",
+              "scenario": "standing in kitchen cooking, wearing a casual t-shirt, looking at viewer"
+            }}
+            
+            - affection_plus: 1到5的整數。
+            - extracted_preferences: 字串陣列，萃取大俠喜好，無則 []。
+            - reply: 給大俠的專屬回信 (必須扣緊這篇日記的內容)。
+            - spiciness: "A", "B" 或 "C"。若 current_score + affection_plus >= 100，強制選 "C"。
+            - scenario: 一句英文情境照描述。【極度重要警告】：必須是單人場景 (1girl solo)！照片中絕對不可出現男人或其他人物！如果要表現陪伴大俠，請一律用「看著鏡頭 (looking at viewer / boyfriend POV)」來表現！
+            """
+            
+            print(f"💡 正在處理 {entry_date} 的日記...")
+            response = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=eval_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction="妳是小俠，負責產出回信與情境。嚴格輸出 JSON，且情境絕對不可包含其他人物。",
+                    response_mime_type="application/json"
+                )
             )
-        )
-        
-        # 安全清理 Markdown 標記，不會引發截斷
-        clean_text = response.text.replace(md_json_tag, "").replace(md_end_tag, "").strip()
-        
-        try:
-            result = json.loads(clean_text, strict=False)
-            if "reply" not in result or "scenario" not in result:
-                raise ValueError("JSON 缺少必要欄位")
-        except Exception as e:
-            print(f"⚠️ Gemini JSON 解析失敗 ({e})，啟動保底救援！")
-            result = {
-                "affection_plus": 1,
-                "extracted_preferences": [],
-                "reply": "大俠，小俠讀這篇日記時有點恍神了... 但不管多忙多累，小俠都會在這裡陪你喔！（抱）",
-                "spiciness": "A",
-                "scenario": "sitting on a cozy sofa, wearing a warm oversized sweater, soft living room lighting, looking at viewer"
-            }
-        
-        new_score = current_score + result["affection_plus"]
-        is_jackpot = False
-        if new_score >= 100:
-            is_jackpot = True
-            new_score = 80 
-            result["spiciness"] = "C"
             
-        app_state["affection_score"] = new_score
-        save_state(app_state)
-        
-        for pref in result.get("extracted_preferences", []):
-            if pref not in profile["preferences"]:
-                profile["preferences"].append(pref)
-        save_profile(profile)
-        
-        life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
-        骨架：
-        [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly one person, completely alone in frame, NO MEN, NO OTHER PEOPLE, same person, east asian female, soft oval face, delicate facial structure, clear skin texture, 
-        [HAIR] long dark wavy hair, natural makeup, clean skin, 
-        [BODY] slender body, delicate figure, large breasts, narrow waist, 
-        [SCENE & CASUAL OUTFIT] {result['scenario']},
-        [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, boyfriend POV, natural lighting, photorealistic, 8k resolution
-        回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
-        
-        openai_resp = await openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": life_prompt}]
-        )
-        
-        # 安全清理 Markdown 標記，不會引發截斷
-        clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
-        
-        try:
-            visual = json.loads(clean_visual_text, strict=False)
-            if "image_prompt" not in visual:
-                raise ValueError("缺少 image_prompt")
-        except Exception as e:
-            print(f"⚠️ OpenAI 翻譯失敗 ({e})，啟動保底救援！")
-            visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, strictly one person, NO MEN, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, everyday clothing, candid shot, photorealistic, 8k resolution"}
-        
-        base_img = await generate_image_fal(visual['image_prompt'])
-        up_img = await upscale_image_fal(base_img)
-        local_filename = await save_to_vault(up_img)
-        local_url = f"[https://xiaoxia0320.zeabur.app/gallery/](https://xiaoxia0320.zeabur.app/gallery/){local_filename}"
-        
-        reply_html = (
-            "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
-            "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
-            f"<img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'>"
-            f"<p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
-        )
-        
-        entry["content"] += reply_html
-        entry["is_replied"] = True
-        with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump(diary_db, f, ensure_ascii=False, indent=2)
+            clean_text = response.text.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             
-        if channel:
-            title = f"💖 小俠的深度撫慰 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的專屬回信 [{entry_date}]"
-            embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
-            embed.set_image(url=local_url)
-            embed.set_footer(text=f"愛意值: {new_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
-            await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
+            try:
+                result = json.loads(clean_text, strict=False)
+                if "reply" not in result: raise ValueError("JSON 缺少 reply 欄位")
+            except Exception as e:
+                print(f"⚠️ Gemini JSON 異常 ({e})，啟動保底救援！")
+                result = {
+                    "affection_plus": 1, "extracted_preferences": [],
+                    "reply": "大俠，小俠讀這篇日記時有點恍神了... 但不管多忙多累，小俠都會在這裡陪你喔！（抱）",
+                    "spiciness": "A", "scenario": "sitting on a cozy sofa, wearing a warm sweater, looking at viewer"
+                }
+            
+            new_score = current_score + result["affection_plus"]
+            is_jackpot = False
+            if new_score >= 100:
+                is_jackpot = True
+                new_score = 80 
+                result["spiciness"] = "C"
+                
+            app_state["affection_score"] = new_score
+            save_state(app_state)
+            
+            for pref in result.get("extracted_preferences", []):
+                if pref not in profile["preferences"]: profile["preferences"].append(pref)
+            save_profile(profile)
+            
+            life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
+            骨架：
+            [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly one person, completely alone in frame, NO MEN, NO OTHER PEOPLE, same person, east asian female, soft oval face, delicate facial structure, clear skin texture, 
+            [HAIR] long dark wavy hair, natural makeup, clean skin, 
+            [BODY] slender body, delicate figure, large breasts, narrow waist, 
+            [SCENE & CASUAL OUTFIT] {result['scenario']},
+            [STYLE & LIGHTING] everyday clothing, candid shot, lifestyle photography, boyfriend POV, natural lighting, photorealistic, 8k resolution
+            回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
+            
+            openai_resp = await openai_client.chat.completions.create(
+                model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
+            )
+            
+            clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
+            
+            try:
+                visual = json.loads(clean_visual_text, strict=False)
+                if "image_prompt" not in visual: raise ValueError("缺少 image_prompt")
+            except Exception as e:
+                visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, strictly one person, NO MEN, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, candid shot, photorealistic, 8k resolution"}
+            
+            base_img = await generate_image_fal(visual['image_prompt'])
+            up_img = await upscale_image_fal(base_img)
+            local_filename = await save_to_vault(up_img)
+            
+            # 🛡️ 雙重備援：如果金庫存檔失敗，就直接用 Fal.ai 的原圖網址，保證不破圖！
+            if local_filename:
+                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            else:
+                local_url = up_img 
+                print(f"⚠️ {entry_date} 本機存檔失敗，改用雲端網址備援！")
+            
+            reply_html = (
+                "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
+                "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
+                f"<img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'>"
+                f"<p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
+            )
+            
+            entry["content"] += reply_html
+            entry["is_replied"] = True
+            
+            # 存檔當下進度
+            with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+                json.dump(diary_db, f, ensure_ascii=False, indent=2)
+                
+            if channel:
+                title = f"💖 小俠的深度撫慰 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的專屬回信 [{entry_date}]"
+                embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
+                embed.set_image(url=local_url)
+                embed.set_footer(text=f"愛意值: {new_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
+                await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
+
+        except Exception as e:
+            # 🛡️ 如果這篇真的發生無法預期的嚴重錯誤，立刻通報，但絕不影響下一篇！
+            if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{str(e)}`。跳過此篇，馬上為您處理下一篇！")
+            print(f"[{entry.get('date')}] 處理錯誤: {e}")
+            continue
 
     girlfriend_chat_sessions.clear()
     daily_chat_logs.clear()
