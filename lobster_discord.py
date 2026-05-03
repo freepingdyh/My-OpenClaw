@@ -432,8 +432,9 @@ async def process_diary_reply(channel, target_date=None):
             messages=[{"role": "user", "content": life_prompt}]
         )
         
-        clean_visual_text = openai_resp.choices[0].message.content.replace("```json", "").replace("
-```", "").strip()
+        # ⚠️ 注意這行：必須完整複製到底！
+        clean_visual_text = openai_resp.choices[0].message.content.replace("
+```json", "").replace("```", "").strip()
         
         try:
             visual = json.loads(clean_visual_text, strict=False)
@@ -447,7 +448,7 @@ async def process_diary_reply(channel, target_date=None):
         base_img = await generate_image_fal(visual['image_prompt'])
         up_img = await upscale_image_fal(base_img)
         local_filename = await save_to_vault(up_img)
-        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+        local_url = f"[https://xiaoxia0320.zeabur.app/gallery/](https://xiaoxia0320.zeabur.app/gallery/){local_filename}"
         
         reply_html = f"<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'><p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p><img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'><p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
         
