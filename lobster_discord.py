@@ -343,9 +343,12 @@ async def process_diary_reply(channel, target_date=None):
         if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
         return
 
-    # 提示大俠即將進行多篇處理
     if channel and len(unreplied) > 0:
         await channel.send(f"⏳ 發現 {len(unreplied)} 篇未讀日記！小俠正在一篇一篇認真閱讀與回信，大俠請稍候喔...")
+
+    # 定義反引號標記 (破解複製貼上被截斷的 Bug)
+    md_json_tag = chr(96) * 3 + "json"
+    md_end_tag = chr(96) * 3
 
     # --- 階段 3：迴圈「逐篇處理」每一篇日記 ---
     for entry in unreplied:
@@ -388,10 +391,8 @@ async def process_diary_reply(channel, target_date=None):
             )
         )
         
-        clean_text = response.text
-        clean_text = clean_text.replace("```json", "")
-        clean_text = clean_text.replace("```", "")
-        clean_text = clean_text.strip()
+        # 安全清理 Markdown 標記，不會引發截斷
+        clean_text = response.text.replace(md_json_tag, "").replace(md_end_tag, "").strip()
         
         try:
             result = json.loads(clean_text, strict=False)
@@ -407,7 +408,6 @@ async def process_diary_reply(channel, target_date=None):
                 "scenario": "sitting on a cozy sofa, wearing a warm oversized sweater, soft living room lighting, looking at viewer"
             }
         
-        # 結算這篇的分數與大獎
         new_score = current_score + result["affection_plus"]
         is_jackpot = False
         if new_score >= 100:
@@ -423,7 +423,6 @@ async def process_diary_reply(channel, target_date=None):
                 profile["preferences"].append(pref)
         save_profile(profile)
         
-        # 🌟 翻譯為生活感 FLUX Prompt (加上強制隔離男性/其他人物的鐵則)
         life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
         骨架：
         [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly one person, completely alone in frame, NO MEN, NO OTHER PEOPLE, same person, east asian female, soft oval face, delicate facial structure, clear skin texture, 
@@ -439,11 +438,8 @@ async def process_diary_reply(channel, target_date=None):
             messages=[{"role": "user", "content": life_prompt}]
         )
         
-        clean_visual_text = openai_resp.choices[0].message.content
-        clean_visual_text = clean_visual_text.replace("
-```json", "")
-        clean_visual_text = clean_visual_text.replace("```", "")
-        clean_visual_text = clean_visual_text.strip()
+        # 安全清理 Markdown 標記，不會引發截斷
+        clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
         
         try:
             visual = json.loads(clean_visual_text, strict=False)
@@ -451,14 +447,13 @@ async def process_diary_reply(channel, target_date=None):
                 raise ValueError("缺少 image_prompt")
         except Exception as e:
             print(f"⚠️ OpenAI 翻譯失敗 ({e})，啟動保底救援！")
-            visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, NO MEN, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, everyday clothing, candid shot, photorealistic, 8k resolution"}
+            visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, strictly one person, NO MEN, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, everyday clothing, candid shot, photorealistic, 8k resolution"}
         
         base_img = await generate_image_fal(visual['image_prompt'])
         up_img = await upscale_image_fal(base_img)
         local_filename = await save_to_vault(up_img)
-        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+        local_url = f"[https://xiaoxia0320.zeabur.app/gallery/](https://xiaoxia0320.zeabur.app/gallery/){local_filename}"
         
-        # 拼接 HTML
         reply_html = (
             "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
             "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
@@ -466,13 +461,11 @@ async def process_diary_reply(channel, target_date=None):
             f"<p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
         )
         
-        # 寫入這筆特定的紀錄並存檔
         entry["content"] += reply_html
         entry["is_replied"] = True
         with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
             json.dump(diary_db, f, ensure_ascii=False, indent=2)
             
-        # 派發單篇回覆通知到 Discord
         if channel:
             title = f"💖 小俠的深度撫慰 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的專屬回信 [{entry_date}]"
             embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
@@ -480,7 +473,6 @@ async def process_diary_reply(channel, target_date=None):
             embed.set_footer(text=f"愛意值: {new_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
             await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
 
-    # 所有日記處理完畢後，清理對話暫存
     girlfriend_chat_sessions.clear()
     daily_chat_logs.clear()
 
