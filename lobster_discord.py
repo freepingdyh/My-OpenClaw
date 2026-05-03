@@ -324,7 +324,7 @@ async def process_diary_reply(channel, target_date=None):
             with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
                 diary_db = json.load(f)
         except Exception as e:
-            if channel: await channel.send(f"⚠️ 嚴重錯誤：你的日記檔案 `xiaoxia_diary.json` 格式損毀！\n系統錯誤訊息：`{e}`\n請至 Zeabur 終端機使用 `cat /data/memory/xiaoxia_diary.json` 檢查內容是否少了逗號或括號。")
+            if channel: await channel.send(f"⚠️ 嚴重錯誤：日記檔案損毀！\n錯誤：`{e}`")
             return
             
     # --- 階段 2：資料篩選與打包 ---
@@ -383,7 +383,12 @@ async def process_diary_reply(channel, target_date=None):
             )
         )
         
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        # 防截斷拆解寫法：字串過濾
+        clean_text = response.text
+        clean_text = clean_text.replace("```json", "")
+        clean_text = clean_text.replace("```", "")
+        clean_text = clean_text.strip()
+        
         print(f"--- Gemini 原始回傳 --- \n{clean_text}\n------------------------")
         
         try:
@@ -432,9 +437,11 @@ async def process_diary_reply(channel, target_date=None):
             messages=[{"role": "user", "content": life_prompt}]
         )
         
-        # ⚠️ 注意這行：必須完整複製到底！
-        clean_visual_text = openai_resp.choices[0].message.content.replace("
-```json", "").replace("```", "").strip()
+        # 防截斷拆解寫法：字串過濾
+        clean_visual_text = openai_resp.choices[0].message.content
+        clean_visual_text = clean_visual_text.replace("```json", "")
+        clean_visual_text = clean_visual_text.replace("```", "")
+        clean_visual_text = clean_visual_text.strip()
         
         try:
             visual = json.loads(clean_visual_text, strict=False)
@@ -448,9 +455,15 @@ async def process_diary_reply(channel, target_date=None):
         base_img = await generate_image_fal(visual['image_prompt'])
         up_img = await upscale_image_fal(base_img)
         local_filename = await save_to_vault(up_img)
-        local_url = f"[https://xiaoxia0320.zeabur.app/gallery/](https://xiaoxia0320.zeabur.app/gallery/){local_filename}"
+        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
         
-        reply_html = f"<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'><p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p><img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'><p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
+        # 防截斷拆解寫法：HTML 字串拼接
+        reply_html = (
+            "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
+            "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
+            f"<img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'>"
+            f"<p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
+        )
         
         for e in diary_db:
             if e in unreplied:
