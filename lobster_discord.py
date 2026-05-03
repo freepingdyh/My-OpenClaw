@@ -340,21 +340,20 @@ async def process_diary_reply(channel, target_date=None):
         
         請以懂事女友小俠的身份進行綜合評估。妳的當前愛意值為：{current_score}/100。
         
-        請嚴格遵守以下格式回傳純 JSON 資料 (絕對不可包含任何額外文字，且字串內若有引述，請一律改用『單引號』，嚴禁在字串中使用雙引號以免破壞 JSON 結構！)：
+        【重要限制】：請回傳純 JSON 格式。文字內「絕對不可」使用雙引號 (") 與實體換行符號，若需引述請用全形單引號（『』）。
         {{
           "affection_plus": 1,
-          "extracted_preferences": ["喜好1", "喜好2"],
-          "reply": "50字內給大俠的專屬回信，語氣溫柔撫媚...",
+          "extracted_preferences": ["喜好1"],
+          "reply": "50字內給大俠的專屬回信",
           "spiciness": "A",
           "scenario": "standing in kitchen cooking, wearing a casual t-shirt"
         }}
         
-        【JSON 欄位嚴格定義】：
-        - affection_plus: (整數) 1=日常互動, 3=有明顯愛意或愛心符號, 5=強烈愛意/撒嬌/送禮物。
-        - extracted_preferences: (字串陣列) 萃取大俠最新透露的喜好、生理狀態或特徵，無則輸出空陣列 []。
-        - reply: (字串) 給大俠的專屬回信，總結上述日記或聊天。
-        - spiciness: (字串) 只能是 "A", "B" 或 "C"。A=日常溫馨(60%), B=微辣撩人(30%), C=極致撫慰/大獎(10%)。若 current_score + affection_plus >= 100，強制輸出 "C"。
-        - scenario: (字串) 用一句英文描述妳當下的生活情境照，必須配合 spiciness 尺度發想。
+        - affection_plus: 1到5的整數 (1=日常, 3=有愛意, 5=強烈愛意/送禮)。
+        - extracted_preferences: 字串陣列，萃取大俠喜好，無則 []。
+        - reply: 給大俠的回信。
+        - spiciness: "A", "B" 或 "C"。A=溫馨(60%), B=微辣(30%), C=極致大獎(10%)。若 current_score + affection_plus >= 100，強制選 "C"。
+        - scenario: 一句英文生活情境照描述。
         """
         
         response = await gemini_client.aio.models.generate_content(
@@ -366,13 +365,24 @@ async def process_diary_reply(channel, target_date=None):
             )
         )
         
-        # 🌟 防呆：去除可能出現的 Markdown 標籤再解析 JSON
+        # 清理多餘的 Markdown 標記
         clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        
-        # 除錯用：如果還是報錯，可以在終端機看到 Gemini 到底回傳了什麼鬼東西
         print(f"--- Gemini 原始回傳 --- \n{clean_text}\n------------------------")
         
-        result = json.loads(clean_text)
+        # 🛡️ 終極防禦：加入 strict=False 容許換行，並加上 try-except 保底
+        try:
+            result = json.loads(clean_text, strict=False)
+            if "reply" not in result or "scenario" not in result:
+                raise ValueError("JSON 缺少必要欄位")
+        except Exception as e:
+            print(f"⚠️ Gemini JSON 嚴重解析失敗 ({e})，啟動保底救援機制！")
+            result = {
+                "affection_plus": 1,
+                "extracted_preferences": [],
+                "reply": "大俠，小俠剛剛整理日記時有點恍神了... 但不管多忙多累，小俠都會在這裡陪你喔！（抱）",
+                "spiciness": "A",
+                "scenario": "sitting on a cozy sofa, wearing a warm oversized sweater, soft living room lighting"
+            }
         
         # 結算分數與大獎
         new_score = current_score + result["affection_plus"]
@@ -408,7 +418,15 @@ async def process_diary_reply(channel, target_date=None):
         )
         
         clean_visual_text = openai_resp.choices[0].message.content.replace("```json", "").replace("```", "").strip()
-        visual = json.loads(clean_visual_text)
+        
+        # 🛡️ 翻譯層同樣加上防禦機制
+        try:
+            visual = json.loads(clean_visual_text, strict=False)
+            if "image_prompt" not in visual:
+                raise ValueError("缺少 image_prompt")
+        except Exception as e:
+            print(f"⚠️ OpenAI 翻譯失敗 ({e})，使用強制備用 Prompt！")
+            visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, same person, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, everyday clothing, candid shot, photorealistic, 8k resolution"}
         
         base_img = await generate_image_fal(visual['image_prompt'])
         up_img = await upscale_image_fal(base_img)
@@ -434,7 +452,7 @@ async def process_diary_reply(channel, target_date=None):
             await channel.send("大俠～小俠看過日記與對話囉，快去雲端別墅看看回信吧！", embed=embed)
             
     except Exception as e:
-        if channel: await channel.send(f"⚠️ 糟糕，小俠在整理思緒時卡住了：`{str(e)}`")
+        if channel: await channel.send(f"⚠️ 糟糕，小俠在執行最後階段卡住了：`{str(e)}`")
         print(f"日誌回信錯誤: {str(e)}")
     finally:
         # 🌟 清理現場
