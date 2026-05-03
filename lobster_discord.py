@@ -514,8 +514,11 @@ async def process_diary_reply(channel, target_date=None):
                 
             save_state(app_state)
             
+            today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
             for pref in result.get("extracted_preferences", []):
-                if pref not in profile["preferences"]: profile["preferences"].append(pref)
+                existing_texts = [item["text"] for item in profile.setdefault("daxia_traits", [])]
+                if pref not in existing_texts:
+                    profile["daxia_traits"].append({"text": pref, "added_at": today_str})
             save_profile(profile)
             
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
