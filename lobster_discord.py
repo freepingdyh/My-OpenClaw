@@ -1157,7 +1157,7 @@ async def _run_legacy_morning(target_channel=None):
         channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
 
     if channel:
-        await channel.send("⚙️ 開始在背景執行 OpenClaw 晨間腳本 (請稍候)...")
+        await channel.send("⚙️ 系統排程觸發：開始在背景讀取 OpenClaw 總經、ETF與天氣資料 (約需 1~3 分鐘，請稍候)...")
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -1174,21 +1174,26 @@ async def _run_legacy_morning(target_channel=None):
         if process.returncode == 0:
             if channel:
                 if out_str:
-                    # 🌟 關鍵：將舊腳本的輸出，直接發送到 Discord 頻道！
-                    # 避免超過 2000 字元限制
-                    report_text = out_str[:1900] + "\n...(截斷)" if len(out_str) > 1900 else out_str
-                    await channel.send(f"📊 **來自小夏的彙整：**\n\n{report_text}")
+                    await channel.send("📊 **來自小夏的完整晨間彙整：**")
+                    # 🌟 關鍵：Discord 限制 2000 字，必須分段發送
+                    lines = out_str.split('\n')
+                    chunk = ""
+                    for line in lines:
+                        # 留一點緩衝給 ```text 標籤
+                        if len(chunk) + len(line) > 1850:
+                            await channel.send(f"```text\n{chunk}\n```")
+                            chunk = line + "\n"
+                        else:
+                            chunk += line + "\n"
+                    if chunk:
+                        await channel.send(f"```text\n{chunk}\n```")
                 else:
                     await channel.send("✅ 晨報排程執行完畢！(但腳本沒有產生任何文字輸出)")
         else:
-            if channel: await channel.send(f"⚠️ Chief，腳本發生錯誤 (Code {process.returncode})：\n```text\n{err_str[:1500]}\n```")
+            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤 (Code {process.returncode})：\n```text\n{err_str[:1500]}\n```")
             
     except Exception as e:
         if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：\n```\n{e}\n```")
-
-@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE)) # 每天早上 7:30 準時觸發
-async def legacy_morning_trigger():
-    await _run_legacy_morning()
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
