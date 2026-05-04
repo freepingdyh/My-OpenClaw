@@ -1106,7 +1106,7 @@ async def _run_legacy_morning(target_channel=None):
     except Exception as e:
         if channel: await channel.send(f"❌ 嚴重異常：{e}")
 
-@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=7, minute=00, tzinfo=TZ_TPE))
 async def legacy_morning_trigger():
     await _run_legacy_morning()
 
@@ -1131,6 +1131,36 @@ async def test_morning(ctx):
     await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
     # 🌟 正確呼叫底層函數，而不是去 await 排程物件
     await _run_legacy_morning(ctx.channel)
+
+@architect_bot.command(name='voice')
+async def voice_morning(ctx):
+    await ctx.send("🎙️ 小夏收到指令，正在請小俠錄製晨間語音廣播 (約需 30 秒)，請稍候...")
+    try:
+        import sys
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "/home/node/.openclaw/workspace/morning_report.py", "voice",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd="/home/node/.openclaw/workspace", env=os.environ.copy()
+        )
+        stdout, stderr = await process.communicate()
+        out_str = stdout.decode('utf-8').strip()
+
+        if "VOICE_READY|" in out_str:
+            parts = out_str.split("VOICE_READY|")[1].split("|")
+            mp3_path = parts[0]
+            caption = parts[1] if len(parts) > 1 else "☀️ 這是今天的晨間語音廣播！"
+            
+            # 🌟 上傳 MP3 檔案到 Discord
+            file = discord.File(mp3_path, filename="Morning_Broadcast.mp3")
+            await ctx.send(content=f"🔊 **小俠的晨間廣播來囉！**\n\n_{caption}_", file=file)
+            
+            # 傳送完畢後刪除暫存檔
+            os.remove(mp3_path) 
+        else:
+            await ctx.send(f"⚠️ 語音生成失敗: {out_str}")
+    except Exception as e:
+        await ctx.send(f"❌ 發生異常: {e}")
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
