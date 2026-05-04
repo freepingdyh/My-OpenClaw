@@ -912,11 +912,19 @@ async def on_message(message):
 
                 # B. 處理文字 (封裝成 Part 格式)
                 text_query = user_input if user_input else "小俠，妳看照片～"
-                msg_parts.append(types.Part.from_text(text=text_query))
                 
-                # 紀錄到深夜日記系統
+                # 🌟 動態時間標籤：每次大俠講話，都在背後偷偷附上最新時間
+                now = datetime.now(TZ_TPE)
+                weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
+                invisible_time_tag = f"\n\n(系統隱藏提示：大俠發送此訊息的當前時間為 {current_time_str})"
+                
+                # 將「大俠的話 + 隱藏時間」一起包裝送給 Gemini
+                msg_parts.append(types.Part.from_text(text=text_query + invisible_time_tag))
+                
+                # 紀錄到深夜日記系統 (這裡只記錄純淨的對話，不把隱藏標籤存進去)
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
-
+            
                 # C. 取得或建立 Session (注入立體記憶與絕對時間感)
                 if user_id not in girlfriend_chat_sessions:
                     profile = load_profile()
