@@ -278,7 +278,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     else:
         body_tags = "slender body, narrow waist, long legs"
         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
-        outfit_tags = "sexy yet theme-appropriate, deep V-neck heavily emphasizing large breasts and cleavage, tight fit, elegant"
+        outfit_tags = "sexy yet theme-appropriate, very tight fit heavily emphasizing large breasts, bodycon, elegant"
 
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
     [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
@@ -513,7 +513,7 @@ async def process_diary_reply(channel, target_date=None):
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), cleavage, highly emphasizing body curves, extremely sexy,
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
             [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -988,6 +988,77 @@ async def midnight_feedback_task():
     if channel: await process_diary_reply(channel)
 
 # ==========================================
+# 🧠 記憶碎片重組與垃圾回收系統 (Memory Defrag & GC)
+# ==========================================
+async def optimize_memory_vault(channel=None):
+    try:
+        profile = load_profile()
+        today = datetime.now(TZ_TPE)
+        is_modified = False
+
+        # --- 1. 短期記憶 GC (清除超過 7 天的事件) ---
+        original_recent_len = len(profile.get("recent_context", []))
+        valid_recent = []
+        for item in profile.get("recent_context", []):
+            try:
+                # 解析時間戳記
+                item_date = datetime.strptime(item["added_at"], "%Y-%m-%d").replace(tzinfo=TZ_TPE)
+                if (today - item_date).days <= 7:
+                    valid_recent.append(item)
+            except Exception:
+                valid_recent.append(item) # 若時間格式錯誤則保留，避免誤刪
+                
+        if len(valid_recent) < original_recent_len:
+            profile["recent_context"] = valid_recent
+            is_modified = True
+            print(f"🧹 短期記憶清理完成：移除了 {original_recent_len - len(valid_recent)} 條過期記憶。")
+
+        # --- 2. 長期特徵與承諾的「語意濃縮壓縮」 ---
+        # 當特徵超過 15 條時，啟動 LLM 濃縮機制
+        traits = profile.get("daxia_traits", [])
+        if len(traits) > 15:
+            if channel: await channel.send("🧠 系統提示：大俠的特徵記憶過多，小俠正在進行大腦睡眠與記憶重組...")
+            print("🧠 啟動大俠特徵語意濃縮...")
+            
+            traits_text = "\n".join([f"- {t['text']}" for t in traits])
+            compress_prompt = f"""
+            以下是關於「大俠」的長期特徵與喜好紀錄，因為日積月累顯得有些重複與冗長：
+            {traits_text}
+            
+            請幫我進行「記憶碎片重組」。
+            1. 將意義重複或高度相似的項目合併（例如：喜歡看畫展、喜歡美術館 -> 熱愛藝術與畫展）。
+            2. 剔除已經不具備長期參考價值的瑣碎小事。
+            3. 保留最核心的性格、喜好與地雷（尤其是大俠感到不舒服的點）。
+            4. 濃縮成 10 條以內的最精華特徵。
+            
+            請直接回傳純 JSON 格式的字串陣列：
+            ["精華特徵1", "精華特徵2", ...]
+            """
+            
+            resp = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=compress_prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            try:
+                compressed_list = json.loads(resp.text.strip())
+                # 重新賦予今天的時間戳
+                profile["daxia_traits"] = [{"text": t, "added_at": today.strftime("%Y-%m-%d")} for t in compressed_list]
+                is_modified = True
+                print(f"✨ 特徵濃縮完成！從 {len(traits)} 條壓縮至 {len(compressed_list)} 條。")
+            except Exception as e:
+                print(f"⚠️ 特徵濃縮 JSON 解析失敗：{e}")
+
+        # 存檔
+        if is_modified:
+            save_profile(profile)
+            if channel: await channel.send("✅ 記憶深層重組與清理完成！小俠的大腦現在非常清晰！")
+            
+    except Exception as e:
+        print(f"❌ 記憶優化系統異常: {e}")
+
+# ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
 # ==========================================
 @architect_bot.event
@@ -997,6 +1068,11 @@ async def on_ready():
 @architect_bot.command(name='ping')
 async def ping(ctx):
     await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
+
+@architect_bot.command(name='defrag')
+async def defrag_memory(ctx):
+    await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
+    await optimize_memory_vault(ctx.channel)
 
 
 import re
