@@ -1064,44 +1064,58 @@ async def optimize_memory_vault(channel=None):
 # ==========================================
 
 async def _run_legacy_morning(target_channel=None):
+    # 🌟 自動推送到 #晨報 頻道
     channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="晨報")
     if not channel:
         channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
 
     if channel:
-        await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據...")
+        await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據 (含語音生成，約需40秒)...")
 
     try:
-        # 🌟 核心修正：強制指定 cwd (工作目錄) 為 workspace，並傳入當前所有 os.environ
+        import sys
         process = await asyncio.create_subprocess_exec(
-            sys.executable,  # 🌟 關鍵：直接使用小夏目前的 Python 環境
+            sys.executable,
             "/home/node/.openclaw/workspace/morning_report.py",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/home/node/.openclaw/workspace", # 確保快照檔路徑正確
-            env=os.environ.copy() # 確保帶入所有 API Keys
+            cwd="/home/node/.openclaw/workspace",
+            env=os.environ.copy()
         )
         
         stdout, stderr = await process.communicate()
         out_str = stdout.decode('utf-8').strip()
-        err_str = stderr.decode('utf-8').strip()
         
+        # 🌟 攔截語音檔標籤
+        voice_file = None
+        if "VOICE_READY|" in out_str:
+            lines = out_str.split('\n')
+            clean_lines = []
+            for line in lines:
+                if line.startswith("VOICE_READY|"):
+                    voice_file = line.split("|")[1]
+                else:
+                    clean_lines.append(line)
+            out_str = "\n".join(clean_lines)
+
         if process.returncode == 0:
             if channel and out_str:
-                # 這裡不要用 ```text，直接發送才能看到彩色 Emoji
-                lines = out_str.split('\n')
                 chunk = ""
-                for line in lines:
+                for line in out_str.split('\n'):
                     if len(chunk) + len(line) > 1900:
-                        await channel.send(chunk) # 🌟 改成直接發送
+                        await channel.send(chunk)
                         chunk = ""
                     chunk += line + "\n"
                 if chunk:
                     await channel.send(chunk)
+                
+                # 🌟 報告文字發送完畢後，上傳語音檔！
+                if voice_file and os.path.exists(voice_file):
+                    await channel.send(content="🔊 **小俠的專屬晨間廣播來囉！**", file=discord.File(voice_file))
+                    os.remove(voice_file) # 傳完後銷毀檔案 
         else:
-            # 如果失敗，把詳細報錯噴出來，讓我們知道缺什麼套件
-            error_log = err_str[:1500]
-            if channel: await channel.send(f"⚠️ 核心回報錯誤 (Code {process.returncode})：\n```python\n{error_log}\n```")
+            error_log = stderr.decode('utf-8').strip()[:1500]
+            if channel: await channel.send(f"⚠️ 核心回報錯誤：\n```python\n{error_log}\n```")
             
     except Exception as e:
         if channel: await channel.send(f"❌ 嚴重異常：{e}")
