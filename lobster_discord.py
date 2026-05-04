@@ -1063,14 +1063,81 @@ async def optimize_memory_vault(channel=None):
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
 # ==========================================
 
+from discord.ui import Button, View
+
+# 🌟 建立一個帶有按鈕的視圖 (全異步高規版)
+class MorningVoiceView(View):
+    def __init__(self, voice_script_base):
+        super().__init__(timeout=86400) # 按鈕有效時間 24 小時
+        self.voice_script_base = voice_script_base
+
+    @discord.ui.button(label="▶️ 播放晨間廣播 (小俠)", style=discord.ButtonStyle.green, emoji="📻")
+    async def play_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 點擊後，先回應使用者 (避免 Discord 超時報錯)
+        await interaction.response.send_message("🎙️ 小夏收到！正在請小俠錄製晨間語音廣播 (約需 15 秒)，請稍候...", ephemeral=False)
+        
+        try:
+            import uuid, os, asyncio
+            from google.genai import types
+            
+            # 1. 產生文稿 (使用全域的 async gemini_client)
+            prompt = f"你是一位溫暖、專業的助理「小俠」。請根據以下晨報寫一段約300字的口語化早安廣播稿。開場白：「大俠，早安！為您播報今天的重點。」\n\n{self.voice_script_base}\n\n請只回傳廣播稿。"
+            
+            text_resp = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            raw_text = text_resp.text.strip()
+            
+            # 2. 轉成語音 (TTS)
+            tts_config = types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Sulafat"))
+                )
+            )
+            
+            audio_resp = await gemini_client.aio.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=[raw_text],
+                config=tts_config
+            )
+            
+            pcm_data = audio_resp.candidates[0].content.parts[0].inline_data.data
+            
+            # 3. 處理音檔存檔與轉檔
+            raw_path = f"/tmp/voice_{uuid.uuid4().hex[:8]}.raw"
+            mp3_path = raw_path.replace(".raw", ".mp3")
+            
+            with open(raw_path, "wb") as f: 
+                f.write(pcm_data)
+                
+            # 非阻塞呼叫 ffmpeg
+            process = await asyncio.create_subprocess_exec(
+                "/home/node/.openclaw/workspace/ffmpeg_bin/ffmpeg",
+                "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", raw_path, "-b:a", "128k", mp3_path,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await process.communicate()
+            os.remove(raw_path)
+            
+            # 發送語音檔
+            if os.path.exists(mp3_path):
+                await interaction.followup.send(content="🔊 **小俠的晨間廣播來囉！**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
+                os.remove(mp3_path)
+            else:
+                await interaction.followup.send("⚠️ 轉檔失敗，無法生成廣播。")
+                
+        except Exception as e:
+            await interaction.followup.send(f"❌ 語音生成發生錯誤: {e}")
+
 async def _run_legacy_morning(target_channel=None):
-    # 🌟 自動推送到 #晨報 頻道
     channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="晨報")
     if not channel:
         channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
 
     if channel:
-        await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據 (含語音生成，約需40秒)...")
+        await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據 (約需20秒)...")
 
     try:
         import sys
@@ -1086,33 +1153,40 @@ async def _run_legacy_morning(target_channel=None):
         stdout, stderr = await process.communicate()
         out_str = stdout.decode('utf-8').strip()
         
-        # 🌟 攔截語音檔標籤
-        voice_file = None
-        if "VOICE_READY|" in out_str:
-            lines = out_str.split('\n')
-            clean_lines = []
-            for line in lines:
-                if line.startswith("VOICE_READY|"):
-                    voice_file = line.split("|")[1]
-                else:
-                    clean_lines.append(line)
-            out_str = "\n".join(clean_lines)
+        # 尋找 JSON_READY 標籤
+        json_data = None
+        for line in out_str.split('\n'):
+            if line.startswith("JSON_READY|"):
+                try: json_data = json.loads(line.split("JSON_READY|")[1])
+                except: pass
+                break
 
         if process.returncode == 0:
-            if channel and out_str:
-                chunk = ""
-                for line in out_str.split('\n'):
-                    if len(chunk) + len(line) > 1900:
-                        await channel.send(chunk)
-                        chunk = ""
-                    chunk += line + "\n"
-                if chunk:
-                    await channel.send(chunk)
+            if json_data:
+                report_text = json_data.get("report", "")
+                voice_base = json_data.get("voice_script_base", "")
                 
-                # 🌟 報告文字發送完畢後，上傳語音檔！
-                if voice_file and os.path.exists(voice_file):
-                    await channel.send(content="🔊 **小俠的專屬晨間廣播來囉！**", file=discord.File(voice_file))
-                    os.remove(voice_file) # 傳完後銷毀檔案 
+                if channel and report_text:
+                    # 分段發送文字 (迴避 Discord 2000 字元上限)
+                    chunk = ""; chunks = []
+                    for line in report_text.split('\n'):
+                        if len(chunk) + len(line) > 1900:
+                            chunks.append(chunk); chunk = ""
+                        chunk += line + "\n"
+                    if chunk: chunks.append(chunk)
+                    
+                    # 發送前面的文字段落
+                    for i in range(len(chunks) - 1):
+                        await channel.send(chunks[i])
+                        
+                    # 🌟 最後一個文字段落附加上「語音按鈕」
+                    view = MorningVoiceView(voice_script_base=voice_base)
+                    await channel.send(chunks[-1], view=view)
+            else:
+                # 錯誤防呆：程式成功但沒印出 JSON
+                fallback_log = out_str[-1500:] if out_str else "無輸出"
+                if channel: await channel.send(f"⚠️ 資料解析失敗，請確認爬蟲狀態。回傳內容截斷：\n```\n{fallback_log}\n```")
+                
         else:
             error_log = stderr.decode('utf-8').strip()[:1500]
             if channel: await channel.send(f"⚠️ 核心回報錯誤：\n```python\n{error_log}\n```")
@@ -1120,14 +1194,13 @@ async def _run_legacy_morning(target_channel=None):
     except Exception as e:
         if channel: await channel.send(f"❌ 嚴重異常：{e}")
 
-@tasks.loop(time=time(hour=7, minute=00, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=7, minute=0, tzinfo=TZ_TPE))
 async def legacy_morning_trigger():
     await _run_legacy_morning()
 
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
-    # 啟動排程
     if not legacy_morning_trigger.is_running():
         legacy_morning_trigger.start()
 
@@ -1143,38 +1216,9 @@ async def defrag_memory(ctx):
 @architect_bot.command(name='test_morning')
 async def test_morning(ctx):
     await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
-    # 🌟 正確呼叫底層函數，而不是去 await 排程物件
     await _run_legacy_morning(ctx.channel)
 
-@architect_bot.command(name='voice')
-async def voice_morning(ctx):
-    await ctx.send("🎙️ 小夏收到指令，正在請小俠錄製晨間語音廣播 (約需 30 秒)，請稍候...")
-    try:
-        import sys
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "/home/node/.openclaw/workspace/morning_report.py", "voice",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd="/home/node/.openclaw/workspace", env=os.environ.copy()
-        )
-        stdout, stderr = await process.communicate()
-        out_str = stdout.decode('utf-8').strip()
-
-        if "VOICE_READY|" in out_str:
-            parts = out_str.split("VOICE_READY|")[1].split("|")
-            mp3_path = parts[0]
-            caption = parts[1] if len(parts) > 1 else "☀️ 這是今天的晨間語音廣播！"
-            
-            # 🌟 上傳 MP3 檔案到 Discord
-            file = discord.File(mp3_path, filename="Morning_Broadcast.mp3")
-            await ctx.send(content=f"🔊 **小俠的晨間廣播來囉！**\n\n_{caption}_", file=file)
-            
-            # 傳送完畢後刪除暫存檔
-            os.remove(mp3_path) 
-        else:
-            await ctx.send(f"⚠️ 語音生成失敗: {out_str}")
-    except Exception as e:
-        await ctx.send(f"❌ 發生異常: {e}")
+# ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
