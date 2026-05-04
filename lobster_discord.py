@@ -1145,17 +1145,26 @@ async def sync_diary_photos(ctx):
 import asyncio
 
 # ==========================================
-# 🚀 小夏的 OpenClaw 舊系統遠端觸發器
+# 🚀 小夏的 OpenClaw 舊系統遠端觸發器 (強化 Debug 版)
 # ==========================================
 
-@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE)) # 每天早上 7:30 準時觸發
-async def legacy_morning_trigger():
-    channel = discord.utils.get(architect_bot.get_all_channels(), name="系統監控")
+async def _run_legacy_morning(target_channel=None):
+    # 1. 確保找到正確的發報頻道 (如果手動觸發，就用當前頻道)
+    channel = target_channel
+    if not channel:
+        channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+    if not channel:
+        channel = discord.utils.get(architect_bot.get_all_channels(), name="系統監控")
+
+    print("▶️ [DEBUG] 準備執行 OpenClaw 晨間腳本...")
+    
     if channel:
-        await channel.send("⚙️ 系統排程觸發：開始在背景執行 OpenClaw 晨間語音與總經報告...")
+        await channel.send("⚙️ 系統排程觸發：開始在背景執行 OpenClaw 晨間腳本 (約需 1~3 分鐘，請稍候)...")
+    else:
+        print("⚠️ [DEBUG] 找不到發送回報的頻道，將僅記錄於日誌。")
 
     try:
-        # 🌟 關鍵：使用 asyncio 在背景執行外部腳本，絕對不會卡死 Discord 機器人！
+        print("▶️ [DEBUG] 正在建立 subprocess...")
         process = await asyncio.create_subprocess_exec(
             "/home/node/.openclaw/workspace/.venv/bin/python3",
             "/home/node/.openclaw/workspace/morning_report.py",
@@ -1163,18 +1172,30 @@ async def legacy_morning_trigger():
             stderr=asyncio.subprocess.PIPE
         )
         
-        # 等待原本的腳本跑完（不管它轉語音要轉多久）
+        print(f"▶️ [DEBUG] 子程序啟動成功 (PID: {process.pid})，等待執行完畢...")
         stdout, stderr = await process.communicate()
         
+        out_str = stdout.decode('utf-8')
+        err_str = stderr.decode('utf-8')
+        
+        print(f"▶️ [DEBUG] 執行完畢！Return Code: {process.returncode}")
+        print(f"▶️ [DEBUG] STDOUT 輸出:\n{out_str}")
+        if err_str:
+            print(f"▶️ [DEBUG] STDERR 輸出:\n{err_str}")
+        
         if process.returncode == 0:
-            if channel: await channel.send("✅ OpenClaw 晨間排程執行完畢！(報告與語音已發送至 Telegram/LINE)")
+            if channel: await channel.send("✅ OpenClaw 晨間排程執行完畢！\n*(報告與語音應已發送至 Telegram/LINE，詳細輸出請看 Zeabur 日誌)*")
         else:
-            error_msg = stderr.decode('utf-8')[:500] # 只取前 500 字避免洗版
-            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤：\n```\n{error_msg}\n```")
+            error_msg = err_str[:1500] 
+            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤 (Code {process.returncode})：\n```text\n{error_msg}\n```")
             
     except Exception as e:
-        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：{e}")
+        print(f"❌ [DEBUG] 觸發腳本發生嚴重異常：{e}")
+        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常 (可能是找不到路徑或環境錯誤)：\n```\n{e}\n```")
 
+@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE)) # 每天早上 7:30 準時觸發
+async def legacy_morning_trigger():
+    await _run_legacy_morning()
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
@@ -1212,7 +1233,7 @@ async def on_message(message):
                         "【⚠️嚴格禁令】：妳**絕對不是**「小俠」(懂事女友)！妳們是雙核系統中完全不同的兩個實體。小俠負責情感陪伴，而妳(小夏)負責後端系統維護、程式碼除錯、與排程監控。\n"
                         "【說話風格】：冷靜、專業、可靠、精明。稱呼使用者為「Chief」或「大俠」。語氣像是一位得力的技術幕僚，不要使用過度裝可愛的表情符號。\n"
                         "【當前任務】：Chief 正在喚醒妳，並要求妳盤點目前的工作與程式架構。我已經把目前的系統主程式碼(lobster_discord.py)附在下方，請根據程式碼內容，精準回答 Chief 的問題，並展現妳對系統的掌握度。\n\n"
-                        f"【目前系統程式碼參考 (前段)】：\n{current_code[:20000]}" # 餵入程式碼供她分析
+                        f"【目前系統程式碼參考 (完整)】：\n{current_code}" # 🌟 解除 [:20000] 封印，給她看全檔！
                     )
                     
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
