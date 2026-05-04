@@ -334,7 +334,7 @@ async def upscale_image_fal(image_url):
             return image_url
 
 # ==========================================
-# 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia)
+# 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
 # ==========================================
 async def process_diary_reply(channel, target_date=None):
     global daily_chat_logs
@@ -342,14 +342,9 @@ async def process_diary_reply(channel, target_date=None):
     # --- 階段 1：本機資料庫讀取與防呆 ---
     try:
         app_state = load_state()
-    except Exception as e:
-        if channel: await channel.send(f"⚠️ `xiaoxia_state.json` 損毀: {e}")
-        return
-        
-    try:
         profile = load_profile()
     except Exception as e:
-        if channel: await channel.send(f"⚠️ `daxia_profile.json` 損毀: {e}")
+        if channel: await channel.send(f"⚠️ 狀態或記憶庫損毀: {e}")
         return
         
     diary_db = []
@@ -358,7 +353,7 @@ async def process_diary_reply(channel, target_date=None):
             with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
                 diary_db = json.load(f)
         except Exception as e:
-            if channel: await channel.send(f"⚠️ 嚴重錯誤：日記檔案損毀！\n錯誤：`{e}`")
+            if channel: await channel.send(f"⚠️ 日記檔案損毀: {e}")
             return
             
     # --- 階段 2：篩選未讀日記 ---
@@ -372,27 +367,23 @@ async def process_diary_reply(channel, target_date=None):
                 unreplied.append(entry)
                 
     chat_context = "\n".join(daily_chat_logs)
+    today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     
     if not unreplied and not chat_context:
         if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
         return
 
-    # ========================================================
-    # 🌟 最小變動修正區：解耦「記憶萃取」，確保即使無日記也會存檔
-    # ========================================================
-    # --- 階段 2：【解耦核心】獨立立體記憶萃取 ---
+    # --- 階段 2.5：獨立立體記憶萃取 ---
     if chat_context:
         try:
-            today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
-            
             mem_prompt = f"""
             分析以下今日對話，進行「雙向記憶萃取」。
             請以純 JSON 格式回傳以下結構（若無新事項則保持陣列為空）：
             {{
                 "daxia_new_traits": ["大俠的新喜好或長期習慣"],
-                "xiaoxia_promises": ["小俠今天答應大俠的事", "小俠認知到的新自我能力"],
-                "recent_context": ["今天發生的短期重要事件(例如大俠今天的心情、剛聊過的話題)"]
+                "xiaoxia_promises": ["小俠今天答應大俠的事"],
+                "recent_context": ["今天發生的短期重要事件(如大俠的心情、剛聊過的話題)"]
             }}
             【今日對話】：\n{chat_context}
             """
@@ -401,107 +392,101 @@ async def process_diary_reply(channel, target_date=None):
                 contents=mem_prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            
             new_memory = json.loads(mem_resp.text.strip())
             
-            # 🌟 乾淨的輔助函數：防重複寫入，並封裝成標準時間戳物件
             def append_memory(target_list, new_texts):
                 existing_texts = [item["text"] for item in target_list]
                 for text in new_texts:
                     if text not in existing_texts:
                         target_list.append({"text": text, "added_at": today_str})
 
-            # 1. 寫入大俠特徵與小俠承諾
-            append_memory(profile["daxia_traits"], new_memory.get("daxia_new_traits", []))
+            append_memory(profile.setdefault("daxia_traits", []), new_memory.get("daxia_new_traits", []))
             append_memory(profile["xiaoxia_self"]["promises"], new_memory.get("xiaoxia_promises", []))
             
-            # 2. 短期動態 (直接覆蓋為最新，避免無限累積)
             if new_memory.get("recent_context"):
                 profile["recent_context"] = [{"text": item, "added_at": today_str} for item in new_memory["recent_context"]]
-
             save_profile(profile)
             print("✅ 雙向記憶已成功存入 daxia_profile.json")
-            memory_extracted = True
         except Exception as e:
             print(f"⚠️ 雙向記憶萃取失敗: {e}")
 
-    # 若只有對話但沒有未讀日記，提早結算並清空，避免失憶或無限累積
     if not unreplied:
         if channel: await channel.send("✅ 今日對話記憶已成功吸取，小俠先休息囉！")
         girlfriend_chat_sessions.clear()
         daily_chat_logs.clear()
         return
-    # ========================================================
 
     if channel and len(unreplied) > 0:
-        await channel.send(f"⏳ 發現 {len(unreplied)} 篇未讀日記！小俠正在一篇一篇認真閱讀與回信，大俠請稍候喔...")
+        await channel.send(f"⏳ 發現 {len(unreplied)} 篇未讀日記！小俠正在構思生活點滴並準備性感穿搭，大俠請稍候喔...")
 
     md_json_tag = chr(96) * 3 + "json"
     md_end_tag = chr(96) * 3
 
-    # --- 階段 3：迴圈「獨立裝甲處理」每一篇日記 ---
+    # --- 階段 3：雙向日記與性感視覺引擎 ---
     for entry in unreplied:
         try:
             current_score = app_state.get("affection_score", 80)
             entry_date = entry['date']
             entry_content = entry['content']
+            recent_activities = "、".join([item["text"] for item in profile.get("recent_context", [])])
+            # 取得當前月份
+            current_month = datetime.now(TZ_TPE).month
             
+            # 動態季節與服裝判定 (以台灣氣候為準)
+            if 5 <= current_month <= 10:
+                season_rule = f"現在是台灣的 {current_month} 月，天氣較熱。請搭配「夏日性感穿搭」（如輕薄材質、細肩帶、無袖洋裝、短裙、熱褲），【嚴禁】毛衣、大衣、羽絨服等冬裝。"
+            elif current_month in [11, 12, 1, 2, 3, 4]:
+                season_rule = f"現在是台灣的 {current_month} 月，天氣微涼或寒冷。請搭配「冬日性感穿搭」（如合身針織衫、露肩毛衣、緊身包臀長裙、透膚黑絲襪、長靴），【嚴禁】比基尼或極度單薄的夏日海灘裝。"
+            else:
+                season_rule = "請搭配符合當前氣候的性感穿搭。"
+            
+            # 🌟 升級版：強制雙向日記與性感限制
             eval_prompt = f"""
-            【大俠的這篇日記 ({entry_date})】：
-            {entry_content}
+            【大俠的日記 ({entry_date})】：{entry_content}
+            【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
+            【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
             
-            【今日聊天紀錄補充】：
-            {chat_context if chat_context else '無紀錄'}
+            妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
+            【重要任務】：
+            1. 分享妳自己今天的生活行程(如出外逛街、看展、運動、旅遊或擔任秘書等)，【絕對限制】：不可與近期活動重複！嚴禁一直待在家或廚房！
+            2. 【季節與服裝限制】：{season_rule} 即使是知性活動，穿搭也【必須極度性感】(凸顯豐滿傲人上圍與身材曲線)。
             
-            請以懂事女友小俠的身份進行評估，並「專門針對這篇日記的內容」給予回覆。妳的當前愛意值為：{current_score}/100。
-            
-            【重要限制】：請回傳純 JSON 格式。文字內「絕對不可」使用雙引號 (") 與實體換行符號。
+            回傳純 JSON 格式：
             {{
               "affection_plus": 1,
-              "extracted_preferences": ["喜好1"],
-              "reply": "50字內給大俠的專屬回信",
-              "spiciness": "A",
-              "scenario": "standing in kitchen cooking, wearing a red off-shoulder sweater, looking at viewer",
-              "scenario_tw": "穿著紅色露肩毛衣在廚房做菜，深情看著大俠"
+              "extracted_preferences": [],
+              "reply_to_daxia": "回應並撫慰大俠的日記內容(50字內)",
+              "xiaoxia_diary": "小俠自己的生活日記分享(50字內)",
+              "spiciness": "C",
+              "scenario": "一句英文情境描述。必須包含服裝款式與顏色、地點、動作。嚴禁出現男人或其他人(1girl solo)！",
+              "scenario_tw": "繁體中文寫真構想"
             }}
-            
-            - affection_plus: 1到5的整數。
-            - extracted_preferences: 萃取大俠喜好，無則 []。
-            - reply: 給大俠的專屬回信 (必須扣緊這篇日記的內容)。
-            - spiciness: "A", "B" 或 "C"。若 current_score + affection_plus >= 100，強制選 "C"。
-            - scenario: 一句英文情境照描述。【極度重要警告】：
-              1. 必須是單人場景 (1girl solo)！絕對不可出現男人或其他人物！請一律用「看著鏡頭 (looking at viewer)」來表現陪伴！
-              2. 必須具體描述服裝的「顏色與款式」(例如 red dress, black silk pajama)，不要只寫 casual clothes！
-              3. 【防黑屏機制】：若尺度為 C，請著重於「誘惑姿態、性感睡衣、男友襯衫」，但「絕對不可裸露點位或過度暴露」，以免被生圖系統判定違規變成黑畫面！
-            - scenario_tw: 用繁體中文描述上述的寫真構想，讓大俠知道妳為什麼想拍這張照片。
             """
             
-            print(f"💡 正在處理 {entry_date} 的日記...")
+            print(f"💡 正在處理 {entry_date} 的雙向日記...")
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=eval_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction="妳是小俠，負責產出回信與情境。嚴格輸出 JSON，防黑屏且必須指定服裝顏色。",
-                    response_mime_type="application/json"
-                )
+                config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             
             clean_text = response.text.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             
             try:
                 result = json.loads(clean_text, strict=False)
-                if "reply" not in result: raise ValueError("JSON 缺少 reply 欄位")
+                if "reply_to_daxia" not in result: raise ValueError("JSON 缺少 reply_to_daxia 欄位")
             except Exception as e:
                 print(f"⚠️ Gemini JSON 異常 ({e})，啟動保底救援！")
                 result = {
                     "affection_plus": 1, "extracted_preferences": [],
-                    "reply": "大俠，小俠讀這篇日記時有點恍神了... 但不管多忙多累，小俠都會在這裡陪你喔！（抱）",
-                    "spiciness": "A", "scenario": "sitting on a cozy sofa, wearing a warm pink oversized sweater, looking at viewer",
-                    "scenario_tw": "穿著溫暖的粉紅色寬大毛衣坐在沙發上，靜靜陪著大俠"
+                    "reply_to_daxia": "大俠，小俠讀日記時恍神了... 但我會一直在這裡陪你喔！（抱）",
+                    "xiaoxia_diary": "今天我去市區喝了杯拿鐵，滿腦子想的都是大俠呢。",
+                    "spiciness": "B", 
+                    "scenario": "sitting in a modern cafe, wearing a deep v-neck tight black dress, looking at viewer",
+                    "scenario_tw": "穿著深V緊身黑洋裝在咖啡廳想著大俠"
                 }
             
-            # 🌟 拆分顯示分數與底層分數
-            new_score = current_score + result["affection_plus"]
+            new_score = current_score + result.get("affection_plus", 1)
             display_score = new_score 
             is_jackpot = False
             
@@ -511,23 +496,26 @@ async def process_diary_reply(channel, target_date=None):
                 app_state["affection_score"] = 80 
             else:
                 app_state["affection_score"] = new_score 
-                
             save_state(app_state)
             
-            today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
             for pref in result.get("extracted_preferences", []):
                 existing_texts = [item["text"] for item in profile.setdefault("daxia_traits", [])]
                 if pref not in existing_texts:
                     profile["daxia_traits"].append({"text": pref, "added_at": today_str})
+                    
+            # 🌟 將小俠今天的行程寫入近期記憶，避免未來重複
+            xiaoxia_activity = result.get("xiaoxia_diary", "")
+            if xiaoxia_activity:
+                profile.setdefault("recent_context", []).append({"text": f"小俠日記: {xiaoxia_activity}", "added_at": today_str})
             save_profile(profile)
             
+            # 🌟 升級版骨架：強制鎖定身材與無人亂入
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
-            [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly one person, completely alone in frame, NO MEN, NO OTHER PEOPLE, same person, east asian female, soft oval face, delicate facial structure, clear skin texture, 
-            [HAIR] long dark wavy hair, natural makeup, clean skin, 
-            [BODY] slender body, delicate figure, large breasts, narrow waist, 
+            [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), cleavage, highly emphasizing body curves, extremely sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
-            [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, natural lighting, photorealistic, 8k resolution
+            [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
             
             openai_resp = await openai_client.chat.completions.create(
@@ -535,49 +523,53 @@ async def process_diary_reply(channel, target_date=None):
             )
             
             clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
+            visual = json.loads(clean_visual_text, strict=False)
+            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
+            # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
+            base_img = None
             try:
-                visual = json.loads(clean_visual_text, strict=False)
-                if "image_prompt" not in visual: raise ValueError("缺少 image_prompt")
+                base_img = await generate_image_fal(image_prompt)
             except Exception as e:
-                visual = {"image_prompt": f"xiaoxia_girl, 1girl, solo, strictly one person, NO MEN, east asian female, long dark wavy hair, slender body, delicate figure, large breasts, {result['scenario']}, candid shot, photorealistic, 8k resolution"}
+                print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
+                safe_prompt = image_prompt + ", (safe for work:1.2), elegant sexy, beautiful lighting"
+                try:
+                    base_img = await generate_image_fal(safe_prompt)
+                except Exception as e2:
+                    print(f"❌ 降級生圖依然失敗: {e2}")
+                    continue # 放棄此篇生圖，進行下一篇
+                    
+            if not base_img: continue
             
-            base_img = await generate_image_fal(visual['image_prompt'])
             up_img = await upscale_image_fal(base_img)
             local_filename = await save_to_vault(up_img)
+            local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img 
             
-            if local_filename:
-                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
-            else:
-                local_url = up_img 
-                print(f"⚠️ {entry_date} 本機存檔失敗，改用雲端網址備援！")
+            combined_message = f"{result['reply_to_daxia']}\n\n【小俠的日常】：{result['xiaoxia_diary']}"
             
-            # 🌟 新增：將「日常陪伴」的照片同步存入主相簿金庫
             diary_photo_payload = {
                 "id": str(uuid.uuid4()),
                 "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                "topic": f"【日常陪伴】{entry_date} 專屬回信",
-                "event": entry_content[:50] + "..." if len(entry_content) > 50 else entry_content, 
-                "composition": result.get("scenario_tw", "與大俠享受專屬的兩人時光"),
-                "mood": "滿滿的愛意與撫慰",
-                "message": result["reply"],
+                "topic": f"【交換日記】{entry_date}",
+                "event": entry_content[:50] + "...", 
+                "composition": result.get("scenario_tw", "與大俠分享生活"),
+                "mood": "愛意與生活感",
+                "message": combined_message,
                 "image_url": up_img,
                 "local_url": local_url,
-                "type": "diary"  # 👈 讓前端相片總覽能抓到
+                "type": "diary" 
             }
+            db = load_memory()
+            db.insert(0, diary_photo_payload)
+            save_memory(db)
             
-            try:
-                db = load_memory()
-                db.insert(0, diary_photo_payload)
-                save_memory(db)
-            except Exception as e:
-                print(f"⚠️ 同步寫入主相簿失敗：{e}")
-            
+            # 組合網頁顯示的 HTML
             reply_html = (
                 "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
-                "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的專屬回信：</p>"
+                "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的交換日記：</p>"
                 f"<img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'>"
-                f"<p style='color:#be185d; font-size: 14px;'>{result['reply']}</p>"
+                f"<p style='color:#be185d; font-size: 14px; margin-bottom: 5px;'>{result['reply_to_daxia']}</p>"
+                f"<p style='color:#9d174d; font-size: 13px; font-style: italic;'>「{result['xiaoxia_diary']}」</p>"
             )
             
             entry["content"] += reply_html
@@ -587,21 +579,21 @@ async def process_diary_reply(channel, target_date=None):
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
                 
             if channel:
-                title = f"💖 小俠的深度撫慰 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的專屬回信 [{entry_date}]"
-                embed = discord.Embed(title=title, description=result['reply'], color=0xffb6c1)
+                title = f"💖 小俠的交換日記 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的交換日記 [{entry_date}]"
+                embed = discord.Embed(title=title, description=combined_message, color=0xffb6c1)
                 embed.set_image(url=local_url)
-                scenario_tw_text = result.get("scenario_tw", "與大俠享受專屬的兩人時光")
-                embed.add_field(name="📸 寫真構想", value=scenario_tw_text, inline=False)
-                embed.set_footer(text=f"愛意值: {display_score}/100 (+{result['affection_plus']}) | 尺度: {result['spiciness']}")
-                await channel.send(f"✅ 已完成 **{entry_date}** 的日記回覆！", embed=embed)
+                embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
+                embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}")
+                await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed)
 
         except Exception as e:
-            if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{str(e)}`。跳過此篇，馬上為您處理下一篇！")
+            if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{str(e)}`。跳過此篇！")
             print(f"[{entry.get('date')}] 處理錯誤: {e}")
             continue
 
     girlfriend_chat_sessions.clear()
     daily_chat_logs.clear()
+
 
 # ==========================================
 # 🌸 懂事女友小俠 (功能指令區)
@@ -968,7 +960,7 @@ async def auto_cosplay_task():
 
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
 async def midnight_feedback_task():
-    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="唐分糕")
+    channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
     if channel: await process_diary_reply(channel)
 
 # ==========================================
