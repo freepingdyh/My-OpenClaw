@@ -132,12 +132,14 @@
         </div>
     </div>
 
-    <div id="lightbox" class="fixed inset-0 bg-black/90 z-[100] hidden flex justify-center items-center cursor-pointer backdrop-blur-sm" onclick="closeLightbox()">
-        <div id="lightbox-container" class="" onclick="event.stopPropagation()">
-            <img id="lightbox-img" class="">
-            <p id="lightbox-caption" class="mt-4 text-gray-700 font-serif text-lg hidden"></p>
-            <p id="lightbox-hint" class="text-xs text-gray-400 mt-4 cursor-pointer text-center hidden" onclick="closeLightbox()">[ 點擊外圍關閉 ]</p>
+    <!-- 🌟 重新設計的燈箱 HTML 結構，確保隨處點擊皆可關閉 -->
+    <div id="lightbox" class="fixed inset-0 bg-black/90 z-[100] hidden flex flex-col justify-center items-center cursor-pointer backdrop-blur-sm" onclick="closeLightbox()">
+        <div id="lightbox-container" class="relative max-w-[95vw] max-h-[90vh] flex flex-col justify-center items-center pointer-events-none">
+            <!-- 加上 pointer-events-auto 讓圖片本身可以點擊但不觸發冒泡異常 -->
+            <img id="lightbox-img" class="max-w-full max-h-[85vh] object-contain shadow-2xl rounded-lg pointer-events-auto" onclick="closeLightbox()">
+            <p id="lightbox-caption" class="mt-4 text-gray-700 font-serif text-lg hidden bg-white/90 px-4 py-2 rounded-md pointer-events-auto"></p>
         </div>
+        <p class="text-white/60 text-sm mt-4 tracking-widest">[ 點擊畫面任意處關閉 ]</p>
     </div>
 
     <script>
@@ -146,7 +148,6 @@
         let currentIndex = 0;
         let datasetPhotos = []; 
 
-        // 🌟 角度陣列：給予拍立得靈魂的動態傾斜度
         const tiltRotations = ['-rotate-1', 'rotate-2', '-rotate-3', 'rotate-1', '-rotate-2', 'rotate-3'];
 
         async function loadDatasetData() {
@@ -156,7 +157,6 @@
                 
                 const container = document.getElementById('dataset-gallery');
                 container.innerHTML = datasetPhotos.map((photo, index) => {
-                    // ✅ 每張縮圖分配一個微傾斜角度，滑鼠移過會回正
                     const rotClass = tiltRotations[index % tiltRotations.length];
                     return `
                     <div class="aspect-square rounded overflow-hidden cursor-pointer shadow-sm border-[3px] border-white transform ${rotClass} hover:rotate-0 hover:scale-110 hover:z-10 transition-all duration-300 relative" onclick="openPolaroidLightbox(${index})">
@@ -169,7 +169,6 @@
             }
         }
 
-        // 1. 金庫解鎖邏輯
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
         function unlockVault() {
             const pass = document.getElementById('vault-pass').value;
@@ -179,13 +178,12 @@
                 document.getElementById('main-body').classList.remove('hidden', 'overflow-hidden');
                 setTimeout(() => lockScreen.style.display = 'none', 500);
                 loadGalleryData(); 
-                loadDiaryData(); // ✅ 加入載入日記資料
+                loadDiaryData(); 
             } else {
                 document.getElementById('lock-error').classList.remove('hidden');
             }
         }
 
-        // 2. 頁籤切換邏輯
         function switchTab(tab) {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('content-' + tab).classList.add('active');
@@ -197,7 +195,6 @@
             });
         }
 
-        // 3. 載入寫真館資料
         async function loadGalleryData() {
             try {
                 const res = await fetch('/api/photos');
@@ -224,11 +221,22 @@
             const keyword = document.getElementById('gallery-search').value.toLowerCase();
             filteredPhotos = allPhotos.filter(p => 
                 p.topic.toLowerCase().includes(keyword) || 
-                p.event.toLowerCase().includes(keyword)
+                p.event.toLowerCase().includes(keyword) ||
+                p.publish_date.includes(keyword)
             );
             currentIndex = 0; 
             renderMainDisplay();
             renderTimelineList();
+        }
+
+        // 🌟 新增：由熱力圖觸發的日期篩選功能
+        function filterGalleryByDate(dateStr) {
+            // 切換回主展演廳
+            switchTab('gallery');
+            // 將日期填入搜尋框
+            document.getElementById('gallery-search').value = dateStr;
+            // 觸發搜尋
+            filterGallery();
         }
 
         function changePhoto(step) {
@@ -240,7 +248,6 @@
             }
         }
 
-        // 4. 渲染中間主展演廳
         function renderMainDisplay() {
             const main = document.getElementById('main-display');
             if(filteredPhotos.length === 0) {
@@ -285,7 +292,6 @@
             `;
         }
 
-        // 5. 渲染右側時光軌跡
         function renderTimelineList() {
             const list = document.getElementById('timeline-list');
             list.innerHTML = filteredPhotos.map((p, index) => {
@@ -307,7 +313,6 @@
             renderTimelineList();
         }
 
-        // 🌟 渲染相片總覽網格 (✅ 完美融合 allPhotos 與 datasetPhotos)
         function renderOverview(filterType = 'all') {
             ['all', 'cosplay', 'diary', 'important'].forEach(t => {
                 const btn = document.getElementById('btn-filter-' + t);
@@ -321,7 +326,6 @@
             const grid = document.getElementById('overview-grid');
             let htmlContent = '';
 
-            // 處理 寫真/日記
             if (filterType === 'all' || filterType === 'cosplay' || filterType === 'diary') {
                 const displayPhotos = allPhotos.filter(p => {
                     const type = p.type || 'cosplay'; 
@@ -348,10 +352,8 @@
                 }).join('');
             }
 
-            // ✅ 處理 心動時刻 (拍立得資料集)
             if (filterType === 'all' || filterType === 'important') {
                 htmlContent += datasetPhotos.map((dp, index) => {
-                    // 自動抓取 (22歲/春) 當作日期標籤，前半段當作標題
                     let title = dp.text;
                     let dateStr = "回憶";
                     let textParts = dp.text.split('(');
@@ -407,31 +409,31 @@
             if(!found) alert(`找不到 ${targetDate} 的日記喔！`);
         }
 
-        // 🌟 燈箱系統 1：一般看圖 (透明背景)
+        // 🌟 重新設計的燈箱控制邏輯
         function openGalleryLightbox(src) {
-            document.getElementById('lightbox-img').src = src;
-            document.getElementById('lightbox-img').className = "max-w-full max-h-full object-contain p-4 shadow-2xl rounded-lg";
-            document.getElementById('lightbox-container').className = "bg-transparent p-0 w-full h-full flex justify-center items-center";
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            img.className = "max-w-full max-h-[85vh] object-contain shadow-2xl rounded-lg pointer-events-auto transition-transform duration-300 hover:scale-[1.02]";
+            
+            document.getElementById('lightbox-container').className = "relative max-w-[95vw] max-h-[90vh] flex flex-col justify-center items-center pointer-events-none";
             document.getElementById('lightbox-caption').classList.add('hidden');
-            document.getElementById('lightbox-hint').classList.add('hidden');
+            
             document.getElementById('lightbox').classList.remove('hidden');
         }
 
-        // 🌟 燈箱系統 2：拍立得模式 (✅ 白色相框與動態傾斜)
         function openPolaroidLightbox(index) {
             const photo = datasetPhotos[index];
-            document.getElementById('lightbox-img').src = photo.url;
-            document.getElementById('lightbox-img').className = "w-full h-auto object-contain rounded border border-gray-200 shadow-sm";
+            const img = document.getElementById('lightbox-img');
+            img.src = photo.url;
+            img.className = "max-w-md w-full h-auto object-contain border border-gray-200 shadow-sm pointer-events-auto bg-white p-4 pb-8 transition-transform duration-300 hover:scale-105";
             
             const container = document.getElementById('lightbox-container');
-            // ✅ 賦予燈箱專屬的隨機傾斜度
             const rotClass = tiltRotations[index % tiltRotations.length];
-            container.className = `bg-white p-5 pb-8 rounded-sm shadow-2xl max-w-sm w-full text-center transform ${rotClass} transition-transform duration-300 cursor-default`;
+            container.className = `relative max-w-[95vw] max-h-[90vh] flex flex-col justify-center items-center pointer-events-none transform ${rotClass}`;
             
             const caption = document.getElementById('lightbox-caption');
             caption.textContent = photo.text;
             caption.classList.remove('hidden');
-            document.getElementById('lightbox-hint').classList.remove('hidden');
             
             document.getElementById('lightbox').classList.remove('hidden');
         }
@@ -440,7 +442,7 @@
             document.getElementById('lightbox').classList.add('hidden');
         }
 
-        // 6. 熱力圖
+        // 🌟 更新的熱力圖渲染：加入 onclick 事件聯動搜尋
         function renderHeatmap() {
             const grid = document.getElementById('heatmap-grid');
             const dateCounts = {};
@@ -459,12 +461,13 @@
                 if (count === 1) colorClass = 'bg-pink-300';
                 else if (count === 2) colorClass = 'bg-pink-400';
                 else if (count >= 3) colorClass = 'bg-pink-600'; 
-                boxes += `<div class="aspect-square rounded-sm ${colorClass} hover:border hover:border-pink-800 cursor-pointer transition shadow-sm" title="${localDateStr} : 小俠換裝了 ${count} 次"></div>`;
+                
+                // 加入 onclick 觸發 filterGalleryByDate
+                boxes += `<div class="aspect-square rounded-sm ${colorClass} hover:border hover:border-pink-800 cursor-pointer transition shadow-sm" title="${localDateStr} : 小俠換裝了 ${count} 次" onclick="filterGalleryByDate('${localDateStr}')"></div>`;
             }
             grid.innerHTML = boxes;
         }
 
-        // ✅ 7. 載入與渲染交換日記資料
         async function loadDiaryData() {
             try {
                 const res = await fetch('/api/diary');
@@ -484,11 +487,9 @@
             }
 
             let htmlContent = '';
-            // 反轉陣列，讓最新日期的日記排在最上面
             const sortedEntries = [...entries].reverse();
 
             sortedEntries.forEach((entry, index) => {
-                // 為了視覺豐富，讓每天的日記左右交錯排列
                 const isRight = index % 2 === 0;
                 const alignmentClass = isRight ? "flex-row right-timeline" : "flex-row-reverse left-timeline";
                 const dotColor = isRight ? "bg-gray-800" : "bg-pink-400";
