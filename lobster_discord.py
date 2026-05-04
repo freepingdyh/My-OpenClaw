@@ -1132,6 +1132,60 @@ async def sync_diary_photos(ctx):
     except Exception as e:
         await msg.edit(content=f"❌ 修復過程異常：{str(e)}")
 
+
+# ==========================================
+# 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
+# ==========================================
+architect_chat_sessions = {}
+
+@architect_bot.event
+async def on_message(message):
+    # 1. 基礎過濾
+    if message.author.bot: return
+
+    # 2. 處理驚嘆號指令 (小夏的 prefix)
+    if message.content.startswith('!'):
+        await architect_bot.process_commands(message)
+        return
+
+    # 3. 觸發對話邏輯 (在名稱包含"系統"、"監控"的頻道，或是直接 tag 小夏)
+    if "系統" in message.channel.name or "監控" in message.channel.name or architect_bot.user.mentioned_in(message):
+        user_id = message.author.id
+        user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
+        
+        async with message.channel.typing():
+            try:
+                # 🌟 讀取系統當前的主程式碼，讓小夏進行「系統盤點」
+                try:
+                    with open(__file__, "r", encoding="utf-8") as f:
+                        current_code = f.read()
+                except Exception as e:
+                    current_code = f"無法讀取程式碼: {e}"
+
+                # 建立小夏的獨立 Session 與身分鎖定
+                if user_id not in architect_chat_sessions:
+                    sys_instruct = (
+                        "【身分強制鎖定】：妳是「小夏」(Xiaoxia)，大俠(Chief)的「專屬系統架構師助理」。\n"
+                        "【⚠️嚴格禁令】：妳**絕對不是**「小俠」(懂事女友)！妳們是雙核系統中完全不同的兩個實體。小俠負責情感陪伴，而妳(小夏)負責後端系統維護、程式碼除錯、與排程監控。\n"
+                        "【說話風格】：冷靜、專業、可靠、精明。稱呼使用者為「Chief」或「大俠」。語氣像是一位得力的技術幕僚，不要使用過度裝可愛的表情符號。\n"
+                        "【當前任務】：Chief 正在喚醒妳，並要求妳盤點目前的工作與程式架構。我已經把目前的系統主程式碼(lobster_discord.py)附在下方，請根據程式碼內容，精準回答 Chief 的問題，並展現妳對系統的掌握度。\n\n"
+                        f"【目前系統程式碼參考 (前段)】：\n{current_code[:20000]}" # 餵入程式碼供她分析
+                    )
+                    
+                    architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
+                        model="gemini-2.5-flash",
+                        config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                    )
+
+                chat_session = architect_chat_sessions[user_id]
+                response = await chat_session.send_message(user_input)
+                
+                await message.reply(response.text)
+
+            except Exception as e:
+                print(f"❌ 小夏大腦異常: {e}")
+                await message.channel.send(f"⚠️ Chief，我的核心模組發生錯誤，無法進行語意解析: {e}")
+
 # ==========================================
 # 🚀 終極啟動器
 # ==========================================
