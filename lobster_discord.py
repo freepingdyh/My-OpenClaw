@@ -1148,8 +1148,8 @@ async def on_message(message):
         await architect_bot.process_commands(message)
         return
 
-    # 3. 觸發對話邏輯 (在名稱包含"系統"、"監控"的頻道，或是直接 tag 小夏)
-    if "系統" in message.channel.name or "監控" in message.channel.name or architect_bot.user.mentioned_in(message):
+    # 3. 觸發對話邏輯 (在名稱包含"系統"、"監控"、"架構師"的頻道，或是直接 tag 小夏)
+    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師"]) or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
