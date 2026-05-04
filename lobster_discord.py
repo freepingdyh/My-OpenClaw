@@ -1087,15 +1087,16 @@ async def _run_legacy_morning(target_channel=None):
         
         if process.returncode == 0:
             if channel and out_str:
-                # 分段發送邏輯保持不變
+                # 這裡不要用 ```text，直接發送才能看到彩色 Emoji
                 lines = out_str.split('\n')
                 chunk = ""
                 for line in lines:
-                    if len(chunk) + len(line) > 1800:
-                        await channel.send(chunk)
+                    if len(chunk) + len(line) > 1900:
+                        await channel.send(chunk) # 🌟 改成直接發送
                         chunk = ""
                     chunk += line + "\n"
-                if chunk: await channel.send(chunk)
+                if chunk:
+                    await channel.send(chunk)
         else:
             # 如果失敗，把詳細報錯噴出來，讓我們知道缺什麼套件
             error_log = err_str[:1500]
