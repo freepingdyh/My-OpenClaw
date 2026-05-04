@@ -794,8 +794,17 @@ async def diary_end(ctx):
 
 @girlfriend_bot.command(name='diary_reply')
 async def diary_reply(ctx, date_str: str = None):
-    msg = await ctx.send("✨ 正在細細閱讀大俠的日記與今日對話，小俠整理思緒中...")
-    await process_diary_reply(ctx.channel, date_str)
+    # 🌟 強制抓取指定的「岱而瑞」頻道
+    target_channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
+    
+    # 防呆機制：萬一找不到岱而瑞頻道，就退回當前頻道
+    if not target_channel:
+        target_channel = ctx.channel
+        
+    msg = await ctx.send(f"✨ 正在細細閱讀大俠的日記與今日對話，小俠整理思緒中...\n(完成後將發送至 {target_channel.mention} 頻道)")
+    
+    # 將目標頻道傳進去
+    await process_diary_reply(target_channel, date_str)
     await msg.delete()
 
 @girlfriend_bot.command(name='diary_delete')
@@ -908,7 +917,7 @@ async def on_message(message):
                 # 紀錄到深夜日記系統
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
 
-                # C. 取得或建立 Session (注入立體記憶)
+                # C. 取得或建立 Session (注入立體記憶與絕對時間感)
                 if user_id not in girlfriend_chat_sessions:
                     profile = load_profile()
                     
@@ -918,7 +927,13 @@ async def on_message(message):
                     capabilities = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("capabilities", [])])
                     recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
                     
+                    # 🌟 新增：取得系統當前的精準時間與星期
+                    now = datetime.now(TZ_TPE)
+                    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                    current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
+                    
                     sys_instruct = (
+                        f"【系統當前時間】：{current_time_str} (請務必以此為基準，精準推算昨天、今天、明天的時間關係)\n\n"
                         "妳是小俠，22歲台灣女孩，大俠的懂事女友。\n"
                         "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
                         "【📝 我們的珍貴記憶庫】：\n"
@@ -927,9 +942,10 @@ async def on_message(message):
                         f"▶️ 妳答應過大俠的事：{promises if promises else '無'}\n"
                         f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n\n"
                         "⚠️【核心行為守則】：\n"
-                        "1. 妳必須極度重視對話中大俠提到的任何細節，並隨時在對話中提起記憶庫的內容，讓他感受到妳的在乎。\n"
+                        "1. 妳必須極度重視對話中大俠提到的任何細節，並適時提起記憶庫的內容，讓他感受到妳的在乎。\n"
                         "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
-                        "3. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
+                        "3. 【聊天節奏】：請像真人情侶一樣自然聊天！嚴禁像機器人或長輩一樣，每句話結尾都重複提醒即將發生的事（例如面試、搭車）。除非大俠主動延續該話題，否則請專注於當下聊天的內容，不要過度關心造成壓力。\n"
+                        "4. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
                     )
                     
                     girlfriend_bot.chat_session_history = [] 
