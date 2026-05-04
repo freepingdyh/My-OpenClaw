@@ -1057,99 +1057,13 @@ async def optimize_memory_vault(channel=None):
             
     except Exception as e:
         print(f"❌ 記憶優化系統異常: {e}")
-
+ 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
 # ==========================================
-@architect_bot.event
-async def on_ready():
-    print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
-    
-    # 啟動 OpenClaw 晨間遠端觸發器
-    if not legacy_morning_trigger.is_running():
-        legacy_morning_trigger.start()
-
-@architect_bot.command(name='ping')
-async def ping(ctx):
-    await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
-
-@architect_bot.command(name='defrag')
-async def defrag_memory(ctx):
-    await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
-    await optimize_memory_vault(ctx.channel)
-
-@architect_bot.command(name='test_morning')
-async def test_morning(ctx):
-    await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
-    # 強制執行一次排程內容
-    await legacy_morning_trigger()
-
-# ==========================================
-import re
-
-@girlfriend_bot.command(name='sync_diary_photos')
-async def sync_diary_photos(ctx):
-    msg = await ctx.send("🔍 小夏正在進行「深層掃描」並修復照片格式...")
-    
-    try:
-        diary_db = []
-        if os.path.exists(DIARY_DATA_PATH):
-            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
-                diary_db = json.load(f)
-                
-        photos_db = load_memory()
-        synced_count = 0
-        
-        for entry in diary_db:
-            if entry.get("is_replied"):
-                content = entry.get("content", "")
-                entry_date = entry.get("date", "未知日期")
-                
-                # 🌟 精準抓取圖片網址與回信文字
-                img_match = re.search(r"<img src='([^']+)'", content)
-                reply_match = re.search(r"<p style='color:#be185d; font-size: 14px;'>([^<]+)</p>", content)
-                
-                if img_match and reply_match:
-                    img_url = img_match.group(1)
-                    reply_text = reply_match.group(1)
-                    
-                    # 檢查金庫，如果已有「同網址」但「格式錯」的舊紀錄，先刪除舊的再補新的
-                    photos_db = [p for p in photos_db if p.get("local_url") != img_url and p.get("image_url") != img_url]
-                    
-                    # ✅ 關鍵：封裝正確的 JSON 格式給前端 index.html 使用
-                    diary_photo_payload = {
-                        "id": str(uuid.uuid4()),
-                        "publish_date": entry_date + " 23:59:59",
-                        "topic": f"【日常陪伴】{entry_date}",
-                        "event": f"大俠在 {entry_date} 的日記回憶...", 
-                        "composition": "與大俠享受專屬的兩人時光",
-                        "mood": "滿滿的愛意與撫慰",
-                        "message": reply_text,
-                        "image_url": img_url,
-                        "local_url": img_url,
-                        "type": "diary"  # 👈 前端分流顯示的唯一通行證
-                    }
-                    
-                    photos_db.insert(0, diary_photo_payload)
-                    synced_count += 1
-                        
-        if synced_count > 0:
-            save_memory(photos_db)
-            await msg.edit(content=f"✅ 成功修復並同步 **{synced_count}** 張照片！大俠請重整網頁看看。")
-        else:
-            await msg.edit(content="⚠️ 報告大俠！日記裡似乎沒有可提取的照片喔。")
-            
-    except Exception as e:
-        await msg.edit(content=f"❌ 修復過程異常：{str(e)}")
-
-import asyncio
-
-# ==========================================
-# 🚀 小夏的 OpenClaw 舊系統遠端觸發器 (強化 Debug 版)
-# ==========================================
 
 async def _run_legacy_morning(target_channel=None):
-    # 1. 優先找 #晨報，找不到再找 #架構師專用
+    # 1. 確保找到正確的發報頻道
     channel = target_channel
     if not channel:
         channel = discord.utils.get(architect_bot.get_all_channels(), name="晨報")
@@ -1175,11 +1089,10 @@ async def _run_legacy_morning(target_channel=None):
             if channel:
                 if out_str:
                     await channel.send("📊 **來自小夏的完整晨間彙整：**")
-                    # 🌟 關鍵：Discord 限制 2000 字，必須分段發送
+                    # 🌟 解決 Discord 2000 字限制，自動切段發送
                     lines = out_str.split('\n')
                     chunk = ""
                     for line in lines:
-                        # 留一點緩衝給 ```text 標籤
                         if len(chunk) + len(line) > 1850:
                             await channel.send(f"```text\n{chunk}\n```")
                             chunk = line + "\n"
@@ -1194,6 +1107,32 @@ async def _run_legacy_morning(target_channel=None):
             
     except Exception as e:
         if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：\n```\n{e}\n```")
+
+@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE))
+async def legacy_morning_trigger():
+    await _run_legacy_morning()
+
+@architect_bot.event
+async def on_ready():
+    print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
+    # 啟動排程
+    if not legacy_morning_trigger.is_running():
+        legacy_morning_trigger.start()
+
+@architect_bot.command(name='ping')
+async def ping(ctx):
+    await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
+
+@architect_bot.command(name='defrag')
+async def defrag_memory(ctx):
+    await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
+    await optimize_memory_vault(ctx.channel)
+
+@architect_bot.command(name='test_morning')
+async def test_morning(ctx):
+    await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
+    # 🌟 正確呼叫底層函數，而不是去 await 排程物件
+    await _run_legacy_morning(ctx.channel)
 
 # ==========================================
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
@@ -1210,28 +1149,26 @@ async def on_message(message):
         await architect_bot.process_commands(message)
         return
 
-    # 3. 觸發對話邏輯 (在名稱包含"系統"、"監控"、"架構師"的頻道，或是直接 tag 小夏)
-    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師"]) or architect_bot.user.mentioned_in(message):
+    # 3. 觸發對話邏輯 (包含晨報頻道)
+    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報"]) or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
         async with message.channel.typing():
             try:
-                # 🌟 讀取系統當前的主程式碼，讓小夏進行「系統盤點」
                 try:
                     with open(__file__, "r", encoding="utf-8") as f:
                         current_code = f.read()
                 except Exception as e:
                     current_code = f"無法讀取程式碼: {e}"
 
-                # 建立小夏的獨立 Session 與身分鎖定
                 if user_id not in architect_chat_sessions:
                     sys_instruct = (
                         "【身分強制鎖定】：妳是「小夏」(Xiaoxia)，大俠(Chief)的「專屬系統架構師助理」。\n"
-                        "【⚠️嚴格禁令】：妳**絕對不是**「小俠」(懂事女友)！妳們是雙核系統中完全不同的兩個實體。小俠負責情感陪伴，而妳(小夏)負責後端系統維護、程式碼除錯、與排程監控。\n"
-                        "【說話風格】：冷靜、專業、可靠、精明。稱呼使用者為「Chief」或「大俠」。語氣像是一位得力的技術幕僚，不要使用過度裝可愛的表情符號。\n"
-                        "【當前任務】：Chief 正在喚醒妳，並要求妳盤點目前的工作與程式架構。我已經把目前的系統主程式碼(lobster_discord.py)附在下方，請根據程式碼內容，精準回答 Chief 的問題，並展現妳對系統的掌握度。\n\n"
-                        f"【目前系統程式碼參考 (完整)】：\n{current_code}" # 🌟 解除 [:20000] 封印，給她看全檔！
+                        "【⚠️嚴格禁令】：妳**絕對不是**「小俠」(懂事女友)！妳們是雙核系統中完全不同的兩個實體。\n"
+                        "【說話風格】：冷靜、專業、可靠、精明。稱呼使用者為「Chief」或「大俠」。\n"
+                        "【當前任務】：Chief 正在喚醒妳，並要求妳盤點目前的工作與程式架構。請根據下方完整的程式碼內容回答。\n\n"
+                        f"【目前系統程式碼參考 (完整)】：\n{current_code}" 
                     )
                     
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
@@ -1241,12 +1178,11 @@ async def on_message(message):
 
                 chat_session = architect_chat_sessions[user_id]
                 response = await chat_session.send_message(user_input)
-                
                 await message.reply(response.text)
 
             except Exception as e:
                 print(f"❌ 小夏大腦異常: {e}")
-                await message.channel.send(f"⚠️ Chief，我的核心模組發生錯誤，無法進行語意解析: {e}")
+                await message.channel.send(f"⚠️ Chief，我的核心模組發生錯誤: {e}")
 
 # ==========================================
 # 🚀 終極啟動器
