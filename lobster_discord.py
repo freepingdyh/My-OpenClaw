@@ -1064,6 +1064,10 @@ async def optimize_memory_vault(channel=None):
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
+    
+    # 啟動 OpenClaw 晨間遠端觸發器
+    if not legacy_morning_trigger.is_running():
+        legacy_morning_trigger.start()
 
 @architect_bot.command(name='ping')
 async def ping(ctx):
@@ -1074,7 +1078,13 @@ async def defrag_memory(ctx):
     await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
     await optimize_memory_vault(ctx.channel)
 
+@architect_bot.command(name='test_morning')
+async def test_morning(ctx):
+    await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
+    # 強制執行一次排程內容
+    await legacy_morning_trigger()
 
+# ==========================================
 import re
 
 @girlfriend_bot.command(name='sync_diary_photos')
@@ -1131,6 +1141,39 @@ async def sync_diary_photos(ctx):
             
     except Exception as e:
         await msg.edit(content=f"❌ 修復過程異常：{str(e)}")
+
+import asyncio
+
+# ==========================================
+# 🚀 小夏的 OpenClaw 舊系統遠端觸發器
+# ==========================================
+
+@tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE)) # 每天早上 7:30 準時觸發
+async def legacy_morning_trigger():
+    channel = discord.utils.get(architect_bot.get_all_channels(), name="系統監控")
+    if channel:
+        await channel.send("⚙️ 系統排程觸發：開始在背景執行 OpenClaw 晨間語音與總經報告...")
+
+    try:
+        # 🌟 關鍵：使用 asyncio 在背景執行外部腳本，絕對不會卡死 Discord 機器人！
+        process = await asyncio.create_subprocess_exec(
+            "/home/node/.openclaw/workspace/.venv/bin/python3",
+            "/home/node/.openclaw/workspace/morning_report.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # 等待原本的腳本跑完（不管它轉語音要轉多久）
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            if channel: await channel.send("✅ OpenClaw 晨間排程執行完畢！(報告與語音已發送至 Telegram/LINE)")
+        else:
+            error_msg = stderr.decode('utf-8')[:500] # 只取前 500 字避免洗版
+            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤：\n```\n{error_msg}\n```")
+            
+    except Exception as e:
+        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：{e}")
 
 
 # ==========================================
