@@ -1149,22 +1149,17 @@ import asyncio
 # ==========================================
 
 async def _run_legacy_morning(target_channel=None):
-    # 1. 確保找到正確的發報頻道 (如果手動觸發，就用當前頻道)
+    # 1. 優先找 #晨報，找不到再找 #架構師專用
     channel = target_channel
     if not channel:
-        channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+        channel = discord.utils.get(architect_bot.get_all_channels(), name="晨報")
     if not channel:
-        channel = discord.utils.get(architect_bot.get_all_channels(), name="系統監控")
+        channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
 
-    print("▶️ [DEBUG] 準備執行 OpenClaw 晨間腳本...")
-    
     if channel:
-        await channel.send("⚙️ 系統排程觸發：開始在背景執行 OpenClaw 晨間腳本 (約需 1~3 分鐘，請稍候)...")
-    else:
-        print("⚠️ [DEBUG] 找不到發送回報的頻道，將僅記錄於日誌。")
+        await channel.send("⚙️ 開始在背景執行 OpenClaw 晨間腳本 (請稍候)...")
 
     try:
-        print("▶️ [DEBUG] 正在建立 subprocess...")
         process = await asyncio.create_subprocess_exec(
             "/home/node/.openclaw/workspace/.venv/bin/python3",
             "/home/node/.openclaw/workspace/morning_report.py",
@@ -1172,26 +1167,24 @@ async def _run_legacy_morning(target_channel=None):
             stderr=asyncio.subprocess.PIPE
         )
         
-        print(f"▶️ [DEBUG] 子程序啟動成功 (PID: {process.pid})，等待執行完畢...")
         stdout, stderr = await process.communicate()
-        
-        out_str = stdout.decode('utf-8')
-        err_str = stderr.decode('utf-8')
-        
-        print(f"▶️ [DEBUG] 執行完畢！Return Code: {process.returncode}")
-        print(f"▶️ [DEBUG] STDOUT 輸出:\n{out_str}")
-        if err_str:
-            print(f"▶️ [DEBUG] STDERR 輸出:\n{err_str}")
+        out_str = stdout.decode('utf-8').strip()
+        err_str = stderr.decode('utf-8').strip()
         
         if process.returncode == 0:
-            if channel: await channel.send("✅ OpenClaw 晨間排程執行完畢！\n*(報告與語音應已發送至 Telegram/LINE，詳細輸出請看 Zeabur 日誌)*")
+            if channel:
+                if out_str:
+                    # 🌟 關鍵：將舊腳本的輸出，直接發送到 Discord 頻道！
+                    # 避免超過 2000 字元限制
+                    report_text = out_str[:1900] + "\n...(截斷)" if len(out_str) > 1900 else out_str
+                    await channel.send(f"📊 **來自小夏的彙整：**\n\n{report_text}")
+                else:
+                    await channel.send("✅ 晨報排程執行完畢！(但腳本沒有產生任何文字輸出)")
         else:
-            error_msg = err_str[:1500] 
-            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤 (Code {process.returncode})：\n```text\n{error_msg}\n```")
+            if channel: await channel.send(f"⚠️ Chief，腳本發生錯誤 (Code {process.returncode})：\n```text\n{err_str[:1500]}\n```")
             
     except Exception as e:
-        print(f"❌ [DEBUG] 觸發腳本發生嚴重異常：{e}")
-        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常 (可能是找不到路徑或環境錯誤)：\n```\n{e}\n```")
+        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：\n```\n{e}\n```")
 
 @tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE)) # 每天早上 7:30 準時觸發
 async def legacy_morning_trigger():
