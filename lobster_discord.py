@@ -1063,22 +1063,22 @@ async def optimize_memory_vault(channel=None):
 # ==========================================
 
 async def _run_legacy_morning(target_channel=None):
-    # 1. 確保找到正確的發報頻道
-    channel = target_channel
-    if not channel:
-        channel = discord.utils.get(architect_bot.get_all_channels(), name="晨報")
+    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="晨報")
     if not channel:
         channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
 
     if channel:
-        await channel.send("⚙️ 系統排程觸發：開始在背景讀取 OpenClaw 總經、ETF與天氣資料 (約需 1~3 分鐘，請稍候)...")
+        await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據...")
 
     try:
+        # 🌟 核心修正：強制指定 cwd (工作目錄) 為 workspace，並傳入當前所有 os.environ
         process = await asyncio.create_subprocess_exec(
             "/home/node/.openclaw/workspace/.venv/bin/python3",
             "/home/node/.openclaw/workspace/morning_report.py",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/home/node/.openclaw/workspace", # 確保快照檔路徑正確
+            env=os.environ.copy() # 確保帶入所有 API Keys
         )
         
         stdout, stderr = await process.communicate()
@@ -1086,27 +1086,23 @@ async def _run_legacy_morning(target_channel=None):
         err_str = stderr.decode('utf-8').strip()
         
         if process.returncode == 0:
-            if channel:
-                if out_str:
-                    await channel.send("📊 **來自小夏的完整晨間彙整：**")
-                    # 🌟 解決 Discord 2000 字限制，自動切段發送
-                    lines = out_str.split('\n')
-                    chunk = ""
-                    for line in lines:
-                        if len(chunk) + len(line) > 1850:
-                            await channel.send(f"```text\n{chunk}\n```")
-                            chunk = line + "\n"
-                        else:
-                            chunk += line + "\n"
-                    if chunk:
-                        await channel.send(f"```text\n{chunk}\n```")
-                else:
-                    await channel.send("✅ 晨報排程執行完畢！(但腳本沒有產生任何文字輸出)")
+            if channel and out_str:
+                # 分段發送邏輯保持不變
+                lines = out_str.split('\n')
+                chunk = ""
+                for line in lines:
+                    if len(chunk) + len(line) > 1800:
+                        await channel.send(chunk)
+                        chunk = ""
+                    chunk += line + "\n"
+                if chunk: await channel.send(chunk)
         else:
-            if channel: await channel.send(f"⚠️ Chief，執行舊腳本發生錯誤 (Code {process.returncode})：\n```text\n{err_str[:1500]}\n```")
+            # 如果失敗，把詳細報錯噴出來，讓我們知道缺什麼套件
+            error_log = err_str[:1500]
+            if channel: await channel.send(f"⚠️ 核心回報錯誤 (Code {process.returncode})：\n```python\n{error_log}\n```")
             
     except Exception as e:
-        if channel: await channel.send(f"❌ 觸發腳本發生嚴重異常：\n```\n{e}\n```")
+        if channel: await channel.send(f"❌ 嚴重異常：{e}")
 
 @tasks.loop(time=time(hour=7, minute=30, tzinfo=TZ_TPE))
 async def legacy_morning_trigger():
