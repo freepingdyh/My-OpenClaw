@@ -8,6 +8,7 @@ import uuid
 import asyncio
 import aiohttp
 import aiofiles
+import sys
 import random
 from datetime import datetime, time, timezone, timedelta
 
@@ -1073,7 +1074,7 @@ async def _run_legacy_morning(target_channel=None):
     try:
         # 🌟 核心修正：強制指定 cwd (工作目錄) 為 workspace，並傳入當前所有 os.environ
         process = await asyncio.create_subprocess_exec(
-            "/home/node/.openclaw/workspace/.venv/bin/python3",
+            sys.executable,  # 🌟 關鍵：直接使用小夏目前的 Python 環境
             "/home/node/.openclaw/workspace/morning_report.py",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
