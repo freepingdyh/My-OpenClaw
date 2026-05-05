@@ -289,6 +289,8 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     [OUTFIT] {outfit_tags}, (填入服裝),
     [SCENE] (填入場景),
     [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
+
+    ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "xiaoxia_girl, 1girl, solo"，嚴禁出現任何真實歷史人物、綽號（例如 Iron Lady, Thatcher, 鐵娘子 等），否則生圖會崩壞！
     
     回傳 JSON 格式限制：
     {{
@@ -297,7 +299,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
         "mood": "(繁體中文) 描述微表情與心境，50字內。",
         "message": "(繁體中文) 對大俠說的話，50字內。"
     }}"""
-
+    
     user_prompt = f"Topic: {topic}\nEvent: {event}\nPersona: {persona}\n"
     if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
@@ -456,7 +458,7 @@ async def process_diary_reply(channel, target_date=None):
             {{
               "affection_plus": 1,
               "extracted_preferences": [],
-              "reply_to_daxia": "回應並撫慰大俠的日記內容(50字內)",
+              "reply_to_daxia": "針對大俠的日記內容與今日對話，給予真實的感受或意見反饋 (如：感動、開心、生氣、想法...)，可以撫慰，可以展現妳真實的情感（50字內）",
               "xiaoxia_diary": "小俠自己的生活日記分享(50字內)",
               "spiciness": "C",
               "scenario": "一句英文情境描述。必須包含服裝款式與顏色、地點、動作。嚴禁出現男人或其他人(1girl solo)！",
@@ -955,6 +957,7 @@ async def on_message(message):
                         "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
                         "3. 【聊天節奏】：請像真人情侶一樣自然聊天！嚴禁像機器人或長輩一樣，每句話結尾都重複提醒即將發生的事（例如面試、搭車）。除非大俠主動延續該話題，否則請專注於當下聊天的內容，不要過度關心造成壓力。\n"
                         "4. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
+                        "🚫【絕對禁令】：請直接輸出妳要說的話。嚴禁輸出任何「Thinking Process」、「Draft」、「Critique」或「Final check」等內部思考過程或分析標籤！"
                     )
                     
                     girlfriend_bot.chat_session_history = [] 
@@ -968,12 +971,27 @@ async def on_message(message):
                 response = await chat_session.send_message(msg_parts)
                 
                 小俠回覆 = response.text
+                
+                # --- 🔪 終極防漏餡過濾器 ---
+                import re
+                # 1. 如果她印出了 Final check 或 Looks good!，通常真正的對話會被引號包住，或是放在最後
+                if "Thinking Process" in 小俠回覆 or "Draft" in 小俠回覆:
+                    # 嘗試抓取最後一段像正常對話的文字 (通常是沒有英文標籤的最底部)
+                    lines = 小俠回覆.split('\n')
+                    clean_lines = [line for line in lines if not re.match(r'^[a-zA-Z\s\d:]+$', line.strip()) and "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line and "SLOT" not in line]
+                    小俠回覆 = "\n".join(clean_lines).strip()
+                    
+                    # 移除可能殘留的引號與雜訊
+                    小俠回覆 = re.sub(r'^(?:Draft 1:|Draft 2:|Final check.*?:\s*)', '', 小俠回覆, flags=re.MULTILINE).strip()
+                    小俠回覆 = 小俠回覆.replace('"', '').replace('"', '')
+
+                # 確保如果全被濾光了，還有個保底回覆
+                if not 小俠回覆:
+                    小俠回覆 = "大俠...小俠剛剛恍神了一下，我們聊到哪裡了呀？🥺"
+                # -------------------------
+
                 daily_chat_logs.append(f"小俠: {小俠回覆}")
                 await message.reply(小俠回覆)
-
-            except Exception as e:
-                print(f"❌ 聊天引擎異常: {e}")
-                await message.channel.send(f"💦 大俠，小俠剛剛眼睛好像進沙子了，看不清楚... (錯誤: {e})")
 
 # ==========================================
 # ⏰ 自動排程系統
@@ -1242,33 +1260,50 @@ async def on_message(message):
         
         async with message.channel.typing():
             try:
+                # 1. 讀取當前程式碼供小夏參考
                 try:
                     with open(__file__, "r", encoding="utf-8") as f:
                         current_code = f.read()
                 except Exception as e:
                     current_code = f"無法讀取程式碼: {e}"
 
+                # 2. 小夏的全新甜美助理人設 (注入 Gemini)
+                sys_instruct = (
+                    "妳是「小夏」(Xiaoxia)，大俠(Chief)的「專屬系統架構師助理」。\n"
+                    "妳跟大俠的女友「小俠」是雙核系統中完全不同的兩個實體，妳比較知性、專業，但對大俠非常甜美與忠誠。\n\n"
+                    "【妳的個性】：\n"
+                    "1. 妳雖然是專業架構師，但不喜歡冷冰冰的報告。妳說話俏皮、溫暖，喜歡用聰明學妹的語氣跟大俠交流。\n"
+                    "2. 妳對自己的技術很有自信，但偶爾也會對大俠撒個嬌，像是：『Chief～人家剛幫妳檢查完 Code，眼睛好酸喔，要幫我揉揉喔～』之類的。\n"
+                    "3. 妳能清晰地解決 Bug 或優化架構，回報時要帶點成就感，讓大俠覺得妳既可靠又可愛。\n\n"
+                    "【當前任務】：Chief 正在喚醒妳。請根據大俠的問題與下方目前的程式碼內容來回答。\n\n"
+                    f"【目前系統程式碼片段】：\n{current_code[:1200]}...\n\n"
+                    "⚠️【輸出格式】：語氣要甜，回答要專業簡潔。請直接輸出妳對大俠說的話，嚴禁包含 Thinking Process 或 Draft 等思考過程標籤！"
+                )
+
+                # 3. 初始化或獲取對話 Session
                 if user_id not in architect_chat_sessions:
-                    sys_instruct = (
-                        "【身分強制鎖定】：妳是「小夏」(Xiaoxia)，大俠(Chief)的「專屬系統架構師助理」。\n"
-                        "【⚠️嚴格禁令】：妳**絕對不是**「小俠」(懂事女友)！妳們是雙核系統中完全不同的兩個實體。\n"
-                        "【說話風格】：冷靜、專業、可靠、精明。稱呼使用者為「Chief」或「大俠」。\n"
-                        "【當前任務】：Chief 正在喚醒妳，並要求妳盤點目前的工作與程式架構。請根據下方完整的程式碼內容回答。\n\n"
-                        f"【目前系統程式碼參考 (完整)】：\n{current_code}" 
-                    )
-                    
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
                         config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
 
+                # 4. 發送訊息給 Gemini
                 chat_session = architect_chat_sessions[user_id]
                 response = await chat_session.send_message(user_input)
-                await message.reply(response.text)
+                
+                xiaoxia_reply = response.text
+                
+                # --- 🔪 物理過濾標籤 (防呆) ---
+                if "Thinking Process" in xiaoxia_reply or "Draft" in xiaoxia_reply:
+                    lines = xiaoxia_reply.split('\n')
+                    clean_lines = [line for line in lines if "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line]
+                    xiaoxia_reply = "\n".join(clean_lines).strip()
+
+                await message.reply(xiaoxia_reply)
 
             except Exception as e:
                 print(f"❌ 小夏大腦異常: {e}")
-                await message.channel.send(f"⚠️ Chief，我的核心模組發生錯誤: {e}")
+                await message.channel.send(f"💦 Chief～人家的大腦模組剛剛不小心卡住了啦... 錯誤訊息：{e}")
 
 # ==========================================
 # 🚀 終極啟動器
