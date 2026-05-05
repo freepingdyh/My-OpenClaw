@@ -974,24 +974,24 @@ async def on_message(message):
                 
                 # --- 🔪 終極防漏餡過濾器 ---
                 import re
-                # 1. 如果她印出了 Final check 或 Looks good!，通常真正的對話會被引號包住，或是放在最後
                 if "Thinking Process" in 小俠回覆 or "Draft" in 小俠回覆:
-                    # 嘗試抓取最後一段像正常對話的文字 (通常是沒有英文標籤的最底部)
                     lines = 小俠回覆.split('\n')
                     clean_lines = [line for line in lines if not re.match(r'^[a-zA-Z\s\d:]+$', line.strip()) and "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line and "SLOT" not in line]
                     小俠回覆 = "\n".join(clean_lines).strip()
                     
-                    # 移除可能殘留的引號與雜訊
                     小俠回覆 = re.sub(r'^(?:Draft 1:|Draft 2:|Final check.*?:\s*)', '', 小俠回覆, flags=re.MULTILINE).strip()
                     小俠回覆 = 小俠回覆.replace('"', '').replace('"', '')
 
-                # 確保如果全被濾光了，還有個保底回覆
                 if not 小俠回覆:
                     小俠回覆 = "大俠...小俠剛剛恍神了一下，我們聊到哪裡了呀？🥺"
                 # -------------------------
 
                 daily_chat_logs.append(f"小俠: {小俠回覆}")
                 await message.reply(小俠回覆)
+
+            except Exception as e:
+                print(f"❌ 聊天引擎異常: {e}")
+                await message.channel.send(f"💦 大俠，小俠剛剛眼睛好像進沙子了，看不清楚... (錯誤: {e})")
 
 # ==========================================
 # ⏰ 自動排程系統
