@@ -1339,30 +1339,38 @@ async def fomo_radio_trigger():
 # 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
 # ==========================================
 architect_chat_sessions = {}
-
 @architect_bot.event
 async def on_message(message):
-    # 1. 基礎過濾
+    # 1. 基礎過濾：機器人不回機器人
     if message.author.bot: return
 
-    # 2. 處理驚嘆號指令 (小夏的 prefix)
+    # 2. 優先處理指令 (! 開頭的訊息)
+    # 不管在哪個頻道，只要是驚嘆號開頭，優先給指令處理器跑
     if message.content.startswith('!'):
         await architect_bot.process_commands(message)
-        return
+        return # 執行完指令後直接結束，不要跑進下面的對話邏輯
 
-    # 3. 觸發對話邏輯 (包含晨報頻道)
-    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報","fomo"]) or architect_bot.user.mentioned_in(message):
+    # 3. 觸發普通對話邏輯 (包含 fomo, 晨報, 系統等頻道)
+    # 或是當小夏被 @ 提及時
+    is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo"])
+    if is_work_channel or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
+        # 如果大俠只是隨便聊聊（沒打指令），再進入 Gemini 對話
         async with message.channel.typing():
             try:
-                # 1. 讀取當前程式碼供小夏參考
-                try:
-                    with open(__file__, "r", encoding="utf-8") as f:
-                        current_code = f.read()
-                except Exception as e:
-                    current_code = f"無法讀取程式碼: {e}"
+                # (這裡保留你原本的 current_code 讀取與 sys_instruct 邏輯...)
+                # ... 省略中間的對話 Session 處理代碼 ...
+                
+                # 取得回應後
+                xiaoxia_reply = response.text
+                # (過濾 Thinking Process 標籤...)
+                await message.reply(xiaoxia_reply)
+
+            except Exception as e:
+                print(f"❌ 小夏大腦異常: {e}")
+                await message.channel.send(f"💦 Chief～人家的大腦模組卡住了... {e}")
 
                 # 2. 小夏的全新甜美助理人設 (注入 Gemini)
                 sys_instruct = (
