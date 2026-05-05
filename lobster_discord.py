@@ -1351,7 +1351,7 @@ async def on_message(message):
         return
 
     # 3. 觸發對話邏輯 (包含晨報頻道)
-    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報",, "fomo"]) or architect_bot.user.mentioned_in(message):
+    if any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報","fomo"]) or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
