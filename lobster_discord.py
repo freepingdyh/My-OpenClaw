@@ -1313,11 +1313,11 @@ async def _run_fomo_radio(target_channel=None):
 # 註冊小夏專屬指令
 @architect_bot.command(name='radio')
 async def trigger_radio(ctx, *, topic: str = None):
-        cmd_args = []
-        if topic:
-            cmd_args = ["--topic", topic]
-        # 呼叫下方的執行函式
-        await _run_fomo_radio(ctx.channel, cmd_args)
+    cmd_args = [] # 修正縮排，改為 4 個空格
+    if topic:
+        cmd_args = ["--topic", topic]
+    # 呼叫下方的執行函式
+    await _run_fomo_radio(ctx.channel, cmd_args)
 
 # ==========================================
 # ⏰ 自動排程：每天中午 11:30 推播 FOMO 廣播
