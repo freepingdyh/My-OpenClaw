@@ -1270,8 +1270,11 @@ class FomoRadioView(discord.ui.View):
         else:
             await interaction.response.send_message(script_msg, ephemeral=True)
 
-# 🚀 更新後的執行函式
-async def _run_fomo_radio(target_channel=None):
+# 🚀 更新後的執行函式 (支援接收大俠點菜參數)
+async def _run_fomo_radio(target_channel=None, additional_args=None):
+    if additional_args is None:
+        additional_args = []
+        
     channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
     if channel:
         await channel.send("📻 **龍蝦廣播電台：** 偵測到最新流行梗！小俠正在茶水間與嘉賓錄音中...")
@@ -1281,6 +1284,7 @@ async def _run_fomo_radio(target_channel=None):
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "/home/node/.openclaw/workspace/fomo_broadcast.py",
+            *additional_args,  # 👈 關鍵！把參數解包傳給腳本
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd="/home/node/.openclaw/workspace"
