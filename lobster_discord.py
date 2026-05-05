@@ -1245,64 +1245,70 @@ async def test_morning(ctx):
 # ==========================================
 # 📻 擴充功能：茶水間搞怪廣播電台整合
 # ==========================================
-async def _run_fomo_radio(target_channel=None):
-    # 預設發送到觸發的頻道，或是架構師專用頻道
-    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+# 🌟 建立茶水間專屬播放器 (帶有劇本閱讀功能)
+class FomoRadioView(discord.ui.View):
+    def __init__(self, mp3_path, full_script):
+        super().__init__(timeout=86400)
+        self.mp3_path = mp3_path
+        self.full_script = full_script
 
+    @discord.ui.button(label="▶️ 播放廣播音檔", style=discord.ButtonStyle.primary, emoji="📻")
+    async def play_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if os.path.exists(self.mp3_path):
+            await interaction.response.send_message("🎧 **正在為大俠準備耳機... 廣播來囉！**", ephemeral=True)
+            await interaction.followup.send(file=discord.File(self.mp3_path, filename="Fomo_Radio.mp3"))
+        else:
+            await interaction.response.send_message("❌ 找不到音檔，可能已經被系統回收了。", ephemeral=True)
+
+    @discord.ui.button(label="📝 閱讀完整劇本", style=discord.ButtonStyle.secondary, emoji="📜")
+    async def read_script(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 劇本太長的話分段發送
+        script_msg = f"📜 **本日廣播劇本全文：**\n\n{self.full_script}"
+        if len(script_msg) > 2000:
+            await interaction.response.send_message(script_msg[:1900] + "...", ephemeral=True)
+            await interaction.followup.send("...(續)\n" + script_msg[1900:], ephemeral=True)
+        else:
+            await interaction.response.send_message(script_msg, ephemeral=True)
+
+# 🚀 更新後的執行函式
+async def _run_fomo_radio(target_channel=None):
+    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
     if channel:
-        await channel.send("📻 收到指令！正在啟動【茶水間廣播電台 2.0】，爬取最新時事迷因與生成語音中 (約需 1~2 分鐘，請耐心等候)...")
+        await channel.send("📻 **龍蝦廣播電台：** 偵測到最新流行梗！小俠正在茶水間與嘉賓錄音中...")
 
     try:
         import sys
-        # 呼叫獨立腳本
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "/home/node/.openclaw/workspace/fomo_broadcast.py",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/home/node/.openclaw/workspace",
-            env=os.environ.copy()
+            cwd="/home/node/.openclaw/workspace"
         )
         
-        stdout, stderr = await process.communicate()
+        stdout, _ = await process.communicate()
         out_str = stdout.decode('utf-8').strip()
         
-        # 尋找 JSON_READY 標籤
         json_data = None
         for line in out_str.split('\n'):
             if line.startswith("JSON_READY|"):
-                try: json_data = json.loads(line.split("JSON_READY|")[1])
-                except: pass
+                json_data = json.loads(line.split("JSON_READY|")[1])
                 break
 
-        if process.returncode == 0 and json_data:
-            topic = json_data.get("topic", "未知話題")
-            guests = json_data.get("guests", "")
-            grade = json_data.get("grade", "")
-            mp3_path = json_data.get("mp3_path", "")
-            script = json_data.get("script", "")
-            
-            if channel:
-                # 建立精美的嵌入訊息
-                embed = discord.Embed(
-                    title=f"🎙️ 茶水間廣播：{topic}", 
-                    description=f"**🔥 迷因評級：{grade}**\n**🎲 通告咖：{guests} (+ 小俠)**\n\n📝 **廣播劇本摘要：**\n{script[:350]}...\n*(完整講稿請見語音內容)*",
-                    color=0x1abc9c  # 活潑的藍綠色
-                )
-                
-                # 將實體 MP3 檔案夾帶傳送上 Discord
-                if os.path.exists(mp3_path):
-                    await channel.send(embed=embed, file=discord.File(mp3_path, filename="FOMO_Broadcast.mp3"))
-                else:
-                    await channel.send("⚠️ 廣播生成成功，但找不到 MP3 檔案！", embed=embed)
+        if json_data:
+            view = FomoRadioView(mp3_path=json_data['mp3_path'], full_script=json_data['script'])
+            embed = discord.Embed(
+                title=f"🎙️ 茶水間廣播：{json_data['topic']}", 
+                description=f"**🔥 迷因評級：{json_data['grade']}**\n**🎲 通告咖：{json_data['guests']}**\n\n*(點擊下方按鈕收聽語音或查看劇本)*",
+                color=0x1abc9c
+            )
+            embed.set_footer(text="🦞 龍蝦電台 2.0 | 每日中午 11:30 準時發車")
+            await channel.send(embed=embed, view=view)
         else:
-            # 防呆：可能因為今天沒有達標的迷因 (skip)，或是發生錯誤
-            fallback_log = out_str[-1000:] if out_str else stderr.decode('utf-8').strip()[:1000]
-            if channel: 
-                await channel.send(f"📭 今日可能沒有足夠熱度的迷因題材停播，或發生系統錯誤。Log 截斷如下：\n```\n{fallback_log}\n```")
+            if channel: await channel.send("📭 今日話題不夠辛辣，電台暫停營業一次。")
                 
     except Exception as e:
-        if channel: await channel.send(f"❌ 廣播電台嚴重異常：{e}")
+        if channel: await channel.send(f"❌ 電台發射塔故障：{e}")
 
 # 註冊小夏專屬指令
 @architect_bot.command(name='radio')
