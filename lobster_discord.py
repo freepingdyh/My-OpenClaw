@@ -1270,33 +1270,36 @@ class FomoRadioView(discord.ui.View):
         else:
             await interaction.response.send_message(script_msg, ephemeral=True)
 
-# 🚀 更新後的執行函式 (支援接收大俠點菜參數)
+# 🚀 更新後的執行函式 (具備完整除錯與參數傳遞能力)
 async def _run_fomo_radio(target_channel=None, additional_args=None):
     if additional_args is None:
         additional_args = []
         
     channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
     if channel:
-        await channel.send("📻 **龍蝦廣播電台：** 偵測到最新流行梗！小俠正在茶水間與嘉賓錄音中...")
+        await channel.send("📻 **龍蝦廣播電台：** 接收到訊號！小俠正在準備錄音 (請等候約 1~2 分鐘)...")
 
     try:
         import sys
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "/home/node/.openclaw/workspace/fomo_broadcast.py",
-            *additional_args,  # 👈 關鍵！把參數解包傳給腳本
+            *additional_args,  # 👈 確實將大俠的點菜參數傳給腳本
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd="/home/node/.openclaw/workspace"
         )
         
-        stdout, _ = await process.communicate()
+        # 同時擷取成功與失敗的輸出
+        stdout, stderr = await process.communicate()
         out_str = stdout.decode('utf-8').strip()
+        err_str = stderr.decode('utf-8').strip()
         
         json_data = None
         for line in out_str.split('\n'):
             if line.startswith("JSON_READY|"):
-                json_data = json.loads(line.split("JSON_READY|")[1])
+                try: json_data = json.loads(line.split("JSON_READY|")[1])
+                except: pass
                 break
 
         if json_data:
@@ -1309,15 +1312,18 @@ async def _run_fomo_radio(target_channel=None, additional_args=None):
             embed.set_footer(text="🦞 龍蝦電台 2.0 | 每日中午 11:30 準時發車")
             await channel.send(embed=embed, view=view)
         else:
-            if channel: await channel.send("📭 今日話題不夠辛辣，電台暫停營業一次。")
+            # 🌟 把這塊遮羞布掀開！如果失敗，直接印出真實 Log，抓出真兇！
+            fallback_log = err_str[-1500:] if err_str else out_str[-1500:]
+            if not fallback_log: fallback_log = "腳本完全沒有任何輸出..."
+            if channel: await channel.send(f"⚠️ **電台遭遇亂流停播！** 抓蟲 Log 如下：\n```text\n{fallback_log}\n```")
                 
     except Exception as e:
-        if channel: await channel.send(f"❌ 電台發射塔故障：{e}")
+        if channel: await channel.send(f"❌ 嚴重故障：{e}")
 
 # 註冊小夏專屬指令
 @architect_bot.command(name='radio')
 async def trigger_radio(ctx, *, topic: str = None):
-    cmd_args = [] # 修正縮排，改為 4 個空格
+    cmd_args = [] 
     if topic:
         cmd_args = ["--topic", topic]
     # 呼叫下方的執行函式
