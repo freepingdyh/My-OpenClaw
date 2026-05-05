@@ -1219,8 +1219,14 @@ async def legacy_morning_trigger():
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
+    
     if not legacy_morning_trigger.is_running():
         legacy_morning_trigger.start()
+        
+    # 👇 新增這兩行，確保廣播排程順利發車
+    if not fomo_radio_trigger.is_running():
+        fomo_radio_trigger.start()
+        print("⏰ 中午 11:30 FOMO 廣播排程已啟動！")
 
 @architect_bot.command(name='ping')
 async def ping(ctx):
@@ -1235,6 +1241,87 @@ async def defrag_memory(ctx):
 async def test_morning(ctx):
     await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
     await _run_legacy_morning(ctx.channel)
+
+# ==========================================
+# 📻 擴充功能：茶水間搞怪廣播電台整合
+# ==========================================
+async def _run_fomo_radio(target_channel=None):
+    # 預設發送到觸發的頻道，或是架構師專用頻道
+    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+
+    if channel:
+        await channel.send("📻 收到指令！正在啟動【茶水間廣播電台 2.0】，爬取最新時事迷因與生成語音中 (約需 1~2 分鐘，請耐心等候)...")
+
+    try:
+        import sys
+        # 呼叫獨立腳本
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "/home/node/.openclaw/workspace/fomo_broadcast.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/home/node/.openclaw/workspace",
+            env=os.environ.copy()
+        )
+        
+        stdout, stderr = await process.communicate()
+        out_str = stdout.decode('utf-8').strip()
+        
+        # 尋找 JSON_READY 標籤
+        json_data = None
+        for line in out_str.split('\n'):
+            if line.startswith("JSON_READY|"):
+                try: json_data = json.loads(line.split("JSON_READY|")[1])
+                except: pass
+                break
+
+        if process.returncode == 0 and json_data:
+            topic = json_data.get("topic", "未知話題")
+            guests = json_data.get("guests", "")
+            grade = json_data.get("grade", "")
+            mp3_path = json_data.get("mp3_path", "")
+            script = json_data.get("script", "")
+            
+            if channel:
+                # 建立精美的嵌入訊息
+                embed = discord.Embed(
+                    title=f"🎙️ 茶水間廣播：{topic}", 
+                    description=f"**🔥 迷因評級：{grade}**\n**🎲 通告咖：{guests} (+ 小俠)**\n\n📝 **廣播劇本摘要：**\n{script[:350]}...\n*(完整講稿請見語音內容)*",
+                    color=0x1abc9c  # 活潑的藍綠色
+                )
+                
+                # 將實體 MP3 檔案夾帶傳送上 Discord
+                if os.path.exists(mp3_path):
+                    await channel.send(embed=embed, file=discord.File(mp3_path, filename="FOMO_Broadcast.mp3"))
+                else:
+                    await channel.send("⚠️ 廣播生成成功，但找不到 MP3 檔案！", embed=embed)
+        else:
+            # 防呆：可能因為今天沒有達標的迷因 (skip)，或是發生錯誤
+            fallback_log = out_str[-1000:] if out_str else stderr.decode('utf-8').strip()[:1000]
+            if channel: 
+                await channel.send(f"📭 今日可能沒有足夠熱度的迷因題材停播，或發生系統錯誤。Log 截斷如下：\n```\n{fallback_log}\n```")
+                
+    except Exception as e:
+        if channel: await channel.send(f"❌ 廣播電台嚴重異常：{e}")
+
+# 註冊小夏專屬指令
+@architect_bot.command(name='radio')
+async def trigger_radio(ctx):
+    await _run_fomo_radio(ctx.channel)
+
+# ==========================================
+# ⏰ 自動排程：每天中午 11:30 推播 FOMO 廣播
+# ==========================================
+@tasks.loop(time=time(hour=11, minute=30, tzinfo=TZ_TPE))
+async def fomo_radio_trigger():
+    # 尋找名為 "fomo廣播電台" 的專屬頻道 (Discord API 抓名稱不含 #)
+    channel = discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
+    
+    if channel:
+        await _run_fomo_radio(channel)
+    else:
+        print("⚠️ FOMO 排程觸發異常：找不到名為 'fomo廣播電台' 的頻道！請確認頻道名稱。")
+
 
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
