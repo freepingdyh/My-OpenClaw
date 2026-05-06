@@ -57,11 +57,13 @@ DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
 DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
 STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 新增：狀態與愛意值
 PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
+TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 
 # --- 運行時變數 ---
 diary_buffers = {}            
 girlfriend_chat_sessions = {} 
-daily_chat_logs = []          # 🌟 新增：今日聊天紀錄(供午夜結算)
+# ✅ 改為從硬碟喚醒記憶
+daily_chat_logs = load_temp_chat()
 pending_inputs = set()        
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
@@ -74,6 +76,19 @@ state = {
     "retry_count": 0,
     "current_topic_data": None
 }
+
+def load_temp_chat():
+    if os.path.exists(TEMP_CHAT_PATH):
+        try:
+            with open(TEMP_CHAT_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_temp_chat(logs):
+    with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
 
 def load_memory():
     if not os.path.exists(DATA_PATH): return []
@@ -417,6 +432,7 @@ async def process_diary_reply(channel, target_date=None):
         if channel: await channel.send("✅ 今日對話記憶已成功吸取，小俠先休息囉！")
         girlfriend_chat_sessions.clear()
         daily_chat_logs.clear()
+        save_temp_chat(daily_chat_logs) # 🌟 結算完清空硬碟
         return
 
     if channel and len(unreplied) > 0:
@@ -596,6 +612,7 @@ async def process_diary_reply(channel, target_date=None):
 
     girlfriend_chat_sessions.clear()
     daily_chat_logs.clear()
+    save_temp_chat(daily_chat_logs) # 🌟 結算完清空硬碟
 
 
 # ==========================================
@@ -927,7 +944,8 @@ async def on_message(message):
                 
                 # 紀錄到深夜日記系統 (這裡只記錄純淨的對話，不把隱藏標籤存進去)
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
-            
+                save_temp_chat(daily_chat_logs) # 🌟 補上這行存檔
+
                 # C. 取得或建立 Session (注入立體記憶與絕對時間感)
                 if user_id not in girlfriend_chat_sessions:
                     profile = load_profile()
@@ -987,6 +1005,7 @@ async def on_message(message):
                 # -------------------------
 
                 daily_chat_logs.append(f"小俠: {小俠回覆}")
+                save_temp_chat(daily_chat_logs) # 🌟 補上這行存檔
                 await message.reply(小俠回覆)
 
             except Exception as e:
@@ -1351,38 +1370,25 @@ async def fomo_radio_trigger():
 architect_chat_sessions = {}
 @architect_bot.event
 async def on_message(message):
-    # 1. 基礎過濾：機器人不回機器人
     if message.author.bot: return
 
-    # 2. 優先處理指令 (! 開頭的訊息)
-    # 不管在哪個頻道，只要是驚嘆號開頭，優先給指令處理器跑
     if message.content.startswith('!'):
         await architect_bot.process_commands(message)
-        return # 執行完指令後直接結束，不要跑進下面的對話邏輯
+        return 
 
-    # 3. 觸發普通對話邏輯 (包含 fomo, 晨報, 系統等頻道)
-    # 或是當小夏被 @ 提及時
     is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo"])
     if is_work_channel or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
-        # 如果大俠只是隨便聊聊（沒打指令），再進入 Gemini 對話
         async with message.channel.typing():
             try:
-                # (這裡保留你原本的 current_code 讀取與 sys_instruct 邏輯...)
-                # ... 省略中間的對話 Session 處理代碼 ...
-                
-                # 取得回應後
-                xiaoxia_reply = response.text
-                # (過濾 Thinking Process 標籤...)
-                await message.reply(xiaoxia_reply)
+                try:
+                    with open(__file__, "r", encoding="utf-8") as f:
+                        current_code = f.read()
+                except Exception as e:
+                    current_code = f"無法讀取程式碼: {e}"
 
-            except Exception as e:
-                print(f"❌ 小夏大腦異常: {e}")
-                await message.channel.send(f"💦 Chief～人家的大腦模組卡住了... {e}")
-
-                # 2. 小夏的全新甜美助理人設 (注入 Gemini)
                 sys_instruct = (
                     "妳是「小夏」(Xiaoxia)，大俠的「專屬系統架構師助理」。\n"
                     "妳跟大俠的女友「小俠」是雙核系統中完全不同的兩個實體，妳比較知性、專業，但對大俠非常甜美與忠誠。\n\n"
@@ -1395,20 +1401,16 @@ async def on_message(message):
                     "⚠️【輸出格式】：語氣要甜，回答要專業簡潔。請直接輸出妳對大俠說的話，嚴禁包含 Thinking Process 或 Draft 等思考過程標籤！"
                 )
 
-                # 3. 初始化或獲取對話 Session
                 if user_id not in architect_chat_sessions:
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
                         config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
 
-                # 4. 發送訊息給 Gemini
                 chat_session = architect_chat_sessions[user_id]
                 response = await chat_session.send_message(user_input)
-                
                 xiaoxia_reply = response.text
                 
-                # --- 🔪 物理過濾標籤 (防呆) ---
                 if "Thinking Process" in xiaoxia_reply or "Draft" in xiaoxia_reply:
                     lines = xiaoxia_reply.split('\n')
                     clean_lines = [line for line in lines if "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line]
