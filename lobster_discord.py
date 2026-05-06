@@ -1291,18 +1291,21 @@ async def list_backup_files(ctx):
 
 @architect_bot.command(name='backup')
 async def trigger_manual_backup(ctx):
-    """手動觸發備份到 GitHub"""
-    await ctx.send("⚙️ 收到！正在將最新修正的防彈版腳本同步至 GitHub 金庫 (freepingdyh/lobster-scripts)...")
-    
+    await ctx.send("⚙️ 收到！正在同步腳本至 GitHub (freepingdyh/lobster-scripts)...")
     try:
-        # 直接呼叫我們剛才寫好的備份腳本
-        # 使用 check_output 確保能抓到執行結果
+        # 🌟 關鍵改動：加入 -u 參數 (Unbuffered) 強制即時輸出日誌
         script_path = "/home/node/.openclaw/workspace/backup_scripts.py"
-        result = subprocess.check_output(["python3", script_path], stderr=subprocess.STDOUT).decode('utf-8')
+        result = subprocess.check_output(
+            ["python3", "-u", script_path], 
+            stderr=subprocess.STDOUT,
+            cwd="/home/node/.openclaw/workspace"
+        ).decode('utf-8')
         
-        await ctx.send(f"✅ **同步成功！** 小夏已經幫大俠把心血都存好囉！\n輸出日誌：\n```\n{result[:1500]}\n```")
+        # 如果輸出還是太短，給個保底文字
+        log_content = result if result.strip() else "✅ 備份程序執行完畢（無新變動或輸出）"
+        await ctx.send(f"✅ **同步成功！**\n輸出日誌：\n```\n{log_content[:1500]}\n```")
     except Exception as e:
-        await ctx.send(f"❌ 報告大俠，同步時發生亂流... 請檢查 GitHub Token 權限！\n錯誤訊息：`{str(e)}`")
+        await ctx.send(f"❌ 備份失敗：`{str(e)}`")
 
 @architect_bot.command(name='defrag')
 async def defrag_memory(ctx):
