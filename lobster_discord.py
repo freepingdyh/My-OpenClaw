@@ -31,6 +31,26 @@ import aiohttp
 from google.genai import types # 確保有載入 types
 
 # ==========================================
+# 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
+# ==========================================
+import subprocess
+import sys
+
+def auto_heal_environment():
+    required_packages = ["pydub"]
+    for pkg in required_packages:
+        try:
+            __import__(pkg)
+        except ImportError:
+            print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+            print(f"✅ {pkg} 強制安裝完成！")
+
+# 程式啟動時立刻執行檢查
+auto_heal_environment()
+# ==========================================
+
+# ==========================================
 # 🔑 環境變數與初始化
 # ==========================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
