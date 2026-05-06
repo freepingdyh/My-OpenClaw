@@ -1303,10 +1303,11 @@ async def _run_fomo_radio(target_channel=None, additional_args=None):
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "/home/node/.openclaw/workspace/fomo_broadcast.py",
-            *additional_args,  # 👈 確實將大俠的點菜參數傳給腳本
+            *additional_args,  
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/home/node/.openclaw/workspace"
+            cwd="/home/node/.openclaw/workspace",
+            env=os.environ.copy()  # 🌟 就是這行！把主程式的虛擬環境路徑傳給腳本！
         )
         
         # 同時擷取成功與失敗的輸出
