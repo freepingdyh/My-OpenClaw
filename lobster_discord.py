@@ -1271,6 +1271,39 @@ async def on_ready():
 async def ping(ctx):
     await ctx.send("🟢 系統運作正常，小俠的金庫與雙核 API 皆已在線，隨時聽候大俠差遣。")
 
+# ==========================================
+# 👩‍💻 系統架構師小夏 (維護與監控指令區) - 升級備份功能
+# ==========================================
+
+@architect_bot.command(name='list')
+async def list_backup_files(ctx):
+    """回報目前守護的備份清單"""
+    config_path = "/home/node/.openclaw/workspace/backup_config.json"
+    if not os.path.exists(config_path):
+        await ctx.send("💦 大俠～人家還沒拿到 `backup_config.json` 裝備清單耶，沒辦法幫妳盤點喔！")
+        return
+        
+    with open(config_path, "r", encoding="utf-8") as f:
+        files = json.load(f).get("files", [])
+    
+    file_list = "\n".join([f"🔹 {f}" for f in files])
+    await ctx.send(f"報告 Chief！小夏目前守護著這 {len(files)} 個核心腳本喔：\n```\n{file_list}\n```\n大俠要不要檢查一下有沒有漏掉的？")
+
+@architect_bot.command(name='backup')
+async def trigger_manual_backup(ctx):
+    """手動觸發備份到 GitHub"""
+    await ctx.send("⚙️ 收到！正在將最新修正的防彈版腳本同步至 GitHub 金庫 (freepingdyh/lobster-scripts)...")
+    
+    try:
+        # 直接呼叫我們剛才寫好的備份腳本
+        # 使用 check_output 確保能抓到執行結果
+        script_path = "/home/node/.openclaw/workspace/backup_scripts.py"
+        result = subprocess.check_output(["python3", script_path], stderr=subprocess.STDOUT).decode('utf-8')
+        
+        await ctx.send(f"✅ **同步成功！** 小夏已經幫大俠把心血都存好囉！\n輸出日誌：\n```\n{result[:1500]}\n```")
+    except Exception as e:
+        await ctx.send(f"❌ 報告大俠，同步時發生亂流... 請檢查 GitHub Token 權限！\n錯誤訊息：`{str(e)}`")
+
 @architect_bot.command(name='defrag')
 async def defrag_memory(ctx):
     await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
