@@ -59,6 +59,19 @@ STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 �
 PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 
+def load_temp_chat():
+    if os.path.exists(TEMP_CHAT_PATH):
+        try:
+            with open(TEMP_CHAT_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_temp_chat(logs):
+    with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
+
 # --- 運行時變數 ---
 diary_buffers = {}            
 girlfriend_chat_sessions = {} 
@@ -76,19 +89,6 @@ state = {
     "retry_count": 0,
     "current_topic_data": None
 }
-
-def load_temp_chat():
-    if os.path.exists(TEMP_CHAT_PATH):
-        try:
-            with open(TEMP_CHAT_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_temp_chat(logs):
-    with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
-        json.dump(logs, f, ensure_ascii=False, indent=2)
 
 def load_memory():
     if not os.path.exists(DATA_PATH): return []
