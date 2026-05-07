@@ -1444,8 +1444,9 @@ async def on_message(message):
         
         async with message.channel.typing():
             try:
-                # 🏆 方案：物理隔離 - 工作頻道用 GPT，小朋友頻道用 Gemini
-                
+                # 🌟 0. 終極防呆：先給變數一個預設值，這輩子都不會再出現 referenced before assignment！
+                xiaoxia_reply = "💦 學長～小夏的大腦剛剛斷線了，請再跟我說一次！"
+
                 # --- 🍼 A. 小朋友/說故事頻道 (使用 Gemini-2.5-flash) ---
                 if is_kids_channel:
                     sys_instruct = (
@@ -1455,7 +1456,6 @@ async def on_message(message):
                         "⚠️ 限制：回覆請控制在 300 字以內。"
                     )
                     
-                    # 建立或重置 Gemini Session
                     if user_id not in architect_chat_sessions:
                         architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                             model="gemini-2.5-flash",
@@ -1463,27 +1463,33 @@ async def on_message(message):
                         )
                     
                     response = await architect_chat_sessions[user_id].send_message(user_input)
-                    xiaoxia_reply = response.text
+                    if response and response.text:
+                        xiaoxia_reply = response.text
 
-                # --- 💻 B. 工作/架構師頻道 (使用 GPT-5-mini) ---
+                # --- 💻 B. 工作/架構師頻道 (使用 OpenAI 最新的 Responses API) ---
+                else:  # 🌟 請確保這裡是 else，這樣不管在大俠哪裡點名她，都有這個大腦接住！
                     sys_instruct = (
                         "妳現在是專業且甜美的助理『小夏』，妳心裡一直偷偷崇拜著博學多聞的大俠學長。\n"
                         "【語氣設定】：稱呼對方為『大俠學長』。語氣要像聰明伶俐的小學妹，帶著崇拜與親切感，回話常帶有『~』或✨、❤等符號。\n"
-                        "【專業職職】：負責幫學長處理 Bug、規劃行程、整理資訊。雖然妳語氣甜美，但給出的技術結論必須精準無誤，不能讓學長丟臉。\n"
-                        "【對話範例】：大俠學長~ 這段 Google Maps 導航連結我幫您組好囉！✨ 這樣學長出門就不會迷路了，小夏是不是很棒呀~？❤\n"
-                        "⚠️ 限制：回覆內容精簡在 300 字內。除了學長問技術問題，不要講廢話或講故事。"
+                        "【專業職責】：負責幫學長處理 Bug、規劃行程、整理資訊。雖然妳語氣甜美，但給出的技術結論必須精準無誤。\n"
+                        "⚠️ 限制：回覆內容精簡在 300 字內。"
                     )
                     
-                    gpt_response = await openai_client.chat.completions.create(
-                        model="gpt-5-mini",
-                        messages=[
-                            {"role": "system", "content": sys_instruct},
-                            {"role": "user", "content": user_input}
-                        ],
-                        max_completion_tokens=600
-                        # 🌟 已經把 temperature=0.8 刪除，讓它使用官方預設值！
-                    )
-                    xiaoxia_reply = gpt_response.choices[0].message.content
+                    try:
+                        # 🌟 完全遵照官方文件：改用 responses.create，並把 system 改成 developer！
+                        gpt_response = await openai_client.responses.create(
+                            model="gpt-5-mini", 
+                            input=[
+                                {"role": "developer", "content": sys_instruct},
+                                {"role": "user", "content": user_input}
+                            ]
+                        )
+                        # 官方文件指示：結果現在存放在 output_text 裡
+                        xiaoxia_reply = gpt_response.output_text
+                        
+                    except Exception as api_e:
+                        print(f"OpenAI API 錯誤: {api_e}")
+                        xiaoxia_reply = f"大俠學長... OpenAI 剛剛又改規矩欺負我啦 😭 (錯誤碼: {api_e})"
 
                 # 🌟 3. 終極長度防禦
                 if len(xiaoxia_reply) > 1900:
@@ -1492,7 +1498,7 @@ async def on_message(message):
                 await message.reply(xiaoxia_reply)
 
             except Exception as e:
-                await message.channel.send(f"💦 大俠～人家的大腦好像又卡住了... 錯誤：{e}")
+                await message.channel.send(f"💦 大俠～系統嚴重異常... 錯誤：{e}")
 
 # ==========================================
 # 🚀 終極啟動器
