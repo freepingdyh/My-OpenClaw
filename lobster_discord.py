@@ -308,15 +308,19 @@ async def generate_story(mode):
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
     weekday = datetime.now(TZ_TPE).weekday()
     
-    # 🌟 破解版：用「高級暗示詞」取代「直白露骨詞」，騙過 Gemini，但 FLUX 依然懂！
+    # 🌟 核心身材鎖定：不管平假日，小俠的招牌傲人上圍絕對不准縮水！(加入 1.3 倍權重)
+    core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.3), (prominent cleavage:1.2)"
+
     if weekday == 5:
-        body_tags = "slender body, delicate figure, narrow waist, long legs, voluptuous curves" # 加入 voluptuous curves (豐腴曲線)
+        # 週末：布料最少，極度火辣
+        body_tags = f"{core_body_tags}, voluptuous curves"
         pose_tags = "confident posture, soft smile, looking at viewer"
-        outfit_tags = "glamorous and bold cosplay outfit, ultra form-fitting, plunging neckline, high slit, highly detailed" # 換成 plunging neckline (深V領口), ultra form-fitting (極度貼身)
+        outfit_tags = "glamorous and bold cosplay outfit, ultra form-fitting, (plunging deep v-neck:1.3), high slit, highly revealing, highly detailed"
     else:
-        body_tags = "slender body, narrow waist, long legs, curvy figure"
+        # 平日：高級性感，服裝可以端莊，但「身材曲線」必須撐爆衣服！
+        body_tags = f"{core_body_tags}"
         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
-        outfit_tags = "elegant yet alluring outfit, ultra form-fitting, bodycon, sophisticated silhouette" # 換成 alluring (誘人的), bodycon (緊身包臀)
+        outfit_tags = "elegant yet alluring outfit, ultra form-fitting, (tight bodycon:1.2), emphasizing body curves, sophisticated silhouette"
 
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
     [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
