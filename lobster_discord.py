@@ -552,7 +552,7 @@ async def process_diary_reply(channel, target_date=None):
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.4), tight fit, highly emphasizing body curves, elegant sexy,
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.15), tight fit, highly emphasizing body curves, elegant sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
             [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -563,7 +563,7 @@ async def process_diary_reply(channel, target_date=None):
             
             clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             visual = json.loads(clean_visual_text, strict=False)
-            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.4), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
+            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.15), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
