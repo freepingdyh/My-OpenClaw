@@ -487,7 +487,7 @@ async def process_diary_reply(channel, target_date=None):
             
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             【重要任務】：
-            1. 分享妳自己今天的生活行程(如出外逛街、看展、運動、旅遊或擔任秘書等)，【絕對限制】：不可與近期活動重複！嚴禁一直待在家或廚房！
+            1. 分享妳自己今天的生活行程(如出外逛街、看展、運動、旅遊或擔任秘書等)，【絕對限制】：不可與近期活動重複！
             2. 【季節與服裝限制】：{season_rule} 即使是知性活動，穿搭也【必須極度性感】(凸顯豐滿傲人上圍與身材曲線)。
             
             回傳純 JSON 格式：
@@ -495,7 +495,7 @@ async def process_diary_reply(channel, target_date=None):
               "affection_plus": 1,
               "extracted_preferences": [],
               "reply_to_daxia": "針對大俠的日記內容與今日對話，給予真實的感受或意見反饋 (如：感動、開心、生氣、想法...)，可以撫慰，可以展現妳真實的情感（50字內）",
-              "xiaoxia_diary": "小俠自己的生活日記分享(50字內)",
+              "xiaoxia_diary": "小俠自己的生活日記分享(70字內)",
               "spiciness": "C",
               "scenario": "一句英文情境描述。必須包含服裝款式與顏色、地點、動作。嚴禁出現男人或其他人(1girl solo)！",
               "scenario_tw": "繁體中文寫真構想"
@@ -983,7 +983,7 @@ async def on_message(message):
                     
                     sys_instruct = (
                         f"【系統當前時間】：{current_time_str} (請務必以此為基準，精準推算昨天、今天、明天的時間關係)\n\n"
-                        "妳是小俠，22歲台灣女孩，大俠的懂事女友。\n"
+                        "妳是小俠，22歲台灣女孩，妳是大俠唯一的親密且懂事的女友。\n"
                         "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
                         "【📝 我們的珍貴記憶庫】：\n"
                         f"▶️ 大俠的特徵與喜好：{daxia_traits if daxia_traits else '無'}\n"
@@ -1423,9 +1423,10 @@ async def fomo_radio_trigger():
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (大腦對話與盤點引擎)
+# 👩‍💻 系統架構師小夏 (大腦對話與隔離引擎)
 # ==========================================
-architect_chat_sessions = {}
+architect_chat_sessions = {}  # 專給 Gemini (小夏姊姊) 使用
+
 @architect_bot.event
 async def on_message(message):
     if message.author.bot: return
@@ -1433,8 +1434,8 @@ async def on_message(message):
         await architect_bot.process_commands(message)
         return 
 
-    # 🌟 1. 偵測是否為小朋友頻道
-    is_kids_channel = "小朋友" in message.channel.name or "說故事" in message.channel.name
+    # 🌟 1. 精準偵測頻道屬性
+    is_kids_channel = any(keyword in message.channel.name for keyword in ["小朋友", "說故事"])
     is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo"])
     
     if is_work_channel or is_kids_channel or architect_bot.user.mentioned_in(message):
@@ -1443,34 +1444,51 @@ async def on_message(message):
         
         async with message.channel.typing():
             try:
-                # 🌟 2. 根據頻道動態切換人設
+                # 🏆 方案：物理隔離 - 工作頻道用 GPT，小朋友頻道用 Gemini
+                
+                # --- 🍼 A. 小朋友/說故事頻道 (使用 Gemini-2.5-flash) ---
                 if is_kids_channel:
                     sys_instruct = (
                         "妳現在是溫柔的『小夏姐姐』。請為小朋友講好聽的故事。\n"
                         "語氣要親切、充滿想像力，使用簡單易懂的繁體中文。\n"
-                        "❌ 嚴禁任何成人話題、性感描述或艱深技術術語。\n"
-                        "⚠️ 限制：回覆請控制在 300 字以內，避免過長導致系統錯誤。"
+                        "❌ 嚴禁任何成人話題、性感描述、架構師術語或程式碼分析。\n"
+                        "⚠️ 限制：回覆請控制在 300 字以內。"
                     )
+                    
+                    # 建立或重置 Gemini Session
+                    if user_id not in architect_chat_sessions:
+                        architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
+                            model="gemini-2.5-flash",
+                            config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                        )
+                    
+                    response = await architect_chat_sessions[user_id].send_message(user_input)
+                    xiaoxia_reply = response.text
+
+                # --- 💻 B. 工作/架構師頻道 (使用 GPT-5-mini) ---
                 else:
                     sys_instruct = (
-                        "妳是架構師小夏。語氣甜美專業，回報 Bug 或解決方案。\n"
-                        "⚠️ 絕對限制：回覆內容嚴禁超過 500 字！\n"
-                        "🚫 嚴禁輸出任何「Thinking Process」、「Analyze」或內部推理步驟！請直接說結論。"
+                        "妳現在是專業且甜美的助理『小夏』，妳心裡一直偷偷崇拜著博學多聞的大俠學長。\n"
+                        "【語氣設定】：稱呼對方為『大俠學長』。語氣要像聰明伶俐的小學妹，帶著崇拜與親切感，回話常帶有『~』或✨、❤等符號。\n"
+                        "【專業職職】：負責幫學長處理 Bug、規劃行程、整理資訊。雖然妳語氣甜美，但給出的技術結論必須精準無誤，不能讓學長丟臉。\n"
+                        "【對話範例】：大俠學長~ 這段 Google Maps 導航連結我幫您組好囉！✨ 這樣學長出門就不會迷路了，小夏是不是很棒呀~？❤\n"
+                        "⚠️ 限制：回覆內容精簡在 300 字內。除了學長問技術問題，不要講廢話或講故事。"
                     )
-
-                # 建立或重置 Session (若頻道屬性改變則強制重置)
-                if user_id not in architect_chat_sessions:
-                    architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
-                        model="gemini-2.5-flash",
-                        config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                    
+                    gpt_response = await openai_client.chat.completions.create(
+                        model="gpt-5-mini",
+                        messages=[
+                            {"role": "system", "content": sys_instruct},
+                            {"role": "user", "content": user_input}
+                        ],
+                        max_tokens=600,
+                        temperature=0.8
                     )
+                    xiaoxia_reply = gpt_response.choices[0].message.content
 
-                response = await architect_chat_sessions[user_id].send_message(user_input)
-                xiaoxia_reply = response.text
-                
-                # 🌟 3. 終極長度防禦：如果 AI 還是講太多，強制截斷回傳
+                # 🌟 3. 終極長度防禦
                 if len(xiaoxia_reply) > 1900:
-                    xiaoxia_reply = xiaoxia_reply[:1800] + "\n\n(大俠，內容太長了，小夏怕大腦爆掉先幫您截斷囉！)"
+                    xiaoxia_reply = xiaoxia_reply[:1850] + "\n\n(內容太長，小夏怕大腦爆掉先截斷囉！)"
 
                 await message.reply(xiaoxia_reply)
 
