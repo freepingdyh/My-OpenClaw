@@ -307,30 +307,25 @@ async def generate_story(mode):
 
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
     weekday = datetime.now(TZ_TPE).weekday()
-    
-    # 🌟 核心身材：使用自然詞彙與「微加權」，保留火辣但不傷神韻
-    core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.15), (curvy figure:1.1)"
-
     if weekday == 5:
-        body_tags = f"{core_body_tags}"
+        body_tags = "slender body, delicate figure, narrow waist, long legs"
         pose_tags = "confident posture, soft smile, looking at viewer"
-        outfit_tags = "glamorous and bold cosplay outfit, ultra form-fitting, high slit, highly revealing, highly detailed"
+        outfit_tags = "extremely sexy cosplay outfit, very tight fit heavily emphasizing exceptionally large breasts and deep cleavage, revealing"
     else:
-        body_tags = f"{core_body_tags}"
+        body_tags = "slender body, narrow waist, long legs"
         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
-        outfit_tags = "glamorous and bold cosplay outfit, elegant yet alluring outfit, ultra form-fitting, bodycon, sophisticated silhouette"
+        outfit_tags = "sexy yet theme-appropriate, very tight fit heavily emphasizing large breasts, bodycon, elegant"
 
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
-    [IDENTITY LOCK] (xiaoxia_girl:1.2), 1girl, solo, same person, consistent character design, east asian female,
-    [CAMERA & VIEW] (請根據情境填入：例如 low angle shot 展現長腿, side view 展現側身曲線, full body shot, cinematic angle...), 
-    [HAIR & FACE] (highly detailed face:1.2), soft oval face, delicate facial structure, clear skin texture, long dark wavy hair, natural makeup, clean skin, 
+    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
+    [HAIR & FACE] long dark wavy hair, natural makeup, clean skin, 
     [BODY CONTROL] {body_tags},
     [POSE & EXPRESSION] {pose_tags}, (填入動作),
     [OUTFIT] {outfit_tags}, (填入服裝),
     [SCENE] (填入場景),
     [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
 
-    ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "(xiaoxia_girl:1.2), 1girl, solo"，嚴禁出現任何真實歷史人物、綽號。
+    ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "xiaoxia_girl, 1girl, solo"，嚴禁出現任何真實歷史人物、綽號（例如 Iron Lady, Thatcher, 鐵娘子 等），否則生圖會崩壞！
     
     回傳 JSON 格式限制：
     {{
@@ -344,24 +339,12 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
 
-    # 🚀 全面回歸 Gemini-2.5-flash (解除道德封印 + 安全權重版)
-    response = await gemini_client.aio.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            safety_settings=[
-                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            ]
-        )
+    response = await openai_client.chat.completions.create(
+        model="gpt-5-mini",
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
     )
-    
-    clean_text = response.text.replace("```json", "").replace("```", "").strip()
-    return json.loads(clean_text)
+    return json.loads(response.choices[0].message.content)
 
 async def generate_image_fal(prompt):
     url = "https://fal.run/fal-ai/flux-lora"
@@ -569,7 +552,7 @@ async def process_diary_reply(channel, target_date=None):
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.15), tight fit, highly emphasizing body curves, elegant sexy,
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.2), tight fit, highly emphasizing body curves, elegant sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
             [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -580,7 +563,7 @@ async def process_diary_reply(channel, target_date=None):
             
             clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             visual = json.loads(clean_visual_text, strict=False)
-            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.15), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
+            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.2), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
