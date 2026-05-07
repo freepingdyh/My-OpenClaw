@@ -339,12 +339,33 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
 
-    response = await openai_client.chat.completions.create(
-        model="gpt-5-mini",
-        response_format={"type": "json_object"},
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    # ==========================================
+    # 🛑 [備用] OpenAI GPT-5-mini 引擎 (目前已註解封印)
+    # 若想換回 GPT，只要把這段每行開頭的 # 刪除即可
+    # ==========================================
+    # response = await openai_client.chat.completions.create(
+    #     model="gpt-5-mini",
+    #     response_format={"type": "json_object"},
+    #     messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    # )
+    # return json.loads(response.choices[0].message.content)
+
+    # ==========================================
+    # 🚀 [主力] Gemini-2.5-flash 引擎 (原汁原味無閹割版)
+    # 若想換回 GPT，請把下方這整段每行開頭加上 # 註解起來
+    # ==========================================
+    response = await gemini_client.aio.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json"
+        )
     )
-    return json.loads(response.choices[0].message.content)
+    
+    # 防呆：清洗 Gemini 偶爾會多加的 Markdown 程式碼區塊標籤
+    clean_text = response.text.replace("```json", "").replace("```", "").strip()
+    return json.loads(clean_text)
 
 async def generate_image_fal(prompt):
     url = "https://fal.run/fal-ai/flux-lora"
