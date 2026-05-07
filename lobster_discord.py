@@ -1481,9 +1481,10 @@ async def on_message(message):
                             {"role": "system", "content": sys_instruct},
                             {"role": "user", "content": user_input}
                         ],
-                        max_tokens=600,
-                        temperature=0.8
+                        max_completion_tokens=600,  # 🌟 換成這個新參數！
+                        temperature=0.8 
                     )
+                    
                     xiaoxia_reply = gpt_response.choices[0].message.content
 
                 # 🌟 3. 終極長度防禦
