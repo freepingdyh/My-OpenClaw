@@ -340,31 +340,37 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
 
     # ==========================================
-    # 🛑 [備用] OpenAI GPT-5-mini 引擎 (目前已註解封印)
-    # 若想換回 GPT，只要把這段每行開頭的 # 刪除即可
-    # ==========================================
-    # response = await openai_client.chat.completions.create(
-    #     model="gpt-5-mini",
-    #     response_format={"type": "json_object"},
-    #     messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-    # )
-    # return json.loads(response.choices[0].message.content)
-
-    # ==========================================
-    # 🚀 [主力] Gemini-2.5-flash 引擎 (原汁原味無閹割版)
-    # 若想換回 GPT，請把下方這整段每行開頭加上 # 註解起來
+    # 🚀 [主力] Gemini-2.5-flash 引擎 (解除道德封印版)
     # ==========================================
     response = await gemini_client.aio.models.generate_content(
         model='gemini-2.5-flash',
         contents=user_prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            response_mime_type="application/json"
+            response_mime_type="application/json",
+            # 🌟 關鍵：強制關閉 Gemini 的道德守門員，允許火辣輸出！
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            ]
         )
     )
     
-    # 防呆：清洗 Gemini 偶爾會多加的 Markdown 程式碼區塊標籤
-    clean_text = response.text.replace("```json", "").replace("```", "").strip()
+    # 🌟 終極防呆：萬一連 BLOCK_NONE 都被官方底層硬擋，導致 response.text 是 None
+    raw_text = response.text
+    if not raw_text:
+        print("⚠️ 警告：Gemini 依然拒絕生圖描述，啟動保底救援！")
+        return {
+            "image_prompt": f"xiaoxia_girl, 1girl, solo, {body_tags}, {pose_tags}, {outfit_tags}, highly detailed sexy outfit, {persona}, 8k resolution",
+            "composition": "系統啟動強制保底構圖",
+            "mood": "害羞與狂野",
+            "message": "大俠，剛剛的衣服尺度真的太大了，小俠差點換不出來，偷偷幫你準備了這套喔！"
+        }
+    
+    # 正常情況下清洗 JSON 標籤
+    clean_text = raw_text.replace("```json", "").replace("```", "").strip()
     return json.loads(clean_text)
 
 async def generate_image_fal(prompt):
