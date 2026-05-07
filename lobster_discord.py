@@ -307,36 +307,25 @@ async def generate_story(mode):
 
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
     weekday = datetime.now(TZ_TPE).weekday()
-    
-    # 🌟 核心身材鎖定
-    core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.2), (prominent cleavage:1.1)"
-
     if weekday == 5:
-        body_tags = f"{core_body_tags}, voluptuous curves"
-        # 移除寫死的 looking at viewer，交給 AI 自由發揮
-        pose_tags = "confident posture, soft smile" 
-        outfit_tags = "glamorous and bold cosplay outfit, ultra form-fitting, (plunging deep v-neck:1.3), high slit, highly revealing, highly detailed"
+        body_tags = "slender body, delicate figure, narrow waist, long legs"
+        pose_tags = "confident posture, soft smile, looking at viewer"
+        outfit_tags = "extremely sexy cosplay outfit, very tight fit heavily emphasizing exceptionally large breasts and deep cleavage, revealing"
     else:
-        body_tags = f"{core_body_tags}"
-        # 移除寫死的 looking at viewer，交給 AI 自由發揮
-        pose_tags = "dignified posture, confident gaze, natural expression, elegant"
-        outfit_tags = "elegant yet alluring outfit, ultra form-fitting, (tight bodycon:1.2), emphasizing body curves, sophisticated silhouette"
+        body_tags = "slender body, narrow waist, long legs"
+        pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
+        outfit_tags = "sexy yet theme-appropriate, very tight fit heavily emphasizing large breasts, bodycon, elegant"
 
-    # 🌟 終極清場 ＋ 好萊塢導演運鏡指令
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
-    [IDENTITY LOCK] (xiaoxia_girl:1.3), strictly 1girl, completely alone, nobody else, same person, consistent character design, east asian female, 
-    [HAIR & FACE] (highly detailed face:1.3), sharp focus on face, ultra-detailed eyes, soft oval face, delicate facial structure, clear skin texture, long dark wavy hair, natural makeup, clean skin, 
+    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
+    [HAIR & FACE] long dark wavy hair, natural makeup, clean skin, 
     [BODY CONTROL] {body_tags},
-    [CAMERA & COMPOSITION] (請填入電影級運鏡！例如：high angle shot, low angle shot, side profile, over the shoulder, rule of thirds, dynamic angle... 🚫絕對禁止每次都呆板的正面置中！),
-    [POSE & EXPRESSION] {pose_tags}, (請填入具體且有動態感的動作！例如：leaning against the wall, sitting cross-legged, walking away looking back, adjusting hair... 🚫嚴禁每次都直直站著面對鏡頭！),
+    [POSE & EXPRESSION] {pose_tags}, (填入動作),
     [OUTFIT] {outfit_tags}, (填入服裝),
-    [SCENE] (填入場景, 必須是單人場景), depth of field, bokeh, blurred background,
+    [SCENE] (填入場景),
     [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
 
-    ⚠️【絕對禁令】：
-    1. [IDENTITY LOCK] 的開頭絕對只能是 "(xiaoxia_girl:1.3), strictly 1girl, completely alone"！
-    2. 【清場令】：場景中『絕對不可以』出現除了主角以外的任何人！
-    3. 【動作禁令】：嚴禁連續生成「正面站立看著鏡頭」的呆板構圖！必須展現豐富的肢體語言與視角變化！
+    ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "xiaoxia_girl, 1girl, solo"，嚴禁出現任何真實歷史人物、綽號（例如 Iron Lady, Thatcher, 鐵娘子 等），否則生圖會崩壞！
     
     回傳 JSON 格式限制：
     {{
@@ -350,39 +339,12 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
 
-    # ==========================================
-    # 🚀 [主力] Gemini-2.5-flash 引擎 (解除道德封印版)
-    # ==========================================
-    response = await gemini_client.aio.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            # 🌟 關鍵：強制關閉 Gemini 的道德守門員，允許火辣輸出！
-            safety_settings=[
-                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            ]
-        )
+    response = await openai_client.chat.completions.create(
+        model="gpt-5-mini",
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
     )
-    
-    # 🌟 終極防呆：萬一連 BLOCK_NONE 都被官方底層硬擋，導致 response.text 是 None
-    raw_text = response.text
-    if not raw_text:
-        print("⚠️ 警告：Gemini 依然拒絕生圖描述，啟動保底救援！")
-        return {
-            "image_prompt": f"xiaoxia_girl, 1girl, solo, {body_tags}, {pose_tags}, {outfit_tags}, highly detailed sexy outfit, {persona}, 8k resolution",
-            "composition": "系統啟動強制保底構圖",
-            "mood": "害羞與狂野",
-            "message": "大俠，剛剛的衣服尺度真的太大了，小俠差點換不出來，偷偷幫你準備了這套喔！"
-        }
-    
-    # 正常情況下清洗 JSON 標籤
-    clean_text = raw_text.replace("```json", "").replace("```", "").strip()
-    return json.loads(clean_text)
+    return json.loads(response.choices[0].message.content)
 
 async def generate_image_fal(prompt):
     url = "https://fal.run/fal-ai/flux-lora"
