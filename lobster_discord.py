@@ -1466,7 +1466,6 @@ async def on_message(message):
                     xiaoxia_reply = response.text
 
                 # --- 💻 B. 工作/架構師頻道 (使用 GPT-5-mini) ---
-                else:
                     sys_instruct = (
                         "妳現在是專業且甜美的助理『小夏』，妳心裡一直偷偷崇拜著博學多聞的大俠學長。\n"
                         "【語氣設定】：稱呼對方為『大俠學長』。語氣要像聰明伶俐的小學妹，帶著崇拜與親切感，回話常帶有『~』或✨、❤等符號。\n"
@@ -1481,10 +1480,9 @@ async def on_message(message):
                             {"role": "system", "content": sys_instruct},
                             {"role": "user", "content": user_input}
                         ],
-                        max_completion_tokens=600,  # 🌟 換成這個新參數！
-                        temperature=0.8 
+                        max_completion_tokens=600
+                        # 🌟 已經把 temperature=0.8 刪除，讓它使用官方預設值！
                     )
-                    
                     xiaoxia_reply = gpt_response.choices[0].message.content
 
                 # 🌟 3. 終極長度防禦
