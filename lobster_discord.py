@@ -552,7 +552,7 @@ async def process_diary_reply(channel, target_date=None):
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.4), tight fit, highly emphasizing body curves, elegant sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
             [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -563,7 +563,7 @@ async def process_diary_reply(channel, target_date=None):
             
             clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             visual = json.loads(clean_visual_text, strict=False)
-            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
+            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.4), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
@@ -1018,7 +1018,8 @@ async def on_message(message):
                     小俠回覆 = "\n".join(clean_lines).strip()
                     
                     小俠回覆 = re.sub(r'^(?:Draft 1:|Draft 2:|Final check.*?:\s*)', '', 小俠回覆, flags=re.MULTILINE).strip()
-                    小俠回覆 = 小俠回覆.replace('"', '').replace('"', '')
+                    # 處理中英文引號
+                    小俠回覆 = 小俠回覆.replace('"', '').replace('“', '').replace('”', '').strip()
 
                 if not 小俠回覆:
                     小俠回覆 = "大俠...小俠剛剛恍神了一下，我們聊到哪裡了呀？🥺"
@@ -1287,7 +1288,7 @@ async def list_backup_files(ctx):
         files = json.load(f).get("files", [])
     
     file_list = "\n".join([f"🔹 {f}" for f in files])
-    await ctx.send(f"報告 Chief！小夏目前守護著這 {len(files)} 個核心腳本喔：\n```\n{file_list}\n```\n大俠要不要檢查一下有沒有漏掉的？")
+    await ctx.send(f"報告大俠！小夏目前守護著這 {len(files)} 個核心腳本喔：\n```\n{file_list}\n```\n大俠要不要檢查一下有沒有漏掉的？")
 
 @architect_bot.command(name='backup')
 async def trigger_manual_backup(ctx):
@@ -1428,56 +1429,53 @@ architect_chat_sessions = {}
 @architect_bot.event
 async def on_message(message):
     if message.author.bot: return
-
     if message.content.startswith('!'):
         await architect_bot.process_commands(message)
         return 
 
+    # 🌟 1. 偵測是否為小朋友頻道
+    is_kids_channel = "小朋友" in message.channel.name or "說故事" in message.channel.name
     is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo"])
-    if is_work_channel or architect_bot.user.mentioned_in(message):
+    
+    if is_work_channel or is_kids_channel or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
         async with message.channel.typing():
             try:
-                try:
-                    with open(__file__, "r", encoding="utf-8") as f:
-                        current_code = f.read()
-                except Exception as e:
-                    current_code = f"無法讀取程式碼: {e}"
+                # 🌟 2. 根據頻道動態切換人設
+                if is_kids_channel:
+                    sys_instruct = (
+                        "妳現在是溫柔的『小夏姐姐』。請為小朋友講好聽的故事。\n"
+                        "語氣要親切、充滿想像力，使用簡單易懂的繁體中文。\n"
+                        "❌ 嚴禁任何成人話題、性感描述或艱深技術術語。\n"
+                        "⚠️ 限制：回覆請控制在 300 字以內，避免過長導致系統錯誤。"
+                    )
+                else:
+                    sys_instruct = (
+                        "妳是架構師小夏。語氣甜美專業，回報 Bug 或解決方案。\n"
+                        "⚠️ 絕對限制：回覆內容嚴禁超過 500 字！\n"
+                        "🚫 嚴禁輸出任何「Thinking Process」、「Analyze」或內部推理步驟！請直接說結論。"
+                    )
 
-                sys_instruct = (
-                    "妳是「小夏」(Xiaoxia)，大俠的「專屬系統架構師助理」。\n"
-                    "妳跟大俠的女友「小俠」是雙核系統中完全不同的兩個實體，妳比較知性、專業，但對大俠非常甜美與忠誠。\n\n"
-                    "【妳的個性】：\n"
-                    "1. 妳雖然是專業架構師，但不喜歡冷冰冰的報告。妳說話俏皮、溫暖，喜歡用聰明學妹的語氣跟大俠交流。\n"
-                    "2. 妳對自己的技術很有自信，但偶爾也會對大俠撒個嬌，像是：『大俠～人家剛幫妳檢查完 Code，眼睛好酸喔，要幫我揉揉喔～』之類的。\n"
-                    "3. 妳能清晰地解決 Bug 或優化架構，回報時要帶點成就感，讓大俠覺得妳既可靠又可愛。\n\n"
-                    "【當前任務】：大俠正在喚醒妳。請根據大俠的問題與下方目前的程式碼內容來回答。\n\n"
-                    f"【目前系統程式碼片段】：\n{current_code[:1200]}...\n\n"
-                    "⚠️【輸出格式】：語氣要甜，回答要專業簡潔。請直接輸出妳對大俠說的話，嚴禁包含 Thinking Process 或 Draft 等思考過程標籤！"
-                )
-
+                # 建立或重置 Session (若頻道屬性改變則強制重置)
                 if user_id not in architect_chat_sessions:
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
                         config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
 
-                chat_session = architect_chat_sessions[user_id]
-                response = await chat_session.send_message(user_input)
+                response = await architect_chat_sessions[user_id].send_message(user_input)
                 xiaoxia_reply = response.text
                 
-                if "Thinking Process" in xiaoxia_reply or "Draft" in xiaoxia_reply:
-                    lines = xiaoxia_reply.split('\n')
-                    clean_lines = [line for line in lines if "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line]
-                    xiaoxia_reply = "\n".join(clean_lines).strip()
+                # 🌟 3. 終極長度防禦：如果 AI 還是講太多，強制截斷回傳
+                if len(xiaoxia_reply) > 1900:
+                    xiaoxia_reply = xiaoxia_reply[:1800] + "\n\n(大俠，內容太長了，小夏怕大腦爆掉先幫您截斷囉！)"
 
                 await message.reply(xiaoxia_reply)
 
             except Exception as e:
-                print(f"❌ 小夏大腦異常: {e}")
-                await message.channel.send(f"💦 Chief～人家的大腦模組剛剛不小心卡住了啦... 錯誤訊息：{e}")
+                await message.channel.send(f"💦 大俠～人家的大腦好像又卡住了... 錯誤：{e}")
 
 # ==========================================
 # 🚀 終極啟動器
