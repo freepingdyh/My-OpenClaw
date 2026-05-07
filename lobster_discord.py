@@ -309,7 +309,7 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     weekday = datetime.now(TZ_TPE).weekday()
     
     # 🌟 核心身材鎖定：不管平假日，小俠的招牌傲人上圍絕對不准縮水！(加入 1.3 倍權重)
-    core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.3), (prominent cleavage:1.2)"
+    core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.2), (prominent cleavage:1.1)"
 
     if weekday == 5:
         # 週末：布料最少，極度火辣
@@ -323,8 +323,8 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
         outfit_tags = "elegant yet alluring outfit, ultra form-fitting, (tight bodycon:1.2), emphasizing body curves, sophisticated silhouette"
 
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
-    [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
-    [HAIR & FACE] long dark wavy hair, natural makeup, clean skin, 
+    [IDENTITY LOCK] (xiaoxia_girl:1.2), 1girl, solo, same person, consistent character design, east asian female, 
+    [HAIR & FACE] (highly detailed face:1.2), soft oval face, delicate facial structure, clear skin texture, long dark wavy hair, natural makeup, clean skin, 
     [BODY CONTROL] {body_tags},
     [POSE & EXPRESSION] {pose_tags}, (填入動作),
     [OUTFIT] {outfit_tags}, (填入服裝),
