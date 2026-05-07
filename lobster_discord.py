@@ -308,30 +308,32 @@ async def generate_story(mode):
 async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
     weekday = datetime.now(TZ_TPE).weekday()
     
-    # 🌟 核心身材鎖定：不管平假日，小俠的招牌傲人上圍絕對不准縮水！(加入 1.3 倍權重)
+    # 🌟 核心身材鎖定
     core_body_tags = "slender body, narrow waist, long legs, (voluptuous breasts:1.2), (prominent cleavage:1.1)"
 
     if weekday == 5:
-        # 週末：布料最少，極度火辣
         body_tags = f"{core_body_tags}, voluptuous curves"
         pose_tags = "confident posture, soft smile, looking at viewer"
         outfit_tags = "glamorous and bold cosplay outfit, ultra form-fitting, (plunging deep v-neck:1.3), high slit, highly revealing, highly detailed"
     else:
-        # 平日：高級性感，服裝可以端莊，但「身材曲線」必須撐爆衣服！
         body_tags = f"{core_body_tags}"
         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
         outfit_tags = "elegant yet alluring outfit, ultra form-fitting, (tight bodycon:1.2), emphasizing body curves, sophisticated silhouette"
 
+    # 🌟 終極清場與鎖臉指令
     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
-    [IDENTITY LOCK] (xiaoxia_girl:1.2), 1girl, solo, same person, consistent character design, east asian female, 
-    [HAIR & FACE] (highly detailed face:1.2), soft oval face, delicate facial structure, clear skin texture, long dark wavy hair, natural makeup, clean skin, 
+    [IDENTITY LOCK] (xiaoxia_girl:1.3), strictly 1girl, completely alone, nobody else, same person, consistent character design, east asian female, 
+    [HAIR & FACE] (highly detailed face:1.3), sharp focus on face, ultra-detailed eyes, soft oval face, delicate facial structure, clear skin texture, long dark wavy hair, natural makeup, clean skin, 
     [BODY CONTROL] {body_tags},
     [POSE & EXPRESSION] {pose_tags}, (填入動作),
     [OUTFIT] {outfit_tags}, (填入服裝),
-    [SCENE] (填入場景),
+    [SCENE] (填入場景, 必須是單人場景), depth of field, bokeh, blurred background,
     [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
 
-    ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "xiaoxia_girl, 1girl, solo"，嚴禁出現任何真實歷史人物、綽號（例如 Iron Lady, Thatcher, 鐵娘子 等），否則生圖會崩壞！
+    ⚠️【絕對禁令】：
+    1. [IDENTITY LOCK] 的開頭絕對只能是 "(xiaoxia_girl:1.3), strictly 1girl, completely alone"！
+    2. 嚴禁出現任何真實歷史人物、綽號。
+    3. 【清場令】：場景中『絕對不可以』出現除了主角以外的任何人！必須確保畫面只有一位女性。
     
     回傳 JSON 格式限制：
     {{
