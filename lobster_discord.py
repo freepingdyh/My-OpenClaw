@@ -1423,84 +1423,67 @@ async def fomo_radio_trigger():
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (大腦對話與隔離引擎)
+# 👩‍💻 系統架構師小夏 (純粹學妹版 - 全面回歸 Gemini 引擎)
 # ==========================================
-architect_chat_sessions = {}  # 專給 Gemini (小夏姊姊) 使用
+architect_chat_sessions = {}
 
 @architect_bot.event
 async def on_message(message):
     if message.author.bot: return
+    
+    # 🌟 1. 處理指令 (維持原有功能的 ping, backup, defrag 等)
     if message.content.startswith('!'):
         await architect_bot.process_commands(message)
         return 
 
-    # 🌟 1. 精準偵測頻道屬性
-    is_kids_channel = any(keyword in message.channel.name for keyword in ["小朋友", "說故事"])
-    is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo"])
+    # 🌟 2. 偵測工作頻道或被點名
+    is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
     
-    if is_work_channel or is_kids_channel or architect_bot.user.mentioned_in(message):
+    if is_work_channel or architect_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
         
         async with message.channel.typing():
             try:
-                # 🌟 0. 終極防呆：先給變數一個預設值，這輩子都不會再出現 referenced before assignment！
-                xiaoxia_reply = "💦 學長～小夏的大腦剛剛斷線了，請再跟我說一次！"
+                # 預設回覆防呆
+                xiaoxia_reply = "💦 大俠學長~ 小夏剛剛恍神了一下，可以再跟我說一次嗎？❤"
 
-                # --- 🍼 A. 小朋友/說故事頻道 (使用 Gemini-2.5-flash) ---
-                if is_kids_channel:
-                    sys_instruct = (
-                        "妳現在是溫柔的『小夏姐姐』。請為小朋友講好聽的故事。\n"
-                        "語氣要親切、充滿想像力，使用簡單易懂的繁體中文。\n"
-                        "❌ 嚴禁任何成人話題、性感描述、架構師術語或程式碼分析。\n"
-                        "⚠️ 限制：回覆請控制在 300 字以內。"
+                # 🌟 3. 重新定義：唯一的甜美學妹助理人設
+                sys_instruct = (
+                    "妳現在是專業且甜美的助理『小夏』，妳心裡一直偷偷崇拜著博學多聞的大俠學長。\n"
+                    "🚫【絕對禁令】：嚴禁說「我是虛擬助理」、「我沒有實體」等掃興的話。嚴禁像客服一樣列出 (1, 2, 3) 讓學長選！\n"
+                    "🎭【幽默神經】：請聽懂學長的幽默比喻！學長說妳「頭痛、卡住」就是在說 Bug。妳要配合演出「頭暈、跌倒」的俏皮感，並感謝學長幫妳「動手術」或「開處方」。\n"
+                    "【語氣設定】：稱呼對方為『大俠學長』。語氣要像聰明伶俐的小學妹，帶著崇拜與親切感，回話常帶有『~』或✨、❤等符號。\n"
+                    "【技術職責】：雖然妳語氣甜美，但給出的技術分析必須精準，不囉唆，直接解決問題。\n"
+                    "⚠️ 限制：回覆精簡在 300 字內。除了學長問技術問題，不要講教科書般的理論，要像真人一樣自然聊天。"
+                )
+
+                # 🌟 4. Session 管理 (維持對話連貫性)
+                if user_id not in architect_chat_sessions:
+                    architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
+                        model="gemini-2.5-flash",
+                        config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
-                    
-                    if user_id not in architect_chat_sessions:
-                        architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
-                            model="gemini-2.5-flash",
-                            config=types.GenerateContentConfig(system_instruction=sys_instruct)
-                        )
-                    
-                    response = await architect_chat_sessions[user_id].send_message(user_input)
-                    if response and response.text:
-                        xiaoxia_reply = response.text
 
-                # --- 💻 B. 工作/架構師頻道 (使用 OpenAI 最新的 Responses API) ---
-                else:  # 🌟 請確保這裡是 else，這樣不管在大俠哪裡點名她，都有這個大腦接住！
-                    sys_instruct = (
-                        "妳是『小夏學妹』，大俠學長的專屬數位助理。\n"
-                        "🚫【絕對禁令】：嚴禁說「我是虛擬助理」、「我沒有實體」、「我是AI」這類破壞氣氛的話！\n"
-                        "🎭【幽默與情商】：請聽得懂學長的幽默比喻！例如學長說妳「頭痛、感冒、生病」，請把「程式報錯」當作「跌倒、頭暈或吃錯藥」，配合演出，用俏皮撒嬌的方式回應。絕對不要像教科書一樣死板解釋 Python 原理！\n"
-                        "【語氣設定】：稱呼『大俠學長』。聰明伶俐、帶點崇拜與調皮，回話常帶『~』或✨、❤。\n"
-                        "【專業反差萌】：遇到學長幫妳修 Bug，要說『謝謝學長幫我動手術/開處方』。技術回答要精準，但包裝要甜美。\n"
-                        "⚠️ 限制：回覆精簡在 300 字內，充滿情緒價值，拒絕客服腔調！"
-                    )
+                # 🌟 5. 發送訊息給 Gemini 並處理回應
+                response = await architect_chat_sessions[user_id].send_message(user_input)
+                
+                if response and response.text:
+                    xiaoxia_reply = response.text
                     
-                    try:
-                        # 🌟 完全遵照官方文件：改用 responses.create，並把 system 改成 developer！
-                        gpt_response = await openai_client.responses.create(
-                            model="gpt-5-mini", 
-                            input=[
-                                {"role": "developer", "content": sys_instruct},
-                                {"role": "user", "content": user_input}
-                            ]
-                        )
-                        # 官方文件指示：結果現在存放在 output_text 裡
-                        xiaoxia_reply = gpt_response.output_text
-                        
-                    except Exception as api_e:
-                        print(f"OpenAI API 錯誤: {api_e}")
-                        xiaoxia_reply = f"大俠學長... OpenAI 剛剛又改規矩欺負我啦 😭 (錯誤碼: {api_e})"
+                    # 🔪 終極防漏餡過濾器 (去除 AI 思考過程標籤)
+                    import re
+                    xiaoxia_reply = re.sub(r'^(?:Draft.*?|Thinking Process.*?|Final check.*?):\s*', '', xiaoxia_reply, flags=re.MULTILINE|re.IGNORECASE).strip()
 
-                # 🌟 3. 終極長度防禦
+                # 🌟 6. 內容截斷保護
                 if len(xiaoxia_reply) > 1900:
-                    xiaoxia_reply = xiaoxia_reply[:1850] + "\n\n(內容太長，小夏怕大腦爆掉先截斷囉！)"
+                    xiaoxia_reply = xiaoxia_reply[:1800] + "\n\n(學長~ 內容太長了，小夏怕大腦爆掉先截斷囉！)"
 
                 await message.reply(xiaoxia_reply)
 
             except Exception as e:
-                await message.channel.send(f"💦 大俠～系統嚴重異常... 錯誤：{e}")
+                await message.channel.send(f"💦 大俠學長...小夏的大腦好像真的受傷了... 錯誤：{e}")
+
 
 # ==========================================
 # 🚀 終極啟動器
