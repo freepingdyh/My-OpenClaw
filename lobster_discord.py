@@ -678,8 +678,21 @@ async def process_diary_reply(channel, target_date=None):
                 await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed)
 
         except Exception as e:
-            if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{str(e)}`。跳過此篇！")
-            print(f"[{entry.get('date')}] 處理錯誤: {e}")
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"\n======================================")
+            print(f"💥 [{entry.get('date')}] 處理錯誤完整日誌:")
+            print(error_detail)
+            print(f"======================================\n")
+            
+            # 嘗試取得有意義的錯誤訊息
+            error_msg = str(e) if str(e).strip() else repr(e)
+            
+            # 判斷是否為安全審查攔截
+            if "finish_reason" in error_detail or "safety" in error_detail.lower():
+                error_msg = "Gemini 安全審查阻擋 (Safety Block) - 尺度太大了！"
+                
+            if channel: await channel.send(f"⚠️ 處理 **{entry.get('date', '未知日期')}** 時遇到亂流：`{error_msg}`。跳過此篇！\n*(小夏已將崩潰日誌印在 Zeabur 終端機，請學長過目！)*")
             continue
 
     girlfriend_chat_sessions.clear()
