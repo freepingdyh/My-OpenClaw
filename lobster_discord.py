@@ -351,15 +351,23 @@ async def generate_image_fal(prompt):
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     payload = {
         "prompt": prompt, "image_size": "portrait_16_9", "num_inference_steps": 28,
-        "guidance_scale": 3.5, "loras": [{"path": XIAOXIA_LORA_URL, "scale": 1.15}]
+        "guidance_scale": 3.5, "loras": [{"path": XIAOXIA_LORA_URL, "scale": 1.15}],
+        "enable_safety_checker": False  # 🌟 魔法參數：嘗試直接強制關閉 Fal.ai 的官方安全濾網！
     }
     async with aiohttp.ClientSession() as session:
         # 加上 90 秒等待保護
         async with session.post(url, headers=headers, json=payload, timeout=90) as resp:
             if resp.status == 200:
                 data = await resp.json()
+                
+                # 🌟 測謊機：攔截「假成功，真黑圖」的狀態！
+                # 如果 Fal.ai 表面說成功，但 JSON 裡偷偷塞了 NSFW 警告，我們就主動戳破它，強制觸發降級！
+                if data.get("has_nsfw_concepts") and data["has_nsfw_concepts"][0]:
+                    raise Exception("Fal.ai 判定為 NSFW，偷偷給了黑屏")
+                    
                 return data['images'][0]['url']
-            else: raise Exception(f"Fal.ai Error: {await resp.text()}")
+            else: 
+                raise Exception(f"Fal.ai Error: {await resp.text()}")
 
 async def upscale_image_fal(image_url):
     url = "https://fal.run/fal-ai/esrgan"
