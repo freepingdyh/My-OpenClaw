@@ -520,6 +520,7 @@ async def process_diary_reply(channel, target_date=None):
             3. 📸【畫面構想 (scenario) 最高權重法則】：
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼，或操場運動服照...），那麼 `scenario` 必須 **100% 聚焦於兌現該承諾的靜態畫面**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
+               - 【安全審查禁令】：嚴禁在 scenario 中使用「全裸」、「露點」等極度露骨的字眼。可以用「性感」、「若隱若現」、「惹火」來形容，但必須保持在 AI 繪圖引擎允許的安全範圍內。
                - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的尺度」或「日常性感穿搭」為準。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
             
@@ -618,19 +619,32 @@ async def process_diary_reply(channel, target_date=None):
             image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
+            # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
+            is_downgraded = False # 新增降級標記
+            
             try:
                 base_img = await generate_image_fal(image_prompt)
             except Exception as e:
                 print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
-                safe_prompt = image_prompt + ", (safe for work:1.2), elegant sexy, beautiful lighting"
+                is_downgraded = True # 標記已被降級
+                safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
                 try:
                     base_img = await generate_image_fal(safe_prompt)
                 except Exception as e2:
-                    print(f"❌ 降級生圖依然失敗: {e2}")
-                    continue # 放棄此篇生圖，進行下一篇
-                    
+                    print(f"❌ 降級生圖依然失敗: {e2}。啟動終極保底生圖！")
+                    ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, looking at viewer, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, highly detailed, safe for work"
+                    try:
+                         base_img = await generate_image_fal(ultimate_safe_prompt)
+                    except Exception as e3:
+                         print(f"💥 終極生圖失敗，放棄本次圖片生成: {e3}")
+                         continue
+                         
             if not base_img: continue
+            
+            # 🌟 如果發生降級，在構想加上委屈的註解
+            if is_downgraded:
+                result["scenario_tw"] += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
             
             up_img = await upscale_image_fal(base_img)
             local_filename = await save_to_vault(up_img)
@@ -1251,18 +1265,47 @@ async def on_raw_reaction_add(payload):
                     model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
                 )
                 
-                visual = json.loads(openai_resp.choices[0].message.content.replace("```json", "").replace("```", "").strip(), strict=False)
-                image_prompt = visual.get('image_prompt', "")
+                # 🌟 修復 1：攔截 OpenAI 的安全審查，並加入降級標記
+                ai_content = openai_resp.choices[0].message.content
+                is_downgraded = False
                 
-                base_image_url = await generate_image_fal(image_prompt)
+                if not ai_content:
+                    print("⚠️ OpenAI 拒絕翻譯 (Safety Block)，啟用安全標籤")
+                    image_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, highly detailed, safe for work"
+                    is_downgraded = True
+                else:
+                    visual = json.loads(ai_content.replace("```json", "").replace("```", "").strip(), strict=False)
+                    image_prompt = visual.get('image_prompt', "")
+                
+                # 🌟 修復 2：為「日記按鈕重骰」裝上 Fal.ai 降級保底機制
+                base_image_url = None
+                try:
+                    base_image_url = await generate_image_fal(image_prompt)
+                except Exception as e:
+                    print(f"⚠️ Fal.ai 重骰審核攔截 ({e})，啟動降級重試...")
+                    is_downgraded = True
+                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress"
+                    try:
+                        base_image_url = await generate_image_fal(safe_prompt)
+                    except Exception as e2:
+                        print(f"❌ 降級重骰依然失敗: {e2}。啟動終極保底生圖！")
+                        ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, looking at viewer, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, safe for work"
+                        base_image_url = await generate_image_fal(ultimate_safe_prompt)
+                
                 upscaled_image_url = await upscale_image_fal(base_image_url)
                 
                 # 重建日記的 Embed
                 title_str = msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}"
                 embed = discord.Embed(title=title_str, description=msg.embeds[0].description, color=0xffb6c1)
                 embed.set_image(url=upscaled_image_url)
+                
                 for field in msg.embeds[0].fields:
-                    embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                    val = field.value
+                    # 🌟 如果被降級，在構想後面加上委屈提示 (避免重複加上)
+                    if is_downgraded and "寫真構想" in field.name and "小俠盡力了" not in val:
+                        val += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
+                    embed.add_field(name=field.name, value=val, inline=field.inline)
+                    
                 embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
                 
             else:
