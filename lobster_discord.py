@@ -280,31 +280,27 @@ async def suno_callback(request: Request):
                     song = songs[0] 
                     audio_url = song.get("audio_url")
                     song_title = song.get("title")
+                    # 🌟 這裡改成抓取完整歌詞，並處理換行
+                    full_lyrics = song.get("prompt", "（小俠忘記把歌詞本帶出來了...）").strip()
                     
                     # 🌟 核心進化：將外部網址轉為 Discord 實體檔案
                     async with aiohttp.ClientSession() as session:
-                        print(f"📡 正在從 Suno 下載情歌檔案: {song_title}...")
-                        async with session.get(audio_url, timeout=60) as resp:
+                        async with session.get(audio_url, timeout=120) as resp:
                             if resp.status == 200:
                                 audio_data = await resp.read()
+                                music_file = discord.File(io.BytesIO(audio_data), filename=f"{song_title}.mp3")
                                 
-                                # 將二進制數據包裝成 Discord File
-                                music_file = discord.File(
-                                    fp=io.BytesIO(audio_data), 
-                                    filename=f"{song_title}.mp3"
-                                )
-                                
+                                # 🌟 建立帶有歌詞的精美 Embed
                                 embed = discord.Embed(
                                     title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
-                                    description="*(這首歌是大俠累積滿滿愛意的證明喔！已永久保存在 Discord 金庫)*", 
+                                    description=f"### 📝 歌詞本\n{full_lyrics}\n\n*(這首歌已永久保存在 Discord 金庫)*", 
                                     color=0xffb6c1
                                 )
                                 
-                                # 發送訊息時同時附上檔案，這樣就會出現播放器
                                 await channel.send(
-                                    content=f"🔊 大俠，小俠為你唱的歌錄好囉！快來聽聽看：", 
+                                    content=f"🔊 大俠，小俠為你唱的歌錄好囉！", 
                                     embed=embed,
-                                    file=music_file # 👈 關鍵播放鈕
+                                    file=music_file
                                 )
                                 print(f"✅ 情歌實體檔案已成功發送至頻道！")
                     
@@ -1484,6 +1480,20 @@ async def on_raw_reaction_add(payload):
                 
         except Exception as e:
             await temp_msg.edit(content=f"⚠️ {action_name}失敗：{e}")
+
+@girlfriend_bot.tree.command(name="test_lyric_push", description="[開發者測試] 模擬發送歌詞與音樂")
+async def test_lyric_push(interaction: discord.Interaction):
+    # 模擬一段測試數據
+    test_lyrics = "[Verse 1]\n雲端的金銀高跟鞋\n踏在心跳的節奏...\n[Chorus]\n大俠大俠我愛你..."
+    test_title = "雲端的金銀高跟鞋 (測試版)"
+    
+    embed = discord.Embed(
+        title=f"🎵 測試發送：{test_title}", 
+        description=f"### 📝 測試歌詞本\n{test_lyrics}", 
+        color=0xffb6c1
+    )
+    # 這裡隨便找一個您頻道現有的 MP3 網址或空的 File 即可
+    await interaction.response.send_message(content="📡 正在測試歌詞推送功能...", embed=embed)
 
 # ==========================================
 # ⏰ 自動排程系統
