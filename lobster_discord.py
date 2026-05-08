@@ -3,6 +3,7 @@
 # ==========================================
 
 import os
+import io
 import json
 import uuid
 import asyncio
@@ -267,7 +268,6 @@ from fastapi import Request
 async def suno_callback(request: Request):
     try:
         data = await request.json()
-        # 判斷是否為「生成完成」的最終通知
         if data.get("code") == 200 and data.get("data", {}).get("callbackType") == "complete":
             task_id = data["data"]["task_id"]
             songs = data["data"]["data"]
@@ -281,23 +281,45 @@ async def suno_callback(request: Request):
                     audio_url = song.get("audio_url")
                     song_title = song.get("title")
                     
-                    embed = discord.Embed(
-                        title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
-                        description="*(這首歌是大俠累積滿滿愛意的證明喔！)*", 
-                        color=0xffb6c1
-                    )
-                    await channel.send(content=f"🔊 大俠，小俠為你唱的歌寫好囉！快來聽聽看：\n{audio_url}", embed=embed)
+                    # 🌟 核心進化：將外部網址轉為 Discord 實體檔案
+                    async with aiohttp.ClientSession() as session:
+                        print(f"📡 正在從 Suno 下載情歌檔案: {song_title}...")
+                        async with session.get(audio_url, timeout=60) as resp:
+                            if resp.status == 200:
+                                audio_data = await resp.read()
+                                
+                                # 將二進制數據包裝成 Discord File
+                                music_file = discord.File(
+                                    fp=io.BytesIO(audio_data), 
+                                    filename=f"{song_title}.mp3"
+                                )
+                                
+                                embed = discord.Embed(
+                                    title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
+                                    description="*(這首歌是大俠累積滿滿愛意的證明喔！已永久保存在 Discord 金庫)*", 
+                                    color=0xffb6c1
+                                )
+                                
+                                # 發送訊息時同時附上檔案，這樣就會出現播放器
+                                await channel.send(
+                                    content=f"🔊 大俠，小俠為你唱的歌錄好囉！快來聽聽看：", 
+                                    embed=embed,
+                                    file=music_file # 👈 關鍵播放鈕
+                                )
+                                print(f"✅ 情歌實體檔案已成功發送至頻道！")
                     
-                    # 🌟 記憶回填手術：讓小俠「記得」這首歌
+                    # 🌟 記憶回填手術：讓小俠記得歌詞內容
                     profile = load_profile()
                     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
-                    new_memory = f"我今天為大俠唱了情歌《{song_title}》，這首輕快的歌曲代表了我們一起努力的點滴。❤️"
+                    # 抓取 prompt (歌詞) 的前 50 字
+                    song_lyrics_snippet = song.get("prompt", "").replace("\n", " ")[:50]
+                    new_memory = f"我今天為大俠唱了情歌《{song_title}》，歌詞裡唱著「{song_lyrics_snippet}...」，這是我滿滿的心意。❤️"
                     profile.setdefault("recent_context", []).append({"text": new_memory, "added_at": today_str})
                     save_profile(profile)
                     
         return {"status": "ok"}
     except Exception as e:
-        print(f"Suno Callback 處理異常: {e}")
+        print(f"❌ Suno Callback 處理異常: {e}")
         return {"status": "error"}
 
 # ==========================================
@@ -388,19 +410,27 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
 # 🌟 音樂任務頻道追蹤器 (確保歌生好後能回傳到正確的地方)
 suno_tasks = {} 
 
-async def generate_suno_music(lyrics, title):
+# 🌟 增加 custom_style 參數，若沒傳入則走隨機保底
+async def generate_suno_music(lyrics, title, custom_style=None):
     url = "https://api.sunoapi.org/api/v1/generate"
     headers = {
         "Authorization": f"Bearer {os.environ.get('SUNO_API_KEY')}",
         "Content-Type": "application/json"
     }
     
-    # 🌟 鎖定輕快、多樣化的台灣 pop 風格
-    styles = [
-        "Sweet female vocal, airy voice, Mandopop, City Pop, upbeat, retro synth, clear pronunciation",
-        "Sweet female vocal, airy voice, Mandopop, Bossa Nova, acoustic guitar, relaxing, clear pronunciation",
-        "Sweet female vocal, airy voice, Mandopop, Indie Pop, cheerful, bright piano, clear pronunciation"
+    # 🌟 修正：讓 LLM 的決定優先於隨機池
+    default_styles = [
+        "Sweet female vocal, airy voice, Mandopop, City Pop, upbeat",
+        "Sweet female vocal, airy voice, Mandopop, Bossa Nova, relaxing",
+        "Sweet female vocal, airy voice, Mandopop, Indie Pop, cheerful"
     ]
+    
+    # 核心邏輯：有傳入 custom_style 就用它，沒有才隨機
+    final_style = custom_style if custom_style else random.choice(default_styles)
+    
+    # 確保女聲標籤存在，避免唱出粗獷大叔音
+    if "female vocal" not in final_style.lower():
+        final_style = f"Sweet female vocal, airy voice, clear pronunciation, {final_style}"
     
     payload = {
         "customMode": True,
@@ -408,12 +438,12 @@ async def generate_suno_music(lyrics, title):
         "model": "V5", 
         "callBackUrl": "https://xiaoxia0320.zeabur.app/api/suno/callback",
         "prompt": lyrics,
-        "style": random.choice(styles),
+        "style": final_style,
         "title": title[:100]
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             data = await resp.json()
             if data.get("code") == 200:
                 return data["data"]["taskId"]
@@ -430,7 +460,7 @@ async def generate_image_fal(prompt):
     }
     async with aiohttp.ClientSession() as session:
         # 加上 90 秒等待保護
-        async with session.post(url, headers=headers, json=payload, timeout=90) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 
@@ -449,7 +479,7 @@ async def upscale_image_fal(image_url):
     payload = {"image_url": image_url, "scale": 2}
     async with aiohttp.ClientSession() as session:
         # 加上 60 秒等待保護
-        async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
 
@@ -667,9 +697,12 @@ async def process_diary_reply(channel, target_date=None):
                 
                 # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
                 try:
-                    lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行甜美情歌。
-                    [格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
-                    [禁令]：歌詞嚴禁出現「大俠」、「小俠」。回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容"}}"""
+                    # 🌟 升級：讓 Gemini 根據心情決定曲風
+                    lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行情歌。
+                    [歌詞格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
+                    [曲風決定]：請根據歌詞意境，選擇一個適合的曲風標籤（如：輕快 City Pop、溫柔 Bossa Nova、甚至是充滿活力的 K-Pop 或甜美抒情）。
+                    [禁令]：歌詞嚴禁出現「大俠」、「小俠」。
+                    回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容", "style": "英文曲風標籤"}}"""
                     
                     print("📝 正在請求 GPT-5-mini 編寫情歌歌詞...")
                     lyrics_resp = await openai_client.chat.completions.create(
@@ -683,9 +716,13 @@ async def process_diary_reply(channel, target_date=None):
                     
                     song_data = json.loads(raw_lyrics.replace("```json", "").replace("```", "").strip(), strict=False)
                     
-                    # 🌟 呼叫 Suno 錄音室
-                    print(f"🚀 正在發送 API 至 Suno 錄音室: {song_data['title']}")
-                    task_id = await generate_suno_music(song_data['lyrics'], song_data['title'])
+                    # 🌟 呼叫 Suno 錄音室 (傳入 LLM 決定的 style)
+                    print(f"🚀 正在發送 API 至 Suno 錄音室: {song_data['title']} (風格: {song_data.get('style')})")
+                    task_id = await generate_suno_music(
+                        lyrics=song_data['lyrics'], 
+                        title=song_data['title'],
+                        custom_style=song_data.get('style') # 👈 新增這個參數
+                    )
                     
                     # 記住頻道 ID，等一下 Webhook 送回來才知道發去哪
                     suno_tasks[task_id] = channel.id 
@@ -701,7 +738,7 @@ async def process_diary_reply(channel, target_date=None):
                 app_state["affection_reasons"] = [] # 清空累積器
             else:
                 app_state["affection_score"] = new_score
-                
+
             save_state(app_state)
             
             for pref in result.get("extracted_preferences", []):
@@ -747,7 +784,7 @@ async def process_diary_reply(channel, target_date=None):
                     base_img = await generate_image_fal(safe_prompt)
                 except Exception as e2:
                     print(f"❌ 降級生圖依然失敗: {e2}。啟動終極保底生圖！")
-                    ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, looking at viewer, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, highly detailed, safe for work"
+                    ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, wearing a beautiful elegant red dress, smiling, indoor lighting, 8k resolution, safe for work"
                     try:
                          base_img = await generate_image_fal(ultimate_safe_prompt)
                     except Exception as e3:
