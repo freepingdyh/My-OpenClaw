@@ -411,17 +411,27 @@ async def process_diary_reply(channel, target_date=None):
         if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
         return
 
-    # --- 階段 2.5：獨立立體記憶萃取 ---
+    # --- 階段 2.5：獨立立體記憶萃取 (嚴格分類雙閘門版) ---
     if chat_context:
         try:
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
+            # 🌟 1. 嚴格分類的 Prompt (新增 xiaoxia_new_traits)
+            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (防字面翻譯、防敷衍)
             mem_prompt = f"""
-            分析以下今日對話，進行「雙向記憶萃取」。
-            請以純 JSON 格式回傳以下結構（若無新事項則保持陣列為空）：
+            請以「高情商人類心理學家」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
+
+            【⚠️ 核心語意分析守則】：
+            1. 判讀弦外之音：請敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話（例如：小俠說「你好壞」通常是開心的嬌嗔，而非真正的指責；大俠說「拿妳沒辦法」是寵溺而非無奈）。
+            2. 辨識真實意圖：嚴格區分「玩笑話」與「真實喜好/承諾」。只有雙方認真表達的喜好、地雷，或明確答應的事項才需要紀錄。
+            3. 拒絕碎片化：紀錄必須像故事綱要一樣具備「完整人事時地物與因果關係」，絕對不可只寫單字或敷衍的短句。
+
+            請在深層理解對話情境後，以純 JSON 格式回傳以下結構（若該項目無新事項，則保持陣列為空 []）：
             {{
-                "daxia_new_traits": ["大俠的新喜好或長期習慣"],
-                "xiaoxia_promises": ["小俠今天答應大俠的事"],
-                "recent_context": ["今天發生的短期重要事件(如大俠的心情、剛聊過的話題)"]
+                "daxia_new_traits": ["嚴格限制：必須包含情境！只能寫『大俠本人』的真實喜好、地雷或習慣。例如：大俠今天看了海邊照片後，表示其實偶爾看清純照也很好。"],
+                "xiaoxia_new_traits": ["嚴格限制：只能寫『小俠』自己的性格特質或深層情緒反應。例如：小俠被大俠逗弄後，表現出傲嬌但其實很高興的反應。"],
+                "xiaoxia_promises": ["嚴格限制：必須有具體事件與細節！只能寫『小俠』明確答應大俠的事。例如：小俠承諾今晚的交換日記會給大俠看紅色比基尼『若隱若現』的特別角度特寫照。"],
+                "shared_knowledge": ["嚴格限制：雙方認真討論過的新知識、讀書心得或價值觀。例如：雙方討論了時間管理的四象限法則，大俠認為..."],
+                "recent_context": ["今天發生的短期重要事件，需包含雙方的情緒狀態與互動結果。"]
             }}
             【今日對話】：\n{chat_context}
             """
@@ -432,19 +442,31 @@ async def process_diary_reply(channel, target_date=None):
             )
             new_memory = json.loads(mem_resp.text.strip())
             
+            # 🌟 2. 記憶刷新演算法 (重複則更新日期)
             def append_memory(target_list, new_texts):
-                existing_texts = [item["text"] for item in target_list]
                 for text in new_texts:
-                    if text not in existing_texts:
-                        target_list.append({"text": text, "added_at": today_str})
+                    found = False
+                    for item in target_list:
+                        if item["text"] == text:
+                            item["added_at"] = today_str # 字面完全重複，刷新記憶時間
+                            found = True
+                            break
+                    if not found:
+                        target_list.append({"text": text, "added_at": today_str}) # 全新特徵，直接新增
 
+            # 🌟 3. 確實把抽出來的四個陣列，分別塞進正確的抽屜
             append_memory(profile.setdefault("daxia_traits", []), new_memory.get("daxia_new_traits", []))
+            append_memory(profile.setdefault("xiaoxia_traits", []), new_memory.get("xiaoxia_new_traits", []))
             append_memory(profile["xiaoxia_self"]["promises"], new_memory.get("xiaoxia_promises", []))
+            append_memory(profile.setdefault("shared_knowledge", []), new_memory.get("shared_knowledge", []))
             
             if new_memory.get("recent_context"):
-                profile["recent_context"] = [{"text": item, "added_at": today_str} for item in new_memory["recent_context"]]
+                # 短期事件直接覆蓋或堆疊，後續由 GC 系統清理 7 天前的舊資料
+                for item in new_memory["recent_context"]:
+                    profile.setdefault("recent_context", []).append({"text": item, "added_at": today_str})
+                    
             save_profile(profile)
-            print("✅ 雙向記憶已成功存入 daxia_profile.json")
+            print("✅ 雙向記憶已成功分類並存入 daxia_profile.json")
         except Exception as e:
             print(f"⚠️ 雙向記憶萃取失敗: {e}")
 
@@ -492,13 +514,14 @@ async def process_diary_reply(channel, target_date=None):
             
             回傳純 JSON 格式：
             {{
-              "affection_plus": 1,
+              "affection_plus": "整數(1~5。依據大俠日記用心程度或禮物價值給分，例如收到高跟鞋給 5 分)",
+              "affection_reason": "加分原因(50字內，例如：大俠送了我一雙金銀色高跟鞋，超感動！)",
               "extracted_preferences": [],
-              "reply_to_daxia": "針對大俠的日記內容與今日對話，給予真實的感受或意見反饋 (如：感動、開心、生氣、想法...)，可以撫慰，可以展現妳真實的情感（50字內）",
-              "xiaoxia_diary": "小俠自己的生活日記分享(70字內)",
+              "reply_to_daxia": "...",
+              "xiaoxia_diary": "...",
               "spiciness": "C",
-              "scenario": "一句英文情境描述。必須包含服裝款式與顏色、地點、動作。嚴禁出現男人或其他人(1girl solo)！",
-              "scenario_tw": "繁體中文寫真構想"
+              "scenario": "...",
+              "scenario_tw": "..."
             }}
             """
             
@@ -525,14 +548,32 @@ async def process_diary_reply(channel, target_date=None):
                     "scenario_tw": "穿著深V緊身黑洋裝在咖啡廳想著大俠"
                 }
             
-            new_score = current_score + result.get("affection_plus", 1)
+            # ... 取得 result 後的結算邏輯 ...
+            try:
+                # 確保轉為整數
+                score_plus = int(result.get("affection_plus", 1))
+            except ValueError:
+                score_plus = 1
+                
+            new_score = current_score + score_plus
             display_score = new_score 
             is_jackpot = False
+            
+            # 🌟 愛意累積器
+            app_state.setdefault("affection_reasons", [])
+            if score_plus > 0 and "affection_reason" in result:
+                app_state["affection_reasons"].append(f"[{entry_date}] {result['affection_reason']}")
             
             if new_score >= 100:
                 is_jackpot = True
                 result["spiciness"] = "C"
-                app_state["affection_score"] = 80 
+                
+                # 🌟 Suno 觸發點：將這包 reasons 交給小夏處理
+                print(f"🎉 愛意值滿 100！準備發送 Suno 音樂神經訊號...\n累積原因：{app_state['affection_reasons']}")
+                # (Suno API 生成與 HTML 寫入邏輯將在後續實作)
+                
+                app_state["affection_score"] = 80 # 重置回基礎值
+                app_state["affection_reasons"] = [] # 清空累積器
             else:
                 app_state["affection_score"] = new_score 
             save_state(app_state)
@@ -638,6 +679,36 @@ async def process_diary_reply(channel, target_date=None):
 # ==========================================
 # 🌸 懂事女友小俠 (功能指令區)
 # ==========================================
+# 🌟 彈出式交換日記表單
+class DiaryModal(discord.ui.Modal, title='📝 撰寫今日交換日記'):
+    diary_content = discord.ui.TextInput(
+        label='大俠，今天發生了什麼事呢？',
+        style=discord.TextStyle.paragraph,
+        placeholder='親愛的小俠，今天我...',
+        required=True,
+        max_length=2000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+        success = save_diary_entry(self.diary_content.value, target_date)
+        if success:
+            await interaction.response.send_message(f"✅ **{target_date}** 的日記已收錄！小俠今晚 23:30 會準時閱讀喔！\n(也可輸入 /diary_reply 讓她馬上看)", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ 寫入失敗，請檢查系統。", ephemeral=True)
+
+class DiaryButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # 永久有效
+
+    @discord.ui.button(label="📝 打開日記本", style=discord.ButtonStyle.blurple, emoji="📖")
+    async def open_diary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DiaryModal())
+
+@girlfriend_bot.command(name='diary_ui')
+async def diary_ui(ctx):
+    await ctx.send("大俠，專屬交換日記本已經準備好了👇", view=DiaryButtonView())
+
 @girlfriend_bot.event
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
@@ -697,6 +768,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
 
         await msg.delete()
         await ctx.send(embed=embed)
+        msg = await ctx.send(embed=embed)
+        await msg.add_reaction("♻️")
+        await msg.add_reaction("🗑️")
     except Exception as e:
         await msg.edit(content=f"⚠️ 狀況：`{str(e)}`")
 
@@ -737,6 +811,9 @@ async def more(ctx):
         embed.set_footer(text="已完成高畫質無損放大")
         await msg.delete()
         await ctx.send(embed=embed)
+        msg = await ctx.send(embed=embed)
+        await msg.add_reaction("♻️")
+        await msg.add_reaction("🗑️")
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
 
 @girlfriend_bot.command(name='cosplay_delete')
@@ -1033,6 +1110,50 @@ async def on_message(message):
                 print(f"❌ 聊天引擎異常: {e}")
                 await message.channel.send(f"💦 大俠，小俠剛剛眼睛好像進沙子了，看不清楚... (錯誤: {e})")
 
+@girlfriend_bot.event
+async def on_raw_reaction_add(payload):
+    # 忽略機器人自己的反應
+    if payload.user_id == girlfriend_bot.user.id: return
+    
+    channel = girlfriend_bot.get_channel(payload.channel_id)
+    msg = await channel.fetch_message(payload.message_id)
+    
+    # 確認這則是機器人發出的圖片訊息
+    if msg.author != girlfriend_bot.user or not msg.embeds: return
+    
+    emoji = str(payload.emoji)
+    
+    if emoji == "🗑️":
+        await msg.delete()
+        # (這裡可擴充連動刪除 JSON 裡的紀錄)
+        temp_msg = await channel.send("🗑️ 照片已撤回銷毀！")
+        await asyncio.sleep(3)
+        await temp_msg.delete()
+        
+    elif emoji == "♻️":
+        await msg.remove_reaction(emoji, payload.member) # 移除您的點擊狀態
+        temp_msg = await channel.send("✨ 收到重骰指令！正在為大俠準備新的構圖...")
+        
+        # 直接拿該篇貼文的標題與內文重新呼叫
+        topic = msg.embeds[0].title.replace("【加洗】", "")
+        event = msg.embeds[0].description
+        
+        try:
+            visual = await translate_to_flux_prompt(topic, event, "重新構圖", True)
+            base_image_url = await generate_image_fal(visual['image_prompt'])
+            upscaled_image_url = await upscale_image_fal(base_image_url)
+            
+            embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
+            embed.set_image(url=upscaled_image_url)
+            embed.set_footer(text="♻️ Emoji 快捷重骰完成")
+            
+            new_msg = await channel.send(embed=embed)
+            await new_msg.add_reaction("♻️")
+            await new_msg.add_reaction("🗑️")
+            await temp_msg.delete()
+        except Exception as e:
+            await temp_msg.edit(content=f"⚠️ 重骰失敗：{e}")
+
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
@@ -1041,10 +1162,16 @@ async def auto_cosplay_task():
     channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="考試不累")
     if channel: await cosplay(channel, mode="auto")
 
-@tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=23, minute=30, tzinfo=TZ_TPE))
 async def midnight_feedback_task():
     channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
     if channel: await process_diary_reply(channel)
+
+# 🌟 新增凌晨 3 點大腦巡邏
+@tasks.loop(time=time(hour=3, minute=0, tzinfo=TZ_TPE))
+async def auto_defrag_task():
+    channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+    if channel: await optimize_memory_vault(channel)
 
 # ==========================================
 # 🧠 記憶碎片重組與垃圾回收系統 (Memory Defrag & GC)
@@ -1072,26 +1199,32 @@ async def optimize_memory_vault(channel=None):
             is_modified = True
             print(f"🧹 短期記憶清理完成：移除了 {original_recent_len - len(valid_recent)} 條過期記憶。")
 
-        # --- 2. 長期特徵與承諾的「語意濃縮壓縮」 ---
-        # 當特徵超過 15 條時，啟動 LLM 濃縮機制
-        traits = profile.get("daxia_traits", [])
-        if len(traits) > 15:
-            if channel: await channel.send("🧠 系統提示：大俠的特徵記憶過多，小俠正在進行大腦睡眠與記憶重組...")
-            print("🧠 啟動大俠特徵語意濃縮...")
+        # --- 2. 長期記憶的「多維度語意濃縮」 (容量閥值觸發) ---
+        daxia_traits = profile.get("daxia_traits", [])
+        xiaoxia_traits = profile.get("xiaoxia_traits", [])
+        promises = profile.get("xiaoxia_self", {}).get("promises", [])
+        shared_know = profile.get("shared_knowledge", [])
+        
+        total_count = len(daxia_traits) + len(xiaoxia_traits) + len(promises) + len(shared_know)
+        
+        # 🌟 當陣列總和 >= 35 條時，才啟動 LLM 濃縮機制
+        if total_count >= 35:
+            if channel: await channel.send(f"🧹 **[系統排程]** 偵測到大腦記憶總數超標 (目前 {total_count} 條)，小夏正在啟動深層記憶重組...")
             
-            traits_text = "\n".join([f"- {t['text']}" for t in traits])
             compress_prompt = f"""
-            以下是關於「大俠」的長期特徵與喜好紀錄，因為日積月累顯得有些重複與冗長：
-            {traits_text}
+            以下是系統累積的長期記憶，請幫我進行「記憶碎片重組」，合併重複項，並保留最核心的細節：
+            【大俠特徵】：{[t['text'] for t in daxia_traits]}
+            【小俠個性】：{[t['text'] for t in xiaoxia_traits]}
+            【小俠承諾】：{[t['text'] for t in promises]}
+            【共通知識】：{[t['text'] for t in shared_know]}
             
-            請幫我進行「記憶碎片重組」。
-            1. 將意義重複或高度相似的項目合併（例如：喜歡看畫展、喜歡美術館 -> 熱愛藝術與畫展）。
-            2. 剔除已經不具備長期參考價值的瑣碎小事。
-            3. 保留最核心的性格、喜好與地雷（尤其是大俠感到不舒服的點）。
-            4. 濃縮成 10 條以內的最精華特徵。
-            
-            請直接回傳純 JSON 格式的字串陣列：
-            ["精華特徵1", "精華特徵2", ...]
+            請直接回傳純 JSON 格式：
+            {{
+                "daxia_traits": ["精華1", "精華2"],
+                "xiaoxia_traits": ["精華1", "精華2"],
+                "promises": ["精華1", "精華2"],
+                "shared_knowledge": ["精華1", "精華2"]
+            }}
             """
             
             resp = await gemini_client.aio.models.generate_content(
@@ -1101,21 +1234,20 @@ async def optimize_memory_vault(channel=None):
             )
             
             try:
-                compressed_list = json.loads(resp.text.strip())
-                # 重新賦予今天的時間戳
-                profile["daxia_traits"] = [{"text": t, "added_at": today.strftime("%Y-%m-%d")} for t in compressed_list]
+                compressed_data = json.loads(resp.text.strip())
+                today_str = today.strftime("%Y-%m-%d")
+                profile["daxia_traits"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("daxia_traits", [])]
+                profile["xiaoxia_traits"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("xiaoxia_traits", [])]
+                profile["xiaoxia_self"]["promises"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("promises", [])]
+                profile["shared_knowledge"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("shared_knowledge", [])]
+                
                 is_modified = True
-                print(f"✨ 特徵濃縮完成！從 {len(traits)} 條壓縮至 {len(compressed_list)} 條。")
+                new_total = len(profile["daxia_traits"]) + len(profile["xiaoxia_traits"]) + len(profile["xiaoxia_self"]["promises"]) + len(profile["shared_knowledge"])
+                
+                if channel:
+                    await channel.send(f"✅ **深層記憶重組完成！** 將 {total_count} 條碎片濃縮為 {new_total} 條純粹精華。")
             except Exception as e:
-                print(f"⚠️ 特徵濃縮 JSON 解析失敗：{e}")
-
-        # 存檔
-        if is_modified:
-            save_profile(profile)
-            if channel: await channel.send("✅ 記憶深層重組與清理完成！小俠的大腦現在非常清晰！")
-            
-    except Exception as e:
-        print(f"❌ 記憶優化系統異常: {e}")
+                print(f"⚠️ 濃縮 JSON 解析失敗：{e}")
  
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
