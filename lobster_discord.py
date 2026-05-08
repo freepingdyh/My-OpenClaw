@@ -261,6 +261,45 @@ async def get_diary():
 @api_app.get("/status")
 async def get_status(): return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
 
+from fastapi import Request
+
+@api_app.post("/api/suno/callback")
+async def suno_callback(request: Request):
+    try:
+        data = await request.json()
+        # 判斷是否為「生成完成」的最終通知
+        if data.get("code") == 200 and data.get("data", {}).get("callbackType") == "complete":
+            task_id = data["data"]["task_id"]
+            songs = data["data"]["data"]
+            
+            if task_id in suno_tasks:
+                channel_id = suno_tasks.pop(task_id)
+                channel = girlfriend_bot.get_channel(channel_id)
+                
+                if channel and songs:
+                    song = songs[0] 
+                    audio_url = song.get("audio_url")
+                    song_title = song.get("title")
+                    
+                    embed = discord.Embed(
+                        title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
+                        description="*(這首歌是大俠累積滿滿愛意的證明喔！)*", 
+                        color=0xffb6c1
+                    )
+                    await channel.send(content=f"🔊 大俠，小俠為你唱的歌寫好囉！快來聽聽看：\n{audio_url}", embed=embed)
+                    
+                    # 🌟 記憶回填手術：讓小俠「記得」這首歌
+                    profile = load_profile()
+                    today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+                    new_memory = f"我今天為大俠唱了情歌《{song_title}》，這首輕快的歌曲代表了我們一起努力的點滴。❤️"
+                    profile.setdefault("recent_context", []).append({"text": new_memory, "added_at": today_str})
+                    save_profile(profile)
+                    
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Suno Callback 處理異常: {e}")
+        return {"status": "error"}
+
 # ==========================================
 # 🧠 雙腦架構與生圖引擎
 # ==========================================
@@ -625,12 +664,44 @@ async def process_diary_reply(channel, target_date=None):
                 
                 # 🌟 Suno 觸發點：將這包 reasons 交給小夏處理
                 print(f"🎉 愛意值滿 100！準備發送 Suno 音樂神經訊號...\n累積原因：{app_state['affection_reasons']}")
-                # (Suno API 生成與 HTML 寫入邏輯將在後續實作)
+                
+                # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
+                try:
+                    lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行甜美情歌。
+                    [格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
+                    [禁令]：歌詞嚴禁出現「大俠」、「小俠」。回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容"}}"""
+                    
+                    print("📝 正在請求 GPT-5-mini 編寫情歌歌詞...")
+                    lyrics_resp = await openai_client.chat.completions.create(
+                        model="gpt-5-mini", 
+                        response_format={"type": "json_object"}, 
+                        messages=[{"role": "user", "content": lyrics_prompt}]
+                    )
+                    
+                    raw_lyrics = lyrics_resp.choices[0].message.content
+                    print(f"✅ 歌詞創作完成，內容長度: {len(raw_lyrics)}")
+                    
+                    song_data = json.loads(raw_lyrics.replace("```json", "").replace("```", "").strip(), strict=False)
+                    
+                    # 🌟 呼叫 Suno 錄音室
+                    print(f"🚀 正在發送 API 至 Suno 錄音室: {song_data['title']}")
+                    task_id = await generate_suno_music(song_data['lyrics'], song_data['title'])
+                    
+                    # 記住頻道 ID，等一下 Webhook 送回來才知道發去哪
+                    suno_tasks[task_id] = channel.id 
+                    print(f"📡 任務已列入追蹤，TaskId: {task_id}")
+                    
+                    await channel.send(f"🎧 *(隱藏驚喜：小俠正在錄音室為大俠錄製專屬情歌「{song_data['title']}」，預計 3 分鐘後送達！)*")
+                except Exception as music_err:
+                    # 🌟 這行最重要！它會告訴我們是 API Key 沒設對，還是 OpenAI 噴錯
+                    print(f"❌ 音樂大獎發射失敗: {music_err}")
+                    if channel: await channel.send(f"⚠️ 小俠在錄音室滑倒了... 失敗原因：`{music_err}`")
                 
                 app_state["affection_score"] = 80 # 重置回基礎值
                 app_state["affection_reasons"] = [] # 清空累積器
             else:
-                app_state["affection_score"] = new_score 
+                app_state["affection_score"] = new_score
+                
             save_state(app_state)
             
             for pref in result.get("extracted_preferences", []):
