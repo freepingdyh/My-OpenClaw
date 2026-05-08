@@ -1168,23 +1168,38 @@ async def on_raw_reaction_add(payload):
     if payload.user_id == girlfriend_bot.user.id: return
     
     channel = girlfriend_bot.get_channel(payload.channel_id)
-    msg = await channel.fetch_message(payload.message_id)
+    if not channel: return
     
+    try:
+        msg = await channel.fetch_message(payload.message_id)
+    except Exception:
+        return
+        
     # 確認這則是機器人發出的圖片訊息
     if msg.author != girlfriend_bot.user or not msg.embeds: return
     
-    emoji = str(payload.emoji)
+    # 🌟 修正1：改用 .name 取值，避免表情符號編碼判斷錯誤
+    emoji_name = payload.emoji.name
     
-    if emoji == "🗑️":
-        await msg.delete()
-        # (這裡可擴充連動刪除 JSON 裡的紀錄)
-        temp_msg = await channel.send("🗑️ 照片已撤回銷毀！")
-        await asyncio.sleep(3)
-        await temp_msg.delete()
+    if emoji_name == "🗑️":
+        try:
+            await msg.delete()
+            temp_msg = await channel.send("🗑️ 照片已撤回銷毀！")
+            await asyncio.sleep(3)
+            await temp_msg.delete()
+        except Exception: pass
         
-    elif emoji in ["➕", "🎲"]:
-        await msg.remove_reaction(emoji, payload.member) # 移除您的點擊狀態
-        action_name = "加洗" if emoji == "➕" else "重骰"
+    elif emoji_name in ["➕", "🎲"]:
+        # 🌟 修正2：加上 try...except 防護網。就算沒權限移除表情，也不會卡死主程式！
+        try:
+            user = payload.member or girlfriend_bot.get_user(payload.user_id)
+            await msg.remove_reaction(payload.emoji, user)
+        except discord.Forbidden:
+            print("⚠️ 機器人缺少「管理訊息」權限，無法移除使用者的表情，但不影響生圖。")
+        except Exception as e:
+            print(f"⚠️ 移除表情失敗: {e}")
+            
+        action_name = "加洗" if emoji_name == "➕" else "重骰"
         temp_msg = await channel.send(f"✨ 收到{action_name}指令！正在為大俠準備新的構圖...")
         
         # 直接拿該篇貼文的標題與內文重新呼叫
@@ -1198,7 +1213,7 @@ async def on_raw_reaction_add(payload):
             
             embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
             embed.set_image(url=upscaled_image_url)
-            embed.set_footer(text=f"{emoji} Emoji 快捷{action_name}完成")
+            embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
             
             new_msg = await channel.send(embed=embed)
             await new_msg.add_reaction("➕")
@@ -1207,7 +1222,7 @@ async def on_raw_reaction_add(payload):
             await temp_msg.delete()
             
             # 🌟 如果是「重骰」，就在新圖發布後，把舊圖刪掉！
-            if emoji == "🎲":
+            if emoji_name == "🎲":
                 await msg.delete() 
                 
         except Exception as e:
