@@ -501,27 +501,38 @@ async def process_diary_reply(channel, target_date=None):
             else:
                 season_rule = "請搭配符合當前氣候的性感穿搭。"
             
-            # 🌟 升級版：強制雙向日記與性感限制
+            # 🌟 提取小俠的承諾清單，準備注入大腦
+            promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
+            current_promises = "、".join([p["text"] for p in promises_list]) if promises_list else "無特殊承諾"
+
+            # 🌟 升級版：強制雙向日記、性感限制與【承諾畫面優先權】
             eval_prompt = f"""
             【大俠的日記 ({entry_date})】：{entry_content}
             【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
             【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
+            【小俠目前的承諾清單】：{current_promises}
             
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
-            【重要任務】：
-            1. 分享妳自己今天的生活行程(如出外逛街、看展、運動、旅遊或擔任秘書等)，【絕對限制】：不可與近期活動重複！
-            2. 【季節與服裝限制】：{season_rule} 即使是知性活動，穿搭也【必須極度性感】(凸顯豐滿傲人上圍與身材曲線)。
+            
+            【重要任務與攝影守則】：
+            1. 日記文字分享：分享妳自己今天的生活行程(如烘焙、逛街等，不可與近期活動重複)。同時，必須針對大俠的日記與妳的「承諾清單」給予溫柔、充滿愛意的回應。
+            2. 服裝限制：{season_rule} 即使是知性活動，穿搭也必須性感。
+            3. 📸【畫面構想 (scenario) 最高權重法則】：
+               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼，或操場運動服照...），那麼 `scenario` 必須 **100% 聚焦於兌現該承諾的靜態畫面**！
+               - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
+               - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的尺度」或「日常性感穿搭」為準。
+               - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
             
             回傳純 JSON 格式：
             {{
-              "affection_plus": "整數(1~5。依據大俠日記用心程度或禮物價值給分，例如收到高跟鞋給 5 分)",
-              "affection_reason": "加分原因(50字內，例如：大俠送了我一雙金銀色高跟鞋，超感動！)",
+              "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
+              "affection_reason": "加分原因(50字內)",
               "extracted_preferences": [],
               "reply_to_daxia": "...",
               "xiaoxia_diary": "...",
               "spiciness": "C",
-              "scenario": "...",
-              "scenario_tw": "..."
+              "scenario": "純英文的生圖場景與服裝描述 (聚焦一個靜態時空)",
+              "scenario_tw": "繁體中文的寫真構想"
             }}
             """
             
