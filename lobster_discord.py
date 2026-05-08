@@ -1248,6 +1248,10 @@ async def optimize_memory_vault(channel=None):
                     await channel.send(f"✅ **深層記憶重組完成！** 將 {total_count} 條碎片濃縮為 {new_total} 條純粹精華。")
             except Exception as e:
                 print(f"⚠️ 濃縮 JSON 解析失敗：{e}")
+
+    except Exception as general_e:
+        print(f"⚠️ 記憶庫最佳化整體失敗：{general_e}")
+        if channel: await channel.send(f"❌ 大腦巡邏異常：{general_e}")
  
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
