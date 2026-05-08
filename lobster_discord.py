@@ -679,32 +679,83 @@ async def process_diary_reply(channel, target_date=None):
 # ==========================================
 # 🌸 懂事女友小俠 (功能指令區)
 # ==========================================
-# 🌟 彈出式交換日記表單
+# 🌟 輔助函式：覆寫日記內容
+def overwrite_diary_entry(content, target_date):
+    try:
+        if not os.path.exists(DIARY_DATA_PATH): return False
+        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+            diary_db = json.load(f)
+        
+        for entry in diary_db:
+            if entry.get("date") == target_date:
+                entry["content"] = content # 完全覆蓋，而非疊加
+                with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump(diary_db, f, ensure_ascii=False, indent=2)
+                return True
+        return False
+    except Exception:
+        return False
+
+# 🌟 彈出式交換日記表單 (新增模式)
 class DiaryModal(discord.ui.Modal, title='📝 撰寫今日交換日記'):
     diary_content = discord.ui.TextInput(
-        label='大俠，今天發生了什麼事呢？',
-        style=discord.TextStyle.paragraph,
-        placeholder='親愛的小俠，今天我...',
-        required=True,
-        max_length=2000
+        label='大俠，今天發生了什麼事呢？', style=discord.TextStyle.paragraph,
+        placeholder='親愛的小俠，今天我...', required=True, max_length=2000
     )
-
     async def on_submit(self, interaction: discord.Interaction):
         target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
         success = save_diary_entry(self.diary_content.value, target_date)
-        if success:
-            await interaction.response.send_message(f"✅ **{target_date}** 的日記已收錄！小俠今晚 23:30 會準時閱讀喔！\n(也可輸入 /diary_reply 讓她馬上看)", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 寫入失敗，請檢查系統。", ephemeral=True)
+        if success: await interaction.response.send_message(f"✅ **{target_date}** 的日記已收錄！\n(可按編輯按鈕修改，或輸入 /diary_reply 讓她看)", ephemeral=True)
+        else: await interaction.response.send_message("❌ 寫入失敗，請檢查系統。", ephemeral=True)
 
+# 🌟 彈出式交換日記表單 (編輯模式 - 會帶入舊資料)
+class DiaryEditModal(discord.ui.Modal):
+    def __init__(self, target_date, current_content):
+        super().__init__(title=f'✏️ 編輯 {target_date} 交換日記')
+        self.target_date = target_date
+        self.diary_content = discord.ui.TextInput(
+            label='大俠，請修改您的日記內容：', style=discord.TextStyle.paragraph,
+            default=current_content, # 🌟 核心魔法：把舊資料塞進輸入框
+            required=True, max_length=2000
+        )
+        self.add_item(self.diary_content)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        success = overwrite_diary_entry(self.diary_content.value, self.target_date)
+        if success: await interaction.response.send_message(f"✅ **{self.target_date}** 的日記已成功更新！", ephemeral=True)
+        else: await interaction.response.send_message("❌ 寫入失敗，請檢查系統。", ephemeral=True)
+
+# 🌟 包含雙按鈕的 View
 class DiaryButtonView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # 永久有效
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="📝 打開日記本", style=discord.ButtonStyle.blurple, emoji="📖")
+    @discord.ui.button(label="📝 新增/附加日記", style=discord.ButtonStyle.blurple, emoji="📖")
     async def open_diary(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DiaryModal())
 
+    @discord.ui.button(label="✏️ 編輯今日日記", style=discord.ButtonStyle.secondary, emoji="✍️")
+    async def edit_diary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+        current_content = ""
+        if os.path.exists(DIARY_DATA_PATH):
+            with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+                diary_db = json.load(f)
+                for entry in diary_db:
+                    if entry.get("date") == target_date:
+                        if entry.get("is_replied"):
+                            await interaction.response.send_message("⚠️ 今天的日記小俠已經讀過並回覆囉，不能偷改！", ephemeral=True)
+                            return
+                        current_content = entry.get("content", "")
+                        break
+        
+        if not current_content:
+            await interaction.response.send_message("❓ 您今天還沒寫日記喔！請點擊旁邊的「📝 新增/附加日記」。", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(DiaryEditModal(target_date, current_content))
+
+# 觸發指令不變
 @girlfriend_bot.command(name='diary_ui')
 async def diary_ui(ctx):
     await ctx.send("大俠，專屬交換日記本已經準備好了👇", view=DiaryButtonView())
@@ -767,10 +818,10 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | 已完成高畫質無損放大")
 
         await msg.delete()
-        await ctx.send(embed=embed)
-        msg = await ctx.send(embed=embed)
-        await msg.add_reaction("♻️")
-        await msg.add_reaction("🗑️")
+        msg = await ctx.send(embed=embed) # 確保這裡只有一行 ctx.send！
+        await msg.add_reaction("➕") # 代表 /more (加洗)
+        await msg.add_reaction("🎲") # 代表 Reroll (重骰)
+        await msg.add_reaction("🗑️") # 代表 Delete (刪除)
     except Exception as e:
         await msg.edit(content=f"⚠️ 狀況：`{str(e)}`")
 
@@ -808,12 +859,13 @@ async def more(ctx):
         embed = discord.Embed(title=f"【加洗】{story['topic']}", color=0xffb6c1)
         embed.set_image(url=upscaled_image_url)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text="已完成高畫質無損放大")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | 已完成高畫質無損放大")
+
         await msg.delete()
-        await ctx.send(embed=embed)
-        msg = await ctx.send(embed=embed)
-        await msg.add_reaction("♻️")
-        await msg.add_reaction("🗑️")
+        msg = await ctx.send(embed=embed) # 確保這裡只有一行 ctx.send！
+        await msg.add_reaction("➕") # 代表 /more (加洗)
+        await msg.add_reaction("🎲") # 代表 Reroll (重骰)
+        await msg.add_reaction("🗑️") # 代表 Delete (刪除)
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
 
 @girlfriend_bot.command(name='cosplay_delete')
@@ -1130,9 +1182,10 @@ async def on_raw_reaction_add(payload):
         await asyncio.sleep(3)
         await temp_msg.delete()
         
-    elif emoji == "♻️":
+    elif emoji in ["➕", "🎲"]:
         await msg.remove_reaction(emoji, payload.member) # 移除您的點擊狀態
-        temp_msg = await channel.send("✨ 收到重骰指令！正在為大俠準備新的構圖...")
+        action_name = "加洗" if emoji == "➕" else "重骰"
+        temp_msg = await channel.send(f"✨ 收到{action_name}指令！正在為大俠準備新的構圖...")
         
         # 直接拿該篇貼文的標題與內文重新呼叫
         topic = msg.embeds[0].title.replace("【加洗】", "")
@@ -1145,14 +1198,20 @@ async def on_raw_reaction_add(payload):
             
             embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
             embed.set_image(url=upscaled_image_url)
-            embed.set_footer(text="♻️ Emoji 快捷重骰完成")
+            embed.set_footer(text=f"{emoji} Emoji 快捷{action_name}完成")
             
             new_msg = await channel.send(embed=embed)
-            await new_msg.add_reaction("♻️")
+            await new_msg.add_reaction("➕")
+            await new_msg.add_reaction("🎲")
             await new_msg.add_reaction("🗑️")
             await temp_msg.delete()
+            
+            # 🌟 如果是「重骰」，就在新圖發布後，把舊圖刪掉！
+            if emoji == "🎲":
+                await msg.delete() 
+                
         except Exception as e:
-            await temp_msg.edit(content=f"⚠️ 重骰失敗：{e}")
+            await temp_msg.edit(content=f"⚠️ {action_name}失敗：{e}")
 
 # ==========================================
 # ⏰ 自動排程系統
