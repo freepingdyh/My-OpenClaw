@@ -953,23 +953,23 @@ async def diary_ui(ctx):
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
     
-    # 🌟 關鍵補丁：同步斜線指令至 Discord 伺服器
-    # 執行這段後，/test_lyric_push 才會出現在您的選單裡
+    # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     try:
         synced = await girlfriend_bot.tree.sync()
         print(f"📡 系統架構師回報：已成功同步 {len(synced)} 個斜線指令！")
     except Exception as e:
         print(f"❌ 指令同步失敗: {e}")
     
+    # 🌟 2. 啟動 Cosplay 排程
     if not auto_cosplay_task.is_running():
         auto_cosplay_task.start()
         print("⏰ 晚間 21:30 Cosplay 排程已啟動！")
         
+    # 🌟 3. 啟動日記回饋排程 (已修正為 23:30)
     if not midnight_feedback_task.is_running():
         midnight_feedback_task.start()
-        # 🌟 修正日誌文字：配合您在第 804 行設定的 23:30
         print("🌙 晚間 23:30 日記回饋排程已啟動！")
-        
+
 @girlfriend_bot.command(name='cosplay')
 async def cosplay(ctx, *, mode: str = "auto"):
     if not check_daily_limit():
