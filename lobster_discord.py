@@ -675,7 +675,11 @@ async def process_diary_reply(channel, target_date=None):
                 embed.set_image(url=local_url)
                 embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
                 embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}")
-                await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed)
+                # 🌟 修改這裡：綁定 msg 變數並加上三個按鈕
+                diary_msg = await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed)
+                await diary_msg.add_reaction("➕")
+                await diary_msg.add_reaction("🎲")
+                await diary_msg.add_reaction("🗑️")
 
         except Exception as e:
             import traceback
@@ -1214,38 +1218,73 @@ async def on_raw_reaction_add(payload):
         except Exception: pass
         
     elif emoji_name in ["➕", "🎲"]:
-        # 🌟 修正2：加上 try...except 防護網。就算沒權限移除表情，也不會卡死主程式！
         try:
             user = payload.member or girlfriend_bot.get_user(payload.user_id)
             await msg.remove_reaction(payload.emoji, user)
-        except discord.Forbidden:
-            print("⚠️ 機器人缺少「管理訊息」權限，無法移除使用者的表情，但不影響生圖。")
-        except Exception as e:
-            print(f"⚠️ 移除表情失敗: {e}")
+        except discord.Forbidden: pass
+        except Exception: pass
             
         action_name = "加洗" if emoji_name == "➕" else "重骰"
         temp_msg = await channel.send(f"✨ 收到{action_name}指令！正在為大俠準備新的構圖...")
         
-        # 直接拿該篇貼文的標題與內文重新呼叫
-        topic = msg.embeds[0].title.replace("【加洗】", "")
-        event = msg.embeds[0].description
-        
         try:
-            visual = await translate_to_flux_prompt(topic, event, "重新構圖", True)
-            base_image_url = await generate_image_fal(visual['image_prompt'])
-            upscaled_image_url = await upscale_image_fal(base_image_url)
+            # 🌟 判斷這張圖是「日記」還是「Cosplay」
+            is_diary = "交換日記" in msg.embeds[0].title
             
-            embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
-            embed.set_image(url=upscaled_image_url)
-            embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
+            if is_diary:
+                # 📝【日記專屬重骰邏輯】
+                scenario_tw = "日常寫真"
+                for field in msg.embeds[0].fields:
+                    if "寫真構想" in field.name:
+                        scenario_tw = field.value
+                        break
+                        
+                life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
+                骨架：
+                [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
+                [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
+                [SCENE & DETAILED OUTFIT] {scenario_tw}, highly detailed clothes, 
+                [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
+                回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
+                
+                openai_resp = await openai_client.chat.completions.create(
+                    model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
+                )
+                
+                visual = json.loads(openai_resp.choices[0].message.content.replace("```json", "").replace("```", "").strip(), strict=False)
+                image_prompt = visual.get('image_prompt', "")
+                
+                base_image_url = await generate_image_fal(image_prompt)
+                upscaled_image_url = await upscale_image_fal(base_image_url)
+                
+                # 重建日記的 Embed
+                title_str = msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}"
+                embed = discord.Embed(title=title_str, description=msg.embeds[0].description, color=0xffb6c1)
+                embed.set_image(url=upscaled_image_url)
+                for field in msg.embeds[0].fields:
+                    embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
+                
+            else:
+                # 👗【Cosplay 專屬重骰邏輯】
+                topic = msg.embeds[0].title.replace("【加洗】", "")
+                event = msg.embeds[0].description
+                visual = await translate_to_flux_prompt(topic, event, "重新構圖", True)
+                
+                base_image_url = await generate_image_fal(visual['image_prompt'])
+                upscaled_image_url = await upscale_image_fal(base_image_url)
+                
+                embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
+                embed.set_image(url=upscaled_image_url)
+                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
             
+            # 發送新圖並重新掛上按鈕
             new_msg = await channel.send(embed=embed)
             await new_msg.add_reaction("➕")
             await new_msg.add_reaction("🎲")
             await new_msg.add_reaction("🗑️")
             await temp_msg.delete()
             
-            # 🌟 如果是「重骰」，就在新圖發布後，把舊圖刪掉！
             if emoji_name == "🎲":
                 await msg.delete() 
                 
