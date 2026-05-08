@@ -346,6 +346,41 @@ async def translate_to_flux_prompt(topic, event, persona, force_half_body=False)
     )
     return json.loads(response.choices[0].message.content)
 
+# 🌟 音樂任務頻道追蹤器 (確保歌生好後能回傳到正確的地方)
+suno_tasks = {} 
+
+async def generate_suno_music(lyrics, title):
+    url = "https://api.sunoapi.org/api/v1/generate"
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('SUNO_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    
+    # 🌟 鎖定輕快、多樣化的台灣 pop 風格
+    styles = [
+        "Sweet female vocal, airy voice, Mandopop, City Pop, upbeat, retro synth, clear pronunciation",
+        "Sweet female vocal, airy voice, Mandopop, Bossa Nova, acoustic guitar, relaxing, clear pronunciation",
+        "Sweet female vocal, airy voice, Mandopop, Indie Pop, cheerful, bright piano, clear pronunciation"
+    ]
+    
+    payload = {
+        "customMode": True,
+        "instrumental": False,
+        "model": "V5", 
+        "callBackUrl": "https://xiaoxia0320.zeabur.app/api/suno/callback",
+        "prompt": lyrics,
+        "style": random.choice(styles),
+        "title": title[:100]
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            data = await resp.json()
+            if data.get("code") == 200:
+                return data["data"]["taskId"]
+            else:
+                raise Exception(f"Suno Error: {data.get('msg')}")
+
 async def generate_image_fal(prompt):
     url = "https://fal.run/fal-ai/flux-lora"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
