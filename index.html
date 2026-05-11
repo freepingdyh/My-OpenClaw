@@ -24,6 +24,10 @@
         @keyframes breathe { from { box-shadow: 0 0 10px rgba(236, 72, 153, 0.2); } to { box-shadow: 0 0 25px rgba(236, 72, 153, 0.6); } }
         .timeline-container::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: #fbcfe8; transform: translateX(-50%); }
         @media (max-width: 768px) { .timeline-container::before { left: 20px; } }
+        .lyric-line { transition: all 0.3s ease; color: #9ca3af; }
+        .lyric-line.active { color: #db2777; font-weight: bold; transform: scale(1.05); }
+        .lyric-word { transition: color 0.1s; }
+        .lyric-word.active { color: #db2777; text-shadow: 0 0 8px rgba(219, 39, 119, 0.4); }
     </style>
 </head>
 <body class="text-gray-800 overflow-hidden" id="main-body">
@@ -51,6 +55,8 @@
             <div class="flex space-x-6 overflow-x-auto">
                 <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap">小俠寫真館</button>
                 <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">相片總覽</button>
+                <button onclick="switchTab('projects')" id="tab-projects" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">其他企劃</button>
+                <button onclick="switchTab('music')" id="tab-music" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">唱片珍藏房</button>
                 <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">交換日記</button>
             </div>
         </header>
@@ -111,6 +117,24 @@
                 </div>
                 <div id="overview-grid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
                     </div>
+            </div>
+        </div>
+
+        <div id="content-projects" class="tab-content">
+            <div class="glass p-6 rounded-2xl min-h-[600px]">
+                <h2 class="text-xl font-bold text-gray-800 mb-6 border-b pb-4">✨ 大俠的特別企劃 (藝廊)</h2>
+                <div id="projects-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <p class="col-span-full text-center text-gray-400 py-10">讀取中...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-music" class="tab-content">
+            <div class="glass p-6 md:p-10 rounded-2xl min-h-[600px]">
+                <h2 class="text-2xl font-bold text-gray-800 mb-6 text-center serif border-b pb-4">🎵 小俠專屬情歌點唱機</h2>
+                <div id="music-container" class="max-w-2xl mx-auto space-y-8">
+                    <p class="text-center text-gray-400 py-10">載入唱片庫中...</p>
+                </div>
             </div>
         </div>
 
@@ -187,7 +211,7 @@
         function switchTab(tab) {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('content-' + tab).classList.add('active');
-            ['gallery', 'overview', 'diary'].forEach(t => {
+            ['gallery', 'overview', 'projects', 'music', 'diary'].forEach(t => {
                 const btn = document.getElementById('tab-' + t);
                 btn.className = (t === tab) 
                     ? "text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap" 
@@ -271,23 +295,24 @@
                     <button onclick="changePhoto(1)" class="absolute right-2 top-1/2 -translate-y-1/2 bg-black/50 text-white p-2 rounded-full hover:bg-pink-500 transition ${nextHidden}"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></button>
                 </div>
                 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div class="md:col-span-2 space-y-4">
-                        <div class="border-l-4 border-gray-300 pl-4">
-                            <h4 class="text-sm font-bold text-gray-500 mb-1">歷史考證</h4>
-                            <p class="text-gray-700 leading-relaxed serif">${photo.event}</p>
-                        </div>
-                        <div class="bg-pink-50 p-4 rounded-lg">
-                            <h4 class="text-sm font-bold text-pink-500 mb-1">構圖發想</h4>
-                            <p class="text-sm text-gray-700">${photo.composition}</p>
-                        </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <div class="border-l-4 border-pink-300 pl-4 bg-white/40 p-3 rounded shadow-sm">
+                        <h4 class="text-sm font-bold text-gray-500 mb-1">歷史考證</h4>
+                        <p class="text-gray-700 leading-relaxed serif text-sm">${photo.event}</p>
                     </div>
-                    
-                    <div class="md:col-span-1 bg-white p-5 rounded-xl border border-pink-100 shadow-inner flex flex-col justify-center">
-                        <div class="text-pink-400 mb-2"><svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/></svg></div>
-                        <p class="text-lg text-gray-800 font-bold leading-relaxed">"${photo.message}"</p>
-                        <p class="text-xs text-gray-400 mt-4 text-right">— 小俠的心境：${photo.mood}</p>
+                    <div class="bg-pink-50 p-3 rounded shadow-sm">
+                        <h4 class="text-sm font-bold text-pink-500 mb-1">構圖發想</h4>
+                        <p class="text-sm text-gray-700">${photo.composition}</p>
                     </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-xl border border-pink-100 shadow-md">
+                    <div class="flex items-center mb-4 border-b border-pink-50 pb-2">
+                        <span class="text-2xl mr-2">💌</span>
+                        <h4 class="text-lg font-bold text-pink-600 serif">小俠的交換日記與留言</h4>
+                    </div>
+                    <p class="text-gray-800 font-bold leading-relaxed whitespace-pre-wrap">${photo.message}</p>
+                    <p class="text-xs text-gray-400 mt-4 text-right">— 小俠的心境：${photo.mood}</p>
                 </div>
             `;
         }
@@ -511,6 +536,112 @@
             });
             timeline.innerHTML = htmlContent;
         }
+        // 🌟 初始化讀取擴充
+        const originalUnlock = unlockVault;
+        unlockVault = function() {
+            originalUnlock();
+            loadProjectsAndMusic();
+        };
+
+        let musicData = [];
+
+        async function loadProjectsAndMusic() {
+            try {
+                const resMusic = await fetch('/api/music');
+                musicData = await resMusic.json();
+                renderMusic();
+            } catch (e) {
+                console.error("Music load error", e);
+            }
+            renderProjects();
+        }
+
+        function renderProjects() {
+            const grid = document.getElementById('projects-grid');
+            const projects = allPhotos.filter(p => p.type === 'project');
+            
+            if (projects.length === 0) {
+                grid.innerHTML = '<p class="col-span-full text-center text-gray-400 py-10">目前還沒有外部企劃喔！在 Discord 使用 !upload_project 上傳。</p>';
+                return;
+            }
+
+            grid.innerHTML = projects.map(p => `
+                <div class="relative rounded-xl overflow-hidden shadow-md group cursor-pointer border border-gray-100" onclick="openGalleryLightbox('${p.local_url || p.image_url}')">
+                    <img src="${p.local_url || p.image_url}" class="w-full h-72 object-cover group-hover:scale-105 transition duration-500">
+                    <div class="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition duration-300 flex items-end p-4">
+                        <p class="text-white text-sm font-bold">${p.message}</p>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 過濾掉主展廳的 project
+        const originalFilter = filterGallery;
+        filterGallery = function() {
+            const keyword = document.getElementById('gallery-search').value.toLowerCase();
+            filteredPhotos = allPhotos.filter(p => p.type !== 'project' && (
+                p.topic.toLowerCase().includes(keyword) || 
+                p.event.toLowerCase().includes(keyword) ||
+                p.publish_date.includes(keyword)
+            ));
+            currentIndex = 0; 
+            renderMainDisplay();
+            renderTimelineList();
+        };
+
+        // 🌟 動態 KTV 播放器邏輯
+        function renderMusic() {
+            const container = document.getElementById('music-container');
+            if(musicData.length === 0) {
+                container.innerHTML = '<p class="text-center text-gray-400 py-10">目前還沒有專屬情歌，讓大俠多累積點愛意值吧！</p>';
+                return;
+            }
+
+            container.innerHTML = musicData.map((song, index) => {
+                const hasKtv = song.timestamped_lyrics && song.timestamped_lyrics.length > 0;
+                
+                let lyricsHtml = '';
+                if (hasKtv) {
+                    lyricsHtml = song.timestamped_lyrics.map((w, i) => 
+                        `<span id="word-${index}-${i}" class="lyric-word" data-start="${w.startS}" data-end="${w.endS}">${w.word.replace(/\\n/g, '<br>')} </span>`
+                    ).join('');
+                } else {
+                    lyricsHtml = `<p class="whitespace-pre-wrap text-sm text-gray-600">${song.lyrics}</p>`;
+                }
+
+                return `
+                <div class="bg-white/80 p-6 rounded-xl border border-pink-100 shadow-sm mb-6">
+                    <h3 class="text-xl font-bold text-pink-600 mb-2">💿 ${song.title}</h3>
+                    <p class="text-xs text-gray-400 mb-4">發行時間: ${song.publish_date}</p>
+                    
+                    <audio id="audio-${index}" src="${song.audio_url}" controls class="w-full mb-6 outline-none" 
+                           ${hasKtv ? `ontimeupdate="updateKtvLyrics(${index}, this.currentTime)"` : ''}></audio>
+                    
+                    <div class="bg-gray-50 p-6 rounded-lg text-center max-h-64 overflow-y-auto font-serif leading-loose" id="lyrics-box-${index}">
+                        ${lyricsHtml}
+                    </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        window.updateKtvLyrics = function(songIndex, currentTime) {
+            const song = musicData[songIndex];
+            if(!song.timestamped_lyrics) return;
+
+            song.timestamped_lyrics.forEach((w, i) => {
+                const span = document.getElementById(`word-${songIndex}-${i}`);
+                if(span) {
+                    if (currentTime >= w.startS && currentTime <= w.endS + 0.5) {
+                        span.classList.add('active');
+                        // 簡單的自動滾動邏輯
+                        if(i % 5 === 0) span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    } else {
+                        span.classList.remove('active');
+                    }
+                }
+            });
+        };
     </script>
 </body>
 </html>

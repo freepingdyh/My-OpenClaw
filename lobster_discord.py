@@ -262,6 +262,20 @@ async def get_diary():
 @api_app.get("/status")
 async def get_status(): return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
 
+@api_app.get("/api/music")
+async def get_music():
+    """提供前端讀取唱片珍藏房的資料"""
+    try:
+        music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
+        if os.path.exists(music_path):
+            async with aiofiles.open(music_path, mode='r', encoding='utf-8') as f:
+                content = await f.read()
+                return json.loads(content)
+        return []
+    except Exception as e:
+        print(f"Error reading music data: {e}")
+        return []
+
 from fastapi import Request
 
 @api_app.post("/api/suno/callback")
@@ -269,7 +283,7 @@ async def suno_callback(request: Request):
     try:
         data = await request.json()
         if data.get("code") == 200 and data.get("data", {}).get("callbackType") == "complete":
-            task_id = data["data"]["task_id"]
+            task_id = data["data"]["taskId"]
             songs = data["data"]["data"]
             
             if task_id in suno_tasks:
@@ -280,20 +294,55 @@ async def suno_callback(request: Request):
                     song = songs[0] 
                     audio_url = song.get("audio_url")
                     song_title = song.get("title")
-                    # 🌟 這裡改成抓取完整歌詞，並處理換行
+                    audio_id = song.get("id")
                     full_lyrics = song.get("prompt", "（小俠忘記把歌詞本帶出來了...）").strip()
                     
-                    # 🌟 核心進化：將外部網址轉為 Discord 實體檔案
+                    timestamped_lyrics = []
+                    # 🌟 呼叫 Suno 隱藏 API 獲取時間軸歌詞
+                    if audio_id:
+                        try:
+                            lrc_url = "https://api.sunoapi.org/api/v1/generate/get-timestamped-lyrics"
+                            lrc_payload = {"taskId": task_id, "audioId": audio_id}
+                            lrc_headers = {"Authorization": f"Bearer {os.environ.get('SUNO_API_KEY')}", "Content-Type": "application/json"}
+                            async with aiohttp.ClientSession() as lrc_session:
+                                async with lrc_session.post(lrc_url, json=lrc_payload, headers=lrc_headers, timeout=30) as lrc_resp:
+                                    if lrc_resp.status == 200:
+                                        lrc_data = await lrc_resp.json()
+                                        if lrc_data.get("code") == 200 and "alignedWords" in lrc_data.get("data", {}):
+                                            timestamped_lyrics = lrc_data["data"]["alignedWords"]
+                                            print("✅ 成功獲取動態歌詞時間軸！")
+                        except Exception as lrc_e:
+                            print(f"⚠️ 獲取動態歌詞失敗: {lrc_e}")
+
+                    # 🌟 儲存到 xiaoxia_music.json
+                    music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
+                    music_db = []
+                    if os.path.exists(music_path):
+                        with open(music_path, "r", encoding="utf-8") as f:
+                            music_db = json.load(f)
+                    
+                    music_db.insert(0, {
+                        "id": audio_id,
+                        "title": song_title,
+                        "audio_url": audio_url,
+                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                        "lyrics": full_lyrics,
+                        "timestamped_lyrics": timestamped_lyrics
+                    })
+                    
+                    with open(music_path, "w", encoding="utf-8") as f:
+                        json.dump(music_db, f, ensure_ascii=False, indent=2)
+                    
+                    # 傳送 Discord 訊息
                     async with aiohttp.ClientSession() as session:
                         async with session.get(audio_url, timeout=120) as resp:
                             if resp.status == 200:
                                 audio_data = await resp.read()
                                 music_file = discord.File(io.BytesIO(audio_data), filename=f"{song_title}.mp3")
                                 
-                                # 🌟 建立帶有歌詞的精美 Embed
                                 embed = discord.Embed(
                                     title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
-                                    description=f"### 📝 歌詞本\n{full_lyrics}\n\n*(這首歌已永久保存在 Discord 金庫)*", 
+                                    description=f"### 📝 歌詞本\n{full_lyrics}\n\n*(這首歌已永久保存在 Discord 金庫與雲端別墅的唱片房中)*", 
                                     color=0xffb6c1
                                 )
                                 
@@ -304,11 +353,10 @@ async def suno_callback(request: Request):
                                 )
                                 print(f"✅ 情歌實體檔案已成功發送至頻道！")
                     
-                    # 🌟 記憶回填手術：讓小俠記得歌詞內容
+                    # 記憶回填
                     profile = load_profile()
                     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
-                    # 抓取 prompt (歌詞) 的前 50 字
-                    song_lyrics_snippet = song.get("prompt", "").replace("\n", " ")[:50]
+                    song_lyrics_snippet = full_lyrics.replace("\n", " ")[:50]
                     new_memory = f"我今天為大俠唱了情歌《{song_title}》，歌詞裡唱著「{song_lyrics_snippet}...」，這是我滿滿的心意。❤️"
                     profile.setdefault("recent_context", []).append({"text": new_memory, "added_at": today_str})
                     save_profile(profile)
@@ -1820,6 +1868,51 @@ async def defrag_memory(ctx):
 async def test_morning(ctx):
     await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
     await _run_legacy_morning(ctx.channel)
+
+# 🌟 擴建：其他企劃 (外部圖片上傳)
+@architect_bot.command(name="upload_project")
+async def upload_project(ctx, *, description: str = "未命名企劃"):
+    if not ctx.message.attachments:
+        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時，於留言處輸入 `!upload_project [圖片說明]`")
+        return
+
+    attachment = ctx.message.attachments[0]
+    if not attachment.content_type.startswith('image/'):
+        await ctx.send("❌ 這好像不是圖片檔喔！")
+        return
+
+    await ctx.send("📥 正在將您的企劃作品收入金庫中...")
+    
+    try:
+        # 下載圖片
+        image_data = await attachment.read()
+        filename = f"project_{uuid.uuid4().hex[:8]}.jpg"
+        save_path = os.path.join(OUTPUT_DIR, filename)
+        
+        with open(save_path, "wb") as f:
+            f.write(image_data)
+
+        # 存入資料庫，並打上 type: project 標籤
+        photo_entry = {
+            "id": str(uuid.uuid4()),
+            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            "image_url": f"https://xiaoxia0320.zeabur.app/gallery/{filename}",
+            "local_url": f"https://xiaoxia0320.zeabur.app/gallery/{filename}",
+            "topic": f"【外部企劃】{description}",
+            "event": "這是學長準備的特別企劃喔！",
+            "composition": "",
+            "mood": "",
+            "message": description,
+            "type": "project" # 關鍵標籤
+        }
+        
+        photos_db = load_memory()
+        photos_db.insert(0, photo_entry)
+        save_memory(photos_db)
+        
+        await ctx.send(f"✅ 成功收入其他企劃！作品說明：{description}")
+    except Exception as e:
+        await ctx.send(f"❌ 收藏失敗：{e}")
 
 # ==========================================
 # 📻 擴充功能：茶水間搞怪廣播電台整合
