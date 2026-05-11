@@ -1981,6 +1981,46 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
     except Exception as e:
         await ctx.send(f"❌ 收藏失敗：{e}")
 
+
+@architect_bot.command(name='sync_lyrics')
+async def sync_lyrics(ctx):
+    await ctx.send("⚙️ 啟動時間軸同步掃描！正在尋找缺少動態歌詞的唱片...")
+    try:
+        music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
+        if not os.path.exists(music_path):
+            await ctx.send("❓ 金庫裡還沒有唱片喔！")
+            return
+            
+        with open(music_path, "r", encoding="utf-8") as f:
+            music_db = json.load(f)
+            
+        updated_count = 0
+        for song in music_db:
+            if not song.get("timestamped_lyrics") and song.get("id"):
+                audio_id = song["id"]
+                # 因為我們沒有存 taskId，但 Suno API 其實只要 audioId 就能抓！
+                # 這裡 taskId 隨便塞個字串騙過 API 檢查即可
+                lrc_url = "https://api.sunoapi.org/api/v1/generate/get-timestamped-lyrics"
+                lrc_payload = {"taskId": "sync_recovery", "audioId": audio_id}
+                lrc_headers = {"Authorization": f"Bearer {os.environ.get('SUNO_API_KEY')}", "Content-Type": "application/json"}
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(lrc_url, json=lrc_payload, headers=lrc_headers) as resp:
+                        if resp.status == 200:
+                            lrc_data = await resp.json()
+                            if lrc_data.get("code") == 200 and lrc_data.get("data", {}).get("alignedWords"):
+                                song["timestamped_lyrics"] = lrc_data["data"]["alignedWords"]
+                                updated_count += 1
+                                
+        if updated_count > 0:
+            with open(music_path, "w", encoding="utf-8") as f:
+                json.dump(music_db, f, ensure_ascii=False, indent=2)
+            await ctx.send(f"✅ 同步完成！成功修復了 {updated_count} 首歌的動態歌詞！請重整網頁查看。")
+        else:
+            await ctx.send("✅ 掃描完畢，所有歌曲都已經有動態歌詞，或是 API 尚未生成完畢。")
+    except Exception as e:
+        await ctx.send(f"❌ 同步失敗：{e}")
+
 # ==========================================
 # 📻 擴充功能：茶水間搞怪廣播電台整合
 # ==========================================

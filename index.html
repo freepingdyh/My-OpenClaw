@@ -130,10 +130,35 @@
         </div>
 
         <div id="content-music" class="tab-content">
-            <div class="glass p-6 md:p-10 rounded-2xl min-h-[600px]">
+            <div class="glass p-6 rounded-2xl min-h-[600px]">
                 <h2 class="text-2xl font-bold text-gray-800 mb-6 text-center serif border-b pb-4">🎵 小俠專屬情歌點唱機</h2>
-                <div id="music-container" class="max-w-2xl mx-auto space-y-8">
-                    <p class="text-center text-gray-400 py-10">載入唱片庫中...</p>
+                
+                <div class="flex flex-col md:flex-row gap-6">
+                    <div class="w-full md:w-1/3 bg-white/80 rounded-xl border border-pink-100 shadow-sm flex flex-col h-[600px]">
+                        <div class="p-4 border-b border-pink-100 font-bold text-pink-600 flex justify-between items-center bg-pink-50 rounded-t-xl">
+                            <span>📑 我的歌庫</span>
+                            <span id="song-count" class="text-xs text-gray-500 bg-white px-2 py-1 rounded-full">0 首</span>
+                        </div>
+                        <div class="overflow-y-auto flex-1 p-2 space-y-1" id="playlist-container">
+                            <p class="text-center text-gray-400 py-10">載入唱片庫中...</p>
+                        </div>
+                    </div>
+
+                    <div class="w-full md:w-2/3 bg-white/80 rounded-xl border border-pink-100 shadow-sm flex flex-col h-[600px] p-6 relative">
+                        <div id="player-empty-state" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400 bg-white/90 z-10 rounded-xl">
+                            <svg class="w-16 h-16 mb-4 text-pink-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"></path></svg>
+                            <p>請從左側選擇一首歌曲播放</p>
+                        </div>
+
+                        <h3 id="now-playing-title" class="text-2xl font-bold text-pink-600 mb-1 truncate">尚未選擇歌曲</h3>
+                        <p id="now-playing-date" class="text-xs text-gray-400 mb-4">發行時間: -</p>
+                        
+                        <audio id="main-audio-player" controls class="w-full mb-6 outline-none shadow-sm rounded-full" 
+                               onended="playNextInList()" ontimeupdate="updateMainKtvLyrics(this.currentTime)"></audio>
+                        
+                        <div class="bg-gray-50 flex-1 rounded-lg p-6 text-center overflow-y-auto font-serif leading-loose text-lg border border-gray-100 shadow-inner relative scroll-smooth" id="main-lyrics-box">
+                            </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -595,76 +620,128 @@
             renderTimelineList();
         };
 
-        // 🌟 動態 KTV 播放器邏輯
+        // 🌟 專業版播放清單引擎 (支援自訂勾選與記憶)
+        let currentSongIndex = -1;
+
         function renderMusic() {
-            const container = document.getElementById('music-container');
+            const container = document.getElementById('playlist-container');
+            document.getElementById('song-count').innerText = `${musicData.length} 首`;
+
             if(musicData.length === 0) {
-                container.innerHTML = '<p class="text-center text-gray-400 py-10">目前還沒有專屬情歌，讓大俠多累積點愛意值吧！</p>';
+                container.innerHTML = '<p class="text-center text-gray-400 py-10 text-sm">目前還沒有專屬情歌喔！</p>';
                 return;
             }
 
-            container.innerHTML = musicData.map((song, index) => {
-                const hasKtv = song.timestamped_lyrics && song.timestamped_lyrics.length > 0;
-                
-                let lyricsHtml = '';
-                if (hasKtv) {
-                    lyricsHtml = song.timestamped_lyrics.map((w, i) => 
-                        `<span id="word-${index}-${i}" class="lyric-word" data-start="${w.startS}" data-end="${w.endS}">${w.word.replace(/\\n/g, '<br>')} </span>`
-                    ).join('');
-                } else {
-                    lyricsHtml = `<p class="whitespace-pre-wrap text-sm text-gray-600">${song.lyrics}</p>`;
-                }
+            // 讀取瀏覽器記憶中的勾選設定
+            const savedPrefs = JSON.parse(localStorage.getItem('xiaoxia_music_prefs') || '{}');
 
+            container.innerHTML = musicData.map((song, index) => {
+                // 預設是打勾的，除非記憶裡明確寫著 false (被取消勾選)
+                const isEnabled = savedPrefs[song.id] !== false; 
+                
                 return `
-                <div class="bg-white/80 p-6 rounded-xl border border-pink-100 shadow-sm mb-6">
-                    <h3 class="text-xl font-bold text-pink-600 mb-2">💿 ${song.title}</h3>
-                    <p class="text-xs text-gray-400 mb-4">發行時間: ${song.publish_date}</p>
-                    
-                    <audio id="audio-${index}" src="${song.audio_url}" controls class="w-full mb-6 outline-none" 
-                           ${hasKtv ? `ontimeupdate="updateKtvLyrics(${index}, this.currentTime)"` : ''}
-                           onended="playNextSong(${index})"></audio>
-                    
-                    <div class="bg-gray-50 p-6 rounded-lg text-center max-h-64 overflow-y-auto font-serif leading-loose" id="lyrics-box-${index}">
-                        ${lyricsHtml}
+                <div id="playlist-row-${index}" class="group flex justify-between items-center p-2 rounded-lg hover:bg-pink-50 transition border border-transparent hover:border-pink-100">
+                    <div class="flex items-center gap-3 w-full overflow-hidden">
+                        <div class="flex-shrink-0 cursor-pointer p-1 z-10" onclick="toggleSongPrefs('${song.id}', ${index}, event)" title="加入或移出自動播放清單">
+                            <input type="checkbox" id="check-${index}" ${isEnabled ? 'checked' : ''} 
+                                   class="w-4 h-4 text-pink-500 rounded border-pink-200 focus:ring-pink-400 cursor-pointer pointer-events-none">
+                        </div>
+                        <div class="flex flex-col flex-1 truncate cursor-pointer" onclick="playSong(${index})">
+                            <span class="font-bold text-gray-700 text-sm truncate group-hover:text-pink-600">${song.title}</span>
+                            <span class="text-[10px] text-gray-400">${song.publish_date.split(' ')[0]}</span>
+                        </div>
+                    </div>
+                    <div class="text-xs text-pink-400 bg-pink-50 px-2 py-1 rounded-full whitespace-nowrap opacity-0 group-hover:opacity-100 transition cursor-pointer" onclick="playSong(${index})">
+                        ▶ 播放
                     </div>
                 </div>
                 `;
             }).join('');
         }
 
-        window.updateKtvLyrics = function(songIndex, currentTime) {
-            const song = musicData[songIndex];
-            if(!song.timestamped_lyrics) return;
+        // 🌟 處理勾選邏輯與記憶儲存
+        window.toggleSongPrefs = function(songId, index, event) {
+            event.stopPropagation(); // 防止點到勾選框時觸發整排的播放
+            const checkbox = document.getElementById(`check-${index}`);
+            checkbox.checked = !checkbox.checked;
+            
+            // 存入瀏覽器記憶
+            const savedPrefs = JSON.parse(localStorage.getItem('xiaoxia_music_prefs') || '{}');
+            savedPrefs[songId] = checkbox.checked;
+            localStorage.setItem('xiaoxia_music_prefs', JSON.stringify(savedPrefs));
+        };
+
+        window.playSong = function(index) {
+            currentSongIndex = index;
+            const song = musicData[index];
+            
+            document.getElementById('player-empty-state').classList.add('hidden');
+            
+            document.querySelectorAll('[id^="playlist-row-"]').forEach(row => {
+                row.classList.remove('bg-pink-100', 'border-pink-200');
+            });
+            document.getElementById(`playlist-row-${index}`).classList.add('bg-pink-100', 'border-pink-200');
+
+            document.getElementById('now-playing-title').innerText = `💿 ${song.title}`;
+            document.getElementById('now-playing-date').innerText = `發行時間: ${song.publish_date}`;
+            
+            const player = document.getElementById('main-audio-player');
+            player.src = song.audio_url;
+            player.play();
+
+            const lyricsBox = document.getElementById('main-lyrics-box');
+            const hasKtv = song.timestamped_lyrics && song.timestamped_lyrics.length > 0;
+            
+            if (hasKtv) {
+                lyricsBox.innerHTML = song.timestamped_lyrics.map((w, i) => 
+                    `<span id="ktv-word-${i}" class="lyric-word inline-block mx-0.5" data-start="${w.startS}" data-end="${w.endS}">${w.word.replace(/\\n/g, '<br>')} </span>`
+                ).join('');
+            } else {
+                lyricsBox.innerHTML = `<p class="whitespace-pre-wrap text-gray-600 text-base my-auto">${song.lyrics}</p>`;
+            }
+        };
+
+        window.updateMainKtvLyrics = function(currentTime) {
+            if (currentSongIndex === -1) return;
+            const song = musicData[currentSongIndex];
+            if (!song.timestamped_lyrics) return;
+
+            let activeElement = null;
 
             song.timestamped_lyrics.forEach((w, i) => {
-                const span = document.getElementById(`word-${songIndex}-${i}`);
-                if(span) {
-                    if (currentTime >= w.startS && currentTime <= w.endS + 0.5) {
+                const span = document.getElementById(`ktv-word-${i}`);
+                if (span) {
+                    if (currentTime >= w.startS && currentTime <= (w.endS + 0.3)) {
                         span.classList.add('active');
-                        // 簡單的自動滾動邏輯
-                        if(i % 5 === 0) span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        activeElement = span;
                     } else {
                         span.classList.remove('active');
                     }
                 }
             });
+
+            if (activeElement) {
+                const container = document.getElementById('main-lyrics-box');
+                const offset = activeElement.offsetTop - (container.clientHeight / 2) + (activeElement.clientHeight / 2);
+                container.scrollTo({ top: offset, behavior: 'smooth' });
+            }
         };
 
-        // 🌟 新增：自動播放下一首歌的接力邏輯
-        window.playNextSong = function(currentIndex) {
-            const nextIndex = currentIndex + 1;
-            const nextAudio = document.getElementById(`audio-${nextIndex}`);
+        // 🌟 智慧判斷下一首歌 (自動跳過未勾選的歌曲)
+        window.playNextInList = function() {
+            let nextIndex = currentSongIndex + 1;
             
-            if (nextAudio) {
-                console.log(`即將自動播放下一首：第 ${nextIndex} 首`);
-                // 1. 自動播放下一首
-                nextAudio.play();
-                
-                // 2. 畫面平滑滾動，讓下一首歌的卡片置中對齊
-                nextAudio.parentElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            } else {
-                console.log("這已經是最後一首歌囉！");
+            // 往下尋找下一個「有打勾」的歌
+            while (nextIndex < musicData.length) {
+                const checkbox = document.getElementById(`check-${nextIndex}`);
+                if (checkbox && checkbox.checked) {
+                    playSong(nextIndex);
+                    return;
+                }
+                nextIndex++; // 如果沒打勾，就繼續往下找
             }
+            
+            console.log("已播放至清單底部！");
         };
 
     </script>
