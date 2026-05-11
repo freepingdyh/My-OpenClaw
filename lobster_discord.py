@@ -602,22 +602,22 @@ async def process_diary_reply(channel, target_date=None):
     if chat_context:
         try:
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
-            # 🌟 1. 嚴格分類的 Prompt (新增 xiaoxia_new_traits)
-            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (防字面翻譯、防敷衍)
+            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (防字面翻譯、防敷衍、強制抓取服裝)
             mem_prompt = f"""
-            請以「高情商人類心理學家」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
+            請以「高情商人類心理學家與首席視覺總監」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
 
             【⚠️ 核心語意分析守則】：
-            1. 判讀弦外之音：請敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話（例如：小俠說「你好壞」通常是開心的嬌嗔，而非真正的指責；大俠說「拿妳沒辦法」是寵溺而非無奈）。
-            2. 辨識真實意圖：嚴格區分「玩笑話」與「真實喜好/承諾」。只有雙方認真表達的喜好、地雷，或明確答應的事項才需要紀錄。
-            3. 拒絕碎片化：紀錄必須像故事綱要一樣具備「完整人事時地物與因果關係」，絕對不可只寫單字或敷衍的短句。
+            1. 判讀弦外之音：敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話。
+            2. 👗 視覺與服裝約定 (CRITICAL)：只要大俠在對話中有明確指定（或詢問）服裝款式、顏色（例如：淺綠色內衣褲、紅色比基尼等），且小俠答應，必須 100% 完整寫入 xiaoxia_promises 中，絕對不可遺漏！這是最高優先級！
+            3. 辨識真實意圖：嚴格區分「玩笑話」與「真實喜好/承諾」。
+            4. 拒絕碎片化：紀錄必須具備完整人事時地物，嚴禁只寫單字（例如不可寫「原型食物」，必須寫「大俠特地為小俠準備了包含雞肉等原型食物的健康早餐」）。
 
             請在深層理解對話情境後，以純 JSON 格式回傳以下結構（若該項目無新事項，則保持陣列為空 []）：
             {{
-                "daxia_new_traits": ["嚴格限制：必須包含情境！只能寫『大俠本人』的真實喜好、地雷或習慣。例如：大俠今天看了海邊照片後，表示其實偶爾看清純照也很好。"],
-                "xiaoxia_new_traits": ["嚴格限制：只能寫『小俠』自己的性格特質或深層情緒反應。例如：小俠被大俠逗弄後，表現出傲嬌但其實很高興的反應。"],
-                "xiaoxia_promises": ["嚴格限制：必須有具體事件與細節！只能寫『小俠』明確答應大俠的事。例如：小俠承諾今晚的交換日記會給大俠看紅色比基尼『若隱若現』的特別角度特寫照。"],
-                "shared_knowledge": ["嚴格限制：雙方認真討論過的新知識、讀書心得或價值觀。例如：雙方討論了時間管理的四象限法則，大俠認為..."],
+                "daxia_new_traits": ["嚴格限制：必須包含情境！例如：大俠今天表示喜歡看小俠穿淺綠色的內衣褲。"],
+                "xiaoxia_new_traits": ["嚴格限制：只能寫『小俠』自己的性格特質或深層情緒反應。"],
+                "xiaoxia_promises": ["嚴格限制：必須有具體事件、服裝顏色與細節！例如：小俠承諾今晚的交換日記會穿上大俠指定的『淺綠色內衣褲』給大俠驚喜。"],
+                "shared_knowledge": ["嚴格限制：雙方認真討論過的新知識。"],
                 "recent_context": ["今天發生的短期重要事件，需包含雙方的情緒狀態與互動結果。"]
             }}
             【今日對話】：\n{chat_context}
@@ -627,7 +627,9 @@ async def process_diary_reply(channel, target_date=None):
                 contents=mem_prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            new_memory = json.loads(mem_resp.text.strip())
+            # 🌟 修復：剝除 Markdown 標籤，防止 JSON 解析崩潰 (解決漏接記憶的元凶)
+            clean_mem_text = mem_resp.text.replace("```json", "").replace("```", "").strip()
+            new_memory = json.loads(clean_mem_text, strict=False)
             
             # 🌟 2. 記憶刷新演算法 (重複則更新日期)
             def append_memory(target_list, new_texts):
@@ -718,7 +720,7 @@ async def process_diary_reply(channel, target_date=None):
             {{
               "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
               "affection_reason": "加分原因(50字內)",
-              "extracted_preferences": [],
+              "extracted_preferences": ["嚴格限制：只記錄與服裝癖好、特殊攝影要求相關的『完整句子』，禁止記錄食物或單字。無則保持空陣列 []"],
               "reply_to_daxia": "...",
               "xiaoxia_diary": "...",
               "spiciness": "C",

@@ -621,7 +621,8 @@
                     <p class="text-xs text-gray-400 mb-4">發行時間: ${song.publish_date}</p>
                     
                     <audio id="audio-${index}" src="${song.audio_url}" controls class="w-full mb-6 outline-none" 
-                           ${hasKtv ? `ontimeupdate="updateKtvLyrics(${index}, this.currentTime)"` : ''}></audio>
+                           ${hasKtv ? `ontimeupdate="updateKtvLyrics(${index}, this.currentTime)"` : ''}
+                           onended="playNextSong(${index})"></audio>
                     
                     <div class="bg-gray-50 p-6 rounded-lg text-center max-h-64 overflow-y-auto font-serif leading-loose" id="lyrics-box-${index}">
                         ${lyricsHtml}
@@ -648,6 +649,24 @@
                 }
             });
         };
+
+        // 🌟 新增：自動播放下一首歌的接力邏輯
+        window.playNextSong = function(currentIndex) {
+            const nextIndex = currentIndex + 1;
+            const nextAudio = document.getElementById(`audio-${nextIndex}`);
+            
+            if (nextAudio) {
+                console.log(`即將自動播放下一首：第 ${nextIndex} 首`);
+                // 1. 自動播放下一首
+                nextAudio.play();
+                
+                // 2. 畫面平滑滾動，讓下一首歌的卡片置中對齊
+                nextAudio.parentElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+                console.log("這已經是最後一首歌囉！");
+            }
+        };
+
     </script>
 </body>
 </html>
