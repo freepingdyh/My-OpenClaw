@@ -270,7 +270,10 @@ async def get_music():
         if os.path.exists(music_path):
             async with aiofiles.open(music_path, mode='r', encoding='utf-8') as f:
                 content = await f.read()
-                return json.loads(content)
+                music_db = json.loads(content)
+                # 🌟 修復：自動過濾掉之前因為 API 提早回傳而存入的「空音檔」壞紀錄
+                valid_music = [m for m in music_db if m.get("audio_url", "").strip() != ""]
+                return valid_music
         return []
     except Exception as e:
         print(f"Error reading music data: {e}")
@@ -286,10 +289,17 @@ async def suno_callback(request: Request):
 
         if data.get("code") == 200:
             inner_data = data.get("data", {})
+            
+            # 🌟 核心修復：攔截半成品！如果狀態不是 complete，直接略過等下一次
+            if isinstance(inner_data, dict):
+                cb_type = inner_data.get("callbackType")
+                if cb_type and cb_type != "complete":
+                    print(f"⏳ 音樂正在生成中 (目前進度: {cb_type})... 忽略本次 Callback，繼續等待！")
+                    return {"status": "ignored"}
+                    
             task_id = None
             songs = []
 
-            # 🌟 彈性相容多種 Suno API 回傳結構
             if isinstance(inner_data, dict):
                 task_id = inner_data.get("taskId") or data.get("taskId")
                 songs = inner_data.get("data", [])
@@ -297,12 +307,17 @@ async def suno_callback(request: Request):
                 task_id = data.get("taskId")
                 songs = inner_data
 
-            # 🌟 暴力保底：如果 API 真的把 taskId 吃了，就抓最後一個任務
             if not task_id and suno_tasks:
                 task_id = list(suno_tasks.keys())[-1]
                 print(f"⚠️ API 未回傳 taskId，啟用暴力盲猜: {task_id}")
 
             if task_id in suno_tasks:
+                # 🌟 終極防線：即使是 complete，也必須確認有音檔網址才放行
+                if not songs or not songs[0].get("audio_url", "").strip():
+                    print("⚠️ 攔截到無效空音檔，退回處理...")
+                    return {"status": "waiting"}
+                    
+                # 確認有音檔了，才把任務註銷！
                 channel_id = suno_tasks.pop(task_id)
                 channel = girlfriend_bot.get_channel(channel_id)
                 
