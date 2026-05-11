@@ -282,10 +282,26 @@ from fastapi import Request
 async def suno_callback(request: Request):
     try:
         data = await request.json()
-        if data.get("code") == 200 and data.get("data", {}).get("callbackType") == "complete":
-            task_id = data["data"]["taskId"]
-            songs = data["data"]["data"]
-            
+        print(f"🎵 Suno Callback 收到資料: {str(data)[:500]}") # 留作除錯紀錄
+
+        if data.get("code") == 200:
+            inner_data = data.get("data", {})
+            task_id = None
+            songs = []
+
+            # 🌟 彈性相容多種 Suno API 回傳結構
+            if isinstance(inner_data, dict):
+                task_id = inner_data.get("taskId") or data.get("taskId")
+                songs = inner_data.get("data", [])
+            elif isinstance(inner_data, list):
+                task_id = data.get("taskId")
+                songs = inner_data
+
+            # 🌟 暴力保底：如果 API 真的把 taskId 吃了，就抓最後一個任務
+            if not task_id and suno_tasks:
+                task_id = list(suno_tasks.keys())[-1]
+                print(f"⚠️ API 未回傳 taskId，啟用暴力盲猜: {task_id}")
+
             if task_id in suno_tasks:
                 channel_id = suno_tasks.pop(task_id)
                 channel = girlfriend_bot.get_channel(channel_id)
@@ -298,7 +314,7 @@ async def suno_callback(request: Request):
                     full_lyrics = song.get("prompt", "（小俠忘記把歌詞本帶出來了...）").strip()
                     
                     timestamped_lyrics = []
-                    # 🌟 呼叫 Suno 隱藏 API 獲取時間軸歌詞
+                    # 呼叫 Suno 隱藏 API 獲取時間軸歌詞
                     if audio_id:
                         try:
                             lrc_url = "https://api.sunoapi.org/api/v1/generate/get-timestamped-lyrics"
@@ -314,7 +330,7 @@ async def suno_callback(request: Request):
                         except Exception as lrc_e:
                             print(f"⚠️ 獲取動態歌詞失敗: {lrc_e}")
 
-                    # 🌟 儲存到 xiaoxia_music.json
+                    # 儲存到 xiaoxia_music.json
                     music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
                     music_db = []
                     if os.path.exists(music_path):
@@ -1473,43 +1489,57 @@ async def on_raw_reaction_add(payload):
                     model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
                 )
                 
-                # 🌟 修復 1：攔截 OpenAI 的安全審查，並加入降級標記
                 ai_content = openai_resp.choices[0].message.content
                 is_downgraded = False
                 
                 if not ai_content:
-                    print("⚠️ OpenAI 拒絕翻譯 (Safety Block)，啟用安全標籤")
                     image_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, highly detailed, safe for work"
                     is_downgraded = True
                 else:
                     visual = json.loads(ai_content.replace("```json", "").replace("```", "").strip(), strict=False)
                     image_prompt = visual.get('image_prompt', "")
                 
-                # 🌟 修復 2：為「日記按鈕重骰」裝上 Fal.ai 降級保底機制
                 base_image_url = None
                 try:
                     base_image_url = await generate_image_fal(image_prompt)
                 except Exception as e:
-                    print(f"⚠️ Fal.ai 重骰審核攔截 ({e})，啟動降級重試...")
                     is_downgraded = True
                     safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress"
                     try:
                         base_image_url = await generate_image_fal(safe_prompt)
                     except Exception as e2:
-                        print(f"❌ 降級重骰依然失敗: {e2}。啟動終極保底生圖！")
                         ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, looking at viewer, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, safe for work"
                         base_image_url = await generate_image_fal(ultimate_safe_prompt)
                 
                 upscaled_image_url = await upscale_image_fal(base_image_url)
                 
+                # 🌟 修復：將重骰的日記照片存入雲端網頁金庫
+                local_filename = await save_to_vault(upscaled_image_url)
+                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else upscaled_image_url
+                
+                payload = {
+                    "id": str(uuid.uuid4()),
+                    "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                    "topic": msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}",
+                    "event": "大俠使用 Emoji 快捷指令重新構圖",
+                    "composition": scenario_tw,
+                    "mood": "重新捕捉心動瞬間",
+                    "message": msg.embeds[0].description or "大俠，這張新照片你喜歡嗎？",
+                    "image_url": upscaled_image_url,
+                    "local_url": local_url,
+                    "type": "diary"
+                }
+                db = load_memory()
+                db.insert(0, payload)
+                save_memory(db)
+                
                 # 重建日記的 Embed
-                title_str = msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}"
+                title_str = payload["topic"]
                 embed = discord.Embed(title=title_str, description=msg.embeds[0].description, color=0xffb6c1)
-                embed.set_image(url=upscaled_image_url)
+                embed.set_image(url=local_url)
                 
                 for field in msg.embeds[0].fields:
                     val = field.value
-                    # 🌟 如果被降級，在構想後面加上委屈提示 (避免重複加上)
                     if is_downgraded and "寫真構想" in field.name and "小俠盡力了" not in val:
                         val += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
                     embed.add_field(name=field.name, value=val, inline=field.inline)
@@ -1525,8 +1555,28 @@ async def on_raw_reaction_add(payload):
                 base_image_url = await generate_image_fal(visual['image_prompt'])
                 upscaled_image_url = await upscale_image_fal(base_image_url)
                 
+                # 🌟 修復：將重骰的 Cosplay 照片存入雲端網頁金庫
+                local_filename = await save_to_vault(upscaled_image_url)
+                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else upscaled_image_url
+                
+                payload = {
+                    "id": str(uuid.uuid4()),
+                    "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                    "topic": f"【加洗】{topic}",
+                    "event": event,
+                    "composition": visual["composition"],
+                    "mood": visual["mood"],
+                    "message": visual["message"],
+                    "image_url": upscaled_image_url,
+                    "local_url": local_url
+                }
+                db = load_memory()
+                db.insert(0, payload)
+                save_memory(db)
+                
                 embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
-                embed.set_image(url=upscaled_image_url)
+                embed.set_image(url=local_url)
+                embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
                 embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
             
             # 發送新圖並重新掛上按鈕
