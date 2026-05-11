@@ -223,7 +223,9 @@
             try {
                 const res = await fetch('/api/photos');
                 allPhotos = await res.json();
-                filteredPhotos = [...allPhotos];
+                
+                // 🌟 修復1：載入時立刻過濾，絕對不讓企劃混進主展廳
+                filteredPhotos = allPhotos.filter(p => p.type !== 'project');
                 
                 loadDatasetData(); 
 
@@ -235,6 +237,10 @@
                 } else {
                     document.getElementById('main-display').innerHTML = '<p class="text-center text-gray-400 py-20">金庫目前空空的，快去 Discord 呼叫小俠吧！</p>';
                 }
+                
+                // 🌟 修復2：確保照片真正下載完畢後，才去渲染企劃藝廊
+                if (typeof renderProjects === "function") renderProjects();
+                
             } catch (e) {
                 console.error(e);
                 document.getElementById('main-display').innerHTML = '<p class="text-center text-red-400 py-20">讀取失敗，請確認 FastAPI 服務是否正常。</p>';
@@ -553,7 +559,7 @@
             } catch (e) {
                 console.error("Music load error", e);
             }
-            renderProjects();
+            // 🌟 修復3：把原本在這裡的 renderProjects() 刪除，避免抓不到資料的空窗期
         }
 
         function renderProjects() {
