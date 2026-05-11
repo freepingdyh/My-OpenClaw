@@ -31,24 +31,24 @@ from fastapi.responses import HTMLResponse
 import aiohttp
 from google.genai import types # 確保有載入 types
 
-# ==========================================
-# 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
-# ==========================================
-import subprocess
-import sys
+# # ==========================================
+# # 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
+# # ==========================================
+# import subprocess
+# import sys
 
-def auto_heal_environment():
-    required_packages = ["pydub"]
-    for pkg in required_packages:
-        try:
-            __import__(pkg)
-        except ImportError:
-            print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-            print(f"✅ {pkg} 強制安裝完成！")
+# def auto_heal_environment():
+#     required_packages = ["pydub"]
+#     for pkg in required_packages:
+#         try:
+#             __import__(pkg)
+#         except ImportError:
+#             print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
+#             subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+#             print(f"✅ {pkg} 強制安裝完成！")
 
-# 程式啟動時立刻執行檢查
-auto_heal_environment()
+# # 程式啟動時立刻執行檢查
+# auto_heal_environment()
 # ==========================================
 
 # ==========================================
@@ -623,8 +623,11 @@ async def process_diary_reply(channel, target_date=None):
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             
             【重要任務與攝影守則】：
-            1. 日記文字分享：分享妳自己今天的生活行程(如烘焙、逛街等，不可與近期活動重複)。同時，必須針對大俠的日記與妳的「承諾清單」給予溫柔、充滿愛意的回應。
-            2. 服裝限制：{season_rule} 即使是知性活動，穿搭也必須性感。
+            1. 日記寫作區分：
+               - `reply_to_daxia`：針對大俠的日記與妳的「承諾清單」給予充滿愛意的回應。妳可以學習大俠的用詞，但請自然表達。
+               - `xiaoxia_diary`：分享妳自己今天的生活行程(如烘焙、逛街等)。
+               - ⚠️【防冗長禁令】：在 `reply_to_daxia` 已經表達過的感動或愛意，【絕對不可】在 `xiaoxia_diary` 再次重複贅述。請確保兩段內容獨立且精簡，避免版面過長。
+            2. "服裝限制：{season_rule} 即使是知性活動，穿搭也必須性感(未必要暴露，重點在於展現身體曲線)。請在寫真構想中多使用「緊身(tight)」、「貼身剪裁(form-fitting)」、「針織(knit)」或「絲質(silk)」等能突顯身材的衣物描述。"
             3. 📸【畫面構想 (scenario) 最高權重法則】：
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼，或操場運動服照...），那麼 `scenario` 必須 **100% 聚焦於兌現該承諾的靜態畫面**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
@@ -693,10 +696,11 @@ async def process_diary_reply(channel, target_date=None):
                 
                 # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
                 try:
-                    # 🌟 升級：讓 Gemini 根據心情決定曲風
+                    # 🌟 升級：強制洗腦神曲風格，嚴禁古風唸歌
                     lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行情歌。
                     [歌詞格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
-                    [曲風決定]：請根據歌詞意境，選擇一個適合的曲風標籤（如：輕快 City Pop、溫柔 Bossa Nova、甚至是充滿活力的 K-Pop 或甜美抒情）。
+                    [寫作風格]：必須像現在最流行的「洗腦抖音神曲」或「K-Pop 中文版」，歌詞要有強烈的【押韻】與【節奏感】，琅琅上口。嚴禁寫成文言文、古詩詞或像在「唸歌」的長篇大論。句子要短，副歌要洗腦！
+                    [曲風決定]：請挑選節奏感強烈的曲風標籤（如：Upbeat Pop, EDM, Catchy TikTok style, R&B）。
                     [禁令]：歌詞嚴禁出現「大俠」、「小俠」。
                     回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容", "style": "英文曲風標籤"}}"""
                     
@@ -953,12 +957,12 @@ async def diary_ui(ctx):
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
     
-    # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
-    try:
-        synced = await girlfriend_bot.tree.sync()
-        print(f"📡 系統架構師回報：已成功同步 {len(synced)} 個斜線指令！")
-    except Exception as e:
-        print(f"❌ 指令同步失敗: {e}")
+    # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
+    # try:
+    #     synced = await girlfriend_bot.tree.sync()
+    #     print(f"📡 系統架構師回報：已成功同步 {len(synced)} 個斜線指令！")
+    # except Exception as e:
+    #     print(f"❌ 指令同步失敗: {e}")
     
     # 🌟 2. 啟動 Cosplay 排程
     if not auto_cosplay_task.is_running():
@@ -1557,9 +1561,18 @@ async def optimize_memory_vault(channel=None):
         
         total_count = len(daxia_traits) + len(xiaoxia_traits) + len(promises) + len(shared_know)
         
-        # 🌟 當陣列總和 >= 35 條時，才啟動 LLM 濃縮機制
-        if total_count >= 35:
-            if channel: await channel.send(f"🧹 **[系統排程]** 偵測到大腦記憶總數超標 (目前 {total_count} 條)，小夏正在啟動深層記憶重組...")
+        # 🌟 新增：建立強制回報訊息 (閥值上調為 100)
+        report_msg = f"📊 **[小夏的大腦巡邏]** 學長早安！目前小俠的長期記憶總計 **{total_count}/100** 條。\n"
+
+        if total_count >= 100:
+            report_msg += "⚠️ 記憶水位已達標，小夏正在啟動背景濃縮重組程序..."
+            if channel: await channel.send(report_msg)
+            
+            compress_prompt = f"""... (保留原來的提示詞)"""
+            # ... (保留後續原來的 API 呼叫與存檔邏輯) ...
+        else:
+            report_msg += "✅ 記憶水位健康，今日無需進行重組！"
+            if channel: await channel.send(report_msg)
             
             compress_prompt = f"""
             以下是系統累積的長期記憶，請幫我進行「記憶碎片重組」，合併重複項，並保留最核心的細節：
@@ -1749,10 +1762,14 @@ async def on_ready():
     if not legacy_morning_trigger.is_running():
         legacy_morning_trigger.start()
         
-    # 👇 新增這兩行，確保廣播排程順利發車
     if not fomo_radio_trigger.is_running():
         fomo_radio_trigger.start()
         print("⏰ 中午 11:30 FOMO 廣播排程已啟動！")
+        
+    # 🚨 新增喚醒大腦巡邏
+    if not auto_defrag_task.is_running():
+        auto_defrag_task.start()
+        print("⏰ 凌晨 3:00 大腦巡邏排程已啟動！")
 
 @architect_bot.command(name='ping')
 async def ping(ctx):
