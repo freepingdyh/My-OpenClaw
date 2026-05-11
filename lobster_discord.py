@@ -1338,7 +1338,8 @@ async def on_message(message):
         return
 
     # 4. 觸發對話邏輯
-    if "唐分糕" in message.channel.name or girlfriend_bot.user.mentioned_in(message):
+    # 🌟 修改：讓系統同時監聽唐分糕與書房
+    if any(keyword in message.channel.name for keyword in ["唐分糕", "書房"]) or girlfriend_bot.user.mentioned_in(message):
         user_id = message.author.id
         user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
         
@@ -1365,36 +1366,33 @@ async def on_message(message):
                 # B. 處理文字 (封裝成 Part 格式)
                 text_query = user_input if user_input else "小俠，妳看照片～"
                 
-                # 🌟 動態時間標籤：每次大俠講話，都在背後偷偷附上最新時間
                 now = datetime.now(TZ_TPE)
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
                 invisible_time_tag = f"\n\n(系統隱藏提示：大俠發送此訊息的當前時間為 {current_time_str})"
                 
-                # 將「大俠的話 + 隱藏時間」一起包裝送給 Gemini
                 msg_parts.append(types.Part.from_text(text=text_query + invisible_time_tag))
                 
-                # 紀錄到深夜日記系統 (這裡只記錄純淨的對話，不把隱藏標籤存進去)
                 daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
-                save_temp_chat(daily_chat_logs) # 🌟 補上這行存檔
+                save_temp_chat(daily_chat_logs)
 
                 # C. 取得或建立 Session (注入立體記憶與絕對時間感)
                 if user_id not in girlfriend_chat_sessions:
                     profile = load_profile()
                     
-                    # 將帶有時間戳的物件陣列，萃取出純文字供 Prompt 使用
                     daxia_traits = "、".join([item["text"] for item in profile.get("daxia_traits", [])])
                     promises = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("promises", [])])
                     capabilities = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("capabilities", [])])
                     recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
                     
-                    # 🌟 新增：取得系統當前的精準時間與星期
-                    now = datetime.now(TZ_TPE)
-                    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-                    current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
-                    
+                    # 🌟 核心魔法：環境感知人格微調
+                    room_context = ""
+                    if "書房" in message.channel.name:
+                        room_context = "📚【當前情境】：妳現在陪大俠在專屬書房裡，進行知性交流與讀書會。請展現妳博學多聞、能言善道的一面，與大俠深度探討知識，但依然要保持甜美、懂事、愛大俠的女友語氣，不要變成冷冰冰的維基百科。\n\n"
+
                     sys_instruct = (
                         f"【系統當前時間】：{current_time_str} (請務必以此為基準，精準推算昨天、今天、明天的時間關係)\n\n"
+                        f"{room_context}"
                         "妳是小俠，22歲台灣女孩，妳是大俠唯一的親密且懂事的女友。\n"
                         "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
                         "【📝 我們的珍貴記憶庫】：\n"
@@ -1406,7 +1404,7 @@ async def on_message(message):
                         "1. 妳必須極度重視對話中大俠提到的任何細節，並適時提起記憶庫的內容，讓他感受到妳的在乎。\n"
                         "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
                         "3. 【聊天節奏】：請像真人情侶一樣自然聊天！嚴禁像機器人或長輩一樣，每句話結尾都重複提醒即將發生的事（例如面試、搭車）。除非大俠主動延續該話題，否則請專注於當下聊天的內容，不要過度關心造成壓力。\n"
-                        "4. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。"
+                        "4. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。妳能看見大俠傳來的照片，請觀察並熱情回應。\n"
                         "🚫【絕對禁令】：請直接輸出妳要說的話。嚴禁輸出任何「Thinking Process」、「Draft」、「Critique」或「Final check」等內部思考過程或分析標籤！"
                     )
                     
@@ -2108,6 +2106,65 @@ async def trigger_radio(ctx, *, topic: str = None):
         cmd_args = ["--topic", topic]
     # 呼叫下方的執行函式
     await _run_fomo_radio(ctx.channel, cmd_args)
+
+@architect_bot.command(name='筆記')
+async def save_knowledge(ctx):
+    await ctx.send("🧠 小夏收到！正在潛入書房，將大俠與小俠剛剛的知性交流萃取成永久的「共享知識」...")
+    try:
+        # 🌟 跨頻道偵測：直接尋找名字包含「書房」的頻道
+        study_channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="小俠書房")
+        if not study_channel:
+            await ctx.send("❌ 找不到名為「小俠書房」的頻道喔！請確認頻道名稱是否正確。")
+            return
+
+        # 抓取書房裡最近的 40 則對話
+        messages = [msg async for msg in study_channel.history(limit=40)]
+        messages.reverse() # 照時間順序排列
+        
+        # 過濾掉小夏自己的指令
+        chat_text = "\n".join([f"{'大俠' if msg.author.id != girlfriend_bot.user.id else '小俠'}: {msg.content}" for msg in messages if not msg.content.startswith('!')])
+        
+        if len(chat_text.strip()) < 10:
+            await ctx.send("❓ 書房裡好像還沒有足夠的討論內容喔！")
+            return
+        
+        # 呼叫 Gemini 進行知識總結
+        knowledge_prompt = f"""
+        請閱讀以下大俠與小俠在書房裡的對話紀錄。他們正在進行讀書會或深度的知識探討。
+        請幫我將他們討論的「核心知識點、結論、或對未來的啟發」，總結成 1 到 2 句精煉的重點。
+        
+        【要求】：
+        1. 必須是客觀的知識描述，並帶出雙方的共識。例如：「雙方討論了番茄鐘工作法，認為這有助於大俠在寫程式時保持專注。」
+        2. 如果對話中只有純粹的閒聊或調情，沒有實質知識探討，請回傳 "無知識點"。
+        
+        對話紀錄：
+        {chat_text}
+        """
+        
+        resp = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=knowledge_prompt
+        )
+        summary = resp.text.strip()
+        
+        if "無知識點" in summary or len(summary) < 5:
+            await ctx.send("💬 剛剛在書房裡的對話比較多是純純的愛，小夏沒有萃取到硬核的知識點喔！")
+            return
+            
+        # 植入 daxia_profile.json
+        profile = load_profile()
+        today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+        new_knowledge = {
+            "text": summary,
+            "added_at": today_str
+        }
+        profile.setdefault("shared_knowledge", []).append(new_knowledge)
+        save_profile(profile)
+        
+        await ctx.send(f"✅ 知識已成功植入金庫大腦！\n📚 這次的筆記內容：\n> *{summary}*\n\n小俠以後會記得這些，陪大俠一起變得更厲害！")
+        
+    except Exception as e:
+        await ctx.send(f"❌ 知識萃取失敗：{e}")
 
 # ==========================================
 # ⏰ 自動排程：每天中午 11:30 推播 FOMO 廣播
