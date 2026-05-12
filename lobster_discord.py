@@ -1635,7 +1635,7 @@ async def midnight_feedback_task():
     if channel: await process_diary_reply(channel)
 
 # 🌟 新增凌晨 0 點大腦巡邏
-@tasks.loop(time=time(hour=9, minute=15, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=9, minute=40, tzinfo=TZ_TPE))
 async def auto_defrag_task():
     channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
     if channel: await optimize_memory_vault(channel)
@@ -1723,11 +1723,14 @@ async def optimize_memory_vault(channel=None):
         else:
             report_msg += "✅ 記憶水位健康，今日無需進行重組！"
             if channel: await channel.send(report_msg)
+
+    # 👇 學長，就是少了下面這兩行！請把它補上，注意 except 前面要保留「4 個空白鍵」的縮排喔！
+    except Exception as e:
+        print(f"❌ 記憶大腦巡邏異常: {e}")
  
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
 # ==========================================
-
 from discord.ui import Button, View
 
 # 🌟 建立一個帶有按鈕的視圖 (全異步高規版)
