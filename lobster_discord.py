@@ -607,23 +607,25 @@ async def process_diary_reply(channel, target_date=None):
     if chat_context:
         try:
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
-            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (防字面翻譯、防敷衍、強制抓取服裝)
+            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (完美 JSON 格式版)
             mem_prompt = f"""
             請以「高情商人類心理學家與首席視覺總監」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
 
+            【目前掛載中的承諾】：{promises_list_str}
+
             【⚠️ 核心語意分析守則】：
             1. 判讀弦外之音：敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話。
-            2. 👗 視覺與服裝約定 (CRITICAL)：只要大俠在對話中有明確指定（或詢問）服裝款式、顏色（例如：淺綠色內衣褲、紅色比基尼等），且小俠答應，必須 100% 完整寫入 xiaoxia_promises 中，絕對不可遺漏！這是最高優先級！
-            3. 辨識真實意圖：嚴格區分「玩笑話」與「真實喜好/承諾」。
-            4. 拒絕碎片化：紀錄必須具備完整人事時地物，嚴禁只寫單字（例如不可寫「原型食物」，必須寫「大俠特地為小俠準備了包含雞肉等原型食物的健康早餐」）。
+            2. 👗 視覺與服裝約定 (CRITICAL)：明確指定服裝款式、顏色，且小俠答應，必須 100% 寫入 xiaoxia_promises。
+            3. 🌟 承諾結案 (NEW)：對照【目前掛載中的承諾】，如果在今日對話中顯然已經完成（例如大俠稱讚她穿了淺綠色內衣），請將其從 xiaoxia_promises 中刪除。
+            4. 拒絕碎片化：紀錄必須具備完整人事時地物。
 
-            請在深層理解對話情境後，以純 JSON 格式回傳以下結構（若該項目無新事項，則保持陣列為空 []）：
+            請回傳純 JSON 格式：
             {{
-                "daxia_new_traits": ["嚴格限制：必須包含情境！例如：大俠今天表示喜歡看小俠穿淺綠色的內衣褲。"],
-                "xiaoxia_new_traits": ["嚴格限制：只能寫『小俠』自己的性格特質或深層情緒反應。"],
-                "xiaoxia_promises": ["嚴格限制：必須有具體事件、服裝顏色與細節！例如：小俠承諾今晚的交換日記會穿上大俠指定的『淺綠色內衣褲』給大俠驚喜。"],
-                "shared_knowledge": ["嚴格限制：雙方認真討論過的新知識。"],
-                "recent_context": ["今天發生的短期重要事件，需包含雙方的情緒狀態與互動結果。"]
+                "daxia_new_traits": ["大俠的新特徵"],
+                "xiaoxia_new_traits": ["小俠的新特質"],
+                "xiaoxia_promises": ["⚠️僅保留尚未完成的承諾，已完成的請刪除。若全數完成或無承諾，請給空陣列 []"],
+                "shared_knowledge": ["雙方討論的新知識"],
+                "recent_context": ["今天發生的短期重要事件"]
             }}
             【今日對話】：\n{chat_context}
             """
@@ -1645,7 +1647,7 @@ async def midnight_feedback_task():
     if channel: await process_diary_reply(channel)
 
 # 🌟 新增凌晨 0 點大腦巡邏
-@tasks.loop(time=time(hour=10, minute=40, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
 async def auto_defrag_task():
     channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
     if channel: await optimize_memory_vault(channel)
