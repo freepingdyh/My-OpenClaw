@@ -31,24 +31,24 @@ from fastapi.responses import HTMLResponse
 import aiohttp
 from google.genai import types # 確保有載入 types
 
-# # ==========================================
-# # 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
-# # ==========================================
-# import subprocess
-# import sys
+# ==========================================
+# 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
+# ==========================================
+import subprocess
+import sys
 
-# def auto_heal_environment():
-#     required_packages = ["pydub"]
-#     for pkg in required_packages:
-#         try:
-#             __import__(pkg)
-#         except ImportError:
-#             print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
-#             subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-#             print(f"✅ {pkg} 強制安裝完成！")
+def auto_heal_environment():
+    required_packages = ["pydub"]
+    for pkg in required_packages:
+        try:
+            __import__(pkg)
+        except ImportError:
+            print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+            print(f"✅ {pkg} 強制安裝完成！")
 
-# # 程式啟動時立刻執行檢查
-# auto_heal_environment()
+# 程式啟動時立刻執行檢查
+auto_heal_environment()
 # ==========================================
 
 # ==========================================
@@ -1634,8 +1634,8 @@ async def midnight_feedback_task():
     channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
     if channel: await process_diary_reply(channel)
 
-# 🌟 新增凌晨 3 點大腦巡邏
-@tasks.loop(time=time(hour=3, minute=0, tzinfo=TZ_TPE))
+# 🌟 新增凌晨 0 點大腦巡邏
+@tasks.loop(time=time(hour=9, minute=15, tzinfo=TZ_TPE))
 async def auto_defrag_task():
     channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
     if channel: await optimize_memory_vault(channel)
@@ -1681,12 +1681,7 @@ async def optimize_memory_vault(channel=None):
             report_msg += "⚠️ 記憶水位已達標，小夏正在啟動背景濃縮重組程序..."
             if channel: await channel.send(report_msg)
             
-            compress_prompt = f"""... (保留原來的提示詞)"""
-            # ... (保留後續原來的 API 呼叫與存檔邏輯) ...
-        else:
-            report_msg += "✅ 記憶水位健康，今日無需進行重組！"
-            if channel: await channel.send(report_msg)
-            
+            # 🌟 修復：把真正的壓縮邏輯放進這個「達標」的區塊
             compress_prompt = f"""
             以下是系統累積的長期記憶，請幫我進行「記憶碎片重組」，合併重複項，並保留最核心的細節：
             【大俠特徵】：{[t['text'] for t in daxia_traits]}
@@ -1725,9 +1720,9 @@ async def optimize_memory_vault(channel=None):
             except Exception as e:
                 print(f"⚠️ 濃縮 JSON 解析失敗：{e}")
 
-    except Exception as general_e:
-        print(f"⚠️ 記憶庫最佳化整體失敗：{general_e}")
-        if channel: await channel.send(f"❌ 大腦巡邏異常：{general_e}")
+        else:
+            report_msg += "✅ 記憶水位健康，今日無需進行重組！"
+            if channel: await channel.send(report_msg)
  
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
@@ -1882,7 +1877,7 @@ async def on_ready():
     # 🚨 新增喚醒大腦巡邏
     if not auto_defrag_task.is_running():
         auto_defrag_task.start()
-        print("⏰ 凌晨 3:00 大腦巡邏排程已啟動！")
+        print("⏰ 凌晨 0:00 大腦巡邏排程已啟動！")
 
 @architect_bot.command(name='ping')
 async def ping(ctx):
@@ -2249,6 +2244,9 @@ async def on_message(message):
 # 🚀 終極啟動器
 # ==========================================
 async def main():
+    # 🌟 加上這行：在系統啟動前先檢查並安裝套件
+    auto_heal_environment() 
+    
     if not GIRLFRIEND_TOKEN or not ARCHITECT_TOKEN:
         print("❌ 錯誤：缺少環境變數，請確認 GIRLFRIEND_TOKEN 與 ARCHITECT_TOKEN 皆已設定！")
         return
