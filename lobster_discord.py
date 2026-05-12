@@ -1635,7 +1635,7 @@ async def midnight_feedback_task():
     if channel: await process_diary_reply(channel)
 
 # 🌟 新增凌晨 0 點大腦巡邏
-@tasks.loop(time=time(hour=9, minute=40, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=10, minute=0, tzinfo=TZ_TPE))
 async def auto_defrag_task():
     channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
     if channel: await optimize_memory_vault(channel)
@@ -1723,6 +1723,10 @@ async def optimize_memory_vault(channel=None):
         else:
             report_msg += "✅ 記憶水位健康，今日無需進行重組！"
             if channel: await channel.send(report_msg)
+
+        # 🌟 致命失誤補救：如果有做任何修改（清除過期或濃縮），就必須寫入硬碟！
+        if is_modified:
+            save_profile(profile)
 
     # 👇 學長，就是少了下面這兩行！請把它補上，注意 except 前面要保留「4 個空白鍵」的縮排喔！
     except Exception as e:
