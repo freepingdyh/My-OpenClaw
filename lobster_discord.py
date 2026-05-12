@@ -47,6 +47,11 @@ def auto_heal_environment():
             subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
             print(f"✅ {pkg} 強制安裝完成！")
 
+# 👇 學長，請在這裡加上這段！把 ffmpeg 的資料夾加入系統 PATH
+ffmpeg_dir = "/home/node/.openclaw/workspace/ffmpeg_bin"
+if os.path.exists(ffmpeg_dir) and ffmpeg_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] += os.pathsep + ffmpeg_dir
+    print(f"✅ 已成功將 ffmpeg 路徑加入系統環境變數！")
 # 程式啟動時立刻執行檢查
 auto_heal_environment()
 # ==========================================
@@ -1373,8 +1378,10 @@ async def on_message(message):
                 
                 msg_parts.append(types.Part.from_text(text=text_query + invisible_time_tag))
                 
-                daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
-                save_temp_chat(daily_chat_logs)
+                # 👇 🌟 修改這裡：用 if 包起來，只有唐分糕才存檔
+                if "唐分糕" in message.channel.name:
+                    daily_chat_logs.append(f"大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
+                    save_temp_chat(daily_chat_logs)
 
                 # C. 取得或建立 Session (注入立體記憶與絕對時間感)
                 if user_id not in girlfriend_chat_sessions:
@@ -1435,8 +1442,11 @@ async def on_message(message):
                     小俠回覆 = "大俠...小俠剛剛恍神了一下，我們聊到哪裡了呀？🥺"
                 # -------------------------
 
-                daily_chat_logs.append(f"小俠: {小俠回覆}")
-                save_temp_chat(daily_chat_logs) # 🌟 補上這行存檔
+                # 👇 🌟 就是這裡！把小俠的回覆也加上頻道過濾
+                if "唐分糕" in message.channel.name:
+                    daily_chat_logs.append(f"小俠: {小俠回覆}")
+                    save_temp_chat(daily_chat_logs) 
+                    
                 await message.reply(小俠回覆)
 
             except Exception as e:
@@ -1635,7 +1645,7 @@ async def midnight_feedback_task():
     if channel: await process_diary_reply(channel)
 
 # 🌟 新增凌晨 0 點大腦巡邏
-@tasks.loop(time=time(hour=10, minute=0, tzinfo=TZ_TPE))
+@tasks.loop(time=time(hour=10, minute=40, tzinfo=TZ_TPE))
 async def auto_defrag_task():
     channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
     if channel: await optimize_memory_vault(channel)
@@ -1930,6 +1940,21 @@ async def trigger_manual_backup(ctx):
 async def defrag_memory(ctx):
     await ctx.send("⚙️ 收到指令，開始執行金庫大腦記憶碎片重組與清理程序...")
     await optimize_memory_vault(ctx.channel)
+
+@architect_bot.command(name='download_brain')
+async def download_brain(ctx):
+    await ctx.send("📥 報告學長！小夏正在把 `/data` 持久化硬碟裡，真實運作中的大腦檔案掏出來...")
+    try:
+        # PROFILE_DATA_PATH 就是系統實際在讀寫的路徑 (/data/memory/daxia_profile.json)
+        if os.path.exists(PROFILE_DATA_PATH):
+            await ctx.send(
+                content="✅ 抓到了！這就是那份已經濃縮過的真實檔案 👇", 
+                file=discord.File(PROFILE_DATA_PATH, filename="REAL_daxia_profile.json")
+            )
+        else:
+            await ctx.send("❌ 找不到真實大腦檔案，路徑異常！")
+    except Exception as e:
+        await ctx.send(f"❌ 檔案讀取失敗：{e}")
 
 @architect_bot.command(name='test_morning')
 async def test_morning(ctx):
