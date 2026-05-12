@@ -255,7 +255,7 @@ async def get_dataset():
     return []
 
 @api_app.get("/api/photos")
-async def get_photos(): return load_memory()[:30]
+async def get_photos(): return load_memory()#[:30]
 
 @api_app.get("/api/diary")
 async def get_diary():
