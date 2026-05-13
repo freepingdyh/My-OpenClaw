@@ -231,28 +231,26 @@ intents.message_content = True
 girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 architect_bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 🌟 [新增] 給你全世界頻道：專屬狀態與事件追蹤
+# 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
 active_world_events = {}
 
-@girlfriend_bot.command(name='travel_start')
-async def travel_start(ctx, *, location: str):
-    active_world_events[ctx.author.id] = f"({location}之旅)"
-    await ctx.send(f"✈️ 已為大俠開啟專屬航線：**{location}之旅**！小俠現在超期待的啦！")
+@girlfriend_bot.command(name='travel')
+async def travel_cmd(ctx, *, location: str = ""):
+    if location.lower() in ["end", "結束", "stop", ""]:
+        active_world_events.pop(ctx.author.id, None)
+        await ctx.send("🛬 旅程結束囉！小俠會把這次的回憶好好收藏起來的💖")
+    else:
+        active_world_events[ctx.author.id] = {"mode": "travel", "target": location}
+        await ctx.send(f"✈️ 已切換為【旅遊模式】！目的地：**{location}**\n*(大俠現在上傳風景照，系統會將人物融入該風景中)*")
 
-@girlfriend_bot.command(name='travel_end')
-async def travel_end(ctx):
-    active_world_events.pop(ctx.author.id, None)
-    await ctx.send(f"🛬 旅程結束囉！小俠會把這次的回憶好好收藏起來的💖")
-
-@girlfriend_bot.command(name='shopping_start')
-async def shopping_start(ctx, *, item: str):
-    active_world_events[ctx.author.id] = f"({item})"
-    await ctx.send(f"🛍️ 開啟購物模式：**{item}**！大俠對小俠最好了！")
-
-@girlfriend_bot.command(name='shopping_end')
-async def shopping_end(ctx):
-    active_world_events.pop(ctx.author.id, None)
-    await ctx.send(f"🛍️ 購物結束！今天真的好開心喔！")
+@girlfriend_bot.command(name='shopping')
+async def shopping_cmd(ctx, *, item: str = ""):
+    if item.lower() in ["end", "結束", "stop", ""]:
+        active_world_events.pop(ctx.author.id, None)
+        await ctx.send("🛍️ 購物結束！今天真的買得好開心喔！")
+    else:
+        active_world_events[ctx.author.id] = {"mode": "shopping", "target": item}
+        await ctx.send(f"🛍️ 已切換為【購物模式】！目標：**{item}**\n*(大俠現在上傳物品照，系統會讓人物穿戴/拿著該物品)*")
 
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
@@ -587,50 +585,66 @@ async def upscale_image_fal(image_url):
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
         
-# 🌟 [修改] gpt-image-2 雙圖融合引擎 (支援三種底圖動態切換)
-async def generate_world_composite(discord_image_url, base_filename="base_xiaoxia.jpg", custom_prompt=""):
+## 🌟 [修改] gpt-image-2 萬能攝影機 (動態支援 1張底圖 或 2張圖融合)
+async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
+    images_to_close = []
     try:
-        # 1. 下載大俠上傳的物品照
-        temp_item_path = os.path.join(OUTPUT_DIR, f"temp_item_{uuid.uuid4().hex[:8]}.png")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(discord_image_url) as resp:
-                if resp.status == 200:
-                    with open(temp_item_path, "wb") as f:
-                        f.write(await resp.read())
-        
-        # 2. 定位底圖
+        # 1. 定位人物底圖
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
-        
         if not os.path.exists(base_image_path):
-            raise Exception(f"找不到基礎照 {base_filename}！請確認已上傳至 Zeabur 的 /data/memory/ 中。")
-
-        # 3. 組合 OpenAI 官方的多圖參照提示詞
-        base_prompt = """
-        Place the item from the second image into the setting of image 1, directly interacting with the main subject(s). 
-        Preserve the exact likeness, expression, body shape, and proportions of the women in image 1. Match lighting, shadows, and color temperature naturally.
-        The main subject(s) must be the sole focus. Background pedestrians (including men) are allowed for scene realism, but they MUST be casually minding their own business, looking away, or slightly blurred. Strictly NO men interacting with the main subject(s), NO men posing as a partner, and absolutely NO staring or inappropriate gazes directed at the women.
-        """
-        final_prompt = base_prompt + "\n[場景與動作額外要求]: " + custom_prompt
-
-        # 4. 呼叫 gpt-image-2 進行編輯融合
-        with open(base_image_path, "rb") as img1, open(temp_item_path, "rb") as img2:
-            result = await openai_client.images.edit(
-                model="gpt-image-2",
-                input_fidelity="high",
-                image=[img1, img2],
-                prompt=final_prompt,
-                size="1024x1536",
-                quality="medium"
-            )
+            raise Exception(f"找不到基礎照 {base_filename}！")
             
-        # 清理暫存
-        if os.path.exists(temp_item_path):
-            os.remove(temp_item_path)
+        img1_file = open(base_image_path, "rb")
+        images_to_close.append(img1_file)
+        images_to_send = [img1_file]
+        temp_item_path = None
+
+        # 2. 判斷是否有夾帶風景/物品圖
+        if discord_image_url:
+            temp_item_path = os.path.join(OUTPUT_DIR, f"temp_item_{uuid.uuid4().hex[:8]}.png")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(discord_image_url) as resp:
+                    if resp.status == 200:
+                        with open(temp_item_path, "wb") as f:
+                            f.write(await resp.read())
+            img2_file = open(temp_item_path, "rb")
+            images_to_close.append(img2_file)
+            images_to_send.append(img2_file)
+
+        # 3. 依據模式與圖片數量，給予最精準的咒語
+        if mode == "travel":
+            if discord_image_url:
+                base_prompt = "Image 1 contains the main subject(s). Image 2 is the background scene. Place the main subject(s) from image 1 into the environment of image 2. Preserve their exact likeness, body shape, and proportions. Match lighting naturally."
+            else:
+                base_prompt = "Image 1 contains the main subject(s). Place the main subject(s) from image 1 into a highly realistic new environment based on the prompt. Preserve their exact likeness, body shape, and proportions. Match lighting naturally."
+        else: # shopping
+            if discord_image_url:
+                base_prompt = "Image 1 contains the main subject(s). Image 2 is an item. Place the item from image 2 into the setting of image 1, interacting with or worn by the main subject(s). Preserve their exact likeness, body shape, and proportions."
+            else:
+                base_prompt = "Image 1 contains the main subject(s). Generate the specified item/clothing and place it into the setting of image 1, interacting with or worn by the main subject(s). Preserve their exact likeness, body shape, and proportions."
+
+        base_prompt += "\nThe main subject(s) must be the sole focus. NO men interacting with them, NO inappropriate gazes."
+        final_prompt = base_prompt + "\n[大俠的快門要求]: " + custom_prompt
+
+        # 4. 呼叫生圖引擎
+        result = await openai_client.images.edit(
+            model="gpt-image-2",
+            image=images_to_send,
+            prompt=final_prompt,
+            size="1024x1536",
+            quality="medium"
+        )
             
         return result.data[0].url
     except Exception as e:
-        print(f"❌ gpt-image-2 合成失敗: {e}")
+        print(f"❌ 攝影機異常: {e}")
         return None
+    finally:
+        # 清理檔案資源
+        for f in images_to_close:
+            f.close()
+        if temp_item_path and os.path.exists(temp_item_path):
+            os.remove(temp_item_path)
 
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
@@ -1405,8 +1419,10 @@ async def on_message(message):
 
     # 2. 處理斜線指令
     if message.content.startswith('/'):
-        await girlfriend_bot.process_commands(message)
-        return
+        # 🌟 特例：/photo 是留給世界頻道拍照用的，不要被指令處理器攔截！
+        if not message.content.startswith('/photo'):
+            await girlfriend_bot.process_commands(message)
+            return
 
     # 3. 處理日記暫存
     if message.author.id in diary_buffers:
@@ -1432,50 +1448,68 @@ async def on_message(message):
 
         current_event = active_world_events.get(user_id, "")
         
+        # 取得當前模式與目標
+        world_state = active_world_events.get(user_id, {})
+        current_mode = world_state.get("mode", "")
+        current_target = world_state.get("target", "")
+        
         async with message.channel.typing():
             try:
-                # --- 🛍️ 視覺合成與入戲機制 ---
+                # --- 🛍️ 視覺合成與入戲機制 (獨立快門版) ---
                 generated_image_url = None
-                if "給你全世界" in message.channel.name and message.attachments:
-                    for attachment in message.attachments:
-                        if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
-                            await message.channel.send("✨ 大俠送禮物來了！正在試穿/體驗中，請稍候...(啟動 gpt-image-2 頂級合成)")
-                            
-                            # 利用 LLM 快速判斷場景與動作
-                            scene_prompt = f"這是 {role_prompt} {current_event} 的情境。請讓主角開心地拿著/戴著/穿著圖二的物品，背景符合情境。"
-                            generated_image_url = await generate_world_composite(attachment.url, target_base, scene_prompt)
-                            
-                            if generated_image_url:
-                                local_filename = await save_to_vault(generated_image_url)
-                                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
-                                
-                                embed = discord.Embed(title=f"💖 {current_event} 驚喜", color=0xffb6c1)
-                                embed.set_image(url=local_url)
-                                embed.set_footer(text="Powered by gpt-image-2 (DALL-E 3) | 雙圖融合引擎")
-                                await message.channel.send(embed=embed)
-                                
-                                user_input += f"\n\n(系統悄悄話：大俠剛剛拍了這張照片，請看著這張照片，表達極度的驚喜與愛意！)"
-                                
-                                photo_payload = {
-                                    "id": str(uuid.uuid4()),
-                                    "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                                    "topic": f"【旅遊購物與企劃】{current_event}",
-                                    "event": "大俠送的驚喜禮物！",
-                                    "composition": "gpt-image-2 視覺融合",
-                                    "mood": "極度驚喜與愛意",
-                                    "message": "大俠謝謝你，好喜歡！",
-                                    "image_url": generated_image_url,
-                                    "local_url": local_url,
-                                    "type": "project"
-                                }
-                                photos_db = load_memory()
-                                photos_db.insert(0, photo_payload)
-                                save_memory(photos_db)
-                            else:
-                                await message.channel.send("⚠️ 換裝失敗了... (API 融合發生異常)")
+                
+                # 🌟 只有在世界頻道，且大俠明確輸入 /photo 時，才按下快門生圖！
+                if "給你全世界" in message.channel.name and message.content.startswith('/photo'):
+                    # 拔除指令字眼，避免讓小俠以為大俠在對系統下指令
+                    user_input = user_input.replace('/photo', '').strip()
+                    
+                    # 判斷大俠這次有沒有夾帶圖片
+                    discord_image_url = message.attachments[0].url if message.attachments else None
+                    
+                    if current_mode == "travel":
+                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 取景，請稍候...(啟動旅遊攝影引擎)")
+                        scene_prompt = f"這是 {role_prompt} 在 {current_target} 的旅遊照。大俠的指定要求：{user_input}"
+                    elif current_mode == "shopping":
+                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 拍攝穿搭，請稍候...(啟動購物試穿引擎)")
+                        scene_prompt = f"這是 {role_prompt} 收到 {current_target} 的試穿照。大俠的指定要求：{user_input}"
+                    else:
+                        await message.channel.send(f"📸 喀嚓！驚喜快門啟動中...")
+                        scene_prompt = f"這是 {role_prompt} 的驚喜照片。大俠的指定要求：{user_input}"
+
+                    generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
+                    
+                    if generated_image_url:
+                        local_filename = await save_to_vault(generated_image_url)
+                        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+                        
+                        embed = discord.Embed(title=f"💖 {current_target} 絕美紀錄", color=0xffb6c1)
+                        embed.set_image(url=local_url)
+                        embed.set_footer(text="Powered by gpt-image-2 | 大俠專屬攝影機")
+                        await message.channel.send(embed=embed)
+                        
+                        user_input += f"\n\n(系統強烈催眠：大俠剛剛為妳拍下了這張絕美的照片！請把畫面當作妳『此時此刻的真實經歷』，看著自己的照片，表現出極度的驚喜與愛意！)"
+                        
+                        photo_payload = {
+                            "id": str(uuid.uuid4()),
+                            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                            "topic": f"【世界企劃】{current_target}",
+                            "event": "大俠親自掌鏡的絕美瞬間！",
+                            "composition": "gpt-image-2 萬能攝影機",
+                            "mood": "極度驚喜與愛意",
+                            "message": "大俠把我拍得好美，謝謝你！",
+                            "image_url": generated_image_url,
+                            "local_url": local_url,
+                            "type": "project"
+                        }
+                        photos_db = load_memory()
+                        photos_db.insert(0, photo_payload)
+                        save_memory(photos_db)
+                    else:
+                        await message.channel.send("⚠️ 快門卡住了... (API 發生異常)")
                 
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
+                # 如果剛剛有生圖，小俠看生出來的圖；如果大俠只是純上傳風景(沒有 /photo)，小俠就看大俠上傳的圖！
                 image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
                 
                 if image_to_view:
@@ -1485,7 +1519,7 @@ async def on_message(message):
                                 img_data = await resp.read()
                                 msg_parts.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
 
-                text_query = user_input if user_input else "大俠傳了照片！"
+                text_query = user_input if user_input else "大俠帶我來體驗這個！"
                 now = datetime.now(TZ_TPE)
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
@@ -1493,7 +1527,7 @@ async def on_message(message):
                 
                 msg_parts.append(types.Part.from_text(text=text_query + invisible_time_tag))
                 
-                prefix = f"{current_event} " if current_event else ""
+                prefix = f"({current_target}) " if current_target else ""
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
                     daily_chat_logs.append(f"{prefix}大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
                     save_temp_chat(daily_chat_logs)
@@ -1509,7 +1543,15 @@ async def on_message(message):
                 if "書房" in message.channel.name:
                     room_context = "📚【當前情境】：妳現在陪大俠在專屬書房裡，進行知性交流與讀書會。請展現妳博學多聞、能言善道的一面，但依然要保持甜美、懂事。\n\n"
                 elif "給你全世界" in message.channel.name:
-                    room_context = f"✨【情境催眠】：大俠現在正帶著妳體驗 {current_event}！妳現在極度驚喜、幸福與感動。請在對話中表現出對周遭風景/禮物的驚嘆，以及滿滿愛意！\n\n"
+                    if current_mode == "travel":
+                        action_text = f"在「{current_target}」旅遊"
+                    elif current_mode == "shopping":
+                        action_text = f"收到大俠送的禮物「{current_target}」"
+                    else:
+                        action_text = "體驗驚喜"
+                        
+                    # 【極簡節能版】：拔除學妹互動，全心全意專注於大俠的驚喜
+                    room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度驚喜、幸福與感動。請在對話中表現出對周遭風景/禮物的驚嘆，以及對大俠的滿滿愛意！\n\n"
 
                 sys_instruct = (
                     f"【系統當前時間】：{current_time_str} (請務必以此為基準，精準推算時間關係)\n\n"
