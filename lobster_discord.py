@@ -585,66 +585,60 @@ async def upscale_image_fal(image_url):
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
         
-## 🌟 [修改] gpt-image-2 萬能攝影機 (動態支援 1張底圖 或 2張圖融合)
+# 🌟 [究極穩定版] gpt-image-2 影像融合引擎
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
-    images_to_close = []
+    files_to_close = []
     try:
-        # 1. 定位人物底圖
+        # 1. 定位底圖
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
         if not os.path.exists(base_image_path):
-            raise Exception(f"找不到基礎照 {base_filename}！")
-            
-        img1_file = open(base_image_path, "rb")
-        images_to_close.append(img1_file)
-        images_to_send = [img1_file]
-        temp_item_path = None
+            raise Exception(f"找不到底圖 {base_filename}")
+        
+        b_file = open(base_image_path, "rb")
+        files_to_close.append(b_file)
+        image_list = [b_file]
 
-        # 2. 判斷是否有夾帶風景/物品圖
+        # 2. 處理參考圖 (風景或物品)
         if discord_image_url:
-            temp_item_path = os.path.join(OUTPUT_DIR, f"temp_item_{uuid.uuid4().hex[:8]}.png")
+            temp_path = os.path.join(OUTPUT_DIR, f"ref_{uuid.uuid4().hex[:6]}.png")
             async with aiohttp.ClientSession() as session:
                 async with session.get(discord_image_url) as resp:
                     if resp.status == 200:
-                        with open(temp_item_path, "wb") as f:
+                        with open(temp_path, "wb") as f:
                             f.write(await resp.read())
-            img2_file = open(temp_item_path, "rb")
-            images_to_close.append(img2_file)
-            images_to_send.append(img2_file)
+            
+            ref_file = open(temp_path, "rb")
+            files_to_close.append(ref_file)
+            image_list.append(ref_file)
 
-        # 3. 依據模式與圖片數量，給予最精準的咒語
+        # 3. 根據模式設定最穩定的提示詞
         if mode == "travel":
-            if discord_image_url:
-                base_prompt = "Image 1 contains the main subject(s). Image 2 is the background scene. Place the main subject(s) from image 1 into the environment of image 2. Preserve their exact likeness, body shape, and proportions. Match lighting naturally."
-            else:
-                base_prompt = "Image 1 contains the main subject(s). Place the main subject(s) from image 1 into a highly realistic new environment based on the prompt. Preserve their exact likeness, body shape, and proportions. Match lighting naturally."
-        else: # shopping
-            if discord_image_url:
-                base_prompt = "Image 1 contains the main subject(s). Image 2 is an item. Place the item from image 2 into the setting of image 1, interacting with or worn by the main subject(s). Preserve their exact likeness, body shape, and proportions."
-            else:
-                base_prompt = "Image 1 contains the main subject(s). Generate the specified item/clothing and place it into the setting of image 1, interacting with or worn by the main subject(s). Preserve their exact likeness, body shape, and proportions."
+            p = f"Place the subject from Image 1 into the scene of Image 2. {custom_prompt}"
+        else:
+            p = f"Add the item from Image 2 to the subject in Image 1. {custom_prompt}"
 
-        base_prompt += "\nThe main subject(s) must be the sole focus. NO men interacting with them, NO inappropriate gazes."
-        final_prompt = base_prompt + "\n[大俠的快門要求]: " + custom_prompt
-
-        # 4. 呼叫生圖引擎
+        # 4. 呼叫 API (加入 moderation="low" 提高穩定度)
+        # ⚠️ 注意：根據文件，gpt-image-2 必須省略 input_fidelity
         result = await openai_client.images.edit(
             model="gpt-image-2",
-            image=images_to_send,
-            prompt=final_prompt,
+            image=image_list,
+            prompt=p + "\nEnsure natural lighting and high fidelity character preservation.",
             size="1024x1536",
-            quality="medium"
+            quality="medium",
+            moderation="low"  # 🌟 官網建議：降低過濾敏感度
         )
-            
+        
         return result.data[0].url
+
     except Exception as e:
         print(f"❌ 攝影機異常: {e}")
-        return None
+        return str(e) # 🌟 這裡把錯誤訊息傳出去！
     finally:
-        # 清理檔案資源
-        for f in images_to_close:
+        for f in files_to_close:
             f.close()
-        if temp_item_path and os.path.exists(temp_item_path):
-            os.remove(temp_item_path)
+        # 刪除暫存風景圖
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
@@ -1476,9 +1470,11 @@ async def on_message(message):
                         await message.channel.send(f"📸 喀嚓！驚喜快門啟動中...")
                         scene_prompt = f"這是 {role_prompt} 的驚喜照片。大俠的指定要求：{user_input}"
 
+                    # 執行生圖並取得結果 (可能是網址，也可能是報錯字串)
                     generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
                     
-                    if generated_image_url:
+                    # 🌟 判斷：如果是網址才執行保存與發送邏輯
+                    if generated_image_url and generated_image_url.startswith("http"):
                         local_filename = await save_to_vault(generated_image_url)
                         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
                         
@@ -1505,7 +1501,9 @@ async def on_message(message):
                         photos_db.insert(0, photo_payload)
                         save_memory(photos_db)
                     else:
-                        await message.channel.send("⚠️ 快門卡住了... (API 發生異常)")
+                        # 🌟 報錯補丁：直接將 API 傳回的錯誤詳細內容印在頻道上
+                        error_info = generated_image_url if generated_image_url else "未知 API 異常"
+                        await message.channel.send(f"⚠️ 快門卡住了！API 報錯內容：\n`{error_info}`")
                 
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
@@ -2404,12 +2402,14 @@ async def on_message(message):
         return 
 
     # 🌟 2. 偵測工作頻道或被點名
-    # 🌟 修改為：
+    # 補上定義，否則下方的 can_speak 會報 NameError
     is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
     is_world_channel = "給你全世界" in message.channel.name
     
-    # 在世界頻道裡，小夏必須被「明確 Tag」才能講話
-    can_speak = is_work_channel or (is_world_channel and ("@小夏" in message.content or architect_bot.user.mentioned_in(message))) or architect_bot.user.mentioned_in(message)
+    # 偵測是否有標記小夏 (不管是文字還是 ID 標記)
+    is_mentioned = architect_bot.user.mentioned_in(message) or "@小夏" in message.content
+    
+    can_speak = is_work_channel or (is_world_channel and is_mentioned) or architect_bot.user.mentioned_in(message)
     
     if can_speak:
         user_id = message.author.id
