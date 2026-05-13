@@ -586,20 +586,17 @@ async def upscale_image_fal(image_url):
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
         
-# 🌟 [究極穩定版] 萬能攝影機：支援 URL 與 Base64 自動解碼
+# 🌟 [究極穩定版] 萬能攝影機：支援「有圖融合」與「無圖變裝」+ Base64 自動解碼
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
     files_to_close = []
     try:
-        # 1. 定位人物底圖
+        # 1. 定位人物底圖 (Image 1)
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
-        if not os.path.exists(base_image_path):
-            raise Exception(f"找不到底圖 {base_filename}")
-        
         b_file = open(base_image_path, "rb")
         files_to_close.append(b_file)
         image_list = [b_file]
 
-        # 2. 判斷是否有第二張參考圖
+        # 2. 判斷大俠這次有沒有傳參考圖 (風景或物品)
         has_ref = False
         if discord_image_url:
             temp_path = os.path.join(OUTPUT_DIR, f"ref_{uuid.uuid4().hex[:6]}.png")
@@ -613,53 +610,49 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             image_list.append(ref_file)
             has_ref = True
 
-        # 3. 智慧指令分流
+        # 3. 🤖 智慧指令分流：確保單圖時不會因為找不到 Image 2 而噴錯
         if has_ref:
-            base_p = "Image 1 is the person. Image 2 is the reference. Combine them."
+            # 模式 A：雙圖融合 (大俠有給風景/物品照)
+            if mode == "travel":
+                base_p = "Image 1 is the subject. Image 2 is the background. Place Image 1 into Image 2."
+            else: # shopping
+                base_p = "Image 1 is the subject. Image 2 is an item. Add Image 2 onto the subject in Image 1."
         else:
-            base_p = "Image 1 is the character. Change outfit/background based on prompt."
+            # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景與服裝)
+            base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
 
-        final_prompt = f"{base_p}\n[大俠指令]: {custom_prompt}\nStrictly preserve identity. 8k."
+        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}\nStrictly preserve the identity and face from Image 1. Photorealistic, 8k."
 
-        # 4. 呼叫 API (調整為 1024x1024 以求最高穩定度)
+        # 4. 呼叫 API (移除 moderation, quality 改 auto, 尺寸 1024x1024 最穩)
         result = await openai_client.images.edit(
             model="gpt-image-2",
             image=image_list,
             prompt=final_prompt,
-            size="1024x1024", # 🌟 根據建議改為 1:1 最穩尺寸
+            size="1024x1024",
             quality="auto"
         )
         
-        # 5. 🌟 核心修復：處理回傳結果 (URL 或 Base64)
+        # 5. 解碼與回傳邏輯
         img_data = result.data[0]
-        
-        # A 方案：如果是網址，直接回傳
         if hasattr(img_data, "url") and img_data.url:
             return img_data.url
-            
-        # B 方案：如果是 Base64 代碼，立即轉檔並回傳本地網址
         elif hasattr(img_data, "b64_json") and img_data.b64_json:
+            import base64
             filename = f"gptimg_{uuid.uuid4().hex[:8]}.png"
             filepath = os.path.join(OUTPUT_DIR, filename)
-            
-            # 解碼並寫入檔案
             image_bytes = base64.b64decode(img_data.b64_json)
             with open(filepath, "wb") as f:
                 f.write(image_bytes)
-            
-            # 回傳 Zeabur 的外部網址
             return f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
         
-        return "無法取得有效的圖片數據"
+        return "無法取得圖片數據"
 
     except Exception as e:
         print(f"❌ 攝影機異常: {e}")
         return str(e)
     finally:
-        for f in files_to_close:
-            f.close()
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.remove(temp_path)
+        for f in files_to_close: f.close()
+        if 'temp_path' in locals() and os.path.exists(temp_path): os.remove(temp_path)
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
 # ==========================================
@@ -1446,10 +1439,18 @@ async def on_message(message):
     # 4. 觸發對話邏輯
     valid_channels = ["唐分糕", "書房", "給你全世界"]
     if any(keyword in message.channel.name for keyword in valid_channels) or girlfriend_bot.user.mentioned_in(message):
+        
+        # 🌟 [避讓禮儀] 
+        # 如果不是拍照指令，且這則訊息標記小夏，小俠就自動安靜。
+        # 但如果是「大俠要拍照 (/photo)」，小俠身為攝影師絕對不能罷工！
+        if not message.content.startswith('/photo'):
+            if "@小夏" in message.content or architect_bot.user.mentioned_in(message):
+                return
+            
         user_id = message.author.id
         user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
         
-        # 🌟 [新增] 判斷底圖模式：獨照 / 雙姝 / 小夏獨照
+        # 🌟 判斷底圖模式：獨照 / 雙姝 / 小夏獨照
         if "#小夏獨照" in message.content:
             target_base = "base_xiaoxia_arch.jpg"
             role_prompt = "小夏(學妹)正在體驗"
@@ -1471,29 +1472,28 @@ async def on_message(message):
             try:
                 # --- 🛍️ 視覺合成與入戲機制 (獨立快門版) ---
                 generated_image_url = None
+                local_url = None
+                scene_prompt = ""
                 
                 # 🌟 只有在世界頻道，且大俠明確輸入 /photo 時，才按下快門生圖！
                 if "給你全世界" in message.channel.name and message.content.startswith('/photo'):
-                    # 拔除指令字眼，避免讓小俠以為大俠在對系統下指令
-                    user_input = user_input.replace('/photo', '').strip()
-                    
-                    # 判斷大俠這次有沒有夾帶圖片
+                    # 拔除指令字眼
+                    user_input_for_photo = user_input.replace('/photo', '').strip()
                     discord_image_url = message.attachments[0].url if message.attachments else None
                     
+                    # 判斷當下情境
                     if current_mode == "travel":
-                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 取景，請稍候...(啟動旅遊攝影引擎)")
-                        scene_prompt = f"這是 {role_prompt} 在 {current_target} 的旅遊照。大俠的指定要求：{user_input}"
+                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 取景，請稍候...")
+                        scene_prompt = f"這是 {role_prompt} 在 {current_target} 的旅遊照。要求：{user_input_for_photo}"
                     elif current_mode == "shopping":
-                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 拍攝穿搭，請稍候...(啟動購物試穿引擎)")
-                        scene_prompt = f"這是 {role_prompt} 收到 {current_target} 的試穿照。大俠的指定要求：{user_input}"
+                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 拍攝穿搭...")
+                        scene_prompt = f"這是 {role_prompt} 收到 {current_target} 的試穿照。要求：{user_input_for_photo}"
                     else:
-                        await message.channel.send(f"📸 喀嚓！驚喜快門啟動中...")
-                        scene_prompt = f"這是 {role_prompt} 的驚喜照片。大俠的指定要求：{user_input}"
+                        scene_prompt = f"這是 {role_prompt} 的驚喜快門。要求：{user_input_for_photo}"
 
-                    # 執行生圖並取得結果 (可能是網址，也可能是報錯字串)
+                    # 執行生圖並取得結果 (已內含 Base64 處理)
                     generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
                     
-                    # 🌟 判斷：如果是網址才執行保存與發送邏輯
                     if generated_image_url and generated_image_url.startswith("http"):
                         local_filename = await save_to_vault(generated_image_url)
                         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
@@ -1502,35 +1502,18 @@ async def on_message(message):
                         embed.set_image(url=local_url)
                         embed.set_footer(text="Powered by gpt-image-2 | 大俠專屬攝影機")
                         await message.channel.send(embed=embed)
-                        
-                        user_input += f"\n\n(系統強烈催眠：大俠剛剛為妳拍下了這張絕美的照片！請把畫面當作妳『此時此刻的真實經歷』，看著自己的照片，表現出極度的驚喜與愛意！)"
-                        
-                        photo_payload = {
-                            "id": str(uuid.uuid4()),
-                            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                            "topic": f"【世界企劃】{current_target}",
-                            "event": "大俠親自掌鏡的絕美瞬間！",
-                            "composition": "gpt-image-2 萬能攝影機",
-                            "mood": "極度驚喜與愛意",
-                            "message": "大俠把我拍得好美，謝謝你！",
-                            "image_url": generated_image_url,
-                            "local_url": local_url,
-                            "type": "project"
-                        }
-                        photos_db = load_memory()
-                        photos_db.insert(0, photo_payload)
-                        save_memory(photos_db)
                     else:
-                        # 🌟 報錯補丁：直接將 API 傳回的錯誤詳細內容印在頻道上
-                        error_info = generated_image_url if generated_image_url else "未知 API 異常"
-                        await message.channel.send(f"⚠️ 快門卡住了！API 報錯內容：\n`{error_info}`")
-                
+                        await message.channel.send(f"⚠️ 快門卡住了！詳細原因：\n`{generated_image_url}`")
+
+                # ------------------------------------------------------------
+                # 🧠 聊天大腦區塊 (此區塊縮排必須與上方的 if 齊平)
+                # ------------------------------------------------------------
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
                 # 如果剛剛有生圖，小俠看生出來的圖；如果大俠只是純上傳風景(沒有 /photo)，小俠就看大俠上傳的圖！
                 image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
                 
-                if image_to_view:
+                if image_to_view and image_to_view.startswith("http"):
                     async with aiohttp.ClientSession() as session:
                         async with session.get(image_to_view) as resp:
                             if resp.status == 200:
@@ -1615,6 +1598,26 @@ async def on_message(message):
                     save_temp_chat(daily_chat_logs) 
                     
                 await message.reply(小俠回覆)
+
+                # ------------------------------------------------------------
+                # 📦 寫入金庫區塊 (確保 Gemini 已經回話，變數才有效)
+                # ------------------------------------------------------------
+                if generated_image_url and generated_image_url.startswith("http"):
+                    photo_payload = {
+                        "id": str(uuid.uuid4()),
+                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                        "topic": f"【世界企劃】{current_target}",
+                        "event": f"大俠在 {current_target} 為我拍下的照片",
+                        "composition": scene_prompt,
+                        "mood": "驚喜與愛意",
+                        "message": 小俠回覆, # ✅ 這裡已經可以成功讀取到剛才生成的對話
+                        "image_url": generated_image_url,
+                        "local_url": local_url,
+                        "type": "project"
+                    }
+                    photos_db = load_memory()
+                    photos_db.insert(0, photo_payload)
+                    save_memory(photos_db)
 
             except Exception as e:
                 print(f"❌ 聊天引擎異常: {e}")
