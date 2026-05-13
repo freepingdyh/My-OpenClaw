@@ -624,8 +624,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             image=image_list,
             prompt=p + "\nEnsure natural lighting and high fidelity character preservation.",
             size="1024x1536",
-            quality="medium",
-            moderation="low"  # 🌟 官網建議：降低過濾敏感度
+            quality="medium"
         )
         
         return result.data[0].url
