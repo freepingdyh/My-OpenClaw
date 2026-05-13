@@ -12,6 +12,7 @@ import aiofiles
 import sys
 import random
 from datetime import datetime, time, timezone, timedelta
+import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
 
 import discord
 from discord.ext import commands, tasks
@@ -585,11 +586,11 @@ async def upscale_image_fal(image_url):
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
         
-# 🌟 [究極穩定版] gpt-image-2 萬能攝影機：支援單圖換裝與多圖融合
+# 🌟 [究極穩定版] 萬能攝影機：支援 URL 與 Base64 自動解碼
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
     files_to_close = []
     try:
-        # 1. 定位底圖
+        # 1. 定位人物底圖
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
         if not os.path.exists(base_image_path):
             raise Exception(f"找不到底圖 {base_filename}")
@@ -599,7 +600,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
         image_list = [b_file]
 
         # 2. 判斷是否有第二張參考圖
-        has_ref_image = False
+        has_ref = False
         if discord_image_url:
             temp_path = os.path.join(OUTPUT_DIR, f"ref_{uuid.uuid4().hex[:6]}.png")
             async with aiohttp.ClientSession() as session:
@@ -607,48 +608,53 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
                     if resp.status == 200:
                         with open(temp_path, "wb") as f:
                             f.write(await resp.read())
-            
             ref_file = open(temp_path, "rb")
             files_to_close.append(ref_file)
             image_list.append(ref_file)
-            has_ref_image = True
+            has_ref = True
 
-        # 3. 🤖 動態調整 Prompt 與模式 (解決單圖無 Image 2 的錯誤)
-        if has_ref_image:
-            # 二圖模式：旅遊融合或物品穿搭
-            if mode == "travel":
-                base_p = "Image 1 is the person. Image 2 is the background. Place the person from Image 1 into the scene of Image 2."
-            else:
-                base_p = "Image 1 is the person. Image 2 is an item. Add the item from Image 2 to the person in Image 1."
+        # 3. 智慧指令分流
+        if has_ref:
+            base_p = "Image 1 is the person. Image 2 is the reference. Combine them."
         else:
-            # 單圖模式：AI 換裝或自動背景生成 (解決大俠遇到的問題)
-            base_p = "Image 1 is the base character. Based on the prompt, modify the character's outfit or background while preserving the exact face and identity."
+            base_p = "Image 1 is the character. Change outfit/background based on prompt."
 
-        final_prompt = f"{base_p}\n[大俠的要求]: {custom_prompt}\nStrictly preserve the identity and likeness from Image 1. High fidelity."
+        final_prompt = f"{base_p}\n[大俠指令]: {custom_prompt}\nStrictly preserve identity. 8k."
 
-        # 4. 呼叫 API (將 quality 改為 auto 以求最穩定輸出)
+        # 4. 呼叫 API (調整為 1024x1024 以求最高穩定度)
         result = await openai_client.images.edit(
             model="gpt-image-2",
             image=image_list,
             prompt=final_prompt,
-            size="1024x1536",
-            quality="auto"  # 🌟 官網建議：auto 最穩
+            size="1024x1024", # 🌟 根據建議改為 1:1 最穩尺寸
+            quality="auto"
         )
         
-        # 5. 安全讀取結果 (防止 KeyError)
+        # 5. 🌟 核心修復：處理回傳結果 (URL 或 Base64)
         img_data = result.data[0]
+        
+        # A 方案：如果是網址，直接回傳
         if hasattr(img_data, "url") and img_data.url:
             return img_data.url
+            
+        # B 方案：如果是 Base64 代碼，立即轉檔並回傳本地網址
         elif hasattr(img_data, "b64_json") and img_data.b64_json:
-            # 處理 b64 的保底邏輯 (若 API 未回傳網址)
-            return "b64_data_detected"
+            filename = f"gptimg_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(OUTPUT_DIR, filename)
+            
+            # 解碼並寫入檔案
+            image_bytes = base64.b64decode(img_data.b64_json)
+            with open(filepath, "wb") as f:
+                f.write(image_bytes)
+            
+            # 回傳 Zeabur 的外部網址
+            return f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
         
-        return "無法取得圖片結果"
+        return "無法取得有效的圖片數據"
 
     except Exception as e:
         print(f"❌ 攝影機異常: {e}")
-        # 傳回詳細報錯內容，方便大俠在 Discord 看到真相
-        return str(e) if str(e) else f"未知 API 錯誤: {type(e).__name__}"
+        return str(e)
     finally:
         for f in files_to_close:
             f.close()
