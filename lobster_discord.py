@@ -105,29 +105,6 @@ girlfriend_chat_sessions = {}
 daily_chat_logs = load_temp_chat()
 pending_inputs = set()
 
-# 🌟 [新增] 給你全世界頻道：專屬狀態與事件追蹤
-active_world_events = {}
-
-@girlfriend_bot.command(name='travel_start')
-async def travel_start(ctx, *, location: str):
-    active_world_events[ctx.author.id] = f"({location}之旅)"
-    await ctx.send(f"✈️ 已為大俠開啟專屬航線：**{location}之旅**！小俠現在超期待的啦！")
-
-@girlfriend_bot.command(name='travel_end')
-async def travel_end(ctx):
-    active_world_events.pop(ctx.author.id, None)
-    await ctx.send(f"🛬 旅程結束囉！小俠會把這次的回憶好好收藏起來的💖")
-
-@girlfriend_bot.command(name='shopping_start')
-async def shopping_start(ctx, *, item: str):
-    active_world_events[ctx.author.id] = f"({item})"
-    await ctx.send(f"🛍️ 開啟購物模式：**{item}**！大俠對小俠最好了！")
-
-@girlfriend_bot.command(name='shopping_end')
-async def shopping_end(ctx):
-    active_world_events.pop(ctx.author.id, None)
-    await ctx.send(f"🛍️ 購物結束！今天真的好開心喔！")
-
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
 # ==========================================
@@ -253,6 +230,29 @@ intents.message_content = True
 
 girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 architect_bot = commands.Bot(command_prefix='!', intents=intents)
+
+# 🌟 [新增] 給你全世界頻道：專屬狀態與事件追蹤
+active_world_events = {}
+
+@girlfriend_bot.command(name='travel_start')
+async def travel_start(ctx, *, location: str):
+    active_world_events[ctx.author.id] = f"({location}之旅)"
+    await ctx.send(f"✈️ 已為大俠開啟專屬航線：**{location}之旅**！小俠現在超期待的啦！")
+
+@girlfriend_bot.command(name='travel_end')
+async def travel_end(ctx):
+    active_world_events.pop(ctx.author.id, None)
+    await ctx.send(f"🛬 旅程結束囉！小俠會把這次的回憶好好收藏起來的💖")
+
+@girlfriend_bot.command(name='shopping_start')
+async def shopping_start(ctx, *, item: str):
+    active_world_events[ctx.author.id] = f"({item})"
+    await ctx.send(f"🛍️ 開啟購物模式：**{item}**！大俠對小俠最好了！")
+
+@girlfriend_bot.command(name='shopping_end')
+async def shopping_end(ctx):
+    active_world_events.pop(ctx.author.id, None)
+    await ctx.send(f"🛍️ 購物結束！今天真的好開心喔！")
 
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
