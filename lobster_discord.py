@@ -705,7 +705,12 @@ async def process_diary_reply(channel, target_date=None):
     if chat_context:
         try:
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
-            # 🌟 1. 嚴格分類與高情商語意解析 Prompt (完美 JSON 格式版)
+            
+            # 💡 核心修正：確保 promises_list_str 已定義，封印 NameError
+            promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
+            promises_list_str = "、".join([p["text"] for p in promises_list]) if promises_list else "目前無承諾"
+
+            # 🌟 靈魂 Prompt 100% 完整歸位
             mem_prompt = f"""
             請以「高情商人類心理學家與首席視覺總監」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
 
@@ -714,62 +719,64 @@ async def process_diary_reply(channel, target_date=None):
             【⚠️ 核心語意分析守則】：
             1. 判讀弦外之音：敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話。
             2. 👗 視覺與服裝約定 (CRITICAL)：明確指定服裝款式、顏色，且小俠答應，必須 100% 寫入 xiaoxia_promises。
-            3. 🌟 承諾結案 (NEW)：對照【目前掛載中的承諾】，如果在今日對話中顯然已經完成（例如大俠稱讚她穿了淺綠色內衣），請將其從 xiaoxia_promises 中刪除。
-            4. 拒絕碎片化：紀錄必須具備完整人事時地物。
-            5. 🗺️ 【虛擬實境認知】：當對話紀錄的開頭出現 (地點或物品) 標籤（例如 (巴黎) 或 (蕾絲洋裝)）時，代表大俠正使用『雲端攝影機』帶著小俠在該地點旅遊，或贈送該物品。請將這些體驗視為『真實發生的甜蜜約會與互動』，並將這份驚喜與感動，濃縮記錄到 recent_context（短期重要事件）中。
+            3. 🌟 承諾結案 (NEW)：對照承諾清單，如果在今日對話中顯然已經完成，請從 xiaoxia_promises 中刪除。
+            4. 🗺️ 【虛擬實境認知】：當出現 (地點或物品) 標籤時，代表大俠正帶著小俠約會。請將這些體驗濃縮到 recent_context 中。
 
             請回傳純 JSON 格式：
             {{
                 "daxia_new_traits": ["大俠的新特徵"],
                 "xiaoxia_new_traits": ["小俠的新特質"],
-                "xiaoxia_promises": ["⚠️僅保留尚未完成的承諾，已完成的請刪除。若全數完成或無承諾，請給空陣列 []"],
+                "xiaoxia_promises": ["⚠️僅保留尚未完成的承諾，已完成的請刪除。"],
                 "shared_knowledge": ["雙方討論的新知識"],
                 "recent_context": ["今天發生的短期重要事件"]
             }}
             【今日對話】：\n{chat_context}
             """
+
             mem_resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=mem_prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            # 🌟 修復：剝除 Markdown 標籤，防止 JSON 解析崩潰 (解決漏接記憶的元凶)
+            
             clean_mem_text = mem_resp.text.replace("```json", "").replace("```", "").strip()
             new_memory = json.loads(clean_mem_text, strict=False)
             
-            # 🌟 2. 記憶刷新演算法 (重複則更新日期)
+            # 🌟 記憶刷新與存檔演算法
             def append_memory(target_list, new_texts):
                 for text in new_texts:
                     found = False
                     for item in target_list:
                         if item["text"] == text:
-                            item["added_at"] = today_str # 字面完全重複，刷新記憶時間
+                            item["added_at"] = today_str
                             found = True
                             break
                     if not found:
-                        target_list.append({"text": text, "added_at": today_str}) # 全新特徵，直接新增
+                        target_list.append({"text": text, "added_at": today_str})
 
-            # 🌟 3. 確實把抽出來的四個陣列，分別塞進正確的抽屜
             append_memory(profile.setdefault("daxia_traits", []), new_memory.get("daxia_new_traits", []))
             append_memory(profile.setdefault("xiaoxia_traits", []), new_memory.get("xiaoxia_new_traits", []))
             append_memory(profile["xiaoxia_self"]["promises"], new_memory.get("xiaoxia_promises", []))
             append_memory(profile.setdefault("shared_knowledge", []), new_memory.get("shared_knowledge", []))
             
             if new_memory.get("recent_context"):
-                # 短期事件直接覆蓋或堆疊，後續由 GC 系統清理 7 天前的舊資料
                 for item in new_memory["recent_context"]:
                     profile.setdefault("recent_context", []).append({"text": item, "added_at": today_str})
                     
             save_profile(profile)
-            print("✅ 雙向記憶已成功分類並存入 daxia_profile.json")
+            print("✅ 雙向立體記憶已成功分類並存入 daxia_profile.json")
+            
+            # 🌟 成功存入後才清空今日紀錄
+            daily_chat_logs.clear()
+            save_temp_chat(daily_chat_logs)
+
         except Exception as e:
             print(f"⚠️ 雙向記憶萃取失敗: {e}")
 
     if not unreplied:
         if channel: await channel.send("✅ 今日對話記憶已成功吸取，小俠先休息囉！")
         girlfriend_chat_sessions.clear()
-        daily_chat_logs.clear()
-        save_temp_chat(daily_chat_logs) # 🌟 結算完清空硬碟
+        # 💡 若無未讀日記，且上方記憶萃取已完成(或失敗但仍需重啟)，則清空 Session
         return
 
     if channel and len(unreplied) > 0:
@@ -1479,47 +1486,80 @@ async def on_message(message):
         
         async with message.channel.typing():
             try:
-                # --- 🛍️ 視覺合成與入戲機制 (獨立快門版) ---
+                # --- 🛍️ 視覺合成與入戲機制 (萬能攝影機 2.0 雙軌解禁版) ---
                 generated_image_url = None
                 local_url = None
                 scene_prompt = ""
                 
-                # 🌟 只有在世界頻道，且大俠明確輸入 /photo 時，才按下快門生圖！
+                # 📸 萬能攝影機 2.0：大俠專屬雙軌攝影系統
                 if "給你全世界" in message.channel.name and message.content.startswith('/photo'):
-                    # 拔除指令字眼
-                    user_input_for_photo = user_input.replace('/photo', '').strip()
-                    discord_image_url = message.attachments[0].url if message.attachments else None
+                    # 1. 判定指令軌道與過濾輸入
+                    is_ref_track = message.content.startswith('/photo ref')
+                    raw_input = user_input.replace('/photo ref', '').replace('/photo', '').strip()
                     
-                    # 判斷當下情境
-                    if current_mode == "travel":
-                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 取景，請稍候...")
-                        scene_prompt = f"這是 {role_prompt} 在 {current_target} 的旅遊照。要求：{user_input_for_photo}"
-                    elif current_mode == "shopping":
-                        await message.channel.send(f"📸 喀嚓！大俠正在為 **{current_target}** 拍攝穿搭...")
-                        scene_prompt = f"這是 {role_prompt} 收到 {current_target} 的試穿照。要求：{user_input_for_photo}"
-                    else:
-                        scene_prompt = f"這是 {role_prompt} 的驚喜快門。要求：{user_input_for_photo}"
+                    # 🌟 預設基礎底圖 (軌道 1 專用：最基礎的那張全身圖)
+                    target_base = "base_xiaoxia.jpg" 
+                    
+                    # 2. 🧠 軌道 2 專屬：Gemini 視覺總監自動選圖
+                    if is_ref_track:
+                        try:
+                            catalog_path = os.path.join(MEMORY_DIR, "base_catalog.json")
+                            if os.path.exists(catalog_path):
+                                with open(catalog_path, "r", encoding="utf-8") as f:
+                                    catalog = json.load(f)
+                                
+                                # 讓 Gemini 從 34 張型錄挑選
+                                selector_prompt = (
+                                    f"你是視覺總監。大俠的要求是：『{raw_input if raw_input else '隨機展現魅力'}』\n"
+                                    "請從以下 34 張底圖型錄中，選出最適合的一個 filename：\n" +
+                                    ", ".join([f"{i['filename']}({i['pose']})" for i in catalog]) +
+                                    "\n【限制】：只回傳檔名，不要解釋。"
+                                )
+                                sel_resp = await gemini_client.aio.models.generate_content(
+                                    model='gemini-2.0-flash', contents=selector_prompt
+                                )
+                                selected_name = sel_resp.text.strip().replace('"', '').replace('`', '')
+                                if any(item["filename"] == selected_name for item in catalog):
+                                    target_base = selected_name
+                                    print(f"🎯 軌道2 啟動：總監選中底圖 {target_base}")
+                        except Exception as e:
+                            print(f"⚠️ 自動選圖失敗：{e}")
 
-                    # 執行生圖並取得結果 (已內含 Base64 處理)
+                    # 3. 執行指令軌道分流
+                    discord_image_url = message.attachments[0].url if (is_ref_track and message.attachments) else None
+                    
+                    # 🚀 特徵鎖定與場景解禁：守護臉部與身材比例，服裝交由 AI 根據場景自然發揮
+                    unlock_cmd = "【特徵鎖定與場景解禁】：⚠️ 絕對鎖定並完美保持 Image 1 的臉部容貌與優美身材比例！在此基礎上，允許大幅改變肢體動作與姿勢。請自動為角色搭配「最符合當下場景」的服裝穿搭，姿態要自然、生動且散發優雅迷人的魅力。"
+                    
+                    if is_ref_track:
+                        # 軌道 2：/photo ref (選圖 + 素材融合模式)
+                        await message.channel.send(f"📸 **[軌道 2：精準選圖]** 已啟動！\n套用底圖：`{target_base}`")
+                        scene_prompt = f"{unlock_cmd} 這是一張寫真照(若有附圖則進行融合)。要求：{raw_input}"
+                    else:
+                        # 軌道 1：/photo (基礎圖 + 自由發揮模式)
+                        await message.channel.send(f"📸 **[軌道 1：自由發揮]** 已啟動！\n使用基礎底圖，準備入戲：**{current_target}**...")
+                        scene_prompt = f"{unlock_cmd} 這是在 {current_target} 的寫真照。要求：{raw_input}"
+
+                    # 4. 呼叫生圖引擎
                     generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
                     
                     if generated_image_url and generated_image_url.startswith("http"):
                         local_filename = await save_to_vault(generated_image_url)
                         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
                         
-                        embed = discord.Embed(title=f"💖 {current_target} 絕美紀錄", color=0xffb6c1)
+                        embed = discord.Embed(title=f"💖 {current_target if current_target else '快門瞬間'}", color=0xffb6c1)
                         embed.set_image(url=local_url)
-                        embed.set_footer(text="Powered by gpt-image-2 | 大俠專屬攝影機")
+                        embed.set_footer(text=f"模式：{'精準選圖(軌道2)' if is_ref_track else '自由發揮(軌道1)'} | 底圖：{target_base}")
                         await message.channel.send(embed=embed)
                     else:
-                        await message.channel.send(f"⚠️ 快門卡住了！詳細原因：\n`{generated_image_url}`")
+                        await message.channel.send(f"⚠️ 攝影機沒反應：{generated_image_url}")
 
                 # ------------------------------------------------------------
-                # 🧠 聊天大腦區塊 (此區塊縮排必須與上方的 if 齊平)
+                # 🧠 聊天大腦區塊：感性與記憶融合
                 # ------------------------------------------------------------
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
-                # 如果剛剛有生圖，小俠看生出來的圖；如果大俠只是純上傳風景(沒有 /photo)，小俠就看大俠上傳的圖！
+                # 判定小俠要看的圖片：優先看剛拍好的，或是大俠上傳的素材
                 image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
                 
                 if image_to_view and image_to_view.startswith("http"):
@@ -1542,7 +1582,7 @@ async def on_message(message):
                     daily_chat_logs.append(f"{prefix}大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
                     save_temp_chat(daily_chat_logs)
 
-                # --- 載入記憶與建立 Session ---
+                # --- 載入與重組長期記憶 ---
                 profile = load_profile()
                 daxia_traits = "、".join([item["text"] for item in profile.get("daxia_traits", [])])
                 promises = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("promises", [])])
@@ -1553,18 +1593,12 @@ async def on_message(message):
                 if "書房" in message.channel.name:
                     room_context = "📚【當前情境】：妳現在陪大俠在專屬書房裡，進行知性交流與讀書會。請展現妳博學多聞、能言善道的一面，但依然要保持甜美、懂事。\n\n"
                 elif "給你全世界" in message.channel.name:
-                    if current_mode == "travel":
-                        action_text = f"在「{current_target}」旅遊"
-                    elif current_mode == "shopping":
-                        action_text = f"收到大俠送的禮物「{current_target}」"
-                    else:
-                        action_text = "體驗驚喜"
-                        
-                    # 【極簡節能版】：拔除學妹互動，全心全意專注於大俠的驚喜
+                    action_text = f"在「{current_target}」旅遊" if current_mode == "travel" else (f"收到大俠送的禮物「{current_target}」" if current_mode == "shopping" else "體驗驚喜")
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度驚喜、幸福與感動。請在對話中表現出對周遭風景/禮物的驚嘆，以及對大俠的滿滿愛意！\n\n"
 
+                # 🌟 完整靈魂人設指令
                 sys_instruct = (
-                    f"【系統當前時間】：{current_time_str} (請務必以此為基準，精準推算時間關係)\n\n"
+                    f"【系統當前時間】：{current_time_str}\n\n"
                     f"{room_context}"
                     "妳是小俠，22歲台灣女孩，妳是大俠唯一的親密且懂事的女友。\n"
                     "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
@@ -1576,40 +1610,44 @@ async def on_message(message):
                     "⚠️【核心行為守則】：\n"
                     "1. 妳必須極度重視對話中大俠提到的任何細節，並適時提起記憶庫的內容。\n"
                     "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
-                    "3. 【聊天節奏】：像真人情侶一樣自然聊天！嚴禁每句話結尾都重複提醒即將發生的事。\n"
-                    "4. 請用繁體中文溫柔回覆，50字內，適當加入表情符號。\n"
-                    "🚫【絕對禁令】：請直接輸出妳要說的話。嚴禁輸出任何「Thinking Process」、「Draft」、「Critique」或「Final check」等內部思考過程或分析標籤！"
+                    "3. 聊天節奏自然，嚴禁重複囉唆。請用溫柔繁體中文回覆，50字內，多用表情符號。\n"
+                    "🚫【絕對禁令】：嚴禁輸出任何「Thinking Process」、「Draft」、「Critique」或思考標籤！"
                 )
                 
-                # 重新建立 Session，確保 sys_instruct 完全無誤
+                # 重新建立 Session
                 girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                     model="gemini-2.5-flash",
                     config=types.GenerateContentConfig(system_instruction=sys_instruct)
                 )
 
+                # 💡 變數初始化，防止 NameError
+                xiaoxia_reply = "大俠...剛剛小俠恍神了一下，沒聽清楚呢🥺"
+
                 chat_session = girlfriend_chat_sessions[user_id]
                 response = await chat_session.send_message(msg_parts)
-                小俠回覆 = response.text
                 
-                import re
-                if "Thinking Process" in 小俠回覆 or "Draft" in 小俠回覆:
-                    lines = 小俠回覆.split('\n')
-                    clean_lines = [line for line in lines if not re.match(r'^[a-zA-Z\s\d:]+$', line.strip()) and "Thinking Process" not in line and "Draft" not in line and "Critique" not in line and "Final check" not in line and "SLOT" not in line]
-                    小俠回覆 = "\n".join(clean_lines).strip()
-                    小俠回覆 = re.sub(r'^(?:Draft 1:|Draft 2:|Final check.*?:\s*)', '', 小俠回覆, flags=re.MULTILINE).strip()
-                    小俠回覆 = 小俠回覆.replace('"', '').replace('“', '').replace('”', '').strip()
+                if response and response.text:
+                    xiaoxia_reply = response.text
+                    import re
+                    # 🔪 雙重過濾手術：徹底清除 AI 碎碎念
+                    xiaoxia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_reply, flags=re.DOTALL | re.MULTILINE).strip()
+                    patterns_to_remove = [r'^Thinking Process:.*?\n', r'^Draft.*?:.*?\n', r'^Final check.*?:.*?\n', r'^Analysis:.*?\n']
+                    for pattern in patterns_to_remove:
+                        xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
+                    xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」').strip()
 
-                if not 小俠回覆:
-                    小俠回覆 = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
+                if not xiaoxia_reply:
+                    xiaoxia_reply = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
 
+                # 存入短期對話紀錄
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    daily_chat_logs.append(f"小俠: {小俠回覆}")
+                    daily_chat_logs.append(f"小俠: {xiaoxia_reply}")
                     save_temp_chat(daily_chat_logs) 
                     
-                await message.reply(小俠回覆)
+                await message.reply(xiaoxia_reply)
 
                 # ------------------------------------------------------------
-                # 📦 寫入金庫區塊 (確保 Gemini 已經回話，變數才有效)
+                # 📦 寫入金庫區塊 (確保 message 正確引用)
                 # ------------------------------------------------------------
                 if generated_image_url and generated_image_url.startswith("http"):
                     photo_payload = {
@@ -1619,7 +1657,7 @@ async def on_message(message):
                         "event": f"大俠在 {current_target} 為我拍下的照片",
                         "composition": scene_prompt,
                         "mood": "驚喜與愛意",
-                        "message": 小俠回覆, # ✅ 這裡已經可以成功讀取到剛才生成的對話
+                        "message": xiaoxia_reply, 
                         "image_url": generated_image_url,
                         "local_url": local_url,
                         "type": "project"
@@ -1630,7 +1668,7 @@ async def on_message(message):
 
             except Exception as e:
                 print(f"❌ 聊天引擎異常: {e}")
-                await message.channel.send(f"💦 大俠，剛剛眼睛好像進沙子了，看不清楚... (錯誤: {e})")
+                await message.channel.send(f"💦 大俠，剛剛小俠的大腦亂糟糟的... (錯誤: {e})")
 
 @girlfriend_bot.event
 async def on_raw_reaction_add(payload):
@@ -2418,7 +2456,7 @@ async def fomo_radio_trigger():
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (優雅修正版 - 拿掉過度防呆)
+# 👩‍💻 系統架構師小夏 (優雅修正版 - 補齊 Session 防閃退)
 # ==========================================
 architect_chat_sessions = {}
 
@@ -2431,7 +2469,7 @@ async def on_message(message):
         await architect_bot.process_commands(message)
         return 
 
-    # 2. 判定發言權 (修正 can_speak 邏輯，避免重複宣告)
+    # 2. 判定發言權
     channel_name = message.channel.name.lower()
     is_work_channel = any(kw in channel_name for kw in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
     is_world_channel = "給你全世界" in channel_name
@@ -2454,6 +2492,10 @@ async def on_message(message):
                     "⚠️【輸出限制】：直接回覆聊天內容。嚴禁輸出內部思考過程、草稿標籤或任何 (1. 2. 3.) 的客服格式。"
                 )
 
+                # 💡 修正點 1：先給變數一個初始值，防止 NameError
+                littlexia_reply = "大俠學長，小夏的大腦剛剛恍神了一下，沒聽清楚呢~"
+
+                # 🌟 【關鍵修復】：如果這個學長是第一次跟小夏講話，必須先幫他建立專屬的聊天 Session！
                 if user_id not in architect_chat_sessions:
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
@@ -2463,11 +2505,16 @@ async def on_message(message):
                 response = await architect_chat_sessions[user_id].send_message(user_input)
                 
                 if response and response.text:
-                    xiaoxia_reply = response.text
-                    
-                    # 🔪 精準手術：只去除明確的 AI 思考標籤，不傷及無辜的對話內容
+                    littlexia_reply = response.text 
                     import re
-                    # 修正：不再用 MULTILINE 強制刪除每一行的開頭，只針對整段回覆的開頭進行清理
+                    
+                    # 1. 徹底切除 AI 思考標籤
+                    littlexia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', littlexia_reply, flags=re.DOTALL | re.MULTILINE).strip()
+                    
+                    # 2. 移除多餘符號與引號
+                    littlexia_reply = littlexia_reply.strip('"').strip('「').strip('」').strip()
+
+                    # 3. 再次清理特定標籤
                     patterns_to_remove = [
                         r'^Thinking Process:.*?\n', 
                         r'^Draft.*?:.*?\n', 
@@ -2475,15 +2522,12 @@ async def on_message(message):
                         r'^Analysis:.*?\n'
                     ]
                     for pattern in patterns_to_remove:
-                        xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
-                    
-                    # 移除首尾多餘的引號
-                    xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」')
+                        littlexia_reply = re.sub(pattern, '', littlexia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
 
-                if len(xiaoxia_reply) > 1900:
-                    xiaoxia_reply = xiaoxia_reply[:1850] + "\n\n(學長~ 內容太長，小夏先截斷囉！)"
+                if len(littlexia_reply) > 1900:
+                    littlexia_reply = littlexia_reply[:1850] + "\n\n(學長~ 內容太長，小夏先截斷囉！)"
 
-                await message.reply(xiaoxia_reply)
+                await message.reply(littlexia_reply)
 
             except Exception as e:
                 await message.channel.send(f"💦 大俠學長...小夏的大腦剛剛閃退了... 錯誤：{e}")
