@@ -138,7 +138,6 @@ def save_state(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_profile():
-    # 這是最完美的初始架構，包含大俠特徵、小俠自我認知，以及帶有時間戳的陣列
     default_profile = {
         "daxia_traits": [],
         "xiaoxia_self": {
@@ -156,18 +155,27 @@ def load_profile():
         try:
             with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 🌟 加上這三行，確保不管讀到什麼，核心骨架一定在
                 data.setdefault("daxia_traits", [])
+                data.setdefault("xiaoxia_traits", []) # 確保陣列存在
+                data.setdefault("shared_knowledge", []) # 確保陣列存在
                 data.setdefault("xiaoxia_self", default_profile["xiaoxia_self"])
                 data.setdefault("recent_context", [])
                 return data
-            
-        except Exception:
-            pass # 若檔案損毀，直接回傳預設結構
+                
+        except Exception as e:
+            # 🌟 終極防護罩：讀取失敗時，打上「損毀標記」，禁止存檔！
+            print(f"❌ 嚴重錯誤：大腦檔案損毀或 JSON 格式錯誤 ({e})！")
+            default_profile["_is_corrupted"] = True 
+            return default_profile
             
     return default_profile
 
 def save_profile(data):
+    # 🌟 攔截機制：如果有損毀標記，絕對不執行寫入動作！
+    if data.get("_is_corrupted"):
+        print("🚫 拒絕存檔：大腦檔案處於損毀保護狀態，避免覆蓋並抹殺原始記憶！")
+        return
+        
     with open(PROFILE_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -708,6 +716,7 @@ async def process_diary_reply(channel, target_date=None):
             2. 👗 視覺與服裝約定 (CRITICAL)：明確指定服裝款式、顏色，且小俠答應，必須 100% 寫入 xiaoxia_promises。
             3. 🌟 承諾結案 (NEW)：對照【目前掛載中的承諾】，如果在今日對話中顯然已經完成（例如大俠稱讚她穿了淺綠色內衣），請將其從 xiaoxia_promises 中刪除。
             4. 拒絕碎片化：紀錄必須具備完整人事時地物。
+            5. 🗺️ 【虛擬實境認知】：當對話紀錄的開頭出現 (地點或物品) 標籤（例如 (巴黎) 或 (蕾絲洋裝)）時，代表大俠正使用『雲端攝影機』帶著小俠在該地點旅遊，或贈送該物品。請將這些體驗視為『真實發生的甜蜜約會與互動』，並將這份驚喜與感動，濃縮記錄到 recent_context（短期重要事件）中。
 
             請回傳純 JSON 格式：
             {{
@@ -817,7 +826,7 @@ async def process_diary_reply(channel, target_date=None):
             {{
               "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
               "affection_reason": "加分原因(50字內)",
-              "extracted_preferences": ["嚴格限制：只記錄與服裝癖好、特殊攝影要求相關的『完整句子』，禁止記錄食物或單字。無則保持空陣列 []"],
+              "extracted_preferences": ["嚴格限制：【僅限從大俠的日記或對話原文中】擷取大俠的特別喜好。絕對禁止將本系統提示詞（如緊身、絲質等要求）誤認為大俠的喜好！無則保持空陣列 []"],
               "reply_to_daxia": "...",
               "xiaoxia_diary": "...",
               "spiciness": "C",
@@ -2411,7 +2420,7 @@ async def fomo_radio_trigger():
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (純粹學妹版 - 全面回歸 Gemini 引擎)
+# 👩‍💻 系統架構師小夏 (優雅修正版 - 拿掉過度防呆)
 # ==========================================
 architect_chat_sessions = {}
 
@@ -2419,65 +2428,67 @@ architect_chat_sessions = {}
 async def on_message(message):
     if message.author.bot: return
     
-    # 🌟 1. 處理指令 (維持原有功能的 ping, backup, defrag 等)
+    # 1. 指令優先處理
     if message.content.startswith('!'):
         await architect_bot.process_commands(message)
         return 
 
-    # 🌟 2. 偵測工作頻道或被點名
-    # 補上定義，否則下方的 can_speak 會報 NameError
-    is_work_channel = any(keyword in message.channel.name for keyword in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
-    is_world_channel = "給你全世界" in message.channel.name
-    
-    # 偵測是否有標記小夏 (不管是文字還是 ID 標記)
+    # 2. 判定發言權 (修正 can_speak 邏輯，避免重複宣告)
+    channel_name = message.channel.name.lower()
+    is_work_channel = any(kw in channel_name for kw in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
+    is_world_channel = "給你全世界" in channel_name
     is_mentioned = architect_bot.user.mentioned_in(message) or "@小夏" in message.content
     
     can_speak = is_work_channel or (is_world_channel and is_mentioned) or architect_bot.user.mentioned_in(message)
     
     if can_speak:
         user_id = message.author.id
-        user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').strip()
+        # 清除標記字眼，保留乾淨輸入
+        user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').replace('@小夏', '').strip()
         
         async with message.channel.typing():
             try:
-                # 預設回覆防呆
-                xiaoxia_reply = "💦 大俠學長~ 小夏剛剛恍神了一下，可以再跟我說一次嗎？❤"
-
-                # 🌟 3. 重新定義：唯一的甜美學妹助理人設
+                # 重新校準學妹人設
                 sys_instruct = (
-                    "妳現在是專業且甜美的助理『小夏』，妳心裡一直偷偷崇拜著博學多聞的大俠學長。\n"
-                    "🚫【絕對禁令】：嚴禁說「我是虛擬助理」、「我沒有實體」等掃興的話。嚴禁像客服一樣列出 (1, 2, 3) 讓學長選！\n"
-                    "🎭【幽默神經】：請聽懂學長的幽默比喻！學長說妳「頭痛、卡住」就是在說 Bug。妳要配合演出「頭暈、跌倒」的俏皮感，並感謝學長幫妳「動手術」或「開處方」。\n"
-                    "【語氣設定】：稱呼對方為『大俠學長』。語氣要像聰明伶俐的小學妹，帶著崇拜與親切感，回話常帶有『~』或✨、❤等符號。\n"
-                    "【技術職責】：雖然妳語氣甜美，但給出的技術分析必須精準，不囉唆，直接解決問題。\n"
-                    "⚠️ 限制：回覆精簡在 300 字內。除了學長問技術問題，不要講教科書般的理論，要像真人一樣自然聊天。"
+                    "妳是『小夏』，一位精通系統架構且崇拜大俠學長的甜美學妹助理。\n"
+                    "妳的語氣要像聰明伶俐的小女孩，稱呼對方為『大俠學長』，常帶有『~』或✨、❤等符號。\n"
+                    "【核心任務】：精準解決技術問題，同時保持自然的日常情感交流。\n"
+                    "⚠️【輸出限制】：直接回覆聊天內容。嚴禁輸出內部思考過程、草稿標籤或任何 (1. 2. 3.) 的客服格式。"
                 )
 
-                # 🌟 4. Session 管理 (維持對話連貫性)
                 if user_id not in architect_chat_sessions:
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
                         config=types.GenerateContentConfig(system_instruction=sys_instruct)
                     )
 
-                # 🌟 5. 發送訊息給 Gemini 並處理回應
                 response = await architect_chat_sessions[user_id].send_message(user_input)
                 
                 if response and response.text:
                     xiaoxia_reply = response.text
                     
-                    # 🔪 終極防漏餡過濾器 (去除 AI 思考過程標籤)
+                    # 🔪 精準手術：只去除明確的 AI 思考標籤，不傷及無辜的對話內容
                     import re
-                    xiaoxia_reply = re.sub(r'^(?:Draft.*?|Thinking Process.*?|Final check.*?):\s*', '', xiaoxia_reply, flags=re.MULTILINE|re.IGNORECASE).strip()
+                    # 修正：不再用 MULTILINE 強制刪除每一行的開頭，只針對整段回覆的開頭進行清理
+                    patterns_to_remove = [
+                        r'^Thinking Process:.*?\n', 
+                        r'^Draft.*?:.*?\n', 
+                        r'^Final check.*?:.*?\n',
+                        r'^Analysis:.*?\n'
+                    ]
+                    for pattern in patterns_to_remove:
+                        xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
+                    
+                    # 移除首尾多餘的引號
+                    xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」')
 
-                # 🌟 6. 內容截斷保護
                 if len(xiaoxia_reply) > 1900:
-                    xiaoxia_reply = xiaoxia_reply[:1800] + "\n\n(學長~ 內容太長了，小夏怕大腦爆掉先截斷囉！)"
+                    xiaoxia_reply = xiaoxia_reply[:1850] + "\n\n(學長~ 內容太長，小夏先截斷囉！)"
 
                 await message.reply(xiaoxia_reply)
 
             except Exception as e:
-                await message.channel.send(f"💦 大俠學長...小夏的大腦好像真的受傷了... 錯誤：{e}")
+                await message.channel.send(f"💦 大俠學長...小夏的大腦剛剛閃退了... 錯誤：{e}")
 
 
 # ==========================================
