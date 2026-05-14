@@ -2185,37 +2185,34 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
     except Exception as e:
         await ctx.send(f"❌ 收藏失敗：{e}")
 
-# 🌟 [2.0 終極擴充版] 萬能攝影機底圖上傳通道
+# 🌟 [4.0 懶人自動化版] 不用打檔名！上傳什麼，小夏就原樣存什麼
 @architect_bot.command(name="upload_base")
-async def upload_base(ctx, filename: str = None):
+async def upload_base(ctx):
     if not ctx.message.attachments:
-        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時，留言輸入 `!upload_base 檔名.png` ~✨")
+        await ctx.send("❌ 學長，附件是空的喔！請直接把圖夾進來發送即可 ~✨")
         return
 
-    # 🚀 移除舊有的三選一限制，讓學長自由定義 2.0 底圖檔名
-    if not filename:
-        await ctx.send("❌ 學長，請在指令後方加上正確的檔名（例如：`!upload_base base_sit_toast.png`）喔！")
-        return
+    attachments = ctx.message.attachments
+    await ctx.send(f"🚀 **自動化同步開始！** 正在接收 {len(attachments)} 個檔案直達雲端金庫...")
 
-    attachment = ctx.message.attachments[0]
-    # 支援 JPG 與 PNG 上傳
-    if not any(attachment.content_type.startswith(t) for t in ['image/jpeg', 'image/png']):
-        await ctx.send("❌ 這好像不是圖片檔喔！小夏只能處理 JPG 或 PNG ~💦")
-        return
-
-    await ctx.send(f"📥 收到！小夏正在把這張絕美的 `{filename}` 寫入大腦 `/data/memory/` 磁碟區...")
-    
-    try:
-        # 下載圖片並直接存入持久化記憶區
-        image_data = await attachment.read()
-        save_path = os.path.join(MEMORY_DIR, filename)
+    success_files = []
+    for file in attachments:
+        # 直接使用附件原本的檔名 (attachment.filename)
+        target_name = file.filename
         
-        with open(save_path, "wb") as f:
-            f.write(image_data)
+        try:
+            image_data = await file.read()
+            # 確實存入持久化磁碟 /data/memory/
+            save_path = os.path.join(MEMORY_DIR, target_name)
             
-        await ctx.send(f"✅ 叮咚！成功囉！學長的底圖 `{filename}` 已經安全送達雲端金庫！小俠已經準備好換裝了❤️")
-    except Exception as e:
-        await ctx.send(f"❌ 糟糕...寫入失敗：{e}")
+            with open(save_path, "wb") as f:
+                f.write(image_data)
+            success_files.append(f"`{target_name}`")
+        except Exception as e:
+            await ctx.send(f"❌ `{target_name}` 寫入失敗: {e}")
+
+    file_list_str = "、".join(success_files)
+    await ctx.send(f"✅ **任務達成！** 已原樣收錄：{file_list_str}\n小俠的 2.0 身體庫已同步更新！❤️")
 
 
 @architect_bot.command(name='sync_lyrics')
