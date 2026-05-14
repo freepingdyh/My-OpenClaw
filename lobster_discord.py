@@ -1529,7 +1529,10 @@ async def on_message(message):
                     discord_image_url = message.attachments[0].url if (is_ref_track and message.attachments) else None
                     
                     # 🚀 特徵鎖定與場景解禁：守護臉部與身材比例，服裝交由 AI 根據場景自然發揮
-                    unlock_cmd = "【特徵鎖定與場景解禁】：⚠️ 絕對鎖定並完美保持 Image 1 的臉部容貌與優美身材比例！在此基礎上，允許大幅改變肢體動作與姿勢。請自動為角色搭配「最符合當下場景」的服裝穿搭，姿態要自然、生動且散發優雅迷人的魅力。"
+                    unlock_cmd = (
+                    "【核心指令】：⚠️ 絕對鎖定 Image 1 的臉部特徵。在此基礎上，請展現極致的電影感光影與高級時尚雜誌構圖。"
+                    "姿態要自然且富有情感。請依照大俠的要求進行細節描繪，確保畫面唯美且具備高品質藝術感。"
+                    )
                     
                     if is_ref_track:
                         # 軌道 2：/photo ref (選圖 + 素材融合模式)
