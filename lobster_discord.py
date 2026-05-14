@@ -2185,36 +2185,37 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
     except Exception as e:
         await ctx.send(f"❌ 收藏失敗：{e}")
 
-# 🌟 [新增] 專屬基礎照上傳通道 (繞過 Zeabur 介面限制)
+# 🌟 [2.0 終極擴充版] 萬能攝影機底圖上傳通道
 @architect_bot.command(name="upload_base")
 async def upload_base(ctx, filename: str = None):
     if not ctx.message.attachments:
-        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時，留言輸入 `!upload_base 檔名.jpg`")
+        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時，留言輸入 `!upload_base 檔名.png` ~✨")
         return
 
-    valid_names = ["base_xiaoxia.jpg", "base_xiaoxia_arch.jpg", "base_twins.jpg"]
-    if filename not in valid_names:
-        await ctx.send(f"⚠️ 學長，檔名必須是這三個其中之一喔：\n`{', '.join(valid_names)}`\n請檢查您的輸入！")
+    # 🚀 移除舊有的三選一限制，讓學長自由定義 2.0 底圖檔名
+    if not filename:
+        await ctx.send("❌ 學長，請在指令後方加上正確的檔名（例如：`!upload_base base_sit_toast.png`）喔！")
         return
 
     attachment = ctx.message.attachments[0]
-    if not attachment.content_type.startswith('image/'):
-        await ctx.send("❌ 這好像不是圖片檔喔！")
+    # 支援 JPG 與 PNG 上傳
+    if not any(attachment.content_type.startswith(t) for t in ['image/jpeg', 'image/png']):
+        await ctx.send("❌ 這好像不是圖片檔喔！小夏只能處理 JPG 或 PNG ~💦")
         return
 
-    await ctx.send(f"📥 正在將您的基礎照 `{filename}` 寫入大腦深處...")
+    await ctx.send(f"📥 收到！小夏正在把這張絕美的 `{filename}` 寫入大腦 `/data/memory/` 磁碟區...")
     
     try:
-        # 下載圖片並直接存入 /data/memory/
+        # 下載圖片並直接存入持久化記憶區
         image_data = await attachment.read()
         save_path = os.path.join(MEMORY_DIR, filename)
         
         with open(save_path, "wb") as f:
             f.write(image_data)
             
-        await ctx.send(f"✅ 成功！圖片已安全存入 `/data/memory/{filename}` 磁碟區！")
+        await ctx.send(f"✅ 叮咚！成功囉！學長的底圖 `{filename}` 已經安全送達雲端金庫！小俠已經準備好換裝了❤️")
     except Exception as e:
-        await ctx.send(f"❌ 寫入失敗：{e}")
+        await ctx.send(f"❌ 糟糕...寫入失敗：{e}")
 
 
 @architect_bot.command(name='sync_lyrics')
