@@ -1516,7 +1516,7 @@ async def on_message(message):
                                     "\n【限制】：只回傳檔名，不要解釋。"
                                 )
                                 sel_resp = await gemini_client.aio.models.generate_content(
-                                    model='gemini-2.0-flash', contents=selector_prompt
+                                    model='gemini-2.5-flash', contents=selector_prompt
                                 )
                                 selected_name = sel_resp.text.strip().replace('"', '').replace('`', '')
                                 if any(item["filename"] == selected_name for item in catalog):
