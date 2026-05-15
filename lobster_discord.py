@@ -104,6 +104,7 @@ diary_buffers = {}
 girlfriend_chat_sessions = {} 
 # ✅ 改為從硬碟喚醒記憶
 daily_chat_logs = load_temp_chat()
+last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
 
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
@@ -222,6 +223,7 @@ async def save_to_vault(url):
         async with aiohttp.ClientSession() as session:
             # 加入 30 秒逾時保護
             async with session.get(url, timeout=30) as resp:
+                
                 if resp.status == 200:
                     async with aiofiles.open(filepath, mode='wb') as f:
                         await f.write(await resp.read())
@@ -300,6 +302,9 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
                 img_data = await resp.read()
                 # 🌟 修復瞎眼 Bug：動態抓取真實的 mime_type，支援 PNG/WEBP！
                 img_part = types.Part.from_bytes(data=img_data, mime_type=attachment.content_type)
+                # 🌟 【新增】把這張圖暫存起來，讓聊天大腦也能看見！
+                global last_captured_image
+                last_captured_image = {"data": img_data, "mime": attachment.content_type}
         
         vision_resp = await gemini_client.aio.models.generate_content(
             model='gemini-2.5-flash',
@@ -1642,6 +1647,8 @@ async def on_message(message):
                 # ------------------------------------------------------------
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
+                global last_captured_image # 🌟 宣告使用全域變數
+                
                 # 判定小俠要看的圖片：優先看剛拍好的，或是大俠上傳的素材
                 image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
                 
@@ -1649,8 +1656,16 @@ async def on_message(message):
                     async with aiohttp.ClientSession() as session:
                         async with session.get(image_to_view) as resp:
                             if resp.status == 200:
-                                img_data = await resp.read()
-                                msg_parts.append(types.Part.from_bytes(data=img_data, mime_type=message.attachments[0].content_type))
+                                new_img_data = await resp.read()
+                                # 🌟 防呆：動態抓取 mime_type，防止 API 產生圖片時因沒有 attachments 而當機
+                                content_type = message.attachments[0].content_type if message.attachments else resp.headers.get('Content-Type', 'image/jpeg')
+                                msg_parts.append(types.Part.from_bytes(data=new_img_data, mime_type=content_type))
+                                
+                                # 🌟 更新視覺殘留：聊天時若傳了新圖，就覆蓋舊記憶
+                                last_captured_image = {"data": new_img_data, "mime": content_type}
+                elif last_captured_image:
+                    # 🌟 視覺殘留魔法：大俠沒傳新圖時，把最近看過的一張圖繼續塞給她的眼睛！
+                    msg_parts.append(types.Part.from_bytes(data=last_captured_image["data"], mime_type=last_captured_image["mime"]))
 
                 text_query = user_input if user_input else "大俠帶我來體驗這個！"
                 now = datetime.now(TZ_TPE)
@@ -1679,7 +1694,10 @@ async def on_message(message):
                     action_text = f"在「{current_target}」旅遊" if current_mode == "travel" else (f"收到大俠送的禮物「{current_target}」" if current_mode == "shopping" else "體驗驚喜")
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度驚喜、幸福與感動。請在對話中表現出對周遭風景/禮物的驚嘆，以及對大俠的滿滿愛意！\n\n"
 
-                # 🌟 完整靈魂人設指令
+                # 🌟 修復金魚腦：強制讀取最近 10 句短期對話紀錄！
+                chat_history_str = "\n".join(daily_chat_logs[-10:]) if daily_chat_logs else "無"
+
+                # 🌟 完整靈魂人設指令 (加入短期記憶約束)
                 sys_instruct = (
                     f"【系統當前時間】：{current_time_str}\n\n"
                     f"{room_context}"
@@ -1690,8 +1708,10 @@ async def on_message(message):
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises if promises else '無'}\n"
                     f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n\n"
+                    "【💬 剛剛的對話紀錄 (極度重要上下文)】：\n"
+                    f"{chat_history_str}\n\n"
                     "⚠️【核心行為守則】：\n"
-                    "1. 妳必須極度重視對話中大俠提到的任何細節，並適時提起記憶庫的內容。\n"
+                    "1. 妳必須優先根據【剛剛的對話紀錄】來回答大俠當下的問題！絕對不要搞錯現在的場景。\n"
                     "2. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到，妳是真的能看圖與寫日記！\n"
                     "3. 聊天節奏自然，嚴禁重複囉唆。請用溫柔繁體中文回覆，50字內，多用表情符號。\n"
                     "🚫【絕對禁令】：嚴禁輸出任何「Thinking Process」、「Draft」、「Critique」或思考標籤！"
