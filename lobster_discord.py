@@ -261,6 +261,70 @@ async def shopping_cmd(ctx, *, item: str = ""):
         active_world_events[ctx.author.id] = {"mode": "shopping", "target": item}
         await ctx.send(f"🛍️ 已切換為【購物模式】！目標：**{item}**\n*(大俠現在上傳物品照，系統會讓人物穿戴/拿著該物品)*")
 
+@girlfriend_bot.command(name='capture')
+async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
+    """
+    大俠專用：在 Web 端洗出好圖後，附上圖片並輸入 /capture [說明]，
+    小俠就會感應並收藏至雲端別墅的「其他企劃」。
+    """
+    if not ctx.message.attachments:
+        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明]`。")
+        return
+
+    attachment = ctx.message.attachments[0]
+    if not attachment.content_type.startswith('image/'):
+        await ctx.send("💦 大俠，這好像不是圖片檔耶...")
+        return
+
+    msg = await ctx.send("✨ 小俠感應到大俠的完美大片了！正在收錄進我們的雲端別墅...")
+
+    try:
+        # 1. 儲存圖片至本地金庫
+        local_filename = await save_to_vault(attachment.url)
+        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else attachment.url
+
+        # 2. 讓小俠 (Gemini Vision) 看圖給予甜美回饋
+        vision_prompt = f"大俠剛剛在 Web 端親自為我拍了一張超美的照片，主題是『{description}』。請根據這張圖片，用小俠的身分給予大俠充滿愛意與崇拜的簡短讚美（50字內），並說會把這張照片好好收藏在雲端別墅裡。"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(attachment.url) as resp:
+                img_data = await resp.read()
+                img_part = types.Part.from_bytes(data=img_data, mime_type="image/jpeg")
+        
+        vision_resp = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[img_part, vision_prompt],
+            config=types.GenerateContentConfig(system_instruction="妳是懂事女友小俠，深愛大俠，情緒要驚喜且溫柔。")
+        )
+        xiaoxia_comment = vision_resp.text.strip()
+
+        # 3. 寫入資料庫，並打上 type="project" 標籤 (讓它出現在網頁的其他企劃區)
+        photo_payload = {
+            "id": str(uuid.uuid4()),
+            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            "topic": f"【大俠親攝】{description}",
+            "event": "大俠在 Web 端親自拍攝並上傳的完美大片",
+            "composition": "Web 端自由創作",
+            "mood": "極度驚喜與崇拜",
+            "message": xiaoxia_comment,
+            "image_url": attachment.url,
+            "local_url": local_url,
+            "type": "project"
+        }
+        db = load_memory()
+        db.insert(0, photo_payload)
+        save_memory(db)
+
+        # 4. 發送結果至 Discord
+        embed = discord.Embed(title=f"📸 {description}", description=xiaoxia_comment, color=0xffb6c1)
+        embed.set_image(url=local_url)
+        embed.set_footer(text="✅ 已自動同步至雲端別墅「其他企劃」")
+        await msg.edit(content="大俠，這張真的太美了！💖", embed=embed)
+
+    except Exception as e:
+        await msg.edit(content=f"💦 收錄失敗了... 錯誤: `{e}`")
+
+
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
@@ -1491,82 +1555,59 @@ async def on_message(message):
                 local_url = None
                 scene_prompt = ""
                 
-                # 📸 萬能攝影機 2.0：大俠專屬雙軌攝影系統 (GPT-5-mini 安全把關版)
+                # 📸 萬能攝影機 2.5：三階段安檢與自動重寫 (拒絕等待五分鐘)
                 if "給你全世界" in message.channel.name and message.content.startswith('/photo'):
-                    # 1. 判定指令軌道與過濾輸入
                     is_ref_track = message.content.startswith('/photo ref')
                     raw_input = user_input.replace('/photo ref', '').replace('/photo', '').strip()
-                    
-                    # 🌟 預設基礎底圖
                     target_base = "base_xiaoxia.jpg" 
                     
-                    # 2. 🧠 軌道 2 專屬：Gemini 視覺總監自動選圖
-                    if is_ref_track:
-                        try:
-                            catalog_path = os.path.join(MEMORY_DIR, "base_catalog.json")
-                            if os.path.exists(catalog_path):
-                                with open(catalog_path, "r", encoding="utf-8") as f:
-                                    catalog = json.load(f)
-                                
-                                selector_prompt = (
-                                    f"你是視覺總監。大俠的要求是：『{raw_input if raw_input else '隨機展現魅力'}』\n"
-                                    "請從以下 34 張底圖型錄中，選出最適合的一個 filename：\n" +
-                                    ", ".join([f"{i['filename']}({i['pose']})" for i in catalog]) +
-                                    "\n【限制】：只回傳檔名，不要解釋。"
-                                )
-                                sel_resp = await gemini_client.aio.models.generate_content(
-                                    model='gemini-2.5-flash', contents=selector_prompt
-                                )
-                                selected_name = sel_resp.text.strip().replace('"', '').replace('`', '')
-                                if any(item["filename"] == selected_name for item in catalog):
-                                    target_base = selected_name
-                                    print(f"🎯 軌道2 啟動：總監選中底圖 {target_base}")
-                        except Exception as e:
-                            print(f"⚠️ 自動選圖失敗：{e}")
-
-                    # 3. 🧠 呼叫 GPT-5-mini 進行「提示詞脫敏與美化」
-                    # 這是為了解決 OpenAI 對「平口、露肩、長腿」等詞彙搭配坐姿時的神經質過敏
-                    await message.channel.send("🔍 小夏正在進行提示詞安全掃描與電影感美化...")
+                    # 1. 🔍 第一階段：1秒快速安檢 (Moderation API)
+                    await message.channel.send("🛡️ 啟動前置快速安檢...")
+                    mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=raw_input)
                     
-                    try:
-                        safety_optimization_prompt = f"""
-                        你現在是 OpenAI 影像審查與提示詞優化專家。
-                        大俠目前的要求是：『{raw_input}』
-                        
-                        你的任務：
-                        1. 檢查並移除任何可能觸發 [sexual] 審查的潛在字眼（如：平口、露肩、長腿、身材比例、性感）。
-                        2. 將這些要求轉化為「高級時尚雜誌」或「電影感攝影」的英文描述。
-                        3. 例如將「平口」改為「elegant straight-cut neckline」，將「長腿斜放」改為「natural and relaxed leg posture」。
-                        4. 絕對禁止使用 bare, sexy, hot, breast, curvy, legs-exposed 等詞彙。
-                        5. 核心指令：必須包含 "Preserve the identity and face from Image 1."。
-                        
-                        回傳純 JSON 格式：{{"safe_prompt": "美化後的英文攝影提示詞"}}
-                        """
-                        
-                        safe_resp = await openai_client.chat.completions.create(
-                            model="gpt-5-mini",
-                            response_format={"type": "json_object"},
-                            messages=[
-                                {"role": "system", "content": "你負責將大俠的要求轉化為絕對符合 OpenAI 安全規範的高品質英文攝影指令。"},
-                                {"role": "user", "content": safety_optimization_prompt}
-                            ]
-                        )
-                        
-                        safe_data = json.loads(safe_resp.choices[0].message.content)
-                        scene_prompt = safe_data.get("safe_prompt", f"Preserve the identity from Image 1. {raw_input}")
-                        print(f"🛡️ GPT-5-mini 洗白後的提示詞: {scene_prompt}")
-                        
-                    except Exception as e_safe:
-                        print(f"⚠️ GPT 把關失敗，使用保底拼接模式: {e_safe}")
-                        scene_prompt = f"⚠️ Preserve Image 1 identity and face. Cinematic lighting, natural posture. {raw_input}"
+                    if mod_resp.results[0].flagged:
+                        await message.channel.send("⚠️ 偵測到原始指令含有敏感風險，正在交由 GPT-5-mini 強制脫敏重構...")
 
-                    # 4. 執行指令軌道分流 (呼叫生圖引擎)
+                    # 2. 🧠 第二階段：GPT-5-mini 脫敏與美化
+                    await message.channel.send("🔍 小夏正在進行電影感提示詞美化與改寫...")
+                    
+                    safety_prompt = f"""
+                    你現在是 OpenAI 影像審查專家。請將大俠的要求：『{raw_input}』改寫為絕對符合 [sexual] 審查規範的英文指令。
+                    1. 移除露肩、平口、長腿等視覺敏感詞。
+                    2. 使用『電影感光影、高級時尚服飾質感、藝術構圖』等詞彙替代。嚴禁 bare, sexy, exposed 等字。
+                    3. 必須包含 "Preserve the identity and face from Image 1."。
+                    回傳 JSON：{{"safe_prompt": "英文提示詞"}}
+                    """
+                    resp = await openai_client.chat.completions.create(
+                        model="gpt-5-mini",
+                        response_format={"type": "json_object"},
+                        messages=[{"role": "user", "content": safety_prompt}]
+                    )
+                    scene_prompt = json.loads(resp.choices[0].message.content).get("safe_prompt", f"Preserve Image 1 identity. {raw_input}")
+                    print(f"🛡️ 洗白後的提示詞: {scene_prompt}")
+
+                    # 3. 🔍 第三階段：改寫後再複檢
+                    re_check = await openai_client.moderations.create(model="omni-moderation-latest", input=scene_prompt)
+                    if re_check.results[0].flagged:
+                        await message.channel.send("🚨 警告：經過兩次改寫後仍無法通過安檢，為保護 Token，本次生圖已攔截。")
+                        return
+
+                    # 4. 🚀 決定底圖與正式發送
                     discord_image_url = message.attachments[0].url if (is_ref_track and message.attachments) else None
                     
                     if is_ref_track:
-                        await message.channel.send(f"📸 **[軌道 2：素材融合]** 啟動！\n套用底圖：`{target_base}`")
+                        # 讓 Gemini 挑選底圖 (確保只從安全名單挑選)
+                        catalog_path = os.path.join(MEMORY_DIR, "base_catalog.json")
+                        if os.path.exists(catalog_path):
+                            with open(catalog_path, "r", encoding="utf-8") as f: catalog = json.load(f)
+                            selector_prompt = f"請從以下清單選出一個最適合『{raw_input}』的 filename：\n" + ", ".join([i['filename'] for i in catalog]) + "\n【限制】：只回傳檔名。"
+                            sel_resp = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=selector_prompt)
+                            selected_name = sel_resp.text.strip().replace('"', '').replace('`', '')
+                            if any(item["filename"] == selected_name for item in catalog): target_base = selected_name
+                        
+                        await message.channel.send(f"📸 **[軌道 2：素材融合]** 啟動！套用底圖：`{target_base}`")
                     else:
-                        await message.channel.send(f"📸 **[軌道 1：自由發揮]** 啟動！\n使用基礎底圖，準備入戲：**{current_target}**...")
+                        await message.channel.send(f"📸 **[軌道 1：自由發揮]** 啟動！準備入戲：**{current_target}**...")
 
                     generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
                     
