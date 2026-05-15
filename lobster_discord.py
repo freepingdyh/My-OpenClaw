@@ -247,27 +247,6 @@ active_world_events = {}
 
 @girlfriend_bot.command(name='travel')
 async def travel_cmd(ctx, *, location: str = ""):
-    if location.lower() in ["end", "結束", "stop", ""]:
-        active_world_events.pop(ctx.author.id, None)
-        await ctx.send("🛬 旅程結束囉！小俠會把這次的回憶好好收藏起來的💖")
-    else:
-        active_world_events[ctx.author.id] = {"mode": "travel", "target": location}
-        await ctx.send(f"✈️ 已切換為【旅遊模式】！目的地：**{location}**\n*(大俠現在上傳風景照，系統會將人物融入該風景中)*")
-
-@girlfriend_bot.command(name='shopping')
-async def shopping_cmd(ctx, *, item: str = ""):
-    if item.lower() in ["end", "結束", "stop", ""]:
-        active_world_events.pop(ctx.author.id, None)
-        await ctx.send("🛍️ 購物結束！今天真的買得好開心喔！")
-    else:
-        active_world_events[ctx.author.id] = {"mode": "shopping", "target": item}
-        await ctx.send(f"🛍️ 已切換為【購物模式】！目標：**{item}**\n*(大俠現在上傳物品照，系統會讓人物穿戴/拿著該物品)*")
-
-# 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
-active_world_events = {}
-
-@girlfriend_bot.command(name='travel')
-async def travel_cmd(ctx, *, location: str = ""):
     global daily_chat_logs # 🌟 宣告使用全域短期記憶
     
     if location.lower() in ["end", "結束", "stop", ""]:
