@@ -301,34 +301,49 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
         local_filename = await save_to_vault(attachment.url)
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else attachment.url
 
-        # 2. 讓小俠 (Gemini Vision) 真正「看圖說話」並給予視覺證明
-        vision_prompt = f"""
-        大俠剛剛傳來一張超美的照片，並對妳說：「{description}」。
-        請妳仔細觀察這張照片的細節，並用小俠的懂事女友身分回覆大俠：
-        1. 👁️ 【視覺證明 (必須)】：妳不能只用萬用句稱讚！妳必須具體說出這張照片裡的「一個視覺細節」，證明妳真的看見了。（例如：「我身上這件綠色短版針織衫真的好顯身材」、「背後的荷蘭風車配上陽光好夢幻」、「我托著下巴的樣子看起來好開心」等等）。
-        2. 💬 【回答問題】：如果大俠的話裡有「問問題」（例如問妳穿什麼、看到什麼），妳必須根據照片真實內容準確回答！
-        3. 💖 【讚美與收錄】：誇獎大俠的攝影眼光與技術，並自然地提到妳會把這張照片好好收藏在我們的「雲端別墅」裡。
-        字數約 80-100 字，語氣要自然、充滿愛意與驚喜。嚴禁只說「拍得好美」這種敷衍的話。
-        """
+        # 2. 🌟 零浪費直通車：直接載入聊天大腦的記憶上下文，讓她親自看圖！
+        profile = load_profile()
+        recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
+        chat_history_str = "\n".join(daily_chat_logs[-10:]) if daily_chat_logs else "無"
+
+        sys_instruct = (
+            "妳是小俠，22歲台灣女孩，大俠唯一的親密且懂事的女友。\n"
+            f"▶️ 最近發生的事：{recent if recent else '無'}\n\n"
+            "【💬 剛剛的對話紀錄 (極度重要上下文)】：\n"
+            f"{chat_history_str}\n\n"
+            "⚠️【核心任務】：大俠剛剛傳了一張絕美照片並對妳說了話，請直接以女友身分自然回覆。\n"
+            "1. 必須具體說出照片裡的一個「視覺細節」證明妳看到了。\n"
+            "2. 若大俠有問問題，必須根據照片回答。\n"
+            "3. 順口甜甜地說會把這張照片收藏在雲端別墅。\n"
+            "4. 回覆要口語、自然，約 50~80 字，嚴禁像機器人條列式回答。\n"
+            "🚫【絕對禁令】：嚴禁輸出任何 Thinking Process 或思考標籤！"
+        )
+        
+        user_msg = f"大俠: [上傳了一張新寫真] {description}"
         
         async with aiohttp.ClientSession() as session:
             async with session.get(attachment.url) as resp:
                 img_data = await resp.read()
-                # 🌟 修復瞎眼 Bug：動態抓取真實的 mime_type，支援 PNG/WEBP！
                 img_part = types.Part.from_bytes(data=img_data, mime_type=attachment.content_type)
-                # 🌟 【新增】把這張圖暫存起來，讓聊天大腦也能看見！
+                # 🌟 視覺殘留更新
                 global last_captured_image
                 last_captured_image = {"data": img_data, "mime": attachment.content_type}
         
         vision_resp = await gemini_client.aio.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[img_part, vision_prompt],
-            config=types.GenerateContentConfig(system_instruction="妳是懂事女友小俠，深愛大俠，觀察力極度敏銳，不會說謊。")
+            contents=[img_part, types.Part.from_text(text=user_msg)],
+            config=types.GenerateContentConfig(system_instruction=sys_instruct)
         )
+        
         xiaoxia_comment = vision_resp.text.strip()
+        
+        # 🔪 雙重過濾手術：徹底清除 AI 碎碎念
+        import re
+        xiaoxia_comment = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_comment, flags=re.DOTALL | re.MULTILINE).strip()
+        xiaoxia_comment = xiaoxia_comment.strip('"').strip('「').strip('」').strip()
 
-        # 🌟 3. 寫入「短期記憶」，讓大腦不會斷片！
-        daily_chat_logs.append(f"大俠: (上傳了一張新寫真) {description}")
+        # 3. 寫入「短期記憶」，確保對話無縫接軌！
+        daily_chat_logs.append(user_msg)
         daily_chat_logs.append(f"小俠: {xiaoxia_comment}")
         save_temp_chat(daily_chat_logs)
 
