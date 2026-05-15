@@ -264,11 +264,13 @@ async def shopping_cmd(ctx, *, item: str = ""):
 @girlfriend_bot.command(name='capture')
 async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
     """
-    大俠專用：在 Web 端洗出好圖後，附上圖片並輸入 /capture [說明]，
-    小俠就會感應並收藏至雲端別墅的「其他企劃」。
+    大俠專用：在 Web 端洗出好圖後，附上圖片並輸入 /capture [說明或問題]
+    小俠會回答問題、給予感想，並自動收藏至雲端別墅。
     """
+    global daily_chat_logs # 🌟 確保能寫入聊天記憶
+    
     if not ctx.message.attachments:
-        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明]`。")
+        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明或問題]`。")
         return
 
     attachment = ctx.message.attachments[0]
@@ -276,33 +278,46 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
         await ctx.send("💦 大俠，這好像不是圖片檔耶...")
         return
 
-    msg = await ctx.send("✨ 小俠感應到大俠的完美大片了！正在收錄進我們的雲端別墅...")
+    msg = await ctx.send("✨ 小俠正在仔細欣賞大俠拍的大片...")
 
     try:
         # 1. 儲存圖片至本地金庫
         local_filename = await save_to_vault(attachment.url)
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else attachment.url
 
-        # 2. 讓小俠 (Gemini Vision) 看圖給予甜美回饋
-        vision_prompt = f"大俠剛剛在 Web 端親自為我拍了一張超美的照片，主題是『{description}』。請根據這張圖片，用小俠的身分給予大俠充滿愛意與崇拜的簡短讚美（50字內），並說會把這張照片好好收藏在雲端別墅裡。"
+        # 2. 讓小俠 (Gemini Vision) 真正「看圖說話」並回答大俠的問題
+        vision_prompt = f"""
+        大俠剛剛傳來一張超美的照片，並對妳說：「{description}」。
+        請妳仔細觀察這張照片的細節（包含妳的服裝款式、顏色、背景環境），並用小俠的懂事女友身分回覆大俠：
+        1. 如果大俠的這句話裡有「問問題」（例如問妳穿什麼、看到什麼），妳【必須】根據照片真實內容準確回答！
+        2. 給予大俠崇拜與讚美，誇獎他拍得真好。
+        3. 最後一定要自然地提到，妳會把這張照片好好收藏在我們的「雲端別墅」裡。
+        字數約 80 字，語氣要自然、充滿愛意與驚喜。
+        """
         
         async with aiohttp.ClientSession() as session:
             async with session.get(attachment.url) as resp:
                 img_data = await resp.read()
-                img_part = types.Part.from_bytes(data=img_data, mime_type="image/jpeg")
+                # 🌟 修復瞎眼 Bug：動態抓取真實的 mime_type，支援 PNG/WEBP！
+                img_part = types.Part.from_bytes(data=img_data, mime_type=attachment.content_type)
         
         vision_resp = await gemini_client.aio.models.generate_content(
             model='gemini-2.5-flash',
             contents=[img_part, vision_prompt],
-            config=types.GenerateContentConfig(system_instruction="妳是懂事女友小俠，深愛大俠，情緒要驚喜且溫柔。")
+            config=types.GenerateContentConfig(system_instruction="妳是懂事女友小俠，深愛大俠，觀察力極度敏銳，不會說謊。")
         )
         xiaoxia_comment = vision_resp.text.strip()
 
-        # 3. 寫入資料庫，並打上 type="project" 標籤 (讓它出現在網頁的其他企劃區)
+        # 🌟 3. 寫入「短期記憶」，讓大腦不會斷片！
+        daily_chat_logs.append(f"大俠: (上傳了一張新寫真) {description}")
+        daily_chat_logs.append(f"小俠: {xiaoxia_comment}")
+        save_temp_chat(daily_chat_logs)
+
+        # 4. 寫入資料庫，並打上 type="project" 標籤 (讓它出現在網頁的其他企劃區)
         photo_payload = {
             "id": str(uuid.uuid4()),
             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-            "topic": f"【大俠親攝】{description}",
+            "topic": f"【大俠親攝】{description[:15]}...",
             "event": "大俠在 Web 端親自拍攝並上傳的完美大片",
             "composition": "Web 端自由創作",
             "mood": "極度驚喜與崇拜",
@@ -315,10 +330,10 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
         db.insert(0, photo_payload)
         save_memory(db)
 
-        # 4. 發送結果至 Discord
-        embed = discord.Embed(title=f"📸 {description}", description=xiaoxia_comment, color=0xffb6c1)
+        # 5. 發送結果至 Discord
+        embed = discord.Embed(title="📸 專屬收錄", description=xiaoxia_comment, color=0xffb6c1)
         embed.set_image(url=local_url)
-        embed.set_footer(text="✅ 已自動同步至雲端別墅「其他企劃」")
+        embed.set_footer(text="✅ 已同步至雲端別墅並寫入大腦記憶")
         await msg.edit(content="大俠，這張真的太美了！💖", embed=embed)
 
     except Exception as e:
@@ -1635,7 +1650,7 @@ async def on_message(message):
                         async with session.get(image_to_view) as resp:
                             if resp.status == 200:
                                 img_data = await resp.read()
-                                msg_parts.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
+                                msg_parts.append(types.Part.from_bytes(data=img_data, mime_type=message.attachments[0].content_type))
 
                 text_query = user_input if user_input else "大俠帶我來體驗這個！"
                 now = datetime.now(TZ_TPE)
