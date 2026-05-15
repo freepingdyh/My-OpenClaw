@@ -281,12 +281,13 @@ async def shopping_cmd(ctx, *, item: str = ""):
 async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
     """
     大俠專用：在 Web 端洗出好圖後，附上圖片並輸入 /capture [說明或問題]
-    小俠會回答問題、給予感想，並自動收藏至雲端別墅。
+    小俠會直接用「聊天大腦」看圖並給予最真實、絲滑的回饋，同時自動收藏至雲端別墅。
     """
-    global daily_chat_logs # 🌟 確保能寫入聊天記憶
-    
+    global daily_chat_logs
+    user_id = ctx.author.id
+
     if not ctx.message.attachments:
-        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明或問題]`。")
+        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明或跟小俠說的話]`。")
         return
 
     attachment = ctx.message.attachments[0]
@@ -294,68 +295,58 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
         await ctx.send("💦 大俠，這好像不是圖片檔耶...")
         return
 
-    msg = await ctx.send("✨ 小俠正在仔細欣賞大俠拍的大片...")
+    msg = await ctx.send("✨ 小俠正眼冒愛心，看著大俠拍的大片...")
 
     try:
         # 1. 儲存圖片至本地金庫
         local_filename = await save_to_vault(attachment.url)
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else attachment.url
 
-        # 2. 🌟 零浪費直通車：直接載入聊天大腦的記憶上下文，讓她親自看圖！
-        profile = load_profile()
-        recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
-        chat_history_str = "\n".join(daily_chat_logs[-10:]) if daily_chat_logs else "無"
-
-        sys_instruct = (
-            "妳是小俠，22歲台灣女孩，大俠唯一的親密且懂事的女友。\n"
-            f"▶️ 最近發生的事：{recent if recent else '無'}\n\n"
-            "【💬 剛剛的對話紀錄 (極度重要上下文)】：\n"
-            f"{chat_history_str}\n\n"
-            "⚠️【核心任務】：大俠剛剛傳了一張絕美照片並對妳說了話，請直接以女友身分自然回覆。\n"
-            "1. 必須具體說出照片裡的一個「視覺細節」證明妳看到了。\n"
-            "2. 若大俠有問問題，必須根據照片回答。\n"
-            "3. 順口甜甜地說會把這張照片收藏在雲端別墅。\n"
-            "4. 回覆要口語、自然，約 50~80 字，嚴禁像機器人條列式回答。\n"
-            "🚫【絕對禁令】：嚴禁輸出任何 Thinking Process 或思考標籤！"
-        )
-        
-        user_msg = f"大俠: [上傳了一張新寫真] {description}"
-        
+        # 2. 準備給「聊天大腦」的視覺與文字素材 (動態讀取真實格式)
         async with aiohttp.ClientSession() as session:
             async with session.get(attachment.url) as resp:
                 img_data = await resp.read()
                 img_part = types.Part.from_bytes(data=img_data, mime_type=attachment.content_type)
-                # 🌟 視覺殘留更新
-                global last_captured_image
-                last_captured_image = {"data": img_data, "mime": attachment.content_type}
+
+        # 🌟 核心魔法：加上系統悄悄話，讓聊天大腦知道現在的「動作」，然後原汁原味回應大俠
+        text_prompt = f"(系統悄悄話：大俠剛為妳拍了這張絕美照片，準備收錄進雲端別墅。請仔細看這張圖，並以女友身分自然回覆大俠的話，順便表達對這張照片的喜愛。字數約50~80字內。)\n\n大俠說：{description}"
+        msg_parts = [img_part, types.Part.from_text(text=text_prompt)]
+
+        # 🌟 3. 單一真理來源 (Single Source of Truth)：直接呼叫正在陪聊的專屬 Session！
+        if user_id not in girlfriend_chat_sessions:
+            # 萬一剛重啟還沒有 Session，給她一個基礎大腦
+            sys_instruct = "妳是小俠，22歲台灣女孩，大俠的親密女友。妳擁有極度豐滿傲人的完美身材，深愛著大俠。請用溫柔繁體中文自然回覆，嚴禁輸出Thinking Process等內部思考標籤。"
+            girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
+                model="gemini-2.5-flash",
+                config=types.GenerateContentConfig(system_instruction=sys_instruct)
+            )
+
+        chat_session = girlfriend_chat_sessions[user_id]
+        response = await chat_session.send_message(msg_parts)
         
-        vision_resp = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[img_part, types.Part.from_text(text=user_msg)],
-            config=types.GenerateContentConfig(system_instruction=sys_instruct)
-        )
-        
-        xiaoxia_comment = vision_resp.text.strip()
+        xiaoxia_reply = response.text if response and response.text else "大俠拍得太美了，小俠都看呆了！"
         
         # 🔪 雙重過濾手術：徹底清除 AI 碎碎念
         import re
-        xiaoxia_comment = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_comment, flags=re.DOTALL | re.MULTILINE).strip()
-        xiaoxia_comment = xiaoxia_comment.strip('"').strip('「').strip('」').strip()
+        xiaoxia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_reply, flags=re.DOTALL | re.MULTILINE).strip()
+        patterns_to_remove = [r'^Thinking Process:.*?\n', r'^Draft.*?:.*?\n', r'^Final check.*?:.*?\n', r'^Analysis:.*?\n']
+        for pattern in patterns_to_remove:
+            xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        # 3. 寫入「短期記憶」，確保對話無縫接軌！
-        daily_chat_logs.append(user_msg)
-        daily_chat_logs.append(f"小俠: {xiaoxia_comment}")
+        # 4. 寫入「短期記憶」，確保對話絲滑連貫
+        daily_chat_logs.append(f"大俠: (上傳寫真) {description}")
+        daily_chat_logs.append(f"小俠: {xiaoxia_reply}")
         save_temp_chat(daily_chat_logs)
 
-        # 4. 寫入資料庫，並打上 type="project" 標籤 (讓它出現在網頁的其他企劃區)
+        # 5. 寫入資料庫，打上 type="project" 標籤 (直接填入聊天大腦的原話！)
         photo_payload = {
             "id": str(uuid.uuid4()),
             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             "topic": f"【大俠親攝】{description[:15]}...",
             "event": "大俠在 Web 端親自拍攝並上傳的完美大片",
             "composition": "Web 端自由創作",
-            "mood": "極度驚喜與崇拜",
-            "message": xiaoxia_comment,
+            "mood": "驚喜與滿滿的愛意",
+            "message": xiaoxia_reply,  # 🌟 直接使用聊天原話
             "image_url": attachment.url,
             "local_url": local_url,
             "type": "project"
@@ -364,10 +355,10 @@ async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
         db.insert(0, photo_payload)
         save_memory(db)
 
-        # 5. 發送結果至 Discord
-        embed = discord.Embed(title="📸 專屬收錄", description=xiaoxia_comment, color=0xffb6c1)
+        # 6. 發送結果至 Discord
+        embed = discord.Embed(title="📸 專屬收錄", description=xiaoxia_reply, color=0xffb6c1)
         embed.set_image(url=local_url)
-        embed.set_footer(text="✅ 已同步至雲端別墅並寫入大腦記憶")
+        embed.set_footer(text="✅ 已由聊天大腦親自鑑定，同步寫入記憶與雲端別墅")
         await msg.edit(content="大俠，這張真的太美了！💖", embed=embed)
 
     except Exception as e:
