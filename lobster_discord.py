@@ -1721,8 +1721,6 @@ async def on_message(message):
                     # 🌟 移除強制驚嘆風景的指令，改為全心享受兩人世界
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度幸福與感動。請全心全意享受與大俠的兩人世界。\n\n"
 
-                # 🌟 完整靈魂人設指令 (被動知性版)
-                sys_instruct = (
                 # 🌟 修復金魚腦：強制讀取最近 10 句短期對話紀錄！
                 chat_history_str = "\n".join(daily_chat_logs[-10:]) if daily_chat_logs else "無"
 
