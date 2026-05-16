@@ -834,11 +834,11 @@ async def process_diary_reply(channel, target_date=None):
 
             請回傳純 JSON 格式：
             {{
-                "daxia_new_traits": ["大俠的新特徵"],
-                "xiaoxia_new_traits": ["小俠的新特質"],
+                "daxia_new_traits": ["⚠️必須是具備『動詞+受詞/形容詞』的完整語意句子。例如：『喜歡用巧思製造浪漫』或『喜歡看小俠穿著展現曲線的服裝』。絕對禁止只填寫名詞碎片（如『夕陽』、『洋裝』）！"],
+                "xiaoxia_new_traits": ["⚠️必須是具備完整語意的句子，描述性格或狀態。例如：『對大俠的安排感到極度感動』。嚴禁名詞碎片！"],
                 "xiaoxia_promises": ["⚠️僅保留尚未完成的承諾，已完成的請刪除。"],
-                "shared_knowledge": ["雙方討論的新知識"],
-                "recent_context": ["今天發生的短期重要事件"]
+                "shared_knowledge": ["雙方討論的新知識，必須是完整句子"],
+                "recent_context": ["今天發生的短期重要事件，必須是完整句子"]
             }}
             【今日對話】：\n{chat_context}
             """
@@ -943,7 +943,7 @@ async def process_diary_reply(channel, target_date=None):
             {{
               "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
               "affection_reason": "加分原因(50字內)",
-              "extracted_preferences": ["嚴格限制：【僅限從大俠的日記或對話原文中】擷取大俠的特別喜好。絕對禁止將本系統提示詞（如緊身、絲質等要求）誤認為大俠的喜好！無則保持空陣列 []"],
+              "extracted_preferences": ["嚴格限制：僅限擷取大俠的特別喜好，且『⚠️必須是具備動詞的完整句子』。例如：『喜歡牽著小俠的手散步』。絕對禁止寫入『夕陽』、『洋裝』等名詞碎片！無則保持空陣列 []"],
               "reply_to_daxia": "...",
               "xiaoxia_diary": "...",
               "spiciness": "C",
