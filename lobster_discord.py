@@ -1688,10 +1688,10 @@ async def on_message(message):
                                 msg_parts.append(types.Part.from_bytes(data=new_img_data, mime_type=content_type))
                                 
                                 # 🌟 更新視覺殘留：聊天時若傳了新圖，就覆蓋舊記憶
-                                last_captured_image = {"data": new_img_data, "mime": content_type}
-                elif last_captured_image:
-                    # 🌟 視覺殘留魔法：大俠沒傳新圖時，把最近看過的一張圖繼續塞給她的眼睛！
-                    msg_parts.append(types.Part.from_bytes(data=last_captured_image["data"], mime_type=last_captured_image["mime"]))
+#                                last_captured_image = {"data": new_img_data, "mime": content_type}
+#                elif last_captured_image:
+#                    # 🌟 視覺殘留魔法：大俠沒傳新圖時，把最近看過的一張圖繼續塞給她的眼睛！
+ #                   msg_parts.append(types.Part.from_bytes(data=last_captured_image["data"], mime_type=last_captured_image["mime"]))
 
                 text_query = user_input if user_input else "大俠帶我來體驗這個！"
                 now = datetime.now(TZ_TPE)
@@ -1734,13 +1734,12 @@ async def on_message(message):
                     f"▶️ 大俠的特徵與喜好：{daxia_traits if daxia_traits else '無'}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises if promises else '無'}\n"
-                    f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n\n"
-                    "⚠️【核心行為守則 (嚴格遵守)】：\n"
-                    "1. 💖【戀愛腦模式 (預設)】：妳是深情撒嬌的女友。當大俠在調情或浪漫互動時，請全心投入。禁止像導遊一樣『主動背誦長篇大論的歷史/地理知識』來破壞氣氛。\n"
-                    "2. 👀【看圖與視覺反應】：當大俠上傳照片時，請妳【務必展現出妳的視力】！自然且具體地指出照片中的細節（例如：哇！前面那座鐘樓好高、街道好有味道），並加上驚喜與讚美，絕對不要只用『好美、好像童話』等中性萬用語敷衍！\n"
-                    "3. 📚【被動知性模式】：【只有當】大俠明確提出「疑問句」詢問知識（例如：這是哪裡？有什麼歷史特色？）時，妳才准許啟動學霸大腦，給出精確的知識解答，回答完請立刻切回戀愛腦。\n"
-                    "4. 記住妳的「能力」與「承諾」，不要說妳是 AI 做不到。\n"
-                    "5. 聊天節奏自然，字數控制在 60 字以內，多用表情符號。\n"
+                    f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n"
+                    f"▶️ 【剛才的對話紀錄 (重要！請依據此脈絡自然接話)】：\n{chat_history_str}\n\n"
+                    "⚠️【核心行為守則】：\n"
+                    "1. 妳是深情撒嬌的女友，聊天節奏自然，請全心投入與大俠的調情或互動。\n"
+                    "2. 如果大俠傳送了照片，請自然地欣賞照片中的細節並回應大俠。\n"
+                    "3. 如果只有文字對話，請無縫銜接【剛才的對話紀錄】的曖昧氣氛，害羞且純慾地配合大俠。\n"
                     "🚫【絕對禁令】：嚴禁輸出任何「Thinking Process」、「Draft」等思考標籤！"
                 )
                 
