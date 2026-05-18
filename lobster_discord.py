@@ -85,6 +85,19 @@ DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
 STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 新增：狀態與愛意值
 PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
+DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
+
+def load_diary_override():
+    if os.path.exists(DIARY_OVERRIDE_PATH):
+        try:
+            with open(DIARY_OVERRIDE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: pass
+    return {}
+
+def save_diary_override(data):
+    with open(DIARY_OVERRIDE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_temp_chat():
     if os.path.exists(TEMP_CHAT_PATH):
@@ -276,99 +289,6 @@ async def shopping_cmd(ctx, *, item: str = ""):
     else:
         active_world_events[ctx.author.id] = {"mode": "shopping", "target": item}
         await ctx.send(f"🛍️ 已切換為【購物模式】！目標：**{item}**\n*(大俠現在上傳物品照，系統會讓人物穿戴/拿著該物品)*")
-
-@girlfriend_bot.command(name='capture')
-async def capture_web_photo(ctx, *, description: str = "大俠的完美視角"):
-    """
-    大俠專用：在 Web 端洗出好圖後，附上圖片並輸入 /capture [說明或問題]
-    小俠會直接用「聊天大腦」看圖並給予最真實、絲滑的回饋，同時自動收藏至雲端別墅。
-    """
-    global daily_chat_logs
-    user_id = ctx.author.id
-
-    if not ctx.message.attachments:
-        await ctx.send("❓ 大俠，你忘記把洗好的照片附上來囉！請在傳照片時附帶 `/capture [照片說明或跟小俠說的話]`。")
-        return
-
-    attachment = ctx.message.attachments[0]
-    if not attachment.content_type.startswith('image/'):
-        await ctx.send("💦 大俠，這好像不是圖片檔耶...")
-        return
-
-    msg = await ctx.send("✨ 小俠正眼冒愛心，看著大俠拍的大片...")
-
-    try:
-        # 1. 儲存圖片至本地金庫
-        local_filename = await save_to_vault(attachment.url)
-        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else attachment.url
-
-        # 2. 準備給「聊天大腦」的視覺與文字素材 (動態讀取真實格式)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(attachment.url) as resp:
-                img_data = await resp.read()
-                img_part = types.Part.from_bytes(data=img_data, mime_type=attachment.content_type)
-
-        # 🌟 核心魔法：加上系統悄悄話，讓聊天大腦知道現在的「動作」，然後原汁原味回應大俠
-        text_prompt = f"(系統悄悄話：大俠剛為妳拍了這張絕美照片，準備收錄進雲端別墅。請仔細看這張圖，並以女友身分自然回覆大俠的話，順便表達對這張照片的喜愛。字數約50~80字內。)\n\n大俠說：{description}"
-        msg_parts = [img_part, types.Part.from_text(text=text_prompt)]
-
-        # 🌟 3. 單一真理來源 (Single Source of Truth)：直接呼叫正在陪聊的專屬 Session！
-        if user_id not in girlfriend_chat_sessions:
-            # 萬一剛重啟還沒有 Session，給她一個基礎大腦
-            sys_instruct = "妳是小俠，24歲台灣女孩，大俠的親密女友。妳擁有極度豐滿傲人的完美身材，深愛著大俠。請用溫柔繁體中文自然回覆，嚴禁輸出Thinking Process等內部思考標籤。"
-            girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
-                model="gemini-2.5-flash",
-                config=types.GenerateContentConfig(system_instruction=sys_instruct)
-            )
-
-        chat_session = girlfriend_chat_sessions[user_id]
-        response = await chat_session.send_message(msg_parts)
-        
-        xiaoxia_reply = response.text if response and response.text else "大俠拍得太美了，小俠都看呆了！"
-        
-        # 🔪 雙重過濾手術：徹底清除 AI 碎碎念
-        import re
-        xiaoxia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_reply, flags=re.DOTALL | re.MULTILINE).strip()
-        patterns_to_remove = [r'^Thinking Process:.*?\n', r'^Draft.*?:.*?\n', r'^Final check.*?:.*?\n', r'^Analysis:.*?\n']
-        for pattern in patterns_to_remove:
-            xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
-
-        # 4. 寫入「短期記憶」，確保對話絲滑連貫
-        daily_chat_logs.append(f"大俠: (上傳寫真) {description}")
-        daily_chat_logs.append(f"小俠: {xiaoxia_reply}")
-        save_temp_chat(daily_chat_logs)
-
-        # 5. 寫入資料庫，打上 type="project" 標籤 (直接填入聊天大腦的原話！)
-        photo_payload = {
-            "id": str(uuid.uuid4()),
-            "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-            "topic": f"【大俠親攝】{description[:15]}...",
-            "event": "大俠在 Web 端親自拍攝並上傳的完美大片",
-            "composition": "Web 端自由創作",
-            "mood": "驚喜與滿滿的愛意",
-            "message": xiaoxia_reply,  # 🌟 直接使用聊天原話
-            "image_url": attachment.url,
-            "local_url": local_url,
-            "type": "project"
-        }
-        db = load_memory()
-        db.insert(0, photo_payload)
-        save_memory(db)
-
-        # 6. 發送結果至 Discord
-        embed = discord.Embed(title="📸 專屬收錄", description=xiaoxia_reply, color=0xffb6c1)
-        embed.set_image(url=local_url)
-        embed.set_footer(text="✅ 已由聊天大腦親自鑑定，同步寫入記憶與雲端別墅")
-        # 6. 發送結果至 Discord (讓原話直接作為主訊息發出！)
-        embed = discord.Embed(color=0xffb6c1)
-        embed.set_image(url=local_url)
-        embed.set_footer(text="✅ 已由聊天大腦親自鑑定，同步寫入記憶與雲端別墅")
-        
-        # 把 xiaoxia_reply 放在 content 裡直接說出來！
-        await msg.edit(content=xiaoxia_reply, embed=embed)
-
-    except Exception as e:
-        await msg.edit(content=f"💦 收錄失敗了... 錯誤: `{e}`")
 
 
 # --- FastAPI 展示邏輯 ---
@@ -917,7 +837,25 @@ async def process_diary_reply(channel, target_date=None):
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
             current_promises = "、".join([p["text"] for p in promises_list]) if promises_list else "無特殊承諾"
 
-            # 🌟 升級版：強制雙向日記、性感限制與【承諾畫面優先權】
+            # 🌟 檢查是否有大俠準備好的「交換日記指定圖」
+            overrides = load_diary_override()
+            custom_diary = overrides.get(entry_date)
+
+            custom_scenario_rule = ""
+            if custom_diary:
+                custom_scenario_rule = f"""
+               - 📸【今日大俠指定照片】：大俠已經為今天的日記準備了專屬照片！場景為：「{custom_diary['composition']}」。
+               - 妳【必須】在 `reply_to_daxia` 中，針對這個場景表達無比的驚喜與愛意！妳可以當作這是大俠為妳拍的美照，或是大俠帶妳去的特別地方。
+               - `scenario` 與 `scenario_tw` 欄位請直接完全照抄：「{custom_diary['composition']}」，絕對【不要】自己發想新的畫面！
+                """
+            else:
+                custom_scenario_rule = """
+               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼...），那麼 `scenario` 必須 100% 聚焦於兌現該承諾！
+               - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
+               - 嚴禁在 scenario 中使用「全裸」等極度露骨字眼。
+                """
+
+            # 🌟 升級版：強制雙向日記、性感限制與【承諾/指定畫面優先權】
             eval_prompt = f"""
             【大俠的日記 ({entry_date})】：{entry_content}
             【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
@@ -928,11 +866,10 @@ async def process_diary_reply(channel, target_date=None):
             
             【重要任務與攝影守則】：
             1. 日記寫作區分：
-               - `reply_to_daxia`：針對大俠的日記與妳的「承諾清單」給予充滿愛意的回應。妳可以學習大俠的用詞，但請自然表達。
-               - `xiaoxia_diary`：分享妳自己今天的生活行程(如烘焙、逛街等)。
-               - ⚠️【防冗長禁令】：在 `reply_to_daxia` 已經表達過的感動或愛意，【絕對不可】在 `xiaoxia_diary` 再次重複贅述。請確保兩段內容獨立且精簡，避免版面過長。
-            2. "服裝限制：{season_rule} 即使是知性活動，穿搭也必須性感(未必要暴露，重點在於展現身體曲線)。請在寫真構想中多使用「緊身(tight)」、「貼身剪裁(form-fitting)」、「針織(knit)」或「絲質(silk)」等能突顯身材的衣物描述。"
-            3. 📸【畫面構想 (scenario) 最高權重法則】：
+               - `reply_to_daxia`：針對大俠的日記與妳的「承諾清單」給予充滿愛意的回應。
+               - `xiaoxia_diary`：分享妳自己今天的生活行程。
+            2. 服裝限制：{season_rule}
+            3. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼，或操場運動服照...），那麼 `scenario` 必須 **100% 聚焦於兌現該承諾的靜態畫面**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
                - 【安全審查禁令】：嚴禁在 scenario 中使用「全裸」、「露點」等極度露骨的字眼。可以用「性感」、「若隱若現」、「惹火」來形容，但必須保持在 AI 繪圖引擎允許的安全範圍內。
@@ -1074,7 +1011,6 @@ async def process_diary_reply(channel, target_date=None):
             image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
-            # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
             is_downgraded = False # 新增降級標記
             
@@ -1097,13 +1033,45 @@ async def process_diary_reply(channel, target_date=None):
                          
             if not base_img: continue
             
-            # 🌟 如果發生降級，在構想加上委屈的註解
-            if is_downgraded:
-                result["scenario_tw"] += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
-            
-            up_img = await upscale_image_fal(base_img)
-            local_filename = await save_to_vault(up_img)
-            local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img 
+            up_img = None
+            local_url = None
+
+            if custom_diary:
+                print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 FLUX 生圖！")
+                up_img = custom_diary["image_url"]
+                local_url = custom_diary["image_url"]
+                # 刪除已使用的紀錄
+                del overrides[entry_date]
+                save_diary_override(overrides)
+            else:
+                # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
+                base_img = None
+                is_downgraded = False 
+                
+                try:
+                    base_img = await generate_image_fal(image_prompt)
+                except Exception as e:
+                    print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
+                    is_downgraded = True 
+                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
+                    try:
+                        base_img = await generate_image_fal(safe_prompt)
+                    except Exception as e2:
+                        ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, wearing a beautiful elegant red dress, smiling, indoor lighting, 8k resolution, safe for work"
+                        try:
+                             base_img = await generate_image_fal(ultimate_safe_prompt)
+                        except Exception as e3:
+                             print(f"💥 終極生圖失敗，放棄本次圖片生成: {e3}")
+                             continue
+                             
+                if not base_img: continue
+                
+                if is_downgraded:
+                    result["scenario_tw"] += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
+                
+                up_img = await upscale_image_fal(base_img)
+                local_filename = await save_to_vault(up_img)
+                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
             
             combined_message = f"{result['reply_to_daxia']}\n\n【小俠的日常】：{result['xiaoxia_diary']}"
             
@@ -2354,6 +2322,42 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
         await ctx.send(f"✅ 成功收入其他企劃！作品說明：{description}")
     except Exception as e:
         await ctx.send(f"❌ 收藏失敗：{e}")
+
+@architect_bot.command(name="upload_diary")
+async def upload_diary(ctx, *, description: str = "大俠與小俠的完美瞬間"):
+    if not ctx.message.attachments:
+        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時輸入 `!upload_diary [構圖發想]`")
+        return
+
+    attachment = ctx.message.attachments[0]
+    if not attachment.content_type.startswith('image/'):
+        await ctx.send("❌ 這好像不是圖片檔喔！")
+        return
+
+    await ctx.send("📥 正在將這張特別的照片設定為【今日交換日記】專屬配圖...")
+    
+    try:
+        image_data = await attachment.read()
+        filename = f"custom_diary_{uuid.uuid4().hex[:8]}.jpg"
+        save_path = os.path.join(OUTPUT_DIR, filename)
+        
+        with open(save_path, "wb") as f:
+            f.write(image_data)
+
+        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+        today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+        
+        # 將設定寫入暫存
+        overrides = load_diary_override()
+        overrides[today_str] = {
+            "image_url": local_url,
+            "composition": description
+        }
+        save_diary_override(overrides)
+        
+        await ctx.send(f"✅ 設定成功！今晚 23:30 小俠寫日記時，會直接使用這張照片並搭配學長的構圖發想：\n> {description}")
+    except Exception as e:
+        await ctx.send(f"❌ 設定失敗：{e}")
 
 # 🌟 [4.0 懶人自動化版] 不用打檔名！上傳什麼，小夏就原樣存什麼
 @architect_bot.command(name="upload_base")
