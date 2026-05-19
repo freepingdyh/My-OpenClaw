@@ -1404,12 +1404,17 @@ async def generate_body_base(prompt):
             return data['images'][0]['url']
 
 async def repair_face_only(base_image_url, prompt):
+    """
+    ⚡ 修正版：將 id_weight 從 1.2 修正為 1.0 (符合 API 限制)
+    """
     url = "https://fal.run/fal-ai/flux-pulid"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     
+    # 讀取身份參考圖
     base_image_path = os.path.join(MEMORY_DIR, "base_close_core.png")
     if not os.path.exists(base_image_path):
-        raise Exception("金庫內找不到 base_close_core.png")
+        print("❌ 找不到 base_close_core.png")
+        return base_image_url
 
     with open(base_image_path, "rb") as f:
         reference_image_b64 = "data:image/png;base64," + base64.b64encode(f.read()).decode('utf-8')
@@ -1418,7 +1423,7 @@ async def repair_face_only(base_image_url, prompt):
         "prompt": f"{prompt}, (perfectly detailed face, natural skin texture, fox-eye makeup)",
         "image_url": base_image_url,
         "reference_image_url": reference_image_b64,
-        "id_weight": 1.2,
+        "id_weight": 1.0,  # 🌟 修正：上限為 1.0，設為 1.0 即可達到最大鎖定效果
         "num_inference_steps": 20,
         "enable_safety_checker": False
     }
@@ -1426,10 +1431,9 @@ async def repair_face_only(base_image_url, prompt):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             data = await resp.json()
-            # 🌟 關鍵除錯：檢查是否真的有 images 鍵值
             if 'images' not in data:
-                print(f"❌ PuLID 注入失敗，回應內容: {data}")
-                raise Exception(f"Face Repair API 回傳錯誤: {data}")
+                print(f"❌ API 回傳異常: {data}")
+                raise Exception(f"API 回傳錯誤: {data}")
             return data['images'][0]['url']
 
 @girlfriend_bot.command(name='test_pulid')
