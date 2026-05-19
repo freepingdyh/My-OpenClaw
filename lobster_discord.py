@@ -1405,7 +1405,7 @@ async def generate_body_base(prompt):
 
 async def repair_face_only(base_image_url, prompt):
     """
-    ⚡ 修正版：將 id_weight 從 1.2 修正為 1.0 (符合 API 限制)
+    ⚡ 身體鎖定版：加入 mask_prompt，強迫模型禁止重繪身體
     """
     url = "https://fal.run/fal-ai/flux-pulid"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
@@ -1413,7 +1413,6 @@ async def repair_face_only(base_image_url, prompt):
     # 讀取身份參考圖
     base_image_path = os.path.join(MEMORY_DIR, "base_close_core.png")
     if not os.path.exists(base_image_path):
-        print("❌ 找不到 base_close_core.png")
         return base_image_url
 
     with open(base_image_path, "rb") as f:
@@ -1423,17 +1422,19 @@ async def repair_face_only(base_image_url, prompt):
         "prompt": f"{prompt}, (perfectly detailed face, natural skin texture, fox-eye makeup)",
         "image_url": base_image_url,
         "reference_image_url": reference_image_b64,
-        "id_weight": 1.0,  # 🌟 修正：上限為 1.0，設為 1.0 即可達到最大鎖定效果
+        "id_weight": 1.0, 
         "num_inference_steps": 20,
-        "enable_safety_checker": False
+        "enable_safety_checker": False,
+        # 🌟 關鍵差異：這行參數會強制模型「只改臉」，身體維持原樣
+        "mask_prompt": "face",
+        "strength": 0.4 # 強度拉高，確保臉能徹底換成小俠的，但不影響 body
     }
     
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             data = await resp.json()
             if 'images' not in data:
-                print(f"❌ API 回傳異常: {data}")
-                raise Exception(f"API 回傳錯誤: {data}")
+                raise Exception(f"API 錯誤: {data}")
             return data['images'][0]['url']
 
 @girlfriend_bot.command(name='test_pulid')
