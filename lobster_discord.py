@@ -593,17 +593,23 @@ async def generate_suno_music(lyrics, title, custom_style=None):
 
 async def generate_image_fal(prompt):
     """
-    🚀 攔截器模式：將全系統的 /cosplay 與 日記生圖請求，自動導向 PuLID 引擎！
+    🚀 攔截器模式：加入「寫實防護罩」與「狐狸眼眼妝」
+    確保不管什麼歷史題材，出來的絕對是真人照片！
     """
-    # 💄 大俠專屬指定：不管什麼情境，這組「狐狸眼與睫毛膏」的靈魂咒語絕對不能少！
-    face_enhancers = ", perfectly detailed face, fox-eye makeup, long eyelashes, mascara, highly detailed eyes, consistent identity"
+    # 📸 寫實防護罩 + 💄 大俠專屬眼妝
+    # 加入 RAW photo, DSLR, lifelike skin 等極端寫實詞彙來對抗歷史插畫感
+    style_and_face_enhancers = (
+        ", RAW photo, ultra-realistic, photorealistic, 8k resolution, DSLR, "
+        "highly detailed lifelike skin texture, perfectly detailed face, "
+        "fox-eye makeup, long eyelashes, mascara, consistent identity"
+    )
     
-    # 將 Gemini 想好的咒語，強制加上眼妝特徵
-    enhanced_prompt = prompt + face_enhancers
+    # 將 Gemini 想好的咒語，強制綁上寫實與眼妝
+    enhanced_prompt = prompt + style_and_face_enhancers
     
-    print(f"🔄 [/cosplay 攔截器] 導向 PuLID 引擎中... 附加眼妝咒語完成！")
+    print(f"🔄 [/cosplay 攔截器] 導向 PuLID 引擎中... 附加寫實防護與眼妝完成！")
     
-    # 呼叫下方的 PuLID 引擎 (維持 0.85 的身分權重)
+    # 呼叫 PuLID 引擎 (維持 0.85 的身分權重)
     return await generate_image_pulid(prompt=enhanced_prompt, id_weight=0.85)
 
 async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85):
