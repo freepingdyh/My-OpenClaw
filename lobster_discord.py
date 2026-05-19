@@ -1396,7 +1396,7 @@ async def test_pulid(ctx, *, prompt: str):
             await ctx.channel.send("👀 偵測到大俠上傳了新特寫，將以此臉孔進行 FaceID 鎖定！")
         
         # 呼叫我們剛剛寫好的 PuLID 引擎
-        img_url = await generate_image_pulid(prompt, reference_image_url=ref_url, id_weight=0.85)
+        img_url = await generate_image_pulid(prompt, reference_image_url=ref_url, id_weight=0.75)
         
         # 🌟 純測試展示，不寫入任何 JSON 資料庫，不進雲端別墅
         embed = discord.Embed(title="🧪 PuLID 測試成果", description=f"**咒語：**\n{prompt}", color=0x9b59b6)
