@@ -13,6 +13,7 @@ import sys
 import random
 from datetime import datetime, time, timezone, timedelta
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
+from PIL import Image
 
 import discord
 from discord.ext import commands, tasks
@@ -38,15 +39,39 @@ from google.genai import types # 確保有載入 types
 import subprocess
 import sys
 
+from PIL import Image, ImageFilter
+
 def auto_heal_environment():
-    required_packages = ["pydub"]
-    for pkg in required_packages:
+
+    required_packages = {
+        "pydub": "pydub",
+        "PIL": "pillow",
+        "cv2": "opencv-python-headless",
+        "insightface": "insightface==0.7.3",
+        "numpy": "numpy",
+        "onnxruntime": "onnxruntime==1.17.1"
+    }
+
+    for import_name, pip_name in required_packages.items():
+
         try:
-            __import__(pkg)
+            __import__(import_name)
+
         except ImportError:
-            print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-            print(f"✅ {pkg} 強制安裝完成！")
+
+            print(f"⚠️ 缺少 {pip_name}，自動安裝中...")
+
+            subprocess.check_call([
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-cache-dir",
+                pip_name
+            ])
+
+            print(f"✅ {pip_name} 安裝完成")
+            
 
 # 👇 學長，請在這裡加上這段！把 ffmpeg 的資料夾加入系統 PATH
 ffmpeg_dir = "/home/node/.openclaw/workspace/ffmpeg_bin"
@@ -55,6 +80,12 @@ if os.path.exists(ffmpeg_dir) and ffmpeg_dir not in os.environ.get("PATH", ""):
     print(f"✅ 已成功將 ffmpeg 路徑加入系統環境變數！")
 # 程式啟動時立刻執行檢查
 auto_heal_environment()
+
+from PIL import Image, ImageFilter
+import cv2
+import numpy as np
+from insightface.app import FaceAnalysis
+
 # ==========================================
 
 # ==========================================
@@ -76,8 +107,12 @@ VAULT_DIR = "/data" if IS_ZEABUR else BASE_DIR
 
 OUTPUT_DIR = os.path.join(VAULT_DIR, "output")
 MEMORY_DIR = os.path.join(VAULT_DIR, "memory")
+# 🌟 新增：Face Repair / Crop 暫存區
+TEMP_DIR = os.path.join(VAULT_DIR, "temp")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(MEMORY_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # --- 資料庫路徑定義 ---
 DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
@@ -245,9 +280,39 @@ async def save_to_vault(url):
     except Exception as e:
         print(f"Vault save error: {e}")
         return None
+    
+async def cleanup_temp_files(max_age_hours=6):
+
+    now = time.time()
+
+    for filename in os.listdir(TEMP_DIR):
+
+        filepath = os.path.join(TEMP_DIR, filename)
+
+        try:
+            file_age = now - os.path.getmtime(filepath)
+
+            if file_age > max_age_hours * 3600:
+
+                os.remove(filepath)
+
+                print(f"🧹 已清理暫存檔: {filename}")
+
+        except Exception as e:
+
+            print(f"⚠️ 清理失敗: {e}")
 
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# ==========================================
+# 🧠 Face Detection Engine
+# ==========================================
+face_app = FaceAnalysis(
+    name='buffalo_l',
+    root='/data/insightface'
+)
+face_app.prepare(ctx_id=-1)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -294,6 +359,8 @@ async def shopping_cmd(ctx, *, item: str = ""):
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
+# 🌟 新增：Face Repair 暫存圖
+api_app.mount("/temp", StaticFiles(directory=TEMP_DIR), name="temp")
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 os.makedirs(DATASET_DIR, exist_ok=True)
 api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
@@ -595,8 +662,13 @@ async def generate_image_fal(prompt):
     url = "https://fal.run/fal-ai/flux-lora"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     payload = {
-        "prompt": prompt, "image_size": "portrait_16_9", "num_inference_steps": 28,
-        "guidance_scale": 3.5, "loras": [{"path": XIAOXIA_LORA_URL, "scale": 1.15}],
+    "prompt": prompt,
+    "image_size": {
+        "width": 768,
+        "height": 1152
+    },
+    "num_inference_steps": 16,
+    "guidance_scale": 3.2, "loras": [{"path": XIAOXIA_LORA_URL, "scale": 1.15}],
         "enable_safety_checker": False  # 🌟 魔法參數：嘗試直接強制關閉 Fal.ai 的官方安全濾網！
     }
     async with aiohttp.ClientSession() as session:
@@ -636,9 +708,12 @@ async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85)
         "prompt": prompt,
         "reference_image_url": reference_image_url,
         # 🌟 修正：依照官方 API 規範，使用 "portrait_4_3" 或直接指定精確解析度
-        "image_size": "portrait_4_3",  
-        "num_inference_steps": 20,
-        "guidance_scale": 4,
+        "image_size": {
+            "width": 512,
+            "height": 512
+        },
+        "num_inference_steps": 14,
+        "guidance_scale": 3,
         "id_weight": id_weight,
         "enable_safety_checker": False # 🌟 徹底無碼解放！
     }
@@ -660,6 +735,151 @@ async def upscale_image_fal(image_url):
         async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
             if resp.status == 200: return (await resp.json())['image']['url']
             return image_url
+        
+async def download_image_to_pil(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            image_bytes = await resp.read()
+
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return image
+
+async def upload_local_image(image: Image.Image):
+
+    filename = f"temp_{uuid.uuid4().hex[:8]}.png"
+
+    filepath = os.path.join(TEMP_DIR, filename)
+
+    image.save(filepath)
+
+    return f"https://xiaoxia0320.zeabur.app/temp/{filename}"
+
+async def repair_face_only(base_image_url):
+    try:
+        # ==========================================
+        # 下載圖片
+        # ==========================================
+        pil_image = await download_image_to_pil(base_image_url)
+
+        img = np.array(pil_image)
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+        # ==========================================
+        # Face Detect
+        # ==========================================
+        faces = face_app.get(img_bgr)
+
+        if not faces:
+            print("⚠️ 偵測不到人臉，跳過 Face Repair")
+            return base_image_url
+
+        face = faces[0]
+
+        bbox = face.bbox.astype(int)
+
+        x1, y1, x2, y2 = bbox
+
+        # ==========================================
+        # 放大 bbox
+        # ==========================================
+        w = x2 - x1
+        h = y2 - y1
+
+        scale = 1.45
+
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+
+        nw = int(w * scale)
+        nh = int(h * scale)
+
+        x1 = max(0, cx - nw // 2)
+        y1 = max(0, cy - nh // 2)
+        x2 = min(img.shape[1], cx + nw // 2)
+        y2 = min(img.shape[0], cy + nh // 2)
+
+        # ==========================================
+        # Crop Face
+        # ==========================================
+        crop = pil_image.crop((x1, y1, x2, y2))
+
+        # ==========================================
+        # Upload Crop
+        # ==========================================
+        crop_url = await upload_local_image(crop)
+
+        # ==========================================
+        # PuLID 修臉
+        # ==========================================
+        repaired_face_url = await generate_image_pulid(
+            prompt="""
+            same asian woman,
+            same identity,
+            same facial structure,
+            same eyes,
+            same nose,
+            same lips,
+
+            ONLY improve the face.
+
+            DO NOT change:
+            hair,
+            body,
+            breasts,
+            clothes,
+            background,
+            lighting,
+            pose,
+            composition.
+
+            preserve original image structure,
+            preserve original outfit,
+            preserve original framing,
+
+            photorealistic skin texture,
+            natural feminine beauty,
+            detailed realistic eyes
+            """,
+            reference_image_url=crop_url,
+            id_weight=0.92
+        )
+
+        repaired_face = await download_image_to_pil(repaired_face_url)
+
+        repaired_face = repaired_face.resize(
+            (x2 - x1, y2 - y1),
+            Image.LANCZOS
+        )
+
+        # ==========================================
+        # Feather Mask
+        # ==========================================
+        mask = Image.new("L", repaired_face.size, 0)
+
+        mask_draw = Image.new("L", repaired_face.size, 255)
+
+        blur_radius = max(20, int((x2 - x1) * 0.12))
+        mask = mask_draw.filter(
+            ImageFilter.GaussianBlur(radius=blur_radius)
+        )
+
+        # ==========================================
+        # Blend Back
+        # ==========================================
+        pil_image.paste(repaired_face, (x1, y1), mask)
+
+        # ==========================================
+        # Save Final
+        # ==========================================
+        final_url = await upload_local_image(pil_image)
+
+        print("✅ Face Repair 完成")
+
+        return final_url
+
+    except Exception as e:
+        print(f"❌ Face Repair 失敗: {e}")
+        return base_image_url
         
 # 🌟 [究極穩定版] 萬能攝影機：支援「有圖融合」與「無圖變裝」+ Base64 自動解碼
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
@@ -1034,7 +1254,7 @@ async def process_diary_reply(channel, target_date=None):
             life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
             骨架：
             [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
+            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, extremely curvy figure,very large bust,dramatic hourglass body,impossibly narrow waist,tight outfit emphasizing chest volume, tight fit, highly emphasizing body curves, elegant sexy,
             [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
             [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
             回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -1045,33 +1265,11 @@ async def process_diary_reply(channel, target_date=None):
             
             clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
             visual = json.loads(clean_visual_text, strict=False)
-            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
+            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, extremely curvy figure,very large bust,dramatic hourglass body,impossibly narrow waist,tight outfit emphasizing chest volume, extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
             
             # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
             base_img = None
             is_downgraded = False # 新增降級標記
-            
-            try:
-                base_img = await generate_image_fal(image_prompt)
-            except Exception as e:
-                print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
-                is_downgraded = True # 標記已被降級
-                safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
-                try:
-                    base_img = await generate_image_fal(safe_prompt)
-                except Exception as e2:
-                    print(f"❌ 降級生圖依然失敗: {e2}。啟動終極保底生圖！")
-                    ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, wearing a beautiful elegant red dress, smiling, indoor lighting, 8k resolution, safe for work"
-                    try:
-                         base_img = await generate_image_fal(ultimate_safe_prompt)
-                    except Exception as e3:
-                         print(f"💥 終極生圖失敗，放棄本次圖片生成: {e3}")
-                         continue
-                         
-            if not base_img: continue
-            
-            up_img = None
-            local_url = None
 
             if custom_diary:
                 print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 FLUX 生圖！")
@@ -1090,7 +1288,7 @@ async def process_diary_reply(channel, target_date=None):
                 except Exception as e:
                     print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
                     is_downgraded = True 
-                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
+                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("extremely curvy figure,very large bust,dramatic hourglass body,impossibly narrow waist,tight outfit emphasizing chest volume", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
                     try:
                         base_img = await generate_image_fal(safe_prompt)
                     except Exception as e2:
@@ -1106,7 +1304,15 @@ async def process_diary_reply(channel, target_date=None):
                 if is_downgraded:
                     result["scenario_tw"] += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
                 
-                up_img = await upscale_image_fal(base_img)
+                                # ==========================================
+                # Face Repair Pipeline
+                # ==========================================
+                repaired_img = await repair_face_only(base_img)
+
+                # ==========================================
+                # Upscale
+                # ==========================================
+                up_img = await upscale_image_fal(repaired_img)
                 local_filename = await save_to_vault(up_img)
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
             
@@ -1265,6 +1471,9 @@ async def diary_ui(ctx):
 @girlfriend_bot.event
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
+
+    await cleanup_temp_files() 
+    print("🧹 TEMP 清理完成")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
@@ -1934,7 +2143,7 @@ async def on_raw_reaction_add(payload):
                 life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
                 骨架：
                 [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-                [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
+                [BODY & SEXY CONTROL] slender body, narrow waist, long legs, extremely curvy figure,very large bust,dramatic hourglass body,impossibly narrow waist,tight outfit emphasizing chest volume, tight fit, highly emphasizing body curves, elegant sexy,
                 [SCENE & DETAILED OUTFIT] {scenario_tw}, highly detailed clothes, 
                 [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
                 回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
@@ -1958,7 +2167,7 @@ async def on_raw_reaction_add(payload):
                     base_image_url = await generate_image_fal(image_prompt)
                 except Exception as e:
                     is_downgraded = True
-                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress"
+                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("extremely curvy figure,very large bust,dramatic hourglass body,impossibly narrow waist,tight outfit emphasizing chest volume", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress"
                     try:
                         base_image_url = await generate_image_fal(safe_prompt)
                     except Exception as e2:
