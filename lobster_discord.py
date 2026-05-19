@@ -12,8 +12,8 @@ import aiofiles
 import sys
 import random
 from datetime import datetime, time, timezone, timedelta
+import time
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
-from PIL import Image
 
 import discord
 from discord.ext import commands, tasks
@@ -39,7 +39,16 @@ from google.genai import types # 確保有載入 types
 import subprocess
 import sys
 
-from PIL import Image, ImageFilter
+# ==========================================
+# 🌟 AI 模組延後初始化容器
+# ==========================================
+Image = None
+ImageFilter = None
+cv2 = None
+np = None
+FaceAnalysis = None
+face_app = None
+
 
 def auto_heal_environment():
 
@@ -49,7 +58,7 @@ def auto_heal_environment():
         "cv2": "opencv-python-headless",
         "insightface": "insightface==0.7.3",
         "numpy": "numpy",
-        "onnxruntime": "onnxruntime==1.17.1"
+        "onnxruntime": "onnxruntime"
     }
 
     for import_name, pip_name in required_packages.items():
@@ -61,15 +70,18 @@ def auto_heal_environment():
 
             print(f"⚠️ 缺少 {pip_name}，自動安裝中...")
 
-            subprocess.check_call([
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-cache-dir",
-                pip_name
-            ])
-
+            try:
+                subprocess.check_call([
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-cache-dir",
+                    pip_name
+                ])
+            except Exception as install_error:
+                print(f"❌ 安裝 {pip_name} 失敗: {install_error}")
+                
             print(f"✅ {pip_name} 安裝完成")
             
 
@@ -78,13 +90,57 @@ ffmpeg_dir = "/home/node/.openclaw/workspace/ffmpeg_bin"
 if os.path.exists(ffmpeg_dir) and ffmpeg_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] += os.pathsep + ffmpeg_dir
     print(f"✅ 已成功將 ffmpeg 路徑加入系統環境變數！")
+
+
+# ==========================================
+# 🌟 初始化 AI 模組
+# ==========================================
+def init_ai_modules():
+
+    global Image
+    global ImageFilter
+    global cv2
+    global np
+    global FaceAnalysis
+    global face_app
+
+    # ==========================================
+    # 延後 import
+    # ==========================================
+    from PIL import Image as PILImage
+    from PIL import ImageFilter as PILImageFilter
+
+    import cv2 as cv2_module
+    import numpy as numpy_module
+
+    from insightface.app import FaceAnalysis as InsightFaceAnalysis
+
+    # ==========================================
+    # 掛回全域
+    # ==========================================
+    Image = PILImage
+    ImageFilter = PILImageFilter
+    cv2 = cv2_module
+    np = numpy_module
+    FaceAnalysis = InsightFaceAnalysis
+
+    # ==========================================
+    # 🌟 建立 Face Engine
+    # ==========================================
+    face_app = FaceAnalysis(
+        name='buffalo_l',
+        root='/data/insightface'
+    )
+
+    face_app.prepare(ctx_id=-1)
+
+    print("✅ AI 模組初始化完成")
+
+
+
 # 程式啟動時立刻執行檢查
 auto_heal_environment()
-
-from PIL import Image, ImageFilter
-import cv2
-import numpy as np
-from insightface.app import FaceAnalysis
+init_ai_modules()
 
 # ==========================================
 
@@ -304,15 +360,6 @@ async def cleanup_temp_files(max_age_hours=6):
 
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-# ==========================================
-# 🧠 Face Detection Engine
-# ==========================================
-face_app = FaceAnalysis(
-    name='buffalo_l',
-    root='/data/insightface'
-)
-face_app.prepare(ctx_id=-1)
 
 intents = discord.Intents.default()
 intents.message_content = True
