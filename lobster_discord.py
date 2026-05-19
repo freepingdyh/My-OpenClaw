@@ -593,47 +593,43 @@ async def generate_suno_music(lyrics, title, custom_style=None):
 
 async def generate_image_fal(prompt):
     """
-    🚀 攔截器模式：取代舊的 flux-lora，將全系統請求導向 PuLID 引擎！
-    自動附加睫毛膏與狐狸眼，確保小俠神韻。
+    🚀 攔截器模式：將全系統的 /cosplay 與 日記生圖請求，自動導向 PuLID 引擎！
     """
-    # 💄 大俠專屬指定：狐狸眼與睫毛膏靈魂咒語 (這段絕對不能省)
+    # 💄 大俠專屬指定：不管什麼情境，這組「狐狸眼與睫毛膏」的靈魂咒語絕對不能少！
     face_enhancers = ", perfectly detailed face, fox-eye makeup, long eyelashes, mascara, highly detailed eyes, consistent identity"
     
-    # 將原始咒語加上眼妝特徵
+    # 將 Gemini 想好的咒語，強制加上眼妝特徵
     enhanced_prompt = prompt + face_enhancers
     
-    print(f"🔄 [攔截器] 導向 PuLID 引擎中... 附加眼妝咒語完成！")
+    print(f"🔄 [/cosplay 攔截器] 導向 PuLID 引擎中... 附加眼妝咒語完成！")
     
-    # 直接呼叫您已經寫好的 generate_image_pulid (維持 0.85 權重)
+    # 呼叫下方的 PuLID 引擎 (維持 0.85 的身分權重)
     return await generate_image_pulid(prompt=enhanced_prompt, id_weight=0.85)
-            
+
 async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85):
     """
-    🧪 專為大俠測試開發的 PuLID (FaceID) 引擎
+    🧪 PuLID (FaceID) 引擎本體
     """
     url = "https://fal.run/fal-ai/flux-pulid"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     
-    # 🌟 修正：精準抓取 Zeabur 金庫裡的完美臉部特寫底圖
+    # 抓取 Zeabur 金庫裡的完美臉部特寫底圖
     if not reference_image_url:
         base_image_path = os.path.join(MEMORY_DIR, "base_close_core.png")
         if os.path.exists(base_image_path):
-            # ⚠️ 注意這裡改為 image/png，以符合 .png 檔案格式
             with open(base_image_path, "rb") as f:
                 reference_image_url = "data:image/png;base64," + base64.b64encode(f.read()).decode('utf-8')
         else:
             raise Exception("金庫裡找不到 base_close_core.png，請確認檔案是否在 /data/memory/ 目錄下！")
 
-    # 💣 核彈級 Payload：強制關閉安全審查！
     payload = {
         "prompt": prompt,
         "reference_image_url": reference_image_url,
-        # 🌟 修正：依照官方 API 規範，使用 "portrait_4_3" 或直接指定精確解析度
-        "image_size": "portrait_4_3",  
+        "image_size": "portrait_16_9",  # 🌟 修正：讓 /cosplay 產出的圖維持 16:9 的高挑唯美比例
         "num_inference_steps": 20,
         "guidance_scale": 4,
         "id_weight": id_weight,
-        "enable_safety_checker": False # 🌟 徹底無碼解放！
+        "enable_safety_checker": False # 徹底無碼解放
     }
     
     async with aiohttp.ClientSession() as session:
