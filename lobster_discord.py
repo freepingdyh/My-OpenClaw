@@ -635,7 +635,8 @@ async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85)
     payload = {
         "prompt": prompt,
         "reference_image_url": reference_image_url,
-        "image_size": "portrait_3_4",  # 直式寫真比例
+        # 🌟 修正：依照官方 API 規範，使用 "portrait_4_3" 或直接指定精確解析度
+        "image_size": "portrait_4_3",  
         "num_inference_steps": 20,
         "guidance_scale": 4,
         "id_weight": id_weight,
