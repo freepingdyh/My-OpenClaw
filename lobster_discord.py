@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import aiohttp
 import aiofiles
+import mediapipe as mp
 import sys
 import random
 from datetime import datetime, time, timezone, timedelta
@@ -47,7 +48,7 @@ ImageFilter = None
 cv2 = None
 np = None
 FaceAnalysis = None
-face_app = None
+face_detector = None
 
 
 def auto_heal_environment():
@@ -56,9 +57,9 @@ def auto_heal_environment():
         "pydub": "pydub",
         "PIL": "pillow",
         "cv2": "opencv-python-headless",
-        "insightface": "insightface==0.7.3",
         "numpy": "numpy",
-        "onnxruntime": "onnxruntime"
+        "onnxruntime": "onnxruntime",
+        "mediapipe": "mediapipe"
     }
 
     for import_name, pip_name in required_packages.items():
@@ -81,7 +82,7 @@ def auto_heal_environment():
                 ])
             except Exception as install_error:
                 print(f"❌ 安裝 {pip_name} 失敗: {install_error}")
-                
+
             print(f"✅ {pip_name} 安裝完成")
             
 
@@ -95,14 +96,16 @@ if os.path.exists(ffmpeg_dir) and ffmpeg_dir not in os.environ.get("PATH", ""):
 # ==========================================
 # 🌟 初始化 AI 模組
 # ==========================================
+
 def init_ai_modules():
 
     global Image
     global ImageFilter
     global cv2
     global np
-    global FaceAnalysis
-    global face_app
+    global face_detector
+
+
 
     # ==========================================
     # 延後 import
@@ -113,8 +116,6 @@ def init_ai_modules():
     import cv2 as cv2_module
     import numpy as numpy_module
 
-    from insightface.app import FaceAnalysis as InsightFaceAnalysis
-
     # ==========================================
     # 掛回全域
     # ==========================================
@@ -122,17 +123,25 @@ def init_ai_modules():
     ImageFilter = PILImageFilter
     cv2 = cv2_module
     np = numpy_module
-    FaceAnalysis = InsightFaceAnalysis
 
     # ==========================================
     # 🌟 建立 Face Engine
     # ==========================================
-    face_app = FaceAnalysis(
-        name='buffalo_l',
-        root='/data/insightface'
+
+    import mediapipe as mp
+
+    mp_face_detection = mp.solutions.face_detection
+
+    
+    face_detector = mp_face_detection.FaceDetection(
+        model_selection=1,
+        min_detection_confidence=0.5
     )
 
-    face_app.prepare(ctx_id=-1)
+    import atexit
+
+    atexit.register(face_detector.close)
+
 
     print("✅ AI 模組初始化完成")
 
@@ -809,22 +818,34 @@ async def repair_face_only(base_image_url):
         pil_image = await download_image_to_pil(base_image_url)
 
         img = np.array(pil_image)
-        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
         # ==========================================
         # Face Detect
         # ==========================================
-        faces = face_app.get(img_bgr)
+    
+        results = face_detector.process(img)
 
-        if not faces:
-            print("⚠️ 偵測不到人臉，跳過 Face Repair")
+        if not results.detections:
             return base_image_url
 
-        face = faces[0]
+        detection = results.detections[0]
 
-        bbox = face.bbox.astype(int)
+        bboxC = detection.location_data.relative_bounding_box
 
-        x1, y1, x2, y2 = bbox
+        h, w, _ = img.shape
+
+        x1 = int(bboxC.xmin * w)
+        y1 = int(bboxC.ymin * h)
+        bw = int(bboxC.width * w)
+        bh = int(bboxC.height * h)
+
+        x2 = x1 + bw
+        y2 = y1 + bh
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
 
         # ==========================================
         # 放大 bbox
@@ -891,6 +912,11 @@ async def repair_face_only(base_image_url):
             id_weight=0.92
         )
 
+
+        if not repaired_face_url:
+            print("⚠️ PuLID 修臉失敗，跳過")
+            return base_image_url
+        
         repaired_face = await download_image_to_pil(repaired_face_url)
 
         repaired_face = repaired_face.resize(
