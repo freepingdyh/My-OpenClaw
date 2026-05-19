@@ -613,6 +613,42 @@ async def generate_image_fal(prompt):
                 return data['images'][0]['url']
             else: 
                 raise Exception(f"Fal.ai Error: {await resp.text()}")
+            
+async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85):
+    """
+    🧪 專為大俠測試開發的 PuLID (FaceID) 引擎
+    """
+    url = "https://fal.run/fal-ai/flux-pulid"
+    headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
+    
+    # 🌟 修正：精準抓取 Zeabur 金庫裡的完美臉部特寫底圖
+    if not reference_image_url:
+        base_image_path = os.path.join(MEMORY_DIR, "base_close_core.png")
+        if os.path.exists(base_image_path):
+            # ⚠️ 注意這裡改為 image/png，以符合 .png 檔案格式
+            with open(base_image_path, "rb") as f:
+                reference_image_url = "data:image/png;base64," + base64.b64encode(f.read()).decode('utf-8')
+        else:
+            raise Exception("金庫裡找不到 base_close_core.png，請確認檔案是否在 /data/memory/ 目錄下！")
+
+    # 💣 核彈級 Payload：強制關閉安全審查！
+    payload = {
+        "prompt": prompt,
+        "reference_image_url": reference_image_url,
+        "image_size": "portrait_3_4",  # 直式寫真比例
+        "num_inference_steps": 20,
+        "guidance_scale": 4,
+        "id_weight": id_weight,
+        "enable_safety_checker": False # 🌟 徹底無碼解放！
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data['images'][0]['url']
+            else: 
+                raise Exception(f"Fal.ai PuLID Error: {await resp.text()}")
 
 async def upscale_image_fal(image_url):
     url = "https://fal.run/fal-ai/esrgan"
@@ -1341,6 +1377,36 @@ async def more(ctx):
         await msg.add_reaction("🎲") # 代表 Reroll (重骰)
         await msg.add_reaction("🗑️") # 代表 Delete (刪除)
     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
+
+@girlfriend_bot.command(name='test_pulid')
+async def test_pulid(ctx, *, prompt: str):
+    """
+    🔬 大俠專用的 PuLID 秘密實驗室指令
+    用法: 
+    1. 直接輸入 `/test_pulid [英文咒語]` (會自動抓 base_xiaoxia.jpg 當臉)
+    2. 或在上傳一張大頭照時，在留言處輸入 `/test_pulid [英文咒語]` (會用您上傳的臉)
+    """
+    msg = await ctx.send("🔬 **[PuLID 秘密實驗室]** 啟動！引擎全開，無安全限制生成中，請稍候...")
+    try:
+        ref_url = None
+        # 判斷大俠有沒有夾帶「臉部特寫」照片
+        if ctx.message.attachments:
+            ref_url = ctx.message.attachments[0].url
+            await ctx.channel.send("👀 偵測到大俠上傳了新特寫，將以此臉孔進行 FaceID 鎖定！")
+        
+        # 呼叫我們剛剛寫好的 PuLID 引擎
+        img_url = await generate_image_pulid(prompt, reference_image_url=ref_url, id_weight=0.85)
+        
+        # 🌟 純測試展示，不寫入任何 JSON 資料庫，不進雲端別墅
+        embed = discord.Embed(title="🧪 PuLID 測試成果", description=f"**咒語：**\n{prompt}", color=0x9b59b6)
+        embed.set_image(url=img_url)
+        embed.set_footer(text="沙盒測試模式 | enable_safety_checker: False (無碼解放)")
+        
+        await msg.delete()
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await msg.edit(content=f"⚠️ 測試失敗：`{str(e)}`")
 
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
