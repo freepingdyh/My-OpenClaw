@@ -502,7 +502,13 @@ async def generate_story(mode):
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=f"妳是小俠，擁有豐滿傲人身材，深愛著大俠。負責規劃Cosplay題材。{system_mod}",
-            response_mime_type="application/json"
+            response_mime_type="application/json",
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+            ]
         )
     )
     return json.loads(response.text)
@@ -798,7 +804,15 @@ async def process_diary_reply(channel, target_date=None):
             mem_resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=mem_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                    ]
+                )
             )
             
             clean_mem_text = mem_resp.text.replace("```json", "").replace("```", "").strip()
@@ -925,7 +939,15 @@ async def process_diary_reply(channel, target_date=None):
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=eval_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                    ]
+                )
             )
             
             clean_text = response.text.replace(md_json_tag, "").replace(md_end_tag, "").strip()
@@ -1779,7 +1801,15 @@ async def on_message(message):
                 # 重新建立 Session
                 girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                     model="gemini-2.5-flash",
-                    config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                    config=types.GenerateContentConfig(
+                        system_instruction=sys_instruct,
+                        safety_settings=[
+                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                        ]
+                    )
                 )
 
                 # 💡 變數初始化，防止 NameError
@@ -2090,7 +2120,15 @@ async def optimize_memory_vault(channel=None):
             resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=compress_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                    ]
+                )
             )
             
             try:
@@ -2614,7 +2652,15 @@ async def save_knowledge(ctx):
         
         resp = await gemini_client.aio.models.generate_content(
             model='gemini-2.5-flash',
-            contents=knowledge_prompt
+            contents=knowledge_prompt,
+            config=types.GenerateContentConfig(
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
         )
         summary = resp.text.strip()
         
@@ -2697,7 +2743,15 @@ async def on_message(message):
                 if user_id not in architect_chat_sessions:
                     architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
                         model="gemini-2.5-flash",
-                        config=types.GenerateContentConfig(system_instruction=sys_instruct)
+                        config=types.GenerateContentConfig(
+                            system_instruction=sys_instruct,
+                            safety_settings=[
+                                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                            ]
+                        )
                     )
 
                 response = await architect_chat_sessions[user_id].send_message(user_input)
