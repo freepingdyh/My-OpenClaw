@@ -1829,13 +1829,12 @@ async def on_message(message):
 
                 chat_session = girlfriend_chat_sessions[user_id]
                 response = await chat_session.send_message(msg_parts)
-
-                # 🌟 加入抓蟲雷達：查看模型到底因為什麼原因中斷
+                
+                # 🚨 把這段加進去！直接把底層狀態印在 Discord 裡！
                 if response and response.candidates:
-                    finish_reason = response.candidates[0].finish_reason
-                    print(f"🔍 [除錯] Gemini 回傳狀態: {finish_reason}")
-                    if str(finish_reason) == "FinishReason.SAFETY":
-                        print("🚨 警告：被模型的強制安全機制 (Hard Block) 攔截了！")
+                    reason = response.candidates[0].finish_reason
+                    if str(reason) != "FinishReason.STOP":
+                        await message.channel.send(f"⚠️ **[系統攔截警告]** Gemini 拒絕回答！原因碼：`{reason}`")
                                 
                 if response and response.text:
                     xiaoxia_reply = response.text
