@@ -97,13 +97,44 @@ async def start_story(ctx):
 @story_bot.event
 async def on_message(message):
     if message.author.bot: return
+    # 🌟 [關鍵修正]：限定只有在 #小朋友說故事 頻道才運作
+    if message.channel.name != "小朋友說故事":
+        return
     if message.content.startswith('/story'):
         await story_bot.process_commands(message)
         return
-    # 這裡加入初始化邏輯...
+
+    # 初始化流程
     if message.author.id not in sessions and not message.content.startswith('/'):
-        # 處理暱稱與邏輯...
-        await message.channel.send("✨ 準備中...")
+        try:
+            parts = message.content.split(',')
+            nickname = parts[0].strip()
+            age = parts[1].strip() if len(parts) > 1 else "5歲"
+            sessions[message.author.id] = StorySession(nickname, age)
+            
+            # 💡 關鍵修正：加入超時保護 (Timeout)
+            msg = await message.channel.send("✨ 小俠正在思考故事中，請稍候...")
+            
+            # 使用 asyncio.wait_for 設定 20 秒極限
+            response = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=f"你好，我是{nickname}，{age}。請開始故事，給出三個題材選項。",
+                    config=types.GenerateContentConfig(system_instruction=XIAOXIA_SYSTEM_PROMPT)
+                ), 
+                timeout=20.0
+            )
+            
+            view = StoryView(["森林探險", "太空旅行", "海洋尋寶", "我要自創..."], message.author.id)
+            await msg.edit(content=response.text, view=view)
+            
+        except asyncio.TimeoutError:
+            await msg.edit(content="⚠️ 小俠思考太久了，API 沒回應... 請確認您的 Gemini API Key 是否有效！")
+        except Exception as e:
+            await message.channel.send(f"⚠️ 發生錯誤：{e}")
+        return
+
+    await story_bot.process_commands(message)
 
 # ==========================================
 # 🔑 環境變數與初始化
