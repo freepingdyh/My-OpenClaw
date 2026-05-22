@@ -32,6 +32,8 @@ from fastapi.responses import HTMLResponse
 import aiohttp
 from google.genai import types # 確保有載入 types
 
+
+
 # ==========================================
 # 🛠️ 系統自我修復模組 (繞過 Zeabur 建置 Bug)
 # ==========================================
@@ -55,7 +57,53 @@ if os.path.exists(ffmpeg_dir) and ffmpeg_dir not in os.environ.get("PATH", ""):
     print(f"✅ 已成功將 ffmpeg 路徑加入系統環境變數！")
 # 程式啟動時立刻執行檢查
 auto_heal_environment()
-# ==========================================
+
+
+from discord.ext import commands
+import discord
+# ----------------------------------------------------
+# 🌟 小俠姐姐說故事 Bot 合併定義 (修正版)
+# ----------------------------------------------------
+intents_story = discord.Intents.all()
+# 為了避免衝突，我們明確命名為 story_bot
+story_bot = commands.Bot(command_prefix='/', intents=intents_story)
+
+class StorySession:
+    def __init__(self, nickname, age):
+        self.nickname = nickname
+        self.age = age
+        self.history = []
+        self.current_step = 0
+
+sessions = {}
+
+class StoryView(discord.ui.View):
+    def __init__(self, options, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        for opt in options:
+            btn = discord.ui.Button(label=opt, style=discord.ButtonStyle.primary, custom_id=opt)
+            btn.callback = self.handle_callback
+            self.add_item(btn)
+
+    async def handle_callback(self, interaction: discord.Interaction):
+        choice = interaction.data['custom_id']
+        await interaction.response.send_message(f"小俠收到：{choice}，故事繼續中...", ephemeral=True)
+
+@story_bot.command(name='story')
+async def start_story(ctx):
+    await ctx.send("🌈 小朋友，今天想說什麼故事呀？(請輸入：暱稱, 年齡)")
+
+@story_bot.event
+async def on_message(message):
+    if message.author.bot: return
+    if message.content.startswith('/story'):
+        await story_bot.process_commands(message)
+        return
+    # 這裡加入初始化邏輯...
+    if message.author.id not in sessions and not message.content.startswith('/'):
+        # 處理暱稱與邏輯...
+        await message.channel.send("✨ 準備中...")
 
 # ==========================================
 # 🔑 環境變數與初始化
@@ -66,6 +114,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 # 🌟 雙 Token 讀取
 GIRLFRIEND_TOKEN = os.environ.get("GIRLFRIEND_TOKEN")
 ARCHITECT_TOKEN = os.environ.get("ARCHITECT_TOKEN")
+STORY_BOT_TOKEN = os.environ.get("STORY_BOT_TOKEN")
 
 FAL_KEY = os.environ.get("FAL_KEY")
 XIAOXIA_LORA_URL = os.environ.get("XIAOXIA_LORA_URL")
@@ -2808,7 +2857,8 @@ async def main():
     await asyncio.gather(
         server.serve(),
         girlfriend_bot.start(GIRLFRIEND_TOKEN),
-        architect_bot.start(ARCHITECT_TOKEN)
+        architect_bot.start(ARCHITECT_TOKEN),
+        story_bot.start(STORY_BOT_TOKEN) # 這裡確保啟動的是我們定義好的 story_bot
     )
 
 if __name__ == "__main__":
