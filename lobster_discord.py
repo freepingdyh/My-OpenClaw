@@ -1804,10 +1804,22 @@ async def on_message(message):
                     config=types.GenerateContentConfig(
                         system_instruction=sys_instruct,
                         safety_settings=[
-                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                            types.SafetySetting(
+                                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                                threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            ),
+                            types.SafetySetting(
+                                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                                threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            ),
+                            types.SafetySetting(
+                                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                                threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            ),
+                            types.SafetySetting(
+                                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                                threshold=types.HarmBlockThreshold.BLOCK_NONE
+                            )
                         ]
                     )
                 )
@@ -1817,7 +1829,14 @@ async def on_message(message):
 
                 chat_session = girlfriend_chat_sessions[user_id]
                 response = await chat_session.send_message(msg_parts)
-                
+
+                # 🌟 加入抓蟲雷達：查看模型到底因為什麼原因中斷
+                if response and response.candidates:
+                    finish_reason = response.candidates[0].finish_reason
+                    print(f"🔍 [除錯] Gemini 回傳狀態: {finish_reason}")
+                    if str(finish_reason) == "FinishReason.SAFETY":
+                        print("🚨 警告：被模型的強制安全機制 (Hard Block) 攔截了！")
+                                
                 if response and response.text:
                     xiaoxia_reply = response.text
                     import re
