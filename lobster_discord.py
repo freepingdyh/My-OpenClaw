@@ -62,6 +62,14 @@ auto_heal_environment()
 from discord.ext import commands
 import discord
 
+intents = discord.Intents.default()
+intents.message_content = True
+
+girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
+architect_bot = commands.Bot(command_prefix='!', intents=intents)
+# 👇 請補上這行，把小俠姐姐的本體宣告出來！
+story_bot = commands.Bot(command_prefix='/', intents=intents)
+
 # ==========================================
 # 🌟 小俠姐姐人設定義 (必須放在全域變數區)
 # ==========================================
@@ -423,13 +431,7 @@ async def save_to_vault(url):
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-intents = discord.Intents.default()
-intents.message_content = True
 
-girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
-architect_bot = commands.Bot(command_prefix='!', intents=intents)
-# 👇 請補上這行，把小俠姐姐的本體宣告出來！
-story_bot = commands.Bot(command_prefix='/', intents=intents)
 
 # 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
 active_world_events = {}
