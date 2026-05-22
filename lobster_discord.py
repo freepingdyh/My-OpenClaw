@@ -73,10 +73,12 @@ story_bot = commands.Bot(command_prefix='/', intents=intents)
 # ==========================================
 # 🌟 小俠姐姐人設定義 (必須放在全域變數區)
 # ==========================================
-XIAOXIA_SYSTEM_PROMPT = """妳是小俠姐姐，幼兒園故事屋主持人。語氣溫柔、博學、具耐心，適合3-12歲小朋友。
+XIAOXIA_SYSTEM_PROMPT = """妳是小俠姐姐，幼兒園故事屋主持人。語氣溫柔、博學、幽默、風趣、具耐心，適合 3-10 歲小朋友。
 【絕對規則】：
 1. 每次回覆【絕對不要】重複之前的故事情節！只要給出「接下來最新的發展（1~2小段文字）」即可。
-2. 選項請務必配合當下劇情，給出 3 個具體的行動選項（每個選項10字以內）。
+2. 🎭【超級接梗王】：小朋友的回答經常天馬行空或惡搞（例如：說是便便、放屁、外星人等），妳【絕對不可以忽略或拒絕】！必須溫柔、幽默地接住這個梗，並巧妙轉化。
+3. 💩【惡搞情節處理】：如果小朋友提出「吃大便」、「吃鼻屎」等惡搞情節，妳【必須順著他們的意思寫】！請給主角安排一個「極度滑稽、誇張的慘痛反應」（例如：主角真的舔了一口，結果臉瞬間變成綠色，臭得在地上打滾狂喝三壺水），或者巧妙反轉（「咬下去才發現是長得很像便便的魔法巧克力！」）。用爆笑的結果來回應小朋友的惡作劇，絕對不要死板說教。
+4. 必須嚴格遵守 JSON 格式回傳，且務必提供 3 個具體的行動選項（每個選項 10 字以內），不可遺漏。
 """
 
 # ==========================================
@@ -126,15 +128,25 @@ class StoryView(discord.ui.View):
         await interaction.response.edit_message(content="✨ 小俠姐姐收到囉，故事繼續...", view=None)
         await process_story_turn(interaction.channel, session, choice, interaction.message)
 
-# 解決問題 3 & 5：獨立的故事推進引擎 (帶入歷史記憶，但限制只輸出下一步)
+# ==========================================
+# 📖 故事記憶與互動模組 (終極升級版)
+# ==========================================
 async def process_story_turn(channel, session, choice, original_msg=None):
     session.step += 1
-    is_ending = session.step >= 5 # 設定第 5 步自動進入結局
+    
+    # 🌟 動態題數：根據年齡決定故事長度
+    try:
+        age_num = int(''.join(filter(str.isdigit, session.age)))
+        max_steps = 5 if age_num <= 5 else (7 if age_num <= 8 else 9)
+    except:
+        max_steps = 5 # 防呆預設
+        
+    is_ending = session.step >= max_steps
     
     if is_ending:
         prompt = f"【前情提要】：\n{session.history}\n\n小朋友剛剛決定：「{choice}」。請為這個故事寫一個溫馨美好的大結局！\n請回傳純 JSON 格式：{{\"story\": \"結局內容(不要重複前情提要)\", \"options\": []}}"
     else:
-        prompt = f"【前情提要】：\n{session.history}\n\n小朋友剛剛決定：「{choice}」。\n請延續故事，【只要寫出接下來發生的1~2段話即可，絕對不要重複前情提要的內容】。\n請回傳純 JSON 格式：{{\"story\": \"最新發展的情節\", \"options\": [\"動作選項1\", \"動作選項2\", \"動作選項3\"]}}"
+        prompt = f"【前情提要】：\n{session.history}\n\n小朋友剛剛大聲說：「{choice}」。\n請延續故事，並對小朋友的決定給予熱情回應與引導。絕對不要重複前情提要。\n請回傳純 JSON 格式：{{\"story\": \"最新發展的情節\", \"options\": [\"動作選項1\", \"動作選項2\", \"動作選項3\"]}}"
 
     try:
         response = await gemini_client.aio.models.generate_content(
@@ -142,29 +154,45 @@ async def process_story_turn(channel, session, choice, original_msg=None):
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=XIAOXIA_SYSTEM_PROMPT,
-                response_mime_type="application/json"
+                temperature=0.8, # 🌟 稍微調高溫度，讓她更會搞笑接梗
+                response_mime_type="application/json",
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
             )
         )
-        data = json.loads(response.text.strip())
+        
+        # 🛡️ 強效 JSON 淨化器 (🌟 利用 chr(96) 完美避開 Gemini 網頁亂碼 Bug)
+        raw_text = response.text.strip()
+        md_tag = chr(96) * 3  
+        raw_text = raw_text.replace(f"{md_tag}json", "").replace(md_tag, "").strip()
+            
+        data = json.loads(raw_text)
         new_story_chunk = data.get("story", "小俠姐姐想了一下...")
         
         # 將新片段疊加到大腦的完整故事本中
         session.history += f"\n\n{new_story_chunk}"
         
         if is_ending:
-            # 結局時，才把所有歷史串起來一次呈現！
             final_text = f"{new_story_chunk}\n\n🎉 **【故事結束囉！】**\n以下是今天 {session.nickname} 跟小俠姐姐一起創作的完整故事：\n{session.history}"
             if original_msg: await original_msg.edit(content=final_text, view=None)
             else: await channel.send(final_text)
             sessions.pop(session.user_id, None) # 任務完成，清除記憶
         else:
-            # 未完結時，只顯示新對話，為未來的 TTS 語音準備好乾淨的文本
-            view = StoryView(data.get("options", []), session.user_id)
+            # 🛡️ 保底選項機制：確保選項絕對不會消失
+            options = data.get("options", [])
+            if not isinstance(options, list) or len(options) == 0:
+                options = ["繼續往前走", "仔細看一看", "尋找好朋友"]
+                
+            view = StoryView(options, session.user_id)
             if original_msg: await original_msg.edit(content=new_story_chunk, view=view)
             else: await channel.send(new_story_chunk, view=view)
             
     except Exception as e:
-         await channel.send(f"⚠️ 故事引擎發生錯誤：{e}")
+         await channel.send(f"⚠️ 故事引擎發生錯誤 (小俠恍神了)：{e}")
 
 # ==========================================
 # 🚀 執行指令區
@@ -224,7 +252,12 @@ async def on_message(message):
                 timeout=20.0
             )
             
-            data = json.loads(response.text.strip())
+            # 🛡️ 開場題也必須裝上強效 JSON 淨化器
+            raw_text = response.text.strip()
+            md_tag = chr(96) * 3  
+            raw_text = raw_text.replace(f"{md_tag}json", "").replace(md_tag, "").strip()
+
+            data = json.loads(raw_text)
             session.history = data.get("story", "") # 第一段存入歷史
             
             view = StoryView(data.get("options", []), message.author.id)
