@@ -428,6 +428,8 @@ intents.message_content = True
 
 girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 architect_bot = commands.Bot(command_prefix='!', intents=intents)
+# 👇 請補上這行，把小俠姐姐的本體宣告出來！
+story_bot = commands.Bot(command_prefix='/', intents=intents)
 
 # 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
 active_world_events = {}
