@@ -92,8 +92,9 @@ class StoryView(discord.ui.View):
     def __init__(self, options, user_id):
         super().__init__(timeout=None)
         self.user_id = user_id
-        for opt in options:
-            btn = discord.ui.Button(label=opt, style=discord.ButtonStyle.primary, custom_id=opt)
+        for i, opt in enumerate(options):
+            # 這裡就是我們剛剛優化的數字化選項
+            btn = discord.ui.Button(label=f"{i+1}. {opt}", style=discord.ButtonStyle.primary, custom_id=opt)
             btn.callback = self.handle_callback
             self.add_item(btn)
 
@@ -108,14 +109,19 @@ async def start_story(ctx):
 @story_bot.event
 async def on_message(message):
     if message.author.bot: return
-    # 🌟 [關鍵修正]：限定只有在 #小朋友說故事 頻道才運作
+    # 限制只有在 #小朋友說故事 頻道才運作
     if message.channel.name != "小朋友說故事":
         return
     if message.content.startswith('/story'):
-        await story_bot.process_commands(message)
+        # 狀態感知：如果已經有 Session，直接喚醒他，不需要重複問名字
+        if message.author.id in sessions:
+            s = sessions[message.author.id]
+            await message.channel.send(f"嗨 {s.nickname}！我們已經準備好啦，直接告訴我你想說什麼故事吧？")
+        else:
+            await story_bot.process_commands(message)
         return
 
-    # 初始化流程
+    # 初始化流程：如果還沒有 Session，才進行問答
     if message.author.id not in sessions and not message.content.startswith('/'):
         try:
             parts = message.content.split(',')
@@ -123,24 +129,25 @@ async def on_message(message):
             age = parts[1].strip() if len(parts) > 1 else "5歲"
             sessions[message.author.id] = StorySession(nickname, age)
             
-            # 💡 關鍵修正：加入超時保護 (Timeout)
-            msg = await message.channel.send("✨ 小俠正在思考故事中，請稍候...")
+            # 親切的動態開場白
+            msg = await message.channel.send(f"哇，是 {nickname} 呀！{age} 的你一定很有想像力。小俠姐姐正在為你編織故事，請稍候...")
             
-            # 使用 asyncio.wait_for 設定 20 秒極限
             response = await asyncio.wait_for(
                 gemini_client.aio.models.generate_content(
                     model='gemini-2.5-flash',
-                    contents=f"你好，我是{nickname}，{age}。請開始故事，給出三個題材選項。",
+                    contents=f"我是{nickname}，{age}。請開始故事，給出三個題材選項。",
                     config=types.GenerateContentConfig(system_instruction=XIAOXIA_SYSTEM_PROMPT)
                 ), 
                 timeout=20.0
             )
             
-            view = StoryView(["森林探險", "太空旅行", "海洋尋寶", "我要自創..."], message.author.id)
+            # 選項帶有數字，方便幼兒辨識
+            options = ["1. 森林探險", "2. 太空旅行", "3. 海洋尋寶", "4. 我要自創..."]
+            view = StoryView(options, message.author.id)
             await msg.edit(content=response.text, view=view)
             
         except asyncio.TimeoutError:
-            await msg.edit(content="⚠️ 小俠思考太久了，API 沒回應... 請確認您的 Gemini API Key 是否有效！")
+            await msg.edit(content="⚠️ 小俠思考太久了，API 沒回應... 請檢查 Gemini 連線。")
         except Exception as e:
             await message.channel.send(f"⚠️ 發生錯誤：{e}")
         return
