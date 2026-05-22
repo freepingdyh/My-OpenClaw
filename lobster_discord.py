@@ -93,14 +93,41 @@ class StoryView(discord.ui.View):
         super().__init__(timeout=None)
         self.user_id = user_id
         for i, opt in enumerate(options):
-            # 這裡就是我們剛剛優化的數字化選項
-            btn = discord.ui.Button(label=f"{i+1}. {opt}", style=discord.ButtonStyle.primary, custom_id=opt)
+            # 解決重複標號：乾淨的選項文字，在這裡才加上 1. 2. 3.
+            btn_label = f"{i+1}. {opt}" if i < 3 else opt
+            btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.primary, custom_id=opt)
             btn.callback = self.handle_callback
             self.add_item(btn)
 
     async def handle_callback(self, interaction: discord.Interaction):
         choice = interaction.data['custom_id']
-        await interaction.response.send_message(f"小俠收到：{choice}，故事繼續中...", ephemeral=True)
+        session = sessions.get(self.user_id)
+        
+        # 解決卡關：讓按鈕顯示載入中
+        await interaction.response.edit_message(content="✨ 小俠姐姐正在編織下一個奇妙片段...", view=None)
+        
+        # 💡 核心引擎：呼叫 Gemini 延續故事，並強制要求動態選項！
+        prompt = f"小朋友剛剛選擇了：「{choice}」。請繼續發展故事，並給予溫柔引導。\n請回傳純 JSON 格式：{{\"story\": \"故事內容\", \"options\": [\"動態選項1(10字內)\", \"動態選項2(10字內)\", \"動態選項3(10字內)\"]}}"
+        
+        try:
+            response = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=XIAOXIA_SYSTEM_PROMPT,
+                    response_mime_type="application/json" # 強制回傳 JSON
+                )
+            )
+            # 解析動態生成的內容
+            data = json.loads(response.text.strip())
+            new_options = data.get("options", ["繼續往前", "偷偷觀察", "尋找幫手"])
+            new_options.append("我要自創...") # 永遠保留自創選項
+            
+            new_view = StoryView(new_options, self.user_id)
+            await interaction.followup.edit_message(message_id=interaction.message.id, content=data["story"], view=new_view)
+            
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ 故事引擎發生錯誤：{e}", ephemeral=True)
 
 @story_bot.command(name='story')
 async def start_story(ctx):
@@ -109,11 +136,9 @@ async def start_story(ctx):
 @story_bot.event
 async def on_message(message):
     if message.author.bot: return
-    # 限制只有在 #小朋友說故事 頻道才運作
-    if message.channel.name != "小朋友說故事":
-        return
+    if message.channel.name != "小朋友說故事": return
+
     if message.content.startswith('/story'):
-        # 狀態感知：如果已經有 Session，直接喚醒他，不需要重複問名字
         if message.author.id in sessions:
             s = sessions[message.author.id]
             await message.channel.send(f"嗨 {s.nickname}！我們已經準備好啦，直接告訴我你想說什麼故事吧？")
@@ -121,7 +146,7 @@ async def on_message(message):
             await story_bot.process_commands(message)
         return
 
-    # 初始化流程：如果還沒有 Session，才進行問答
+    # 初始化流程 (第一道題)
     if message.author.id not in sessions and not message.content.startswith('/'):
         try:
             parts = message.content.split(',')
@@ -129,22 +154,29 @@ async def on_message(message):
             age = parts[1].strip() if len(parts) > 1 else "5歲"
             sessions[message.author.id] = StorySession(nickname, age)
             
-            # 親切的動態開場白
             msg = await message.channel.send(f"哇，是 {nickname} 呀！{age} 的你一定很有想像力。小俠姐姐正在為你編織故事，請稍候...")
+            
+            # 💡 核心引擎：第一道題也改用 JSON 動態生成選項！
+            prompt = f"我是{nickname}，{age}。請開始一個全新的故事開場。\n請回傳純 JSON 格式：{{\"story\": \"開場故事與引導語\", \"options\": [\"動態故事題材1\", \"動態故事題材2\", \"動態故事題材3\"]}}"
             
             response = await asyncio.wait_for(
                 gemini_client.aio.models.generate_content(
                     model='gemini-2.5-flash',
-                    contents=f"我是{nickname}，{age}。請開始故事，給出三個題材選項。",
-                    config=types.GenerateContentConfig(system_instruction=XIAOXIA_SYSTEM_PROMPT)
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=XIAOXIA_SYSTEM_PROMPT,
+                        response_mime_type="application/json" # 強制回傳 JSON
+                    )
                 ), 
                 timeout=20.0
             )
             
-            # 選項帶有數字，方便幼兒辨識
-            options = ["1. 森林探險", "2. 太空旅行", "3. 海洋尋寶", "4. 我要自創..."]
-            view = StoryView(options, message.author.id)
-            await msg.edit(content=response.text, view=view)
+            data = json.loads(response.text.strip())
+            dynamic_options = data.get("options", ["奇幻冒險", "溫馨日常", "動物王國"])
+            dynamic_options.append("我要自創...")
+            
+            view = StoryView(dynamic_options, message.author.id)
+            await msg.edit(content=data["story"], view=view)
             
         except asyncio.TimeoutError:
             await msg.edit(content="⚠️ 小俠思考太久了，API 沒回應... 請檢查 Gemini 連線。")
