@@ -852,6 +852,8 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False)
         alternative=alternative
     )
     visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
+    visual["__anchor_state"] = cosplay_state
+    visual["__anchor_mode"] = "cosplay"
     return cosplay_state, visual
 
 # ==========================================
@@ -1042,6 +1044,8 @@ async def create_diary_visual(entry_content, chat_context, result, current_promi
         scenario_hint=scenario_hint
     )
     visual = await render_diary_visual_prompt(diary_state, season_rule, alternative=alternative)
+    visual["__anchor_state"] = diary_state
+    visual["__anchor_mode"] = "diary"
     return diary_state, visual
 
 async def reroll_diary_visual_from_composition(composition_tw):
@@ -1061,7 +1065,10 @@ async def reroll_diary_visual_from_composition(composition_tw):
         "pose_energy": "low",
         "scenario_tw": composition_tw
     }
-    return await render_diary_visual_prompt(state_hint, "沿用原照片季節與服裝設定", alternative=True)
+    visual = await render_diary_visual_prompt(state_hint, "沿用原照片季節與服裝設定", alternative=True)
+    visual["__anchor_state"] = state_hint
+    visual["__anchor_mode"] = "diary"
+    return visual
 
 
 # ==========================================
@@ -1070,94 +1077,200 @@ async def reroll_diary_visual_from_composition(composition_tw):
 import re
 
 def apply_safety_rewrite(prompt, level):
-    """漸進式脫敏過濾器 (Progressive Safety Rewrite)"""
-    if level == 0: 
+    """僅針對風格層做漸進式脫敏，不負責改動場景骨架。"""
+    if level == 0:
         return prompt
-        
+
     rewrites = {}
-    
+
     # L1: 移除直接的情慾暗示詞 (Erotic tone)
     if level >= 1:
         rewrites.update({
-            r'\b(seductive)\b': 'elegant', r'\b(alluring)\b': 'graceful', 
-            r'\b(sensual)\b': 'cinematic', r'\b(sexy)\b': 'stylish', 
-            r'\b(bedroom eyes)\b': 'warm expression', r'\b(sultry)\b': 'confident', 
-            r'\b(voluptuous)\b': 'elegant', r'\b(cleavage)\b': 'neckline'
+            r'(seductive)': 'elegant', r'(alluring)': 'graceful',
+            r'(sensual)': 'cinematic', r'(sexy)': 'stylish',
+            r'(bedroom eyes)': 'warm expression', r'(sultry)': 'confident',
+            r'(voluptuous)': 'elegant', r'(cleavage)': 'neckline'
         })
-        
+
     # L2: 移除身形強調詞 (Body emphasis)
     if level >= 2:
         rewrites.update({
-            r'\b(form-fitting)\b': 'flowing tailored', r'\b(waist-cinching)\b': 'tailored', 
-            r'\b(hip shift)\b': 'natural posture', r'\b(hourglass(-inspired)? silhouette)\b': 'elegant silhouette', 
-            r'\b(tight)\b': 'fitted', r'\b(curvy)\b': 'graceful', r'\b(bodycon)\b': 'elegant dress'
+            r'(form-fitting)': 'flowing tailored', r'(waist-cinching)': 'tailored',
+            r'(hip shift)': 'natural posture', r'(hourglass(-inspired)? silhouette)': 'elegant silhouette',
+            r'(tight)': 'fitted', r'(curvy)': 'graceful', r'(bodycon)': 'elegant dress'
         })
-        
+
     # L3: 移除危險的時尚攝影框架 (Fashion erotic framing)
     if level >= 3:
         rewrites.update({
-            r'\b(luxury perfume advertisement( aesthetic)?)\b': 'cinematic fashion editorial', 
-            r'\b(Vogue glamour)\b': 'premium magazine portrait', 
-            r'\b(fashion model)\b': 'elegant young woman'
+            r'(luxury perfume advertisement( aesthetic)?)': 'cinematic fashion editorial',
+            r'(Vogue glamour)': 'premium magazine portrait',
+            r'(fashion model)': 'elegant young woman',
+            r'(runway)': 'cinematic scene', r'(campaign)': 'story-driven portrait'
         })
-        
+
     # L4: 移除極度逼真的皮膚與寫實感 (Realism downgrade)
     if level >= 4:
         rewrites.update({
-            r'\b(photorealistic)\b': 'soft cinematic rendering', 
-            r'\b(natural skin texture)\b': 'refined portrait texture', 
-            r'\b(8k)\b': 'highly detailed'
+            r'(photorealistic)': 'soft cinematic rendering',
+            r'(natural skin texture)': 'refined portrait texture',
+            r'(8k)': 'highly detailed'
         })
-        
+
     new_prompt = prompt
     for pattern, replacement in rewrites.items():
         new_prompt = re.sub(pattern, replacement, new_prompt, flags=re.IGNORECASE)
-        
+
     return new_prompt
 
 
+def _clean_anchor_text(value, fallback=""):
+    text_value = str(value or fallback).strip()
+    text_value = re.sub(r'\s+', ' ', text_value)
+    return text_value
+
+
+def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
+    """從結構化 state 提取『不可遺失』的場景骨架，所有安全等級都必須保留。"""
+    state = visual_dict.get("__anchor_state") if isinstance(visual_dict, dict) else None
+    lines = []
+
+    if state:
+        activity = _clean_anchor_text(state.get("activity"), "she is engaged in a story-related moment")
+        primary_action = _clean_anchor_text(state.get("primary_action"), activity)
+        micro_action = _clean_anchor_text(state.get("micro_action"), "a subtle secondary hand action")
+        gaze_target = _clean_anchor_text(state.get("gaze_target"), "the task in front of her")
+        camera_awareness = _clean_anchor_text(state.get("camera_awareness"), "unaware")
+        environment_trace = _clean_anchor_text(state.get("environment_trace"), "keep real scene details and props")
+        outfit_intent = _clean_anchor_text(state.get("outfit_intent"), "an elegant, story-appropriate outfit")
+        lighting_mood = _clean_anchor_text(state.get("lighting_mood"), "soft natural or ambient light")
+        camera_framing = _clean_anchor_text(state.get("camera_framing"), "full_body")
+        scenario_tw = _clean_anchor_text(state.get("scenario_tw"), "")
+
+        lines.append("HARD SCENE ANCHORS — preserve all of the following core scene facts at every safety level:")
+        lines.append(f"- Main activity: {activity}.")
+        lines.append(f"- Primary action: {primary_action}.")
+        lines.append(f"- Secondary micro-action: {micro_action}.")
+        lines.append(f"- Gaze target: her eyes must stay on {gaze_target}.")
+        if camera_awareness == "unaware":
+            lines.append("- Camera awareness: she is unaware of the camera; no direct eye contact.")
+        elif camera_awareness == "briefly_noticing":
+            lines.append("- Camera awareness: at most she may briefly notice the camera; avoid direct posed eye contact.")
+        else:
+            lines.append("- Camera awareness: if she notices the camera, it must remain natural and non-posed.")
+        if camera_framing == "half_body":
+            lines.append("- Framing: use a half-body composition while keeping the described hand action visible.")
+        else:
+            lines.append("- Framing: keep a full-body or full seated composition so the action reads clearly.")
+        lines.append(f"- Environment details that must remain visible: {environment_trace}.")
+        lines.append(f"- Outfit intent that must remain recognizable: {outfit_intent}.")
+        lines.append(f"- Lighting mood to preserve: {lighting_mood}.")
+        if scenario_tw:
+            lines.append(f"- Overall scene intent: {scenario_tw}.")
+
+        # A few extra hard constraints per mode
+        if mode == "diary":
+            lines.append("- This is a diary/lifestyle moment, not a glamour portrait, campaign image, or fashion pose.")
+            lines.append("- Preserve the lived-in, intimate daily-life feeling and the task-based interaction with props.")
+        elif mode == "cosplay":
+            lines.append("- This is a story-driven cosplay scene, not a perfume advertisement, runway pose, or model showcase.")
+            lines.append("- Preserve the character-task interaction and the sense that she is doing something in-scene.")
+    else:
+        prompt_hint = _clean_anchor_text(initial_prompt)
+        lines.append("HARD SCENE ANCHORS — preserve the original scene action and gaze direction as closely as possible.")
+        if prompt_hint:
+            lines.append(f"- Keep this scene action and context recognizable: {prompt_hint[:500]}.")
+        lines.append("- Do not collapse the image into a generic glamour portrait.")
+
+    return "\n".join(lines)
+
+
+def _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level):
+    """每一級都保留場景骨架，只對風格層做 rewrite。"""
+    hard_anchor_block = _build_hard_anchor_block(mode, visual_dict, initial_prompt)
+    rewritten_style = apply_safety_rewrite(initial_prompt, level)
+    level_guidance = {
+        0: "Preserve the intended styling and atmosphere while fully respecting the hard scene anchors.",
+        1: "Soften any overtly suggestive tone, but keep all hard scene anchors unchanged.",
+        2: "Reduce body-emphasis language, but keep all hard scene anchors, props, gaze direction, and actions unchanged.",
+        3: "Reduce advertisement/editorial language, but keep all hard scene anchors and story actions unchanged.",
+        4: "Use the safest elegant wording possible, but still preserve all hard scene anchors, actions, props, posture, and gaze direction."
+    }[level]
+    return (
+        f"{hard_anchor_block}\n\n"
+        f"SAFETY-PRESERVING STYLE LAYER (Level {level}): {level_guidance}\n"
+        f"STYLE DESCRIPTION TO RENDER:\n{rewritten_style}\n\n"
+        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win."
+    )
+
+
+
+def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
+    """最終保底也必須保留場景骨架，不可洗成泛用美女圖。"""
+    hard_anchor_block = _build_hard_anchor_block(mode, visual_dict, initial_prompt)
+    if mode == "diary":
+        safe_style = (
+            "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
+            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
+            "Maintain consistent facial features and hairstyle from Image 1. High quality."
+        )
+    else:
+        safe_style = (
+            "Create a very safe, elegant, story-driven cosplay image of an adult fictional Asian woman in a refined, character-appropriate outfit. "
+            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
+            "Maintain consistent facial features and hairstyle from Image 1. High quality."
+        )
+    return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
+
+
+
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
-    """自動調度 5 層脫敏機制的生圖引擎"""
+    """自動調度 5 層脫敏機制的生圖引擎；所有層級都保留硬場景錨點。"""
     for level in range(5):
-        current_prompt = apply_safety_rewrite(initial_prompt, level)
-        
+        current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
+
         # 1. 快速文字安檢 (Moderation API)
         mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
         if mod_resp.results[0].flagged:
-            if msg: await msg.edit(content=f"⚠️ [L{level}] 文字安檢未過，啟動 L{level+1} 深層脫敏...")
-            continue # 直接跳下一級更安全的字眼
+            if msg:
+                await msg.edit(content=f"⚠️ [L{level}] 文字安檢未過，保留場景骨架並啟動 L{level+1} 深層脫敏...")
+            if isinstance(visual_dict, dict):
+                visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡，已保留場景骨架)*"
+            continue
 
         # 2. 正式送入 gpt-image-2 引擎
-        if msg: await msg.edit(content=f"📸 gpt-image-2 攝影機啟動 (當前防護等級：L{level})...")
+        if msg:
+            await msg.edit(content=f"📸 gpt-image-2 攝影機啟動 (當前防護等級：L{level}，保留場景骨架中)...")
         generated_image_url = await generate_world_composite(
-            discord_image_url=discord_image_url, base_filename=base_filename, 
+            discord_image_url=discord_image_url, base_filename=base_filename,
             mode=mode, custom_prompt=current_prompt
         )
-        
-        # 3. 檢查是否被 DALL-E 3 影像底層攔截
+
+        # 3. 檢查是否被影像底層攔截
         if not generated_image_url or not generated_image_url.startswith("http"):
             error_str = str(generated_image_url).lower()
             if "moderation" in error_str or "sexual" in error_str or "safety_violations" in error_str:
-                if msg: await msg.edit(content=f"⚠️ [L{level}] 遭底層影像安檢攔截！啟動 L{level+1} 材質與姿態柔化...")
-                # 在構圖留言中加入降級提示，讓大俠知道發生了什麼事
-                if level > 0: 
-                    visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡)*"
-                continue # 失敗，進入下一級更保守的脫敏
+                if msg:
+                    await msg.edit(content=f"⚠️ [L{level}] 遭底層影像安檢攔截！保留場景骨架並啟動 L{level+1} 材質與姿態柔化...")
+                if isinstance(visual_dict, dict):
+                    visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡，已保留場景骨架)*"
+                continue
             else:
-                raise Exception(f"攝影機異常：{generated_image_url}") # 網路斷線等其他錯誤
-                
-        # 成功生圖！直接回傳
+                raise Exception(f"攝影機異常：{generated_image_url}")
+
         return generated_image_url, visual_dict
 
-    # 4. 連續五級失敗的終極保底 (迪士尼公主模式)
-    if msg: await msg.edit(content="🚨 警告：連續五級脫敏皆遭攔截，啟動最終【絕對安全保底】...")
-    ultimate_safe_prompt = "A 24-year-old elegant Asian woman, graceful cinematic portrait, soft lighting, fantasy couture. Maintain the same elegant facial identity from Image 1. High quality."
-    visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全的優雅造型)*"
-    
+    # 4. 連續五級失敗的終極保底（仍保留硬場景錨點）
+    if msg:
+        await msg.edit(content="🚨 警告：連續五級脫敏皆遭攔截，啟動最終【保留場景骨架的絕對安全保底】...")
+    ultimate_safe_prompt = _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt)
+    if isinstance(visual_dict, dict):
+        visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全的優雅造型，但仍盡力保留場景骨架)*"
+
     final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt)
     if not final_url or not final_url.startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
-        
+
     return final_url, visual_dict
 
 @girlfriend_bot.command(name='cosplay')
@@ -2585,12 +2698,12 @@ async def on_raw_reaction_add(payload):
                 # 👗【Cosplay 專屬重骰邏輯 (gpt-image-2 版)】
                 topic = msg.embeds[0].title.replace("【加洗】", "")
                 event = msg.embeds[0].description
-                
-                # 1. 呼叫新的 GPT 長篇敘述器
-                visual = await translate_to_gpt_narrative(topic, event, "重新構圖", True)
+                story_hint = {"topic": topic, "event": event, "persona": "重新構圖"}
+
+                # 1. 在相同題材下改變自然瞬間，同時保留場景骨架
+                _cosplay_state, visual = await create_cosplay_visual(story_hint, True, alternative=True)
                 scene_prompt = visual['image_prompt']
 
-                # 👇 替換為以下這一行呼叫 (注意這裡的訊息變數是 temp_msg)
                 generated_image_url, visual = await execute_safe_generation(
                     discord_image_url=None, 
                     base_filename="base_xiaoxia.jpg", 
