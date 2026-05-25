@@ -865,6 +865,8 @@ DIARY_VISUAL_CORE = """
 而不是裸露、身體部位特寫或刻意挑逗。
 每張圖必須是一個正在發生的生活瞬間：一個主行為、一個微小輔助動作、一個明確視線目標。
 身體動作保持自然穩定，不做複雜扭轉，不做誇張回眸，不固定直視鏡頭微笑。
+交換日記的預設世界觀是「當代台灣日常生活」：現代台灣住宅、公寓、透天厝、書房、客廳、餐桌、陽台、廚房等真實生活空間；
+光線、季節、衣著與物件應優先符合當下台灣生活，而不是自動變成歐洲古堡、維多利亞書房、宮廷臥室或戲服型造型。
 避免商業廣告語彙、伸展台姿勢與完美對稱構圖；允許溫暖、俏皮、思念、疲倦、專注等每日變化。
 """
 
@@ -885,18 +887,20 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
     """
     fallback = {
         "visual_mode": "quiet_intimacy",
-        "activity": "整理桌上的手寫日記與一杯尚未喝完的茶",
+        "setting_anchor": "當代台灣住家書房或臥室一角",
+        "time_anchor": "台灣當季的自然午後或夜晚室內時光",
+        "activity": "在台灣住家的書桌前整理手寫日記與聊天筆記",
         "emotion": "溫柔、安靜、稍微想念大俠",
         "interaction_anchor": "讀完大俠的文字後仍沉浸在情緒裡",
-        "primary_action": "坐在桌邊整理日記頁面",
-        "micro_action": "指尖輕輕停在尚未寫完的一行字旁",
+        "primary_action": "坐在書桌前翻看交換日記與未寫完的筆記",
+        "micro_action": "一隻手停在紙頁附近，另一隻手自然靠近桌面",
         "gaze_target": "日記頁面",
         "camera_awareness": "unaware",
-        "environment_trace": "桌上有半杯茶、散落便箋與一支未蓋上的筆",
-        "outfit_intent": "符合季節的柔和居家洋裝",
-        "lighting_mood": "窗邊自然暖光",
+        "environment_trace": "現代台灣居家書桌、散落便箋、馬克杯或茶杯、檯燈與窗邊自然光",
+        "outfit_intent": "符合台灣季節的自然居家穿著，例如柔和洋裝、針織上衣配長裙、簡約睡前罩衫或舒適家居服",
+        "lighting_mood": "台灣住家窗邊自然暖光或柔和室內燈光",
         "pose_energy": "low",
-        "scenario_tw": "小俠坐在桌邊整理日記，手指停在尚未寫完的句子旁，桌上留著半杯茶與散落便箋，視線落在紙頁上。"
+        "scenario_tw": "小俠坐在台灣住家的書桌前翻看日記，視線落在紙頁上，一手停在頁面附近，桌上留著便箋與杯子。"
     }
     planner_prompt = f"""你是交換日記中的「生活狀態規劃員」，不是攝影師，也不是服裝廣告文案。
 請根據今天的大俠日記、小俠回覆與今日互動，產生一個只屬於今天的生活瞬間狀態。
@@ -915,18 +919,23 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 
 【輸出規則】
 1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life 選一個。
-2. activity 必須是居家或日常可自然發生的一件事情，應與今日內容有因果關係。
-3. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。
-4. gaze_target 必須是場景中的物件或互動來源；除非日記明確描述對鏡頭互動，否則不可看鏡頭。
-5. camera_awareness 僅能為 unaware 或 briefly_noticing；預設 unaware。
-6. pose_energy 僅能為 low 或 medium；禁止奔跑、舞蹈、誇張轉身、回眸扭轉。
-7. outfit_intent 可展現成熟女性魅力並保留已承諾的款式/顏色，但不得含裸露或身體部位強調。
-8. 禁止使用 Vogue、editorial、campaign、perfume advertisement、model pose、性感、惹火、裸露等字樣。
-9. scenario_tw 必須是自然繁體中文生活畫面描述，80 字內。
+2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如台灣公寓、透天厝、書房、客廳、餐桌、陽台、廚房等；除非大俠當天明確指定其他旅行/特殊場景，否則不可自動變成歐洲古典、宮廷、奇幻或歷史時代場景。
+3. time_anchor 必須反映台灣當下合理的時段/季節氣氛，例如午後暖光、傍晚、夜間室內光、夏季悶熱、梅雨、秋日微涼等，但不要把每個物件寫死。
+4. activity 必須是居家或日常可自然發生的一件事情，應與今日內容有因果關係。
+5. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。請保留動作核心，不必硬指定左右手完全鎖死。
+6. gaze_target 必須是場景中的物件或互動來源；除非日記明確描述對鏡頭互動，否則不可看鏡頭。
+7. camera_awareness 僅能為 unaware 或 briefly_noticing；預設 unaware。
+8. pose_energy 僅能為 low 或 medium；禁止奔跑、舞蹈、誇張轉身、回眸扭轉。
+9. outfit_intent 應優先是符合台灣季節與當代居家生活的自然穿著，可展現成熟女性魅力，但不可自動變成戲服、宮廷睡袍、拖地禮服；若有承諾，可保留顏色/款式精神，但仍要生活化且不得含裸露或身體部位強調。
+10. environment_trace 請使用現代台灣住宅中合理出現的生活物件與空間痕跡；不要把桌椅、窗格、牆飾、材質等細節鎖得過死。
+11. 禁止使用 Vogue、editorial、campaign、perfume advertisement、model pose、性感、惹火、裸露等字樣。
+12. scenario_tw 必須是自然繁體中文生活畫面描述，90 字內。
 
 只回傳 JSON：
 {{
   "visual_mode": "...",
+  "setting_anchor": "...",
+  "time_anchor": "...",
   "activity": "...",
   "emotion": "...",
   "interaction_anchor": "...",
@@ -969,12 +978,11 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
     不允許重寫心情、事件或把照片導向商業擺拍。
     """
     variation_rule = (
-        "Create a fresh variation of the same emotional moment by changing only the small hand action "
-        "or framing; do not turn it into a posed portrait."
+        "Create a fresh variation of the same emotional moment by changing only the small hand action or framing; do not invent a new activity or turn it into a posed portrait."
         if alternative else
         "Keep the described moment faithfully; do not invent a new activity."
     )
-    prompt = f"""你是生活攝影文字轉譯員。把下方結構化狀態轉成一段 90 至 130 字的英文 gpt-image-2 圖片描述。
+    prompt = f"""你是生活攝影文字轉譯員。把下方結構化狀態轉成一段 95 至 140 字的英文 gpt-image-2 圖片描述。
 這張照片屬於交換日記：溫暖、親密、自然、有女性魅力，但不是廣告、不是走秀、不是擺拍。
 
 【固定導演規則】
@@ -988,8 +996,11 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 
 【轉譯限制】
 - 第一個句子先描述她正在做的事情，不要先寫美貌或身材。
+- 明確保留 setting_anchor 與 time_anchor，讓畫面看起來像發生在當代台灣日常生活裡。
 - 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。
 - 保留生活痕跡 environment_trace，使用自然居家/生活光線。
+- 交換日記的服裝以當代台灣季節合宜的居家或日常穿著為主，可有柔和女性魅力，但不要變成戲服、宮廷睡袍、拖地晚禮服或古典歐洲感型錄。
+- 若需要手部細節，只寫成 one hand near the page / the other resting near the desk 之類自然描述，不要把左右手鎖太死。
 - 可描述 elegant, feminine, attractive, soft silk/knit/cotton 等自然衣著質感。
 - 禁止 commercial campaign, perfume advertisement, runway, Vogue, model pose。
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
@@ -1000,19 +1011,18 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 只回傳 JSON：
 {{
   "image_prompt": "pure English image prompt",
-  "composition": "繁體中文生活構圖說明，80字內",
+  "composition": "繁體中文生活構圖說明，90字內",
   "mood": "繁體中文情緒說明，40字內",
   "message": "繁體中文給大俠的短句，40字內"
 }}"""
     fallback_visual = {
         "image_prompt": (
-            "She sits at a lived-in wooden desk, quietly organizing handwritten diary pages while one fingertip "
-            "rests beside an unfinished sentence. Her eyes stay on the page, unaware of the camera. A half-finished "
-            "cup of tea and scattered notes make the room feel real, with warm window light across her simple, elegant "
-            "seasonal dress. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional "
-            "character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography."
+            "In a contemporary Taiwan home, she sits at a lived-in wooden desk, quietly organizing handwritten diary pages and unfinished notes during a warm seasonal afternoon or evening. "
+            "One hand stays near the page while the other rests naturally near the desk, and her eyes remain on the diary, unaware of the camera. "
+            "A mug, scattered notes, a lamp, and soft window or indoor light make the room feel real, while her outfit remains elegant, seasonal, and naturally suited to daily life. "
+            "Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography."
         ),
-        "composition": diary_state.get("scenario_tw", "小俠在桌邊整理日記，視線落在紙頁上，桌上保留生活痕跡。"),
+        "composition": diary_state.get("scenario_tw", "小俠在台灣住家的桌邊整理日記，視線落在紙頁上，桌上保留生活痕跡。"),
         "mood": diary_state.get("emotion", "安靜而溫柔"),
         "message": "大俠，這是今天只屬於我們的小片刻。"
     }
@@ -1052,6 +1062,8 @@ async def reroll_diary_visual_from_composition(composition_tw):
     """Emoji 加洗/重骰時，只改小動作或鏡位，維持原日記的情緒與生活場景。"""
     state_hint = {
         "visual_mode": "quiet_intimacy",
+        "setting_anchor": "當代台灣住家中的原場景",
+        "time_anchor": "沿用原照片的台灣時段與季節氣氛",
         "activity": composition_tw,
         "emotion": "延續原本的生活情緒",
         "interaction_anchor": "同一則交換日記的另一個自然瞬間",
@@ -1060,7 +1072,7 @@ async def reroll_diary_visual_from_composition(composition_tw):
         "gaze_target": "正在處理的生活物件",
         "camera_awareness": "unaware",
         "environment_trace": "保留原場景中的日常物品與不完美細節",
-        "outfit_intent": "保留原照片的自然有魅力穿著",
+        "outfit_intent": "保留原照片的自然、有魅力且符合台灣日常的穿著",
         "lighting_mood": "自然室內光或窗邊柔光",
         "pose_energy": "low",
         "scenario_tw": composition_tw
@@ -1144,6 +1156,8 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         environment_trace = _clean_anchor_text(state.get("environment_trace"), "keep real scene details and props")
         outfit_intent = _clean_anchor_text(state.get("outfit_intent"), "an elegant, story-appropriate outfit")
         lighting_mood = _clean_anchor_text(state.get("lighting_mood"), "soft natural or ambient light")
+        setting_anchor = _clean_anchor_text(state.get("setting_anchor"), "")
+        time_anchor = _clean_anchor_text(state.get("time_anchor"), "")
         camera_framing = _clean_anchor_text(state.get("camera_framing"), "full_body")
         scenario_tw = _clean_anchor_text(state.get("scenario_tw"), "")
 
@@ -1162,6 +1176,10 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
             lines.append("- Framing: use a half-body composition while keeping the described hand action visible.")
         else:
             lines.append("- Framing: keep a full-body or full seated composition so the action reads clearly.")
+        if setting_anchor:
+            lines.append(f"- Setting anchor: {setting_anchor}.")
+        if time_anchor:
+            lines.append(f"- Time/season anchor: {time_anchor}.")
         lines.append(f"- Environment details that must remain visible: {environment_trace}.")
         lines.append(f"- Outfit intent that must remain recognizable: {outfit_intent}.")
         lines.append(f"- Lighting mood to preserve: {lighting_mood}.")
@@ -1172,6 +1190,8 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         if mode == "diary":
             lines.append("- This is a diary/lifestyle moment, not a glamour portrait, campaign image, or fashion pose.")
             lines.append("- Preserve the lived-in, intimate daily-life feeling and the task-based interaction with props.")
+            lines.append("- Keep the scene grounded in a contemporary Taiwan everyday setting unless an explicit exception was requested.")
+            lines.append("- Prefer modern, season-appropriate daily clothing over costume-like robes or historical styling.")
         elif mode == "cosplay":
             lines.append("- This is a story-driven cosplay scene, not a perfume advertisement, runway pose, or model showcase.")
             lines.append("- Preserve the character-task interaction and the sense that she is doing something in-scene.")
