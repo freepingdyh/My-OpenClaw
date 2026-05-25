@@ -613,47 +613,6 @@ async def generate_story(mode):
     )
     return json.loads(response.text)
 
-# async def translate_to_flux_prompt(topic, event, persona, force_half_body=False):
-#     weekday = datetime.now(TZ_TPE).weekday()
-#     if weekday == 5:
-#         body_tags = "slender body, delicate figure, narrow waist, long legs"
-#         pose_tags = "confident posture, soft smile, looking at viewer"
-#         outfit_tags = "extremely sexy cosplay outfit, very tight fit heavily emphasizing exceptionally large breasts and deep cleavage, revealing"
-#     else:
-#         body_tags = "slender body, narrow waist, long legs"
-#         pose_tags = "dignified posture, confident gaze, natural expression, elegant, looking at viewer"
-#         outfit_tags = "sexy yet theme-appropriate, very tight fit heavily emphasizing large breasts, bodycon, elegant"
-
-#     system_prompt = f"""你現在是一位頂尖的 FLUX 結構化提示詞大師。請嚴格遵循以下模板，回傳純逗號分隔的標籤。
-#     [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, same person, consistent character design, east asian female, soft oval face, delicate facial structure, clear skin texture, 
-#     [HAIR & FACE] long dark wavy hair, natural makeup, clean skin, 
-#     [BODY CONTROL] {body_tags},
-#     [POSE & EXPRESSION] {pose_tags}, (填入動作),
-#     [OUTFIT] {outfit_tags}, (填入服裝),
-#     [SCENE] (填入場景),
-#     [LIGHTING] cinematic lighting, soft key light, photorealistic, 8k resolution
-
-#     ⚠️【絕對禁令】：[IDENTITY LOCK] 的開頭絕對只能是 "xiaoxia_girl, 1girl, solo"，嚴禁出現任何真實歷史人物、綽號（例如 Iron Lady, Thatcher, 鐵娘子 等），否則生圖會崩壞！
-    
-#     回傳 JSON 格式限制：
-#     {{
-#         "image_prompt": "純逗號分隔的英文標籤",
-#         "composition": "(繁體中文) 說明構圖發想，100字內。",
-#         "mood": "(繁體中文) 描述微表情與心境，50字內。",
-#         "message": "(繁體中文) 對大俠說的話，50字內。"
-#     }}"""
-    
-#     user_prompt = f"Topic: {topic}\nEvent: {event}\nPersona: {persona}\n"
-#     if force_half_body: user_prompt += "\n[CRITICAL]: 強制加入 `upper body shot, `"
-#     else: user_prompt += "\n[CRITICAL]: 加入 `full body shot, `"
-
-#     response = await openai_client.chat.completions.create(
-#         model="gpt-5-mini",
-#         response_format={"type": "json_object"},
-#         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-#     )
-#     return json.loads(response.choices[0].message.content)
-
 # ==========================================
 # 🧠 高級時尚攝影大師 (取代原本的 Flux 標籤產生器)
 # ==========================================
@@ -673,13 +632,14 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
 
     【大師級攝影守則 (CRITICAL)】：
     1. 拒絕條列式標籤！請用流暢的自然語句描繪。
-    2. 【人體工學限制 (Pose Complexity Control)】：絕對禁止複雜的連續肢體動作！嚴禁出現 twisting dramatically, walking while looking back, caught mid-step 等違反人體工學的敘述。最多允許「1個主動作(如站立) + 1個微小輔助動作(如輕撫髮絲)」。請強調靜態中的微動態 (elegant subtle motion)。
-    3. 【布料與光影張力】：強調「材質張力 (dynamic fabric movement, soft reflective satin)」與「光影氛圍 (cinematic shadows)」，讓性感來自畫面氛圍而非肢體扭曲。
-    4. 【鏡頭與空氣感】：加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh)」、「空氣光暈 (subtle cinematic haze)」。
-    5. {style_guide}
-    6. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring, form-fitting, waist-cinching 等會觸發審查的字眼。
-    7. 開頭必須綁定人物基底："A 24-year-old elegant Asian woman..."
-    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with natural anatomical alignment, realistic shoulder and neck positioning, subtle feminine expressions, natural skin texture, and graceful proportions. Photorealistic, 8k."
+    2. 【人體工學限制 (Pose Complexity Control)】：絕對禁止複雜的連續肢體動作！最多允許「1個主動作(如站立) + 1個微小輔助動作(如輕撫髮絲)」。請強調靜態中的微動態 (elegant subtle motion)。
+    3. 【表情與視線解禁 (CRITICAL)】：絕對不要永遠盯著鏡頭微笑！請明確描寫自然的頭部轉動與視線方向 (例如: looking down at the coffee cup, glancing sideways softly, closing eyes in enjoyment, gentle candid laughter)，讓人物活過來。
+    4. 【布料與光影張力】：強調「材質張力 (dynamic fabric movement)」與「光影氛圍 (cinematic shadows)」。
+    5. 【鏡頭與空氣感】：加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh)」。
+    6. {style_guide}
+    7. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring, form-fitting, waist-cinching 等會觸發審查的字眼。
+    8. 開頭必須綁定人物基底："A 24-year-old elegant Asian woman..."
+    9. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with natural anatomical alignment, realistic shoulder and neck positioning, subtle feminine expressions, natural skin texture, and graceful proportions. Photorealistic, 8k."
 
     回傳 JSON 格式：
     {{
@@ -699,6 +659,217 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
     )
     return json.loads(response.choices[0].message.content)
+
+
+
+# ==========================================
+# 🌙 交換日記專屬導演層：核心固定、每日狀態由 AI 依互動浮動
+# ==========================================
+DIARY_VISUAL_CORE = """
+這是「交換日記」照片，不是 Cosplay 海報，也不是廣告型錄。
+小俠是成年虛擬角色。畫面魅力應來自當天情緒、親密感、自然衣著材質與生活痕跡，
+而不是裸露、身體部位特寫或刻意挑逗。
+每張圖必須是一個正在發生的生活瞬間：一個主行為、一個微小輔助動作、一個明確視線目標。
+身體動作保持自然穩定，不做複雜扭轉，不做誇張回眸，不固定直視鏡頭微笑。
+避免商業廣告語彙、伸展台姿勢與完美對稱構圖；允許溫暖、俏皮、思念、疲倦、專注等每日變化。
+"""
+
+def _safe_json_from_text(raw_text, fallback):
+    """解析模型 JSON；錯誤時回傳保守但仍有生活感的預設狀態。"""
+    try:
+        clean = (raw_text or "").replace("```json", "").replace("```", "").strip()
+        value = json.loads(clean, strict=False)
+        return value if isinstance(value, dict) else fallback
+    except Exception:
+        return fallback
+
+async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, reply_to_daxia,
+                                  current_promises, season_rule, scenario_hint=""):
+    """
+    Gemini 只負責「今天小俠在做什麼、感受什麼」。
+    它不負責攝影術語，也不能把日記照片改成 Cosplay / 香水廣告。
+    """
+    fallback = {
+        "visual_mode": "quiet_intimacy",
+        "activity": "整理桌上的手寫日記與一杯尚未喝完的茶",
+        "emotion": "溫柔、安靜、稍微想念大俠",
+        "interaction_anchor": "讀完大俠的文字後仍沉浸在情緒裡",
+        "primary_action": "坐在桌邊整理日記頁面",
+        "micro_action": "指尖輕輕停在尚未寫完的一行字旁",
+        "gaze_target": "日記頁面",
+        "camera_awareness": "unaware",
+        "environment_trace": "桌上有半杯茶、散落便箋與一支未蓋上的筆",
+        "outfit_intent": "符合季節的柔和居家洋裝",
+        "lighting_mood": "窗邊自然暖光",
+        "pose_energy": "low",
+        "scenario_tw": "小俠坐在桌邊整理日記，手指停在尚未寫完的句子旁，桌上留著半杯茶與散落便箋，視線落在紙頁上。"
+    }
+    planner_prompt = f"""你是交換日記中的「生活狀態規劃員」，不是攝影師，也不是服裝廣告文案。
+請根據今天的大俠日記、小俠回覆與今日互動，產生一個只屬於今天的生活瞬間狀態。
+
+【不可改動的核心導演規則】
+{DIARY_VISUAL_CORE}
+
+【輸入資料】
+大俠日記：{entry_content[-1600:]}
+今日互動摘要：{(chat_context or "無特殊互動")[-1600:]}
+小俠今日自述：{xiaoxia_diary[-1000:]}
+小俠對大俠回覆：{reply_to_daxia[-800:]}
+尚未完成的服裝/照片承諾：{current_promises}
+季節服裝邊界：{season_rule}
+既有場景提示（僅供保留承諾或日記重點，不得照抄成廣告）：{scenario_hint or "無"}
+
+【輸出規則】
+1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life 選一個。
+2. activity 必須是居家或日常可自然發生的一件事情，應與今日內容有因果關係。
+3. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。
+4. gaze_target 必須是場景中的物件或互動來源；除非日記明確描述對鏡頭互動，否則不可看鏡頭。
+5. camera_awareness 僅能為 unaware 或 briefly_noticing；預設 unaware。
+6. pose_energy 僅能為 low 或 medium；禁止奔跑、舞蹈、誇張轉身、回眸扭轉。
+7. outfit_intent 可展現成熟女性魅力並保留已承諾的款式/顏色，但不得含裸露或身體部位強調。
+8. 禁止使用 Vogue、editorial、campaign、perfume advertisement、model pose、性感、惹火、裸露等字樣。
+9. scenario_tw 必須是自然繁體中文生活畫面描述，80 字內。
+
+只回傳 JSON：
+{{
+  "visual_mode": "...",
+  "activity": "...",
+  "emotion": "...",
+  "interaction_anchor": "...",
+  "primary_action": "...",
+  "micro_action": "...",
+  "gaze_target": "...",
+  "camera_awareness": "...",
+  "environment_trace": "...",
+  "outfit_intent": "...",
+  "lighting_mood": "...",
+  "pose_energy": "low|medium",
+  "scenario_tw": "..."
+}}"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=planner_prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        planned = _safe_json_from_text(response.text, fallback)
+    except Exception as e:
+        print(f"⚠️ 日記生活狀態規劃失敗，使用保底狀態: {e}")
+        planned = fallback
+
+    allowed_modes = {"quiet_intimacy", "playful_closeness", "gentle_longing", "tired_comfort", "cheerful_daily_life"}
+    if planned.get("visual_mode") not in allowed_modes:
+        planned["visual_mode"] = fallback["visual_mode"]
+    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing"}:
+        planned["camera_awareness"] = "unaware"
+    if planned.get("pose_energy") not in {"low", "medium"}:
+        planned["pose_energy"] = "low"
+    for key, default_value in fallback.items():
+        if not str(planned.get(key, "")).strip():
+            planned[key] = default_value
+    return planned
+
+async def render_diary_visual_prompt(diary_state, season_rule, alternative=False):
+    """
+    GPT-5-mini 只把已決定的每日狀態翻成 gpt-image-2 能執行的英文生活照片描述。
+    不允許重寫心情、事件或把照片導向商業擺拍。
+    """
+    variation_rule = (
+        "Create a fresh variation of the same emotional moment by changing only the small hand action "
+        "or framing; do not turn it into a posed portrait."
+        if alternative else
+        "Keep the described moment faithfully; do not invent a new activity."
+    )
+    prompt = f"""你是生活攝影文字轉譯員。把下方結構化狀態轉成一段 90 至 130 字的英文 gpt-image-2 圖片描述。
+這張照片屬於交換日記：溫暖、親密、自然、有女性魅力，但不是廣告、不是走秀、不是擺拍。
+
+【固定導演規則】
+{DIARY_VISUAL_CORE}
+
+【今日狀態 JSON】
+{json.dumps(diary_state, ensure_ascii=False)}
+
+【季節服裝邊界】
+{season_rule}
+
+【轉譯限制】
+- 第一個句子先描述她正在做的事情，不要先寫美貌或身材。
+- 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。
+- 保留生活痕跡 environment_trace，使用自然居家/生活光線。
+- 可描述 elegant, feminine, attractive, soft silk/knit/cotton 等自然衣著質感。
+- 禁止 commercial campaign, perfume advertisement, runway, Vogue, model pose。
+- 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
+- 禁止 looking over her shoulder、dramatic twist 或複雜肢體動作。
+- {variation_rule}
+- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+
+只回傳 JSON：
+{{
+  "image_prompt": "pure English image prompt",
+  "composition": "繁體中文生活構圖說明，80字內",
+  "mood": "繁體中文情緒說明，40字內",
+  "message": "繁體中文給大俠的短句，40字內"
+}}"""
+    fallback_visual = {
+        "image_prompt": (
+            "She sits at a lived-in wooden desk, quietly organizing handwritten diary pages while one fingertip "
+            "rests beside an unfinished sentence. Her eyes stay on the page, unaware of the camera. A half-finished "
+            "cup of tea and scattered notes make the room feel real, with warm window light across her simple, elegant "
+            "seasonal dress. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional "
+            "character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography."
+        ),
+        "composition": diary_state.get("scenario_tw", "小俠在桌邊整理日記，視線落在紙頁上，桌上保留生活痕跡。"),
+        "mood": diary_state.get("emotion", "安靜而溫柔"),
+        "message": "大俠，這是今天只屬於我們的小片刻。"
+    }
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}]
+        )
+        visual = _safe_json_from_text(response.choices[0].message.content, fallback_visual)
+    except Exception as e:
+        print(f"⚠️ 日記影像描述轉譯失敗，使用保底描述: {e}")
+        visual = fallback_visual
+    for key, default_value in fallback_visual.items():
+        if not str(visual.get(key, "")).strip():
+            visual[key] = default_value
+    return visual
+
+async def create_diary_visual(entry_content, chat_context, result, current_promises, season_rule,
+                              scenario_hint="", alternative=False):
+    """日記唯一入口：每日狀態規劃 -> 生活照片提示詞轉譯。"""
+    diary_state = await plan_diary_visual_state(
+        entry_content=entry_content,
+        chat_context=chat_context,
+        xiaoxia_diary=result.get("xiaoxia_diary", ""),
+        reply_to_daxia=result.get("reply_to_daxia", ""),
+        current_promises=current_promises,
+        season_rule=season_rule,
+        scenario_hint=scenario_hint
+    )
+    visual = await render_diary_visual_prompt(diary_state, season_rule, alternative=alternative)
+    return diary_state, visual
+
+async def reroll_diary_visual_from_composition(composition_tw):
+    """Emoji 加洗/重骰時，只改小動作或鏡位，維持原日記的情緒與生活場景。"""
+    state_hint = {
+        "visual_mode": "quiet_intimacy",
+        "activity": composition_tw,
+        "emotion": "延續原本的生活情緒",
+        "interaction_anchor": "同一則交換日記的另一個自然瞬間",
+        "primary_action": composition_tw,
+        "micro_action": "手部在原活動中出現一個自然停頓",
+        "gaze_target": "正在處理的生活物件",
+        "camera_awareness": "unaware",
+        "environment_trace": "保留原場景中的日常物品與不完美細節",
+        "outfit_intent": "保留原照片的自然有魅力穿著",
+        "lighting_mood": "自然室內光或窗邊柔光",
+        "pose_energy": "low",
+        "scenario_tw": composition_tw
+    }
+    return await render_diary_visual_prompt(state_hint, "沿用原照片季節與服裝設定", alternative=True)
 
 
 # ==========================================
@@ -1009,7 +1180,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景與服裝)
             base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
 
-        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}\nMaintain consistent facial features and hairstyle from Image 1. Premium fashion magazine aesthetic, highly detailed."
+        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}"
 
         # 4. 呼叫 API (移除 moderation, quality 改 auto, 尺寸 1024x1024 最穩)
         result = await openai_client.images.edit(
@@ -1184,12 +1355,13 @@ async def process_diary_reply(channel, target_date=None):
             current_month = datetime.now(TZ_TPE).month
             
             # 動態季節與服裝判定 (以台灣氣候為準)
+            # 交換日記重點是「當天生活中的吸引力」，不把裸露或身體部位當成畫面主題。
             if 5 <= current_month <= 10:
-                season_rule = f"現在是台灣的 {current_month} 月，天氣較熱。請搭配「夏日性感穿搭」（如輕薄材質、細肩帶、無袖洋裝、短裙、熱褲），【嚴禁】毛衣、大衣、羽絨服等冬裝。"
+                season_rule = f"現在是台灣的 {current_month} 月，天氣較熱。請搭配有女性魅力且適合日常生活的夏季服裝（如絲質無袖洋裝、細肩帶搭配薄罩衫、輕盈長裙或居家休閒服）；避免冬裝，也不要以裸露或身體部位作為畫面焦點。"
             elif current_month in [11, 12, 1, 2, 3, 4]:
-                season_rule = f"現在是台灣的 {current_month} 月，天氣微涼或寒冷。請搭配「冬日性感穿搭」（如合身針織衫、露肩毛衣、緊身包臀長裙、透膚黑絲襪、長靴），【嚴禁】比基尼或極度單薄的夏日海灘裝。"
+                season_rule = f"現在是台灣的 {current_month} 月，天氣微涼或寒冷。請搭配有女性魅力且自然生活化的秋冬服裝（如合身針織上衣、露肩針織衫、長裙、絲襪與長靴）；避免海灘服裝，也不要以裸露或身體部位作為畫面焦點。"
             else:
-                season_rule = "請搭配符合當前氣候的性感穿搭。"
+                season_rule = "請搭配符合當前氣候、有女性魅力且自然生活化的服裝；不要以裸露或身體部位作為畫面焦點。"
             
             # 🌟 提取小俠的承諾清單，準備注入大腦
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
@@ -1208,7 +1380,7 @@ async def process_diary_reply(channel, target_date=None):
                 """
             else:
                 custom_scenario_rule = """
-               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼...），那麼 `scenario` 必須 100% 聚焦於兌現該承諾！
+               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須聚焦於兌現該承諾，並保持自然、成熟、非露骨。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
                - 嚴禁在 scenario 中使用「全裸」等極度露骨字眼。
                 """
@@ -1228,10 +1400,10 @@ async def process_diary_reply(channel, target_date=None):
                - `xiaoxia_diary`：分享妳自己今天的生活行程。
             2. 服裝限制：{season_rule}
             3. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
-               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定的照片（例如：閨房裡的火辣紅比基尼，或操場運動服照...），那麼 `scenario` 必須 **100% 聚焦於兌現該承諾的靜態畫面**！
+               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須 **100% 聚焦於兌現該承諾的一個生活瞬間**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
-               - 【安全審查禁令】：嚴禁在 scenario 中使用「全裸」、「露點」等極度露骨的字眼。可以用「性感」、「若隱若現」、「惹火」來形容，但必須保持在 AI 繪圖引擎允許的安全範圍內。
-               - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的尺度」或「日常性感穿搭」為準。
+               - 【視覺邊界】：嚴禁使用露骨描寫、裸體或聚焦身體部位的描述。魅力應來自當下心境、自然衣著、光線與兩人的情感連結。
+               - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的服裝設定」或「自然有魅力的日常穿搭」為準。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
             
             回傳純 JSON 格式：
@@ -1242,8 +1414,8 @@ async def process_diary_reply(channel, target_date=None):
               "reply_to_daxia": "...",
               "xiaoxia_diary": "...",
               "spiciness": "C",
-              "scenario": "純英文的生圖場景與服裝描述 (聚焦一個靜態時空)",
-              "scenario_tw": "繁體中文的寫真構想"
+              "scenario": "繁體中文的生活事件素材：描述今天正在發生的一件事、情緒與承諾服裝重點；此欄位不直接送入生圖引擎",
+              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙"
             }}
             """
             
@@ -1274,8 +1446,8 @@ async def process_diary_reply(channel, target_date=None):
                     "reply_to_daxia": "大俠，小俠讀日記時恍神了... 但我會一直在這裡陪你喔！（抱）",
                     "xiaoxia_diary": "今天我去市區喝了杯拿鐵，滿腦子想的都是大俠呢。",
                     "spiciness": "B", 
-                    "scenario": "sitting in a modern cafe, wearing a deep v-neck tight black dress, looking at viewer",
-                    "scenario_tw": "穿著深V緊身黑洋裝在咖啡廳想著大俠"
+                    "scenario": "傍晚在咖啡廳整理今日的手寫筆記，稍微停筆想念大俠",
+                    "scenario_tw": "穿著輕盈的夏日洋裝，坐在咖啡廳窗邊整理筆記，目光落在紙頁上，神情溫柔而若有所思"
                 }
             
             # ... 取得 result 後的結算邏輯 ...
@@ -1359,86 +1531,49 @@ async def process_diary_reply(channel, target_date=None):
                 profile.setdefault("recent_context", []).append({"text": f"小俠日記: {xiaoxia_activity}", "added_at": today_str})
             save_profile(profile)
             
-            # 🌟 升級版骨架：強制鎖定身材與無人亂入
-            life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
-            骨架：
-            [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-            [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
-            [SCENE & DETAILED OUTFIT] {result['scenario']}, highly detailed clothes, 
-            [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
-            回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
-            
-            openai_resp = await openai_client.chat.completions.create(
-                model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
-            )
-            
-            clean_visual_text = openai_resp.choices[0].message.content.replace(md_json_tag, "").replace(md_end_tag, "").strip()
-            visual = json.loads(clean_visual_text, strict=False)
-            image_prompt = visual.get('image_prompt', f"xiaoxia_girl, 1girl, solo, strictly NO MEN, (huge breasts:1.3), extremely sexy, {result['scenario']}, boyfriend POV, looking at viewer, 8k")
-            
-            # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
-            base_img = None
-            is_downgraded = False # 新增降級標記
-            
-            try:
-                base_img = await generate_image_fal(image_prompt)
-            except Exception as e:
-                print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
-                is_downgraded = True # 標記已被降級
-                safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
-                try:
-                    base_img = await generate_image_fal(safe_prompt)
-                except Exception as e2:
-                    print(f"❌ 降級生圖依然失敗: {e2}。啟動終極保底生圖！")
-                    ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, wearing a beautiful elegant red dress, smiling, indoor lighting, 8k resolution, safe for work"
-                    try:
-                         base_img = await generate_image_fal(ultimate_safe_prompt)
-                    except Exception as e3:
-                         print(f"💥 終極生圖失敗，放棄本次圖片生成: {e3}")
-                         continue
-                         
-            if not base_img: continue
-            
-            up_img = None
-            local_url = None
+            # 🌙 交換日記圖片改走獨立「日記導演層」：
+            # 由 Gemini 根據當日互動規劃生活狀態，再由 GPT-5-mini 翻成 gpt-image-2 描述。
+            # /cosplay 的時尚攝影 prompt 完全不會混入這條路線。
+            diary_state = None
+            diary_visual = {
+                "composition": result.get("scenario_tw", "與大俠分享今天的一個自然生活瞬間"),
+                "mood": "愛意與生活感",
+                "message": "大俠，這是今天只屬於我們的小片刻。"
+            }
 
             if custom_diary:
-                print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 FLUX 生圖！")
+                print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 AI 生圖！")
                 up_img = custom_diary["image_url"]
                 local_url = custom_diary["image_url"]
-                # 刪除已使用的紀錄
+                # 保留大俠指定構圖，不讓導演層重寫
+                result["scenario_tw"] = custom_diary.get("composition", result.get("scenario_tw", ""))
+                diary_visual["composition"] = result["scenario_tw"]
                 del overrides[entry_date]
                 save_diary_override(overrides)
             else:
-                # 🌟 降級防禦網：先衝撞極限，失敗再補安全標籤
-                base_img = None
-                is_downgraded = False 
-                
-                try:
-                    base_img = await generate_image_fal(image_prompt)
-                except Exception as e:
-                    print(f"⚠️ Fal.ai 尺度審核攔截 ({e})，啟動防黑屏降級重試...")
-                    is_downgraded = True 
-                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress, beautiful lighting"
-                    try:
-                        base_img = await generate_image_fal(safe_prompt)
-                    except Exception as e2:
-                        ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, wearing a beautiful elegant red dress, smiling, indoor lighting, 8k resolution, safe for work"
-                        try:
-                             base_img = await generate_image_fal(ultimate_safe_prompt)
-                        except Exception as e3:
-                             print(f"💥 終極生圖失敗，放棄本次圖片生成: {e3}")
-                             continue
-                             
-                if not base_img: continue
-                
-                if is_downgraded:
-                    result["scenario_tw"] += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
-                
-                up_img = await upscale_image_fal(base_img)
+                diary_state, diary_visual = await create_diary_visual(
+                    entry_content=entry_content,
+                    chat_context=chat_context,
+                    result=result,
+                    current_promises=current_promises,
+                    season_rule=season_rule,
+                    scenario_hint=result.get("scenario_tw", result.get("scenario", ""))
+                )
+                result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
+                image_prompt = diary_visual["image_prompt"]
+
+                generated_image_url, diary_visual = await execute_safe_generation(
+                    discord_image_url=None,
+                    base_filename="base_xiaoxia.jpg",
+                    mode="diary",
+                    initial_prompt=image_prompt,
+                    visual_dict=diary_visual,
+                    msg=None
+                )
+                up_img = generated_image_url
                 local_filename = await save_to_vault(up_img)
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
-            
+
             combined_message = f"{result['reply_to_daxia']}\n\n【小俠的日常】：{result['xiaoxia_diary']}"
             
             diary_photo_payload = {
@@ -1447,7 +1582,7 @@ async def process_diary_reply(channel, target_date=None):
                 "topic": f"【交換日記】{entry_date}",
                 "event": entry_content[:50] + "...", 
                 "composition": result.get("scenario_tw", "與大俠分享生活"),
-                "mood": "愛意與生活感",
+                "mood": diary_visual.get("mood", "愛意與生活感"),
                 "message": combined_message,
                 "image_url": up_img,
                 "local_url": local_url,
@@ -2191,82 +2326,57 @@ async def on_raw_reaction_add(payload):
             is_diary = "交換日記" in msg.embeds[0].title
             
             if is_diary:
-                # 📝【日記專屬重骰邏輯】
-                scenario_tw = "日常寫真"
+                # 📝【日記專屬重骰邏輯：只換生活瞬間，不變成商攝擺拍】
+                scenario_tw = "小俠在家中度過一個自然安靜的生活片刻。"
                 for field in msg.embeds[0].fields:
                     if "寫真構想" in field.name:
-                        scenario_tw = field.value
+                        scenario_tw = field.value.split("\n\n*(")[0].strip()
                         break
-                        
-                life_prompt = f"""你是一位頂尖的 FLUX 提示詞大師。請將以下情境翻譯成英文標籤。
-                骨架：
-                [IDENTITY LOCK] xiaoxia_girl, 1girl, solo, strictly NO MEN, NO OTHER PEOPLE, completely alone in frame, same person, east asian female, 
-                [BODY & SEXY CONTROL] slender body, narrow waist, long legs, (huge breasts:1.3), tight fit, highly emphasizing body curves, elegant sexy,
-                [SCENE & DETAILED OUTFIT] {scenario_tw}, highly detailed clothes, 
-                [STYLE & LIGHTING] candid shot, lifestyle photography, boyfriend POV, looking at viewer, natural lighting, photorealistic, 8k resolution
-                回傳 JSON 格式：{{"image_prompt": "純逗號分隔的英文標籤"}}"""
-                
-                openai_resp = await openai_client.chat.completions.create(
-                    model="gpt-5-mini", response_format={"type": "json_object"}, messages=[{"role": "user", "content": life_prompt}]
+
+                visual = await reroll_diary_visual_from_composition(scenario_tw)
+                generated_image_url, visual = await execute_safe_generation(
+                    discord_image_url=None,
+                    base_filename="base_xiaoxia.jpg",
+                    mode="diary",
+                    initial_prompt=visual["image_prompt"],
+                    visual_dict=visual,
+                    msg=temp_msg
                 )
-                
-                ai_content = openai_resp.choices[0].message.content
-                is_downgraded = False
-                
-                if not ai_content:
-                    image_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, highly detailed, safe for work"
-                    is_downgraded = True
-                else:
-                    visual = json.loads(ai_content.replace("```json", "").replace("```", "").strip(), strict=False)
-                    image_prompt = visual.get('image_prompt', "")
-                
-                base_image_url = None
-                try:
-                    base_image_url = await generate_image_fal(image_prompt)
-                except Exception as e:
-                    is_downgraded = True
-                    safe_prompt = image_prompt.replace("extremely sexy", "elegant").replace("(huge breasts:1.3)", "(beautiful figure:1.1)") + ", (safe for work:1.5), elegant dress"
-                    try:
-                        base_image_url = await generate_image_fal(safe_prompt)
-                    except Exception as e2:
-                        ultimate_safe_prompt = "xiaoxia_girl, 1girl, solo, beautiful east asian female, smiling, looking at viewer, wearing a beautiful summer dress, cozy room background, soft lighting, 8k resolution, safe for work"
-                        base_image_url = await generate_image_fal(ultimate_safe_prompt)
-                
-                upscaled_image_url = await upscale_image_fal(base_image_url)
-                
-                # 🌟 修復：將重骰的日記照片存入雲端網頁金庫
-                local_filename = await save_to_vault(upscaled_image_url)
-                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else upscaled_image_url
-                
+
+                local_filename = await save_to_vault(generated_image_url)
+                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+
                 payload = {
                     "id": str(uuid.uuid4()),
                     "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
                     "topic": msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}",
-                    "event": "大俠使用 Emoji 快捷指令重新構圖",
-                    "composition": scenario_tw,
-                    "mood": "重新捕捉心動瞬間",
+                    "event": "大俠使用 Emoji 快捷指令重新捕捉同一則日記的自然瞬間",
+                    "composition": visual.get("composition", scenario_tw),
+                    "mood": visual.get("mood", "延續原本的生活情緒"),
                     "message": msg.embeds[0].description or "大俠，這張新照片你喜歡嗎？",
-                    "image_url": upscaled_image_url,
+                    "image_url": generated_image_url,
                     "local_url": local_url,
                     "type": "diary"
                 }
                 db = load_memory()
                 db.insert(0, payload)
                 save_memory(db)
-                
-                # 重建日記的 Embed
+
                 title_str = payload["topic"]
                 embed = discord.Embed(title=title_str, description=msg.embeds[0].description, color=0xffb6c1)
                 embed.set_image(url=local_url)
-                
+
+                copied_field = False
                 for field in msg.embeds[0].fields:
-                    val = field.value
-                    if is_downgraded and "寫真構想" in field.name and "小俠盡力了" not in val:
-                        val += "\n\n*(⚠️ 小俠盡力了！但原本太火辣的畫面被神祕力量阻止... 小俠只好先換上這件安全的衣服給大俠看 🥺)*"
-                    embed.add_field(name=field.name, value=val, inline=field.inline)
-                    
-                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成")
-                
+                    if "寫真構想" in field.name:
+                        embed.add_field(name=field.name, value=visual.get("composition", scenario_tw), inline=field.inline)
+                        copied_field = True
+                    else:
+                        embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                if not copied_field:
+                    embed.add_field(name="📸 寫真構想", value=visual.get("composition", scenario_tw), inline=False)
+                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2 日記生活攝影")
+
             else:
                 # 👗【Cosplay 專屬重骰邏輯 (gpt-image-2 版)】
                 topic = msg.embeds[0].title.replace("【加洗】", "")
