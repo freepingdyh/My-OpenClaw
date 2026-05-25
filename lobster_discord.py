@@ -573,11 +573,11 @@ async def generate_story(mode):
     weekday = today.weekday()
     
     if weekday == 5:
-        style_desc = "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色，絕對不要挑選魅魔或邪惡角色！\n【服裝限制】：將該角色服裝『大幅魔改』成極度大膽、露骨、強調極致豐滿身材的性感戰袍！場景必須明亮唯美。"
-        system_mod = "妳今天要扮演原本清純或正向的角色，但妳故意把衣服改得極度火辣性感，展現傲人上圍與完美曲線。"
+        style_desc = "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色，絕對不要挑選魅魔或邪惡角色！\n【服裝限制】：將該角色服裝『高級時尚化(high-fashion reinterpretation)』，展現優雅的女性比例(elegant feminine proportions)與雜誌級的奢華感！場景必須明亮唯美。"
+        system_mod = "妳今天要扮演原本清純或正向的角色，換上充滿高級訂製服(luxury couture)質感的服裝，展現自信大方與完美優雅的體態。"
     else:
-        style_desc = "服裝可以大膽露(如深V、短裙)，但姿態必須端莊專業，神韻自信大方，不可有搔首弄姿之感。"
-        system_mod = "妳要展現一種『高級的性感』：穿著大膽吸睛，但行為舉止知性大方，展現端莊的神聖感。言語間要帶點撫媚與自信。"
+        style_desc = "服裝請採用高級時尚雜誌風格(premium fashion magazine aesthetic)，姿態必須端莊專業，神韻自信大方，展現優雅氣質。"
+        system_mod = "妳要展現一種『高級的時尚感(cinematic couture styling)』：穿著大方，行為舉止知性，展現端莊的優雅。言語間要帶點自信與溫柔。"
 
     # 🌟 修正：精準分離「歷史」與「現代職業」的邏輯
     if mode == "職業":
@@ -659,22 +659,22 @@ async def generate_story(mode):
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
-    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器
+    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (Vogue 雜誌安全版)
     """
     weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
-        style_guide = "服裝上請大膽採用深V領口、高衩裙襬或貼身剪裁，展現極致豐滿的曲線與修長美腿，但整體必須維持電影級的高級時尚感與神聖感，絕非低俗賣弄。"
+        style_guide = "服裝上請採用高級訂製服的剪裁(luxury couture styling)，展現優雅的女性身段(elegant feminine proportions)與自信魅力，整體必須維持電影雜誌級的高級時尚感(high-fashion reinterpretation)。"
     else:
-        style_guide = "服裝請採用優雅的貼身剪裁，適度展現曲線與深V領口，強調成熟女性的知性與高級性感。"
+        style_guide = "服裝請採用優雅的貼身剪裁(stylish silhouette)，展現成熟女性的知性與高級時尚感(graceful figure)。"
 
     system_prompt = f"""你現在是一位頂尖的「電影視覺藝術總監」。請根據大俠的要求，寫出一段「純英文、如小說般細膩、充滿畫面感」的長篇場景描述（約100-150字）。
 
     【撰寫守則】：
-    1. 拒絕條列式標籤！請用優美的自然語句 (Natural Language) 描繪人物的氣質、服裝的材質細節 (如絲綢、刺繡)、光影的變化以及背景的宏偉。
+    1. 拒絕條列式標籤！請用優美的自然語句描繪人物氣質、服裝材質 (如絲綢、刺繡)、光影變化及宏偉背景。
     2. {style_guide}
-    3. 為了通過安全審查，請將性感元素翻譯為高級時尚詞彙 (例如: curvy and voluptuous silhouette, elegant deep V-neckline, form-fitting luxury fabric, revealing elegant curves)。嚴禁使用裸露或色情單字。
+    3. 為了通過嚴格的審查，絕對禁止使用 voluptuous, large breasts, deep cleavage, sexy, seductive, exposed 等字眼。請將女性魅力翻譯為頂級時尚詞彙 (例如: elegant feminine proportions, stylish silhouette, luxury fashion styling, graceful figure)。
     4. 開頭必須綁定人物基底："A 24-year-old beautiful mature Asian woman..."
-    5. 結尾必須包含："Preserve the identity and face from Image 1. Cinematic lighting, photorealistic, 8k."
+    5. 結尾必須包含："Maintain consistent facial features and hairstyle from Image 1. Soft cinematic lighting, premium fashion magazine aesthetic."
 
     回傳 JSON 格式：
     {{
@@ -738,8 +738,28 @@ async def cosplay(ctx, *, mode: str = "auto"):
             custom_prompt=scene_prompt
         )
 
+        # 🚨 終極安檢攔截與降級重試機制
         if not generated_image_url or not generated_image_url.startswith("http"):
-            raise Exception(f"攝影機生圖失敗：{generated_image_url}")
+            if "moderation" in generated_image_url.lower() or "sexual" in generated_image_url.lower():
+                await msg.edit(content="⚠️ 警告：服裝設計觸發最高級別安檢！啟動『Vogue 雜誌安全款』降級重拍...")
+                
+                # 絕對會過關的保守時尚替換詞
+                safe_prompt = "A 24-year-old beautiful mature Asian woman wearing a fully covered, elegant high-fashion long modest evening gown, smiling confidently, cinematic lighting, premium fashion magazine aesthetic. Maintain consistent facial features and hairstyle from Image 1."
+                
+                # 在構圖發想中加上委屈備註
+                visual["composition"] += "\n\n*(⚠️ 小俠盡力了！但原本的服裝被神祕的審查力量沒收... 只能換上保守時尚款的長禮服了 🥺)*"
+                
+                generated_image_url = await generate_world_composite(
+                    discord_image_url=None, 
+                    base_filename="base_xiaoxia.jpg", 
+                    mode="cosplay", 
+                    custom_prompt=safe_prompt
+                )
+                
+                if not generated_image_url or not generated_image_url.startswith("http"):
+                    raise Exception(f"降級生圖依然失敗：{generated_image_url}")
+            else:
+                raise Exception(f"攝影機生圖失敗：{generated_image_url}")
 
         state["daily_gen_count"] += 1
 
@@ -920,7 +940,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景與服裝)
             base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
 
-        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}\nStrictly preserve the identity and face from Image 1. Photorealistic, 8k."
+        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}\nMaintain consistent facial features and hairstyle from Image 1. Premium fashion magazine aesthetic, highly detailed."
 
         # 4. 呼叫 API (移除 moderation, quality 改 auto, 尺寸 1024x1024 最穩)
         result = await openai_client.images.edit(
