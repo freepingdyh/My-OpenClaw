@@ -659,29 +659,30 @@ async def generate_story(mode):
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
-    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (香水廣告動態版)
+    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (大師級電影攝影版)
     """
     weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
-        style_guide = "Focus on cinematic body language, dynamic asymmetrical posture (e.g., one leg slightly forward, looking over shoulder, walking gracefully), tailored waistline, and silk fabric flowing in the wind. Warm confident gaze, luxury perfume advertisement aesthetic."
+        style_guide = "Focus on dynamic fabric movement, caught mid-step, looking over shoulder. Tailored waistline, and silk fabric flowing in the wind. Warm confident gaze, luxury perfume advertisement aesthetic."
     else:
-        style_guide = "Focus on subtle asymmetrical posture, body slightly turned sideways, one hand gently touching the waist, waist-cinching design, soft satin tension, and warm confident gaze. Cinematic couture advertisement, low-angle fashion photography."
+        style_guide = "Focus on subtle asymmetrical posture, caught in a natural candid moment, one hand gently touching the waist, soft satin tension. Cinematic couture advertisement."
 
-    system_prompt = f"""你現在是一位頂尖的「電影視覺藝術總監」。請根據大俠的要求，寫出一段「純英文、如小說般細膩、充滿畫面感」的長篇場景描述（約100-150字）。
+    system_prompt = f"""你現在是一位頂尖的「好萊塢電影攝影指導」與「Vogue 雜誌藝術總監」。請根據大俠的要求，寫出一段「純英文、如小說般細膩、充滿畫面感」的長篇場景描述（約150字）。
 
-    【撰寫守則】：
-    1. 拒絕條列式標籤！請用自然語句描繪人物具體動作、服裝材質(如布料張力)、光影變化(鏡頭景深)及背景。
-    2. 【變化姿態法則 (CRITICAL)】：絕對不要每次都寫「站直直的」！請根據場景，自由發揮具體且不對稱的肢體動作 (例如：body slightly turned sideways, stepping forward gracefully, leaning elegantly)，創造視覺新鮮感。
-    3. {style_guide}
-    4. 為了展現高級性感且絕對安全，請將焦點放在「身形剪裁 (tailored waistline)」、「材質張力 (dynamic fabric movement)」、「不對稱姿勢語言 (asymmetrical editorial pose)」與「視線誘惑 (warm confident gaze)」。
-    5. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring 等危險字眼。
-    6. 開頭必須綁定人物基底："A 24-year-old sophisticated Asian fashion model..."
-    7. 結尾必須包含："Maintain the same elegant facial identity from Image 1, with subtle feminine expressions and natural body proportions. Cinematic couture fashion editorial, photorealistic, 8k."
+    【大師級攝影守則 (CRITICAL)】：
+    1. 拒絕條列式標籤！請用流暢的自然語句描繪。
+    2. 【動態抓拍感】：絕對不要寫「站著擺拍」！請描寫「被捕捉到的瞬間」(caught mid-step, fabric drifting naturally, glancing back softly)。
+    3. 【布料與身形張力】：強調「身形剪裁 (tailored waistline)」、「材質張力 (dynamic fabric movement, soft reflective satin)」。
+    4. 【鏡頭與空氣感】：必須加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh, out-of-focus architectural framing)」、「空氣光暈 (subtle cinematic haze, soft atmospheric glow)」。
+    5. {style_guide}
+    6. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring 等低俗字眼。
+    7. 開頭必須綁定人物基底："A 24-year-old sophisticated Asian fashion model..."
+    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and natural body proportions. Photorealistic, 8k."
 
     回傳 JSON 格式：
     {{
         "image_prompt": "純英文的長篇細膩場景描述",
-        "composition": "(繁體中文) 說明構圖與具體動作細節，100字內。",
+        "composition": "(繁體中文) 說明動作、鏡頭景深與空氣光暈感，100字內。",
         "mood": "(繁體中文) 描述微表情與心境，50字內。",
         "message": "(繁體中文) 對大俠說的話，50字內。"
     }}"""
@@ -746,7 +747,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
                 await msg.edit(content="⚠️ 警告：服裝設計觸發最高級別安檢！啟動『Vogue 雜誌安全款』降級重拍...")
                 
                 # 絕對會過關的保守時尚替換詞
-                safe_prompt = "A 24-year-old sophisticated Asian fashion model wearing a fitted satin wrap dress with an elegant waist-cinching silhouette, dynamic fabric movement, one leg slightly forward in an asymmetrical editorial pose, warm confident gaze, luxury perfume advertisement aesthetic, cinematic depth of field. Maintain the same elegant facial identity from Image 1, with subtle feminine expressions and natural body proportions. Photorealistic, 8k."
+                safe_prompt = "A 24-year-old sophisticated Asian fashion model caught mid-step in a natural candid moment, wearing a fitted satin wrap dress with an elegant waist-cinching silhouette. Dynamic fabric movement, slight hip shift, warm confident smile. Shot on 85mm lens, soft foreground bokeh, subtle cinematic haze, luxury perfume advertisement aesthetic. Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and natural body proportions. Photorealistic, 8k."
                 # 在構圖發想中加上委屈備註
                 visual["composition"] += "\n\n*(⚠️ 小俠盡力了！但原本的服裝被神祕的審查力量沒收... 只能換上保守時尚款的長禮服了 🥺)*"
                 
