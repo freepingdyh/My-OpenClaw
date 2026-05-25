@@ -659,25 +659,25 @@ async def generate_story(mode):
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
-    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (大師級電影攝影版)
+    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (頂級時尚安全過濾版)
     """
     weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
-        style_guide = "Focus on dynamic fabric movement, caught mid-step, looking over shoulder. Tailored waistline, and silk fabric flowing in the wind. Warm confident gaze, luxury perfume advertisement aesthetic."
+        style_guide = "Focus on dynamic fabric movement, caught mid-step, looking over shoulder. Graceful tailored silhouette, and silk fabric flowing in the wind. Gentle confident expression, cinematic fashion editorial."
     else:
-        style_guide = "Focus on subtle asymmetrical posture, caught in a natural candid moment, one hand gently touching the waist, soft satin tension. Cinematic couture advertisement."
+        style_guide = "Focus on natural posture, caught in a natural candid moment, flowing elegant fabric, soft satin tension. Prestige European luxury fashion campaign."
 
     system_prompt = f"""你現在是一位頂尖的「好萊塢電影攝影指導」與「Vogue 雜誌藝術總監」。請根據大俠的要求，寫出一段「純英文、如小說般細膩、充滿畫面感」的長篇場景描述（約150字）。
 
     【大師級攝影守則 (CRITICAL)】：
     1. 拒絕條列式標籤！請用流暢的自然語句描繪。
     2. 【動態抓拍感】：絕對不要寫「站著擺拍」！請描寫「被捕捉到的瞬間」(caught mid-step, fabric drifting naturally, glancing back softly)。
-    3. 【布料與身形張力】：強調「身形剪裁 (tailored waistline)」、「材質張力 (dynamic fabric movement, soft reflective satin)」。
-    4. 【鏡頭與空氣感】：必須加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh, out-of-focus architectural framing)」、「空氣光暈 (subtle cinematic haze, soft atmospheric glow)」。
+    3. 【布料與光影張力】：強調「材質張力 (dynamic fabric movement, soft reflective satin)」與「光影氛圍 (cinematic shadows, soft moonlit ambience)」，而非刻意強調身形。
+    4. 【鏡頭與空氣感】：必須加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh)」、「空氣光暈 (subtle cinematic haze)」。
     5. {style_guide}
-    6. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring 等低俗字眼。
-    7. 開頭必須綁定人物基底："A 24-year-old sophisticated Asian fashion model..."
-    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and natural body proportions. Photorealistic, 8k."
+    6. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring, form-fitting, waist-cinching 等會觸發審查的字眼。
+    7. 開頭必須綁定人物基底："A 24-year-old elegant Asian woman..."
+    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and graceful proportions. Photorealistic, 8k."
 
     回傳 JSON 格式：
     {{
@@ -702,6 +702,99 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
 # ==========================================
 # 👗 終極進化版 /cosplay 指令 (gpt-image-2 核心)
 # ==========================================
+import re
+
+def apply_safety_rewrite(prompt, level):
+    """漸進式脫敏過濾器 (Progressive Safety Rewrite)"""
+    if level == 0: 
+        return prompt
+        
+    rewrites = {}
+    
+    # L1: 移除直接的情慾暗示詞 (Erotic tone)
+    if level >= 1:
+        rewrites.update({
+            r'\b(seductive)\b': 'elegant', r'\b(alluring)\b': 'graceful', 
+            r'\b(sensual)\b': 'cinematic', r'\b(sexy)\b': 'stylish', 
+            r'\b(bedroom eyes)\b': 'warm expression', r'\b(sultry)\b': 'confident', 
+            r'\b(voluptuous)\b': 'elegant', r'\b(cleavage)\b': 'neckline'
+        })
+        
+    # L2: 移除身形強調詞 (Body emphasis)
+    if level >= 2:
+        rewrites.update({
+            r'\b(form-fitting)\b': 'flowing tailored', r'\b(waist-cinching)\b': 'tailored', 
+            r'\b(hip shift)\b': 'natural posture', r'\b(hourglass(-inspired)? silhouette)\b': 'elegant silhouette', 
+            r'\b(tight)\b': 'fitted', r'\b(curvy)\b': 'graceful', r'\b(bodycon)\b': 'elegant dress'
+        })
+        
+    # L3: 移除危險的時尚攝影框架 (Fashion erotic framing)
+    if level >= 3:
+        rewrites.update({
+            r'\b(luxury perfume advertisement( aesthetic)?)\b': 'cinematic fashion editorial', 
+            r'\b(Vogue glamour)\b': 'premium magazine portrait', 
+            r'\b(fashion model)\b': 'elegant young woman'
+        })
+        
+    # L4: 移除極度逼真的皮膚與寫實感 (Realism downgrade)
+    if level >= 4:
+        rewrites.update({
+            r'\b(photorealistic)\b': 'soft cinematic rendering', 
+            r'\b(natural skin texture)\b': 'refined portrait texture', 
+            r'\b(8k)\b': 'highly detailed'
+        })
+        
+    new_prompt = prompt
+    for pattern, replacement in rewrites.items():
+        new_prompt = re.sub(pattern, replacement, new_prompt, flags=re.IGNORECASE)
+        
+    return new_prompt
+
+
+async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
+    """自動調度 5 層脫敏機制的生圖引擎"""
+    for level in range(5):
+        current_prompt = apply_safety_rewrite(initial_prompt, level)
+        
+        # 1. 快速文字安檢 (Moderation API)
+        mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
+        if mod_resp.results[0].flagged:
+            if msg: await msg.edit(content=f"⚠️ [L{level}] 文字安檢未過，啟動 L{level+1} 深層脫敏...")
+            continue # 直接跳下一級更安全的字眼
+
+        # 2. 正式送入 gpt-image-2 引擎
+        if msg: await msg.edit(content=f"📸 gpt-image-2 攝影機啟動 (當前防護等級：L{level})...")
+        generated_image_url = await generate_world_composite(
+            discord_image_url=discord_image_url, base_filename=base_filename, 
+            mode=mode, custom_prompt=current_prompt
+        )
+        
+        # 3. 檢查是否被 DALL-E 3 影像底層攔截
+        if not generated_image_url or not generated_image_url.startswith("http"):
+            error_str = str(generated_image_url).lower()
+            if "moderation" in error_str or "sexual" in error_str or "safety_violations" in error_str:
+                if msg: await msg.edit(content=f"⚠️ [L{level}] 遭底層影像安檢攔截！啟動 L{level+1} 材質與姿態柔化...")
+                # 在構圖留言中加入降級提示，讓大俠知道發生了什麼事
+                if level > 0: 
+                    visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡)*"
+                continue # 失敗，進入下一級更保守的脫敏
+            else:
+                raise Exception(f"攝影機異常：{generated_image_url}") # 網路斷線等其他錯誤
+                
+        # 成功生圖！直接回傳
+        return generated_image_url, visual_dict
+
+    # 4. 連續五級失敗的終極保底 (迪士尼公主模式)
+    if msg: await msg.edit(content="🚨 警告：連續五級脫敏皆遭攔截，啟動最終【絕對安全保底】...")
+    ultimate_safe_prompt = "A 24-year-old elegant Asian woman, graceful cinematic portrait, soft lighting, fantasy couture. Maintain the same elegant facial identity from Image 1. High quality."
+    visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全的優雅造型)*"
+    
+    final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt)
+    if not final_url or not final_url.startswith("http"):
+        raise Exception(f"最終保底生圖依然失敗：{final_url}")
+        
+    return final_url, visual_dict
+
 @girlfriend_bot.command(name='cosplay')
 async def cosplay(ctx, *, mode: str = "auto"):
     if not check_daily_limit():
@@ -725,43 +818,15 @@ async def cosplay(ctx, *, mode: str = "auto"):
         visual = await translate_to_gpt_narrative(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
         scene_prompt = visual['image_prompt']
 
-        # 3. 快速安檢 (Moderation API)
-        mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=scene_prompt)
-        if mod_resp.results[0].flagged:
-            await msg.edit(content="⚠️ 警告：劇本過於火辣觸發安全警報，啟動終極安全降級方案...")
-            # 保底的最安全卻依然時尚的提示詞
-            scene_prompt = "A 24-year-old beautiful mature Asian woman in an elegant, form-fitting luxury evening dress, curvy figure, confident smile, cinematic lighting, editorial fashion photography. Preserve the identity and face from Image 1. Photorealistic, 8k."
-
-        # 4. 呼叫萬能攝影機 (gpt-image-2)
-        await msg.edit(content=f"📸 gpt-image-2 攝影機啟動！正在根據底圖生成【{mode}】的電影級寫真...")
-        generated_image_url = await generate_world_composite(
+        # 👇 替換為以下這一行呼叫：自動執行 1~5 級安檢與重試！
+        generated_image_url, visual = await execute_safe_generation(
             discord_image_url=None, 
             base_filename="base_xiaoxia.jpg", 
             mode="cosplay", 
-            custom_prompt=scene_prompt
+            initial_prompt=scene_prompt, 
+            visual_dict=visual, 
+            msg=msg
         )
-
-        # 🚨 終極安檢攔截與降級重試機制
-        if not generated_image_url or not generated_image_url.startswith("http"):
-            if "moderation" in generated_image_url.lower() or "sexual" in generated_image_url.lower():
-                await msg.edit(content="⚠️ 警告：服裝設計觸發最高級別安檢！啟動『Vogue 雜誌安全款』降級重拍...")
-                
-                # 絕對會過關的保守時尚替換詞
-                safe_prompt = "A 24-year-old sophisticated Asian fashion model caught mid-step in a natural candid moment, wearing a fitted satin wrap dress with an elegant waist-cinching silhouette. Dynamic fabric movement, slight hip shift, warm confident smile. Shot on 85mm lens, soft foreground bokeh, subtle cinematic haze, luxury perfume advertisement aesthetic. Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and natural body proportions. Photorealistic, 8k."
-                # 在構圖發想中加上委屈備註
-                visual["composition"] += "\n\n*(⚠️ 小俠盡力了！但原本的服裝被神祕的審查力量沒收... 只能換上保守時尚款的長禮服了 🥺)*"
-                
-                generated_image_url = await generate_world_composite(
-                    discord_image_url=None, 
-                    base_filename="base_xiaoxia.jpg", 
-                    mode="cosplay", 
-                    custom_prompt=safe_prompt
-                )
-                
-                if not generated_image_url or not generated_image_url.startswith("http"):
-                    raise Exception(f"降級生圖依然失敗：{generated_image_url}")
-            else:
-                raise Exception(f"攝影機生圖失敗：{generated_image_url}")
 
         state["daily_gen_count"] += 1
 
@@ -1545,102 +1610,6 @@ async def on_ready():
         midnight_feedback_task.start()
         print("🌙 晚間 23:30 日記回饋排程已啟動！")
 
-# @girlfriend_bot.command(name='cosplay')
-# async def cosplay(ctx, *, mode: str = "auto"):
-#     if not check_daily_limit():
-#         await ctx.send("💦 大俠～小俠今天累了，明天再拍好不好？（抱）")
-#         return
-    
-#     if mode == "auto":
-#         weekday = datetime.now(TZ_TPE).weekday()
-#         if weekday < 5: mode = "歷史上的今天"
-#         elif weekday == 5: mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
-#         else: mode = random.choice(["職業", "旅遊景點"])
-
-#     msg = await ctx.send(f"✨ 正在準備【{mode}】的服裝與場景，並進行高畫質處理中...")
-#     try:
-#         story = await generate_story(mode)
-#         state["current_topic_data"] = story 
-#         visual = await translate_to_flux_prompt(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
-        
-#         base_image_url = await generate_image_fal(visual['image_prompt'])
-#         upscaled_image_url = await upscale_image_fal(base_image_url)
-#         state["daily_gen_count"] += 1
-
-#         local_filename = await save_to_vault(upscaled_image_url)
-#         payload = {
-#             "id": str(uuid.uuid4()),
-#             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-#             "topic": story["topic"],
-#             "event": story["event"],
-#             "composition": visual["composition"],
-#             "mood": visual["mood"],
-#             "message": visual["message"],
-#             "image_url": upscaled_image_url,
-#             "local_url": f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
-#         }
-#         db = load_memory()
-#         db.insert(0, payload)
-#         save_memory(db)
-
-#         embed = discord.Embed(title=story["topic"], description=story["event"], color=0xffb6c1)
-#         embed.set_image(url=upscaled_image_url)
-#         embed.add_field(name="📸 構圖發想", value=visual["composition"], inline=False)
-#         embed.add_field(name="💭 小俠心境", value=visual["mood"], inline=False)
-#         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-#         embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | 已完成高畫質無損放大")
-
-#         await msg.delete()
-#         msg = await ctx.send(embed=embed) # 確保這裡只有一行 ctx.send！
-#         await msg.add_reaction("➕") # 代表 /more (加洗)
-#         await msg.add_reaction("🎲") # 代表 Reroll (重骰)
-#         await msg.add_reaction("🗑️") # 代表 Delete (刪除)
-#     except Exception as e:
-#         await msg.edit(content=f"⚠️ 狀況：`{str(e)}`")
-
-# @girlfriend_bot.command(name='more')
-# async def more(ctx):
-#     if not state["current_topic_data"]:
-#         await ctx.send("❓ 還沒決定題材呢！")
-#         return
-#     if not check_daily_limit(): return
-#     msg = await ctx.send("✨ 再換個姿勢拍一張，高畫質處理中...")
-#     try:
-#         story = state["current_topic_data"]
-#         visual = await translate_to_flux_prompt(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
-        
-#         base_image_url = await generate_image_fal(visual['image_prompt'])
-#         upscaled_image_url = await upscale_image_fal(base_image_url)
-#         state["daily_gen_count"] += 1
-        
-#         local_filename = await save_to_vault(upscaled_image_url)
-#         payload = {
-#             "id": str(uuid.uuid4()),
-#             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-#             "topic": f"【加洗】{story['topic']}",
-#             "event": story["event"],
-#             "composition": visual["composition"],
-#             "mood": visual["mood"],
-#             "message": visual["message"],
-#             "image_url": upscaled_image_url,
-#             "local_url": f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
-#         }
-#         db = load_memory()
-#         db.insert(0, payload)
-#         save_memory(db)
-
-#         embed = discord.Embed(title=f"【加洗】{story['topic']}", color=0xffb6c1)
-#         embed.set_image(url=upscaled_image_url)
-#         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-#         embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | 已完成高畫質無損放大")
-
-#         await msg.delete()
-#         msg = await ctx.send(embed=embed) # 確保這裡只有一行 ctx.send！
-#         await msg.add_reaction("➕") # 代表 /more (加洗)
-#         await msg.add_reaction("🎲") # 代表 Reroll (重骰)
-#         await msg.add_reaction("🗑️") # 代表 Delete (刪除)
-#     except Exception as e: await ctx.send(f"⚠️ 失敗：{e}")
-
 @girlfriend_bot.command(name='more')
 async def more(ctx):
     if not state["current_topic_data"]:
@@ -1655,21 +1624,15 @@ async def more(ctx):
         visual = await translate_to_gpt_narrative(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
         scene_prompt = visual['image_prompt']
 
-        # 2. 快速安檢
-        mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=scene_prompt)
-        if mod_resp.results[0].flagged:
-            scene_prompt = "A 24-year-old beautiful mature Asian woman in an elegant, form-fitting luxury evening dress, curvy figure, confident smile, cinematic lighting, editorial fashion photography. Preserve the identity and face from Image 1. Photorealistic, 8k."
-
-        # 3. 呼叫萬能攝影機 (gpt-image-2)
-        generated_image_url = await generate_world_composite(
+        # 👇 替換為以下這一行呼叫
+        generated_image_url, visual = await execute_safe_generation(
             discord_image_url=None, 
             base_filename="base_xiaoxia.jpg", 
             mode="cosplay", 
-            custom_prompt=scene_prompt
+            initial_prompt=scene_prompt, 
+            visual_dict=visual, 
+            msg=msg
         )
-
-        if not generated_image_url or not generated_image_url.startswith("http"):
-            raise Exception(f"攝影機生圖失敗：{generated_image_url}")
 
         state["daily_gen_count"] += 1
         
@@ -2311,17 +2274,14 @@ async def on_raw_reaction_add(payload):
                 visual = await translate_to_gpt_narrative(topic, event, "重新構圖", True)
                 scene_prompt = visual['image_prompt']
 
-                # 2. 快速安檢
-                mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=scene_prompt)
-                if mod_resp.results[0].flagged:
-                    scene_prompt = "A 24-year-old beautiful mature Asian woman in an elegant, form-fitting luxury evening dress, curvy figure, confident smile, cinematic lighting, editorial fashion photography. Preserve the identity and face from Image 1. Photorealistic, 8k."
-
-                # 3. 呼叫萬能攝影機 (gpt-image-2)
-                generated_image_url = await generate_world_composite(
+                # 👇 替換為以下這一行呼叫 (注意這裡的訊息變數是 temp_msg)
+                generated_image_url, visual = await execute_safe_generation(
                     discord_image_url=None, 
                     base_filename="base_xiaoxia.jpg", 
                     mode="cosplay", 
-                    custom_prompt=scene_prompt
+                    initial_prompt=scene_prompt, 
+                    visual_dict=visual, 
+                    msg=temp_msg
                 )
                 
                 # 4. 存檔
