@@ -659,25 +659,27 @@ async def generate_story(mode):
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
-    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (頂級時尚安全過濾版)
+    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (人體工學穩態版)
     """
     weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
-        style_guide = "Focus on dynamic fabric movement, caught mid-step, looking over shoulder. Graceful tailored silhouette, and silk fabric flowing in the wind. Gentle confident expression, cinematic fashion editorial."
+        # 移除高危險的 caught mid-step, looking over shoulder
+        style_guide = "Focus on elegant subtle motion (e.g., standing gracefully with a slight hip shift). Limit body movement complexity. Graceful tailored silhouette, and silk fabric flowing in the wind. Gentle confident expression, cinematic fashion editorial."
     else:
-        style_guide = "Focus on natural posture, caught in a natural candid moment, flowing elegant fabric, soft satin tension. Prestige European luxury fashion campaign."
+        # 強調自然穩定的姿態
+        style_guide = "Focus on natural, stable posture with realistic anatomical alignment. Flowing elegant fabric, soft satin tension. Prestige European luxury fashion campaign."
 
     system_prompt = f"""你現在是一位頂尖的「好萊塢電影攝影指導」與「Vogue 雜誌藝術總監」。請根據大俠的要求，寫出一段「純英文、如小說般細膩、充滿畫面感」的長篇場景描述（約150字）。
 
     【大師級攝影守則 (CRITICAL)】：
     1. 拒絕條列式標籤！請用流暢的自然語句描繪。
-    2. 【動態抓拍感】：絕對不要寫「站著擺拍」！請描寫「被捕捉到的瞬間」(caught mid-step, fabric drifting naturally, glancing back softly)。
-    3. 【布料與光影張力】：強調「材質張力 (dynamic fabric movement, soft reflective satin)」與「光影氛圍 (cinematic shadows, soft moonlit ambience)」，而非刻意強調身形。
-    4. 【鏡頭與空氣感】：必須加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh)」、「空氣光暈 (subtle cinematic haze)」。
+    2. 【人體工學限制 (Pose Complexity Control)】：絕對禁止複雜的連續肢體動作！嚴禁出現 twisting dramatically, walking while looking back, caught mid-step 等違反人體工學的敘述。最多允許「1個主動作(如站立) + 1個微小輔助動作(如輕撫髮絲)」。請強調靜態中的微動態 (elegant subtle motion)。
+    3. 【布料與光影張力】：強調「材質張力 (dynamic fabric movement, soft reflective satin)」與「光影氛圍 (cinematic shadows)」，讓性感來自畫面氛圍而非肢體扭曲。
+    4. 【鏡頭與空氣感】：加入電影級的攝影細節，例如「焦段 (shot on 85mm lens)」、「前景模糊 (soft foreground bokeh)」、「空氣光暈 (subtle cinematic haze)」。
     5. {style_guide}
     6. 絕對禁止使用 curvy, voluptuous, large breasts, deep cleavage, sexy, seductive, alluring, form-fitting, waist-cinching 等會觸發審查的字眼。
     7. 開頭必須綁定人物基底："A 24-year-old elegant Asian woman..."
-    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with subtle feminine expressions, natural skin texture, fine cinematic grain, and graceful proportions. Photorealistic, 8k."
+    8. 結尾必須嚴格包含："Maintain the same elegant facial identity from Image 1, with natural anatomical alignment, realistic shoulder and neck positioning, subtle feminine expressions, natural skin texture, and graceful proportions. Photorealistic, 8k."
 
     回傳 JSON 格式：
     {{
