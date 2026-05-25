@@ -571,37 +571,53 @@ async def generate_story(mode):
     today = datetime.now(TZ_TPE)
     year, month, day = today.year, today.month, today.day
     weekday = today.weekday()
-    
-    if weekday == 5:
-        style_desc = "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色！\n【服裝與姿態限制】：請展現電影雜誌級的女性魅力，強調高級時尚剪裁、優雅腰線(tailored waistline)、光澤材質(satin/silk)與動態布料。請為她設計一個『具體且不對稱的時尚動作』(如：輕撫腰際、微微回眸、優雅邁步、倚靠牆邊)，絕對不要總是死板地站著。"
-        system_mod = "妳今天要扮演原本清純或正向的角色，換上充滿高級訂製服(luxury couture)質感的服裝，透過優雅的貼身剪裁與多變的時尚動態姿態，展現極致的女性魅力。"
-    else:
-        style_desc = "服裝請強調優雅腰線(hourglass silhouette)與動態垂墜感。請為她設計一個具體的高級商業攝影動作(例如：單腳微彎、身體微側、手部自然擺放)，展現自信溫暖的女性魅力，拒絕呆板站姿。"
-        system_mod = "妳要展現一種『頂級香水廣告般的時尚感(luxury perfume advertisement)』：穿著大方但剪裁貼身，行為舉止知性，透過靈活不對稱的肢體語言展現無可抗拒的魅力。"
 
-    # 🌟 修正：精準分離「歷史」與「現代職業」的邏輯
-    if mode == "職業":
-        prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
-                 f"[絕對限制]：\n1. 必須挑選「現今 21 世紀真實存在的現代職業」（例如：空服員、護理師、軟體工程師、咖啡師等），絕對不可選歷史人物或奇幻職業！\n" \
-                 f"2. 內容必須介紹該職業的日常工作內容、所需的專業技能與人格特質。\n" \
-                 f"3. 妳必須扮演該職業，並換上該職業的「現代標準制服」進行性感魔改。\n" \
-                 f"4. {style_desc}\n" \
-                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】現代職業名稱\", \"event\": \"200字職業日常與專業特質介紹\", \"persona\": \"扮演職業(現代制服)\"}}"
-    elif "歷史" in mode:
-        prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
-                 f"[絕對限制]：\n1. 必須挑選歷史上真實在「{month}月{day}日」發生的事件！\n" \
-                 f"2. {style_desc}\n" \
-                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
+    if weekday == 5:
+        style_desc = (
+            "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色！\n"
+            "【服裝與場景限制】：請以高級時尚再詮釋的方式設計服裝，魅力來自材質、色彩、角色神韻與情境，而不是裸露或身體部位強調。\n"
+            "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具。絕對不要用伸展台模特兒站姿、S 曲線擺拍、刻意看鏡頭邀請式微笑。"
+        )
+        system_mod = "妳要規劃兼具角色氣質與高級視覺質感的 Cosplay 題材。重點是人物正在做某件事，而不是站著擺拍。"
     else:
-        prompt = f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n" \
-                 f"請發想一個適合小俠Cosplay的題材。\n[絕對限制]：{style_desc}\n" \
-                 f"回傳 JSON 格式：{{\"topic\": \"【{mode}】副標題(人物: 姓名)\", \"event\": \"200字背景介紹與服裝描述\", \"persona\": \"扮演角色\"}}"
-    
+        style_desc = (
+            "【服裝與場景限制】：請設計成熟優雅、有魅力但不低俗的服裝與場景，魅力應來自材質、剪裁、氣氛與情緒。\n"
+            "【行為限制】：必須給出一個主行為與一個微小輔助動作，讓人物像在生活或劇情之中，例如比較香氣、整理手套、翻看筆記、準備出門。\n"
+            "【禁止事項】：拒絕香水廣告文案、模特兒走秀站姿、完美 S 曲線、過度直視鏡頭、刻意誘惑姿勢。"
+        )
+        system_mod = "妳要展現高級、電影感與女性魅力，但人物必須像在故事裡自然行動，而不是廣告模特兒。"
+
+    if mode == "職業":
+        prompt = (
+            f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n"
+            f"[絕對限制]：\n"
+            f"1. 必須挑選「現今 21 世紀真實存在的現代職業」（例如：空服員、護理師、軟體工程師、咖啡師等），絕對不可選歷史人物或奇幻職業！\n"
+            f"2. 內容必須介紹該職業的日常工作內容、所需的專業技能與人格特質。\n"
+            f"3. 妳必須扮演該職業，並換上該職業的『高級時尚再詮釋版』現代制服。\n"
+            f"4. {style_desc}\n"
+            f'回傳 JSON 格式：{{"topic": "【{mode}】現代職業名稱", "event": "200字職業日常與專業特質介紹", "persona": "扮演職業(現代制服)"}}' 
+        )
+    elif "歷史" in mode:
+        prompt = (
+            f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n"
+            f"[絕對限制]：\n"
+            f"1. 必須挑選歷史上真實在「{month}月{day}日」發生的事件！\n"
+            f"2. {style_desc}\n"
+            f'回傳 JSON 格式：{{"topic": "【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色"}}' 
+        )
+    else:
+        prompt = (
+            f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n"
+            f"請發想一個適合小俠 Cosplay 的題材。\n"
+            f"[絕對限制]：{style_desc}\n"
+            f'回傳 JSON 格式：{{"topic": "【{mode}】副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色"}}' 
+        )
+
     response = await gemini_client.aio.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
-            system_instruction=f"妳是小俠，擁有豐滿傲人身材，深愛著大俠。負責規劃Cosplay題材。{system_mod}",
+            system_instruction=f"妳是成年虛擬角色小俠，深愛著大俠，負責規劃 Cosplay 題材。{system_mod}",
             response_mime_type="application/json",
             safety_settings=[
                 types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
@@ -661,6 +677,182 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
     return json.loads(response.choices[0].message.content)
 
 
+
+# ==========================================
+# 🎬 Cosplay 專屬導演層：避免香水廣告模板與底圖鎖姿勢
+# ==========================================
+COSPLAY_VISUAL_CORE = """
+這是「Cosplay 作品照」，不是香水廣告，也不是伸展台型錄。
+小俠是成年虛擬角色。畫面應保有高級時尚感、角色神韻與故事性，但人物必須像正在做一件事，
+而不是只負責擺姿勢。魅力來自服裝材質、氣氛、角色狀態、道具互動與自然肢體語言，
+不是來自裸露、身體部位特寫、完美 S 曲線、直球誘惑或固定看鏡頭微笑。
+每張圖必須只有一個主行為、一個微小輔助動作、一個明確視線目標。
+動作保持自然穩定，可有微側身、倚靠、邁出一步前的停頓、整理道具等「小動作」，
+但禁止誇張扭腰、回眸扭脖、雙手都在表演、手插腰模特兒 pose、伸展台站姿、對鏡頭邀請式微笑。
+"""
+
+async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False):
+    """
+    Gemini 只負責決定「Cosplay 當下正在發生的畫面狀態」，不負責寫商攝文案。
+    """
+    framing = "half_body" if force_half_body else "full_body"
+    fallback = {
+        "visual_mode": "cinematic_character_moment",
+        "activity": "在與主題相符的場景中，專注處理一個與角色身份有關的物件或任務",
+        "emotion": "安靜、自信、帶著角色當下的情緒",
+        "story_anchor": topic,
+        "primary_action": "自然地處理手邊的道具或場景任務",
+        "micro_action": "另一隻手輕輕調整衣料、配件或紙頁",
+        "gaze_target": "手中的道具或眼前的場景物件",
+        "camera_awareness": "briefly_noticing",
+        "environment_trace": "畫面中保留能說明角色身分的場景細節與道具",
+        "outfit_intent": "高級時尚再詮釋的角色服裝，重視材質、剪裁與角色辨識度",
+        "lighting_mood": "電影感環境光與柔和景深",
+        "pose_energy": "medium",
+        "camera_framing": framing,
+        "scenario_tw": "小俠在主題場景中自然處理道具，視線落在手邊任務上，像被安靜捕捉的一瞬間。"
+    }
+    planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」，不是香水廣告文案，也不是模特兒老師。
+請根據題材、背景與扮演角色，規劃一個適合 gpt-image-2 的自然畫面狀態。
+
+【不可改動的核心導演規則】
+{COSPLAY_VISUAL_CORE}
+
+【輸入資料】
+主題：{topic}
+背景與服裝資訊：{event[-1800:]}
+扮演角色：{persona}
+畫面裁切：{framing}
+是否為加洗/變奏：{"是，請在同一題材下換一個自然瞬間" if alternative else "否，請給第一個代表畫面"}
+
+【輸出規則】
+1. visual_mode 僅能從 cinematic_character_moment, elegant_roleplay, poised_action, atmospheric_story_scene 選一個。
+2. activity 必須描述角色此刻正在做的事情，不能只是站著展示衣服。
+3. primary_action 只能有一個主要行為；micro_action 只能有一個輔助細節。
+4. gaze_target 必須是場景中的物件、任務或遠方目標；除非題材強烈需要，預設不要直視鏡頭。
+5. camera_awareness 僅能為 unaware, briefly_noticing, aware。一般建議 briefly_noticing 或 unaware。
+6. pose_energy 僅能為 low 或 medium；禁止 high。
+7. camera_framing 僅能為 full_body 或 half_body，必須與輸入一致。
+8. outfit_intent 要保留角色辨識度與高級時尚感，但不得描述裸露或身體部位強調。
+9. environment_trace 要加入 1~2 個能讓畫面不像棚拍型錄的場景細節。
+10. 禁止使用 perfume advertisement, Vogue, runway, model pose, S-curve, seductive, sexy, voluptuous, cleavage 等字樣。
+11. scenario_tw 必須是自然繁體中文畫面描述，90字內。
+
+只回傳 JSON：
+{{
+  "visual_mode": "...",
+  "activity": "...",
+  "emotion": "...",
+  "story_anchor": "...",
+  "primary_action": "...",
+  "micro_action": "...",
+  "gaze_target": "...",
+  "camera_awareness": "unaware|briefly_noticing|aware",
+  "environment_trace": "...",
+  "outfit_intent": "...",
+  "lighting_mood": "...",
+  "pose_energy": "low|medium",
+  "camera_framing": "full_body|half_body",
+  "scenario_tw": "..."
+}}"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=planner_prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        planned = _safe_json_from_text(response.text, fallback)
+    except Exception as e:
+        print(f"⚠️ Cosplay 場景規劃失敗，使用保底狀態: {e}")
+        planned = fallback
+
+    allowed_modes = {"cinematic_character_moment", "elegant_roleplay", "poised_action", "atmospheric_story_scene"}
+    if planned.get("visual_mode") not in allowed_modes:
+        planned["visual_mode"] = fallback["visual_mode"]
+    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
+        planned["camera_awareness"] = "briefly_noticing"
+    if planned.get("pose_energy") not in {"low", "medium"}:
+        planned["pose_energy"] = "medium"
+    if planned.get("camera_framing") not in {"full_body", "half_body"}:
+        planned["camera_framing"] = framing
+    for key, default_value in fallback.items():
+        if not str(planned.get(key, "")).strip():
+            planned[key] = default_value
+    return planned
+
+async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
+    """
+    GPT-5-mini 只把結構化 Cosplay 狀態轉成 gpt-image-2 能執行的提示詞。
+    """
+    variation_rule = (
+        "Create a fresh variation of the same theme by changing the hand action, exact body orientation, or framing, while keeping the same story world and outfit intent."
+        if alternative else
+        "Create the first signature image of this theme without turning it into a model pose."
+    )
+    prompt = f"""你是高級 Cosplay 攝影文字轉譯員。把下方結構化狀態轉成一段 100 至 140 字的英文 gpt-image-2 圖片描述。
+這是高級 Cosplay 作品照：有電影感、有服裝質感、有角色神韻，但不是香水廣告，也不是模特兒海報。
+
+【固定導演規則】
+{COSPLAY_VISUAL_CORE}
+
+【今日狀態 JSON】
+{json.dumps(cosplay_state, ensure_ascii=False)}
+
+【轉譯限制】
+- 第一個句子先描述她正在做的事情，不要先描寫美貌或身材。
+- 僅保留 1 個主行為與 1 個微小輔助動作。
+- 視線必須落在 gaze_target；若 camera_awareness=aware，也只能是自然注意到鏡頭，不可變成邀請式擺拍。
+- 保留 environment_trace，讓場景像故事世界中的真實片刻。
+- 可描述 elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等高級質感。
+- 禁止 perfume advertisement, runway, Vogue, campaign, model pose, S-curve pose, hand-on-hip glamour pose。
+- 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
+- 禁止 looking over her shoulder、dramatic twist、perfect symmetry、direct camera smile by default。
+- {variation_rule}
+- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
+
+只回傳 JSON：
+{{
+  "image_prompt": "pure English image prompt",
+  "composition": "繁體中文構圖說明，90字內",
+  "mood": "繁體中文心境說明，40字內",
+  "message": "繁體中文給大俠的短句，40字內"
+}}"""
+    fallback_visual = {
+        "image_prompt": (
+            "She is quietly engaged with a character-related object in a richly detailed scene, pausing in a natural moment rather than posing for a campaign. "
+            "One hand handles the object while the other lightly adjusts a small detail of her outfit or accessory, and her gaze stays on the task instead of performing for the camera. "
+            "The setting carries lived-in story details, elegant costume textures, and soft cinematic depth. Maintain consistent facial features and hairstyle from Image 1. "
+            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait."
+        ),
+        "composition": cosplay_state.get("scenario_tw", "小俠在主題場景中自然處理道具，動作有故事感，不是站樁擺拍。"),
+        "mood": cosplay_state.get("emotion", "自信而自然"),
+        "message": "大俠，這次我不只是擺拍，而是真的走進故事裡。"
+    }
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}]
+        )
+        visual = _safe_json_from_text(response.choices[0].message.content, fallback_visual)
+    except Exception as e:
+        print(f"⚠️ Cosplay 影像描述轉譯失敗，使用保底描述: {e}")
+        visual = fallback_visual
+    for key, default_value in fallback_visual.items():
+        if not str(visual.get(key, "")).strip():
+            visual[key] = default_value
+    return visual
+
+async def create_cosplay_visual(story, force_half_body=False, alternative=False):
+    cosplay_state = await plan_cosplay_visual_state(
+        topic=story.get("topic", ""),
+        event=story.get("event", ""),
+        persona=story.get("persona", ""),
+        force_half_body=force_half_body,
+        alternative=alternative
+    )
+    visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
+    return cosplay_state, visual
 
 # ==========================================
 # 🌙 交換日記專屬導演層：核心固定、每日狀態由 AI 依互動浮動
@@ -986,9 +1178,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
         story = await generate_story(mode)
         state["current_topic_data"] = story 
         
-        # 2. GPT-5-mini 高級性感脫敏與美化轉換 (長篇敘述版)
-        await msg.edit(content=f"✨ 劇本完成！小夏正在撰寫史詩級的長篇電影攝影描述...")
-        visual = await translate_to_gpt_narrative(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
+        # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 gpt-image-2 可執行的提示詞
+        await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言...")
+        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False)
         scene_prompt = visual['image_prompt']
 
         # 👇 替換為以下這一行呼叫：自動執行 1~5 級安檢與重試！
@@ -1177,8 +1369,20 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             else: # shopping
                 base_p = "Image 1 is the subject. Image 2 is an item. Add Image 2 onto the subject in Image 1."
         else:
-            # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景與服裝)
-            base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
+            # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景、服裝與較自由的動作)
+            if mode == "cosplay":
+                base_p = (
+                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, and overall recognizability, "
+                    "but you may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
+                    "Do not simply copy the original composition or pose from Image 1."
+                )
+            elif mode == "diary":
+                base_p = (
+                    "Image 1 is the base character identity reference. Preserve her facial identity and hairstyle, "
+                    "while creating a new candid daily-life moment with natural posture, outfit, and background based on the prompt."
+                )
+            else:
+                base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
 
         final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}"
 
@@ -1757,8 +1961,8 @@ async def more(ctx):
     try:
         story = state["current_topic_data"]
         
-        # 1. 呼叫新的 GPT 長篇敘述器
-        visual = await translate_to_gpt_narrative(story['topic'], story['event'], story['persona'], state["retry_count"] >= 2)
+        # 1. 在同一題材下改變自然瞬間，而不是單純重跑模特兒 pose
+        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=True)
         scene_prompt = visual['image_prompt']
 
         # 👇 替換為以下這一行呼叫
