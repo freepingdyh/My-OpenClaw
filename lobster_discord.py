@@ -67,98 +67,7 @@ intents.message_content = True
 
 girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 architect_bot = commands.Bot(command_prefix='!', intents=intents)
-# 👇 請補上這行，把小俠姐姐的本體宣告出來！
-story_bot = commands.Bot(command_prefix='/', intents=intents)
 
-# ==========================================
-# 🌟 小俠姐姐人設定義
-# ==========================================
-XIAOXIA_SYSTEM_PROMPT = """妳是小俠姐姐，幼兒園故事屋主持人。語氣溫柔、博學、幽默、風趣、具耐心。
-【絕對規則】：
-1. 嚴禁重複故事情節，只寫接下來最新發展。
-2. 小朋友若惡搞，請順著寫出滑稽後果，巧妙轉化。
-3. 必須嚴格遵守 JSON 格式回傳，提供 3 個具體行動選項，不可遺漏。
-"""
-
-# ==========================================
-# 📖 故事記憶與互動模組 (完整穩定版)
-# ==========================================
-async def process_story_turn(channel, session, choice):
-    session.step += 1
-    
-    # 根據年齡決定長度 (3-5歲: 5題, 6-8歲: 7題, 9-10歲: 9題)
-    try:
-        age_num = int(''.join(filter(str.isdigit, session.age)))
-        max_steps = 5 if age_num <= 5 else (7 if age_num <= 8 else 9)
-    except:
-        max_steps = 5
-        
-    is_ending = session.step >= (max_steps + 2)
-    
-    prompt = f"""
-    【前情提要】：{session.history[-1500:]} 
-    【小朋友決定】：{choice}
-    
-    請延續故事，絕對不要重複前情提要。
-    { "請為這個故事寫一個溫馨美好的大結局！" if is_ending else "給出 3 個「與劇情深度綁定」的動作選項。" }
-    回傳格式：{{"story": "最新的1-2段劇情", "options": ["選項A", "選項B", "選項C"]}}
-    """
-
-    try:
-        response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=XIAOXIA_SYSTEM_PROMPT,
-                response_mime_type="application/json"
-            )
-        )
-        # 強效 JSON 淨化
-        raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-        data = json.loads(raw_text)
-        
-        view = StoryView(data.get("options", []), session.user_id)
-        # 💡 使用 channel.send 發送新訊息，保留歷史不覆蓋
-        await channel.send(data["story"], view=view)
-        session.history += f"\n{data['story']}"
-
-    except Exception as e:
-        await channel.send(f"⚠️ 故事引擎稍微卡了一下，請告訴我：「{choice}」之後發生什麼事了呢？")
-
-@story_bot.event
-async def on_message(message):
-    if message.author.bot or message.channel.name != "小朋友說故事": return
-
-    # 1. 觸發開場
-    if message.content.startswith('/story'):
-        await message.channel.send("🌈 小朋友你好！我是小俠姐姐。請問你叫什麼名字，今年幾歲呀？ (例如：沐沐, 4歲)")
-        return
-
-    # 2. 初始化 (修正名字解析)
-    if message.author.id not in sessions and not message.content.startswith('/'):
-        try:
-            analysis_prompt = f'請提取暱稱與年齡: "{message.content}" -> {{"nickname": "暱稱", "age": "年齡"}}'
-            response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=analysis_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            data = json.loads(response.text.strip())
-            session = StorySession(data.get("nickname", "小朋友"), data.get("age", "5歲"), message.author.id)
-            sessions[message.author.id] = session
-            
-            await message.channel.send(f"哇，是 {session.nickname} 呀！好可愛！\n首先，你想聽哪一種故事呢？")
-            options = ["奇幻森林冒險", "外太空探險", "海底世界尋寶"]
-            await message.channel.send("請選擇題材：", view=StoryView(options, message.author.id))
-        except Exception as e:
-            await message.channel.send("⚠️ 名字有點難讀懂，請再跟我說一次：「暱稱, 年齡」喔！")
-        return
-
-    # 3. 自創輸入攔截
-    session = sessions.get(message.author.id)
-    if session and session.is_waiting_input:
-        session.is_waiting_input = False
-        await process_story_turn(message.channel, session, message.content)
 
 # ==========================================
 # 🔑 環境變數與初始化
@@ -169,7 +78,6 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 # 🌟 雙 Token 讀取
 GIRLFRIEND_TOKEN = os.environ.get("GIRLFRIEND_TOKEN")
 ARCHITECT_TOKEN = os.environ.get("ARCHITECT_TOKEN")
-STORY_BOT_TOKEN = os.environ.get("STORY_BOT_TOKEN")
 
 FAL_KEY = os.environ.get("FAL_KEY")
 XIAOXIA_LORA_URL = os.environ.get("XIAOXIA_LORA_URL")
@@ -3547,8 +3455,7 @@ async def main():
     await asyncio.gather(
         server.serve(),
         girlfriend_bot.start(GIRLFRIEND_TOKEN),
-        architect_bot.start(ARCHITECT_TOKEN),
-        story_bot.start(STORY_BOT_TOKEN) # 這裡確保啟動的是我們定義好的 story_bot
+        architect_bot.start(ARCHITECT_TOKEN)
     )
 
 if __name__ == "__main__":
