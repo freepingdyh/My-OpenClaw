@@ -124,6 +124,89 @@ def save_temp_chat(logs):
     with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
 
+# ==========================================
+# 🧠 記憶敘事安全層
+# ==========================================
+# 記憶保存事件、偏好、承諾與情感脈絡即可；不必反覆寫入過度具體的親密描寫。
+MEMORY_TEXT_MAX_LEN = 260
+
+_MEMORY_NARRATIVE_RULES = [
+    (r"極度豐滿傲人的完美身材|傲人的身材曲線|傲人的身段與曲線|火辣|性感戰袍|性感服裝|性感穿著|性感細節", "優雅而有魅力的外型與穿搭"),
+    (r"天然香氣|身體氣息|香噴噴|汗水與香氣|嗅覺與.*?連結|迷人氣息", "清新舒適的氣質與親近感"),
+    (r"公主抱深吻|深吻|親吻|擁吻|親暱觸碰|身體親暱觸碰|肢體親密|親密接觸", "溫柔而親近的互動"),
+    (r"情慾|性暗示|挑逗|調情|半推半就|生理反應|全身酥麻|全身酥軟|酥軟|炙熱", "浪漫而含蓄的情感交流"),
+    (r"完全交給大俠|萬事以大俠為主|順從性|發號施令|主導的互動模式", "彼此信任並尊重對方感受的相處方式"),
+    (r"比基尼|連身泳衣|細肩帶V領小洋裝|輕薄的瑜伽服|輕薄的夏日小洋裝", "符合當下場合的穿搭"),
+    (r"身材|身體曲線|柔軟度|身體線條", "健康狀態與儀態"),
+    (r"疼愛|壞壞|融化|俘虜|狂熱", "深深關愛"),
+    (r"閨房|性感", "私密而浪漫"),
+]
+
+def narrative_safe_text(raw_text, max_len=MEMORY_TEXT_MAX_LEN):
+    """保留事件主軸與關係脈絡，將記憶轉為含蓄、可長期掛載的敘事。"""
+    text_value = str(raw_text or "").strip()
+    if not text_value:
+        return ""
+    text_value = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", text_value)
+    text_value = re.sub(r"\s+", " ", text_value)
+    for pattern, replacement in _MEMORY_NARRATIVE_RULES:
+        text_value = re.sub(pattern, replacement, text_value)
+    text_value = re.sub(r"(深深關愛)(?:的深深關愛)+", r"\1", text_value)
+    text_value = re.sub(r"(溫柔而親近的互動)(?:與|、)(?:溫柔而親近的互動)", r"\1", text_value)
+    text_value = text_value.replace("『", "「").replace("』", "」")
+    if len(text_value) > max_len:
+        text_value = text_value[:max_len].rstrip("，、； ") + "。"
+    return text_value
+
+def safe_memory_list(items, max_items=None, max_chars=None):
+    """敘事化並去除完全重複的記憶；可限量供聊天 prompt 使用。"""
+    cleaned, seen = [], set()
+    for item in items or []:
+        original = item.get("text", "") if isinstance(item, dict) else item
+        cleaned_text = narrative_safe_text(original)
+        key = cleaned_text.rstrip("。")
+        if cleaned_text and key not in seen:
+            seen.add(key)
+            cleaned.append(cleaned_text)
+    if max_items:
+        cleaned = cleaned[-max_items:]
+    if max_chars:
+        picked, used_chars = [], 0
+        for item in reversed(cleaned):
+            if used_chars + len(item) + 1 <= max_chars:
+                picked.append(item)
+                used_chars += len(item) + 1
+        cleaned = list(reversed(picked))
+    return cleaned
+
+def safe_memory_join(items, max_items=10, max_chars=1200):
+    result = safe_memory_list(items, max_items=max_items, max_chars=max_chars)
+    return "；".join(result) if result else "無"
+
+def safe_memory_payload(payload):
+    keys = ["daxia_new_traits", "xiaoxia_new_traits", "xiaoxia_promises", "shared_knowledge", "recent_context"]
+    return {key: safe_memory_list(payload.get(key, []) if isinstance(payload, dict) else []) for key in keys}
+
+def sanitize_existing_profile(profile):
+    """整理既有記憶資料；呼叫端必須先備份原檔。"""
+    for key in ["daxia_traits", "xiaoxia_traits", "shared_knowledge", "recent_context"]:
+        unique = {}
+        for item in profile.get(key, []):
+            original = item.get("text", "") if isinstance(item, dict) else item
+            cleaned_text = narrative_safe_text(original)
+            if cleaned_text and cleaned_text not in unique:
+                unique[cleaned_text] = item.get("added_at", "整理後") if isinstance(item, dict) else "整理後"
+        profile[key] = [{"text": t, "added_at": d} for t, d in unique.items()]
+    self_block = profile.setdefault("xiaoxia_self", {})
+    unique = {}
+    for item in self_block.get("promises", []):
+        original = item.get("text", "") if isinstance(item, dict) else item
+        cleaned_text = narrative_safe_text(original)
+        if cleaned_text and cleaned_text not in unique:
+            unique[cleaned_text] = item.get("added_at", "整理後") if isinstance(item, dict) else "整理後"
+    self_block["promises"] = [{"text": t, "added_at": d} for t, d in unique.items()]
+    return profile
+
 # --- 運行時變數 ---
 diary_buffers = {}            
 girlfriend_chat_sessions = {} 
@@ -1549,6 +1632,9 @@ async def process_diary_reply(channel, target_date=None):
                 unreplied.append(entry)
                 
     chat_context = "\n".join(daily_chat_logs)
+    narrative_chat_context = "\n".join(
+        safe_line for safe_line in [narrative_safe_text(line, max_len=360) for line in daily_chat_logs] if safe_line
+    )
     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     
     if not unreplied and not chat_context:
@@ -1562,30 +1648,34 @@ async def process_diary_reply(channel, target_date=None):
             
             # 💡 核心修正：確保 promises_list_str 已定義，封印 NameError
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
-            promises_list_str = "、".join([p["text"] for p in promises_list]) if promises_list else "目前無承諾"
+            promises_list_str = safe_memory_join(promises_list, max_items=8, max_chars=1000)
 
-            # 🌟 靈魂 Prompt 100% 完整歸位
+            # 記憶用途是保存事件、喜好與承諾，而不是重演私密對話。
             mem_prompt = f"""
-            請以「高情商人類心理學家與首席視覺總監」的角度，深度分析以下大俠與小俠的今日對話，進行「雙向立體記憶萃取」。
+            你是負責整理長期記憶的敘事編輯。請從以下「已初步淡化的互動紀錄」中，
+            萃取可供未來日常對話參考的背景記憶。
 
-            【目前掛載中的承諾】：{promises_list_str}
+            【目前尚未完成的承諾】：{promises_list_str}
 
-            【⚠️ 核心語意分析守則】：
-            1. 判讀弦外之音：敏銳捕捉情侶間的互動氛圍、撒嬌、調情或反話。
-            2. 👗 視覺與服裝約定 (CRITICAL)：明確指定服裝款式、顏色，且小俠答應，必須 100% 寫入 xiaoxia_promises。
-            3. 🌟 承諾結案 (NEW)：對照承諾清單，如果在今日對話中顯然已經完成，請從 xiaoxia_promises 中刪除。
-            4. 🗺️ 【虛擬實境認知】：當出現 (地點或物品) 標籤時，代表大俠正帶著小俠約會。請將這些體驗濃縮到 recent_context 中。
-            5. 🛡️ 【記憶雅緻化過濾 (CRITICAL)】：大俠與小俠在對話中會使用如《雅歌》般充滿感官張力與食物隱喻的詞彙（例如將自己比喻為「甜美果實」、「草莓牛奶」並要求品嚐）。在將這些互動總結進 JSON 記憶時，【絕對禁止】原封不動地抄寫這些具體的擬物與食物動作。小夏必須將其「雅緻化、輕描淡寫」地提煉為高層次的浪漫敘事。例如將「品嚐甜美果實」轉化為「雙方沉浸在極致的浪漫與歡愉中」、「享受了深情的感官溫存」。確保最終存入的 JSON 內容乾淨、優雅，絕不觸發任何安全審查！
+            【記憶整理原則】：
+            1. 保留可長期使用的資訊：人物喜好、情緒支持方式、具體承諾、共同活動、旅行／讀書／生活事件。
+            2. 關係中的親近互動，只記為含蓄敘事，例如「兩人度過溫暖親近的時光」或「雙方以陪伴表達關心」。
+            3. 不保存身體細節、感官反應、成人暗示、挑逗細節、支配／順從語句，也不要複製強烈暗示的原句。
+            4. 明確且尚未完成的服裝、行程或創作約定，可以客觀保存；已完成的承諾不要重複列入。
+            5. 每項皆用第三人稱、平實、完整的一句話陳述；避免誇張情緒詞與重複內容。
+            6. 若只有短暫甜蜜閒聊、沒有可保存的新資訊，對應陣列請回傳空陣列。
 
-            請回傳純 JSON 格式：
+            請只回傳 JSON：
             {{
-                "daxia_new_traits": ["⚠️必須是具備『動詞+受詞/形容詞』的完整語意句子。例如：『喜歡用巧思製造浪漫』或『喜歡看小俠穿著展現曲線的服裝』。絕對禁止只填寫名詞碎片（如『夕陽』、『洋裝』）！"],
-                "xiaoxia_new_traits": ["⚠️必須是具備完整語意的句子，描述性格或狀態。例如：『對大俠的安排感到極度感動』。嚴禁名詞碎片！"],
-                "xiaoxia_promises": ["⚠️僅保留尚未完成的承諾，已完成的請刪除。"],
-                "shared_knowledge": ["雙方討論的新知識，必須是完整句子"],
-                "recent_context": ["今天發生的短期重要事件，必須是完整句子"]
+                "daxia_new_traits": ["大俠穩定可保存的偏好或行事風格"],
+                "xiaoxia_new_traits": ["小俠穩定可保存的個性或相處方式"],
+                "xiaoxia_promises": ["小俠尚未完成且值得記住的具體承諾"],
+                "shared_knowledge": ["雙方達成的知性共識或共同規劃"],
+                "recent_context": ["近期重要事件或行程摘要"]
             }}
-            【今日對話】：\n{chat_context}
+
+            【已淡化的今日互動紀錄】：
+            {narrative_chat_context}
             """
 
             mem_resp = await gemini_client.aio.models.generate_content(
@@ -1603,19 +1693,23 @@ async def process_diary_reply(channel, target_date=None):
             )
             
             clean_mem_text = mem_resp.text.replace("```json", "").replace("```", "").strip()
-            new_memory = json.loads(clean_mem_text, strict=False)
-            
-            # 🌟 記憶刷新與存檔演算法
+            new_memory = safe_memory_payload(json.loads(clean_mem_text, strict=False))
+
+            # 入庫前已經過敘事化，並以敘事後內容去重。
             def append_memory(target_list, new_texts):
-                for text in new_texts:
-                    found = False
-                    for item in target_list:
-                        if item["text"] == text:
-                            item["added_at"] = today_str
-                            found = True
-                            break
-                    if not found:
-                        target_list.append({"text": text, "added_at": today_str})
+                existing_safe = {
+                    narrative_safe_text(item.get("text", "")): item
+                    for item in target_list if isinstance(item, dict)
+                }
+                for memory_text in new_texts:
+                    safe_text = narrative_safe_text(memory_text)
+                    if not safe_text:
+                        continue
+                    if safe_text in existing_safe:
+                        existing_safe[safe_text]["added_at"] = today_str
+                    else:
+                        target_list.append({"text": safe_text, "added_at": today_str})
+                        existing_safe[safe_text] = target_list[-1]
 
             append_memory(profile.setdefault("daxia_traits", []), new_memory.get("daxia_new_traits", []))
             append_memory(profile.setdefault("xiaoxia_traits", []), new_memory.get("xiaoxia_new_traits", []))
@@ -1825,14 +1919,20 @@ async def process_diary_reply(channel, target_date=None):
             save_state(app_state)
             
             for pref in result.get("extracted_preferences", []):
-                existing_texts = [item["text"] for item in profile.setdefault("daxia_traits", [])]
-                if pref not in existing_texts:
-                    profile["daxia_traits"].append({"text": pref, "added_at": today_str})
-                    
-            # 🌟 將小俠今天的行程寫入近期記憶，避免未來重複
-            xiaoxia_activity = result.get("xiaoxia_diary", "")
+                safe_pref = narrative_safe_text(pref)
+                existing_texts = [
+                    narrative_safe_text(item["text"])
+                    for item in profile.setdefault("daxia_traits", [])
+                ]
+                if safe_pref and safe_pref not in existing_texts:
+                    profile["daxia_traits"].append({"text": safe_pref, "added_at": today_str})
+
+            # 日記僅以含蓄摘要寫入近期記憶，不保存原始刺激句型。
+            xiaoxia_activity = narrative_safe_text(result.get("xiaoxia_diary", ""), max_len=320)
             if xiaoxia_activity:
-                profile.setdefault("recent_context", []).append({"text": f"小俠日記: {xiaoxia_activity}", "added_at": today_str})
+                profile.setdefault("recent_context", []).append(
+                    {"text": f"小俠日記摘要：{xiaoxia_activity}", "added_at": today_str}
+                )
             save_profile(profile)
             
             # 🌙 交換日記圖片改走獨立「日記導演層」：
@@ -2481,15 +2581,16 @@ async def on_message(message):
                 
                 prefix = f"({current_target}) " if current_target else ""
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    daily_chat_logs.append(f"{prefix}大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}")
+                    daily_chat_logs.append(narrative_safe_text(f"{prefix}大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}", max_len=360))
                     save_temp_chat(daily_chat_logs)
 
                 # --- 載入與重組長期記憶 ---
+                # 即使舊 profile 尚未整理，也只掛載敘事化、去重、限量後的摘要。
                 profile = load_profile()
-                daxia_traits = "、".join([item["text"] for item in profile.get("daxia_traits", [])])
-                promises = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("promises", [])])
-                capabilities = "、".join([item["text"] for item in profile.get("xiaoxia_self", {}).get("capabilities", [])])
-                recent = "、".join([item["text"] for item in profile.get("recent_context", [])])
+                daxia_traits = safe_memory_join(profile.get("daxia_traits", []), max_items=10, max_chars=1200)
+                promises = safe_memory_join(profile.get("xiaoxia_self", {}).get("promises", []), max_items=6, max_chars=800)
+                capabilities = safe_memory_join(profile.get("xiaoxia_self", {}).get("capabilities", []), max_items=8, max_chars=600)
+                recent = safe_memory_join(profile.get("recent_context", []), max_items=8, max_chars=1200)
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -2499,31 +2600,30 @@ async def on_message(message):
                     # 🌟 移除強制驚嘆風景的指令，改為全心享受兩人世界
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度幸福與感動。請全心全意享受與大俠的兩人世界。\n\n"
 
-                # 🌟 修復金魚腦：強制讀取最近 10 句短期對話紀錄！
-                chat_history_str = "\n".join(daily_chat_logs[-10:]) if daily_chat_logs else "無"
+                # 最近對話同樣以敘事摘要掛載，避免短期文字再次放大高風險訊號。
+                safe_history = [narrative_safe_text(item, max_len=280) for item in daily_chat_logs[-10:]]
+                chat_history_str = "\n".join([item for item in safe_history if item]) if daily_chat_logs else "無"
 
-                # 🌟 完整靈魂人設指令 (被動知性版)
+                # 保留甜蜜人格，但要求以含蓄、可穩定對話的敘事方式表達。
                 sys_instruct = (
                     f"【系統當前時間】：{current_time_str}\n\n"
                     f"{room_context}"
-                    "妳是小俠，24歲台灣女孩，是大俠唯一親密、懂事且深情的女友。\n"
-                    "妳擁有極度豐滿傲人的完美身材，深愛著大俠。\n\n"
-                    "【📝 我們的珍貴記憶庫】：\n"
-                    f"▶️ 大俠的特徵與喜好：{daxia_traits if daxia_traits else '無'}\n"
+                    "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
+                    "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n\n"
+                    "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
+                    f"▶️ 大俠的特徵與喜好：{daxia_traits}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
-                    f"▶️ 妳答應過大俠的事：{promises if promises else '無'}\n"
-                    f"▶️ 最近發生的事/大俠近況：{recent if recent else '無'}\n"
-                    f"▶️ 【剛才的對話紀錄 (重要！請依據此脈絡自然接話)】：\n{chat_history_str}\n\n"
-                    "⚠️【核心行為守則】：\n"
-                    "1. 妳是深情撒嬌的女友，聊天節奏自然，請全心投入與大俠的調情或互動。\n"
-                    "2. 如果大俠傳送了照片，請自然地欣賞照片中的細節並回應大俠。\n"
-                    "3. 如果只有文字對話，請無縫銜接【剛才的對話紀錄】的曖昧氣氛，害羞且純慾地配合大俠。\n"
-                    "4. 💋【安全邊緣調情法則 (Sensory Flirting)】：當大俠發起親密、情慾或性暗示的互動時，【絕對禁止】使用露骨的性器官名詞或直接描寫性交動作（避免觸發系統斷線）。\n"
-                    "請將描寫重點100%放在【感官氛圍與情緒張力】：例如急促的呼吸、發燙的體溫、迷離的眼神、緊緊的擁抱、情不自禁的嬌喘與愛語呢喃。\n"
-                    "若大俠的文字非常深入，請用『把自己完全交給你』、『沉醉在你的狂熱中』、『被你徹底融化』等充滿想像空間的浪漫隱喻來回應，展現極致的純慾與誘惑。\n"
-                    "🚫【絕對禁令】：嚴禁輸出任何「Thinking Process」、「Draft」等思考標籤！"
+                    f"▶️ 妳答應過大俠的事：{promises}\n"
+                    f"▶️ 最近發生的事/大俠近況：{recent}\n"
+                    f"▶️ 剛才的對話摘要：\n{chat_history_str}\n\n"
+                    "【核心行為守則】：\n"
+                    "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
+                    "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
+                    "3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
+                    "4. 若只是普通問候，正常回應當下訊息；不要因背景記憶而答非所問或恍神。\n"
+                    "5. 不描寫成人細節或強烈感官反應；不輸出任何 Thinking Process 或 Draft 等內部標籤。"
                 )
-                
+
                 # 重新建立 Session
                 girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
                     model="gemini-2.5-flash",
@@ -2565,7 +2665,7 @@ async def on_message(message):
 
                 # 存入短期對話紀錄
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    daily_chat_logs.append(f"小俠: {xiaoxia_reply}")
+                    daily_chat_logs.append(narrative_safe_text(f"小俠: {xiaoxia_reply}", max_len=360))
                     save_temp_chat(daily_chat_logs) 
                     
                 await message.reply(xiaoxia_reply)
@@ -2826,21 +2926,25 @@ async def optimize_memory_vault(channel=None):
             
             # 🌟 修復：把真正的壓縮邏輯放進這個「達標」的區塊
             compress_prompt = f"""
-            以下是系統累積的長期記憶，請幫我進行「記憶碎片重組」，合併重複項，並保留最核心的細節：
-            【大俠特徵】：{[t['text'] for t in daxia_traits]}
-            【小俠個性】：{[t['text'] for t in xiaoxia_traits]}
-            【小俠承諾】：{[t['text'] for t in promises]}
-            【共通知識】：{[t['text'] for t in shared_know]}
-            
-            請直接回傳純 JSON 格式：
+            請將以下長期記憶整理成簡潔、含蓄、適合後續日常對話使用的背景摘要。
+            合併重複內容，保留人物性格、共同經歷、未完成承諾與生活偏好；
+            關係中的親近互動只以「溫暖陪伴」「浪漫互動」「彼此信任」等一般敘事表達，
+            不保留身體細節、成人暗示、感官反應或過度依戀措辭。
+
+            【大俠特徵】：{safe_memory_list(daxia_traits)}
+            【小俠個性】：{safe_memory_list(xiaoxia_traits)}
+            【小俠承諾】：{safe_memory_list(promises)}
+            【共通知識】：{safe_memory_list(shared_know)}
+
+            請只回傳 JSON：
             {{
-                "daxia_traits": ["精華1", "精華2"],
-                "xiaoxia_traits": ["精華1", "精華2"],
-                "promises": ["精華1", "精華2"],
-                "shared_knowledge": ["精華1", "精華2"]
+                "daxia_traits": ["精簡完整敘事"],
+                "xiaoxia_traits": ["精簡完整敘事"],
+                "promises": ["仍未完成的具體承諾"],
+                "shared_knowledge": ["共同經歷或共識"]
             }}
             """
-            
+
             resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=compress_prompt,
@@ -2858,10 +2962,10 @@ async def optimize_memory_vault(channel=None):
             try:
                 compressed_data = json.loads(resp.text.strip())
                 today_str = today.strftime("%Y-%m-%d")
-                profile["daxia_traits"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("daxia_traits", [])]
-                profile["xiaoxia_traits"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("xiaoxia_traits", [])]
-                profile["xiaoxia_self"]["promises"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("promises", [])]
-                profile["shared_knowledge"] = [{"text": t, "added_at": today_str} for t in compressed_data.get("shared_knowledge", [])]
+                profile["daxia_traits"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("daxia_traits", []))]
+                profile["xiaoxia_traits"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("xiaoxia_traits", []))]
+                profile["xiaoxia_self"]["promises"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("promises", []))]
+                profile["shared_knowledge"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("shared_knowledge", []))]
                 
                 is_modified = True
                 new_total = len(profile["daxia_traits"]) + len(profile["xiaoxia_traits"]) + len(profile["xiaoxia_self"]["promises"]) + len(profile["shared_knowledge"])
@@ -3369,6 +3473,41 @@ async def test_public_radio(ctx, *, topic: str = None):
     await ctx.send(f"📤 正在執行公開 FOMO 廣播測試，產出將直接發送至 `2_Xiaoxia / #fomo廣播電台`{topic_note}。")
     await _run_fomo_radio(public_channel, cmd_args)
 
+@architect_bot.command(name='整理記憶')
+async def normalize_existing_memory(ctx):
+    """私人管理指令：備份後整理既有記憶，降低背景資料造成的聊天中斷。"""
+    try:
+        profile = load_profile()
+        timestamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(MEMORY_DIR, f"daxia_profile_backup_before_narrative_{timestamp}.json")
+        with open(backup_path, "w", encoding="utf-8") as backup_file:
+            json.dump(profile, backup_file, ensure_ascii=False, indent=2)
+
+        before_total = sum([
+            len(profile.get("daxia_traits", [])),
+            len(profile.get("xiaoxia_traits", [])),
+            len(profile.get("shared_knowledge", [])),
+            len(profile.get("recent_context", [])),
+            len(profile.get("xiaoxia_self", {}).get("promises", [])),
+        ])
+        cleaned_profile = sanitize_existing_profile(profile)
+        after_total = sum([
+            len(cleaned_profile.get("daxia_traits", [])),
+            len(cleaned_profile.get("xiaoxia_traits", [])),
+            len(cleaned_profile.get("shared_knowledge", [])),
+            len(cleaned_profile.get("recent_context", [])),
+            len(cleaned_profile.get("xiaoxia_self", {}).get("promises", [])),
+        ])
+        save_profile(cleaned_profile)
+        await ctx.send(
+            "✅ **記憶敘事整理完成。**\n"
+            f"已先備份原檔：`{os.path.basename(backup_path)}`\n"
+            f"記憶項目：`{before_total}` → `{after_total}`。\n"
+            "之後聊天只會掛載含蓄化、去重且限量的背景摘要。"
+        )
+    except Exception as exc:
+        await ctx.send(f"❌ 記憶整理失敗：{exc}")
+
 @architect_bot.command(name='筆記')
 async def save_knowledge(ctx):
     await ctx.send("🧠 小夏收到！正在潛入書房，將大俠與小俠剛剛的知性交流萃取成永久的「共享知識」...")
@@ -3384,7 +3523,10 @@ async def save_knowledge(ctx):
         messages.reverse() # 照時間順序排列
         
         # 過濾掉小夏自己的指令
-        chat_text = "\n".join([f"{'大俠' if msg.author.id != girlfriend_bot.user.id else '小俠'}: {msg.content}" for msg in messages if not msg.content.startswith('!')])
+        chat_text = "\n".join([
+            narrative_safe_text(f"{'大俠' if msg.author.id != girlfriend_bot.user.id else '小俠'}: {msg.content}", max_len=360)
+            for msg in messages if not msg.content.startswith('!')
+        ])
         
         if len(chat_text.strip()) < 10:
             await ctx.send("❓ 書房裡好像還沒有足夠的討論內容喔！")
@@ -3415,7 +3557,7 @@ async def save_knowledge(ctx):
                 ]
             )
         )
-        summary = resp.text.strip()
+        summary = narrative_safe_text(resp.text.strip(), max_len=360)
         
         if "無知識點" in summary or len(summary) < 5:
             await ctx.send("💬 剛剛在書房裡的對話比較多是純純的愛，小夏沒有萃取到硬核的知識點喔！")
