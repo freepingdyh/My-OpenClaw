@@ -3028,6 +3028,7 @@ async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
     print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
+    print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -3107,6 +3108,16 @@ async def download_brain(ctx):
 async def test_morning(ctx):
     await ctx.send("⚙️ 收到指令，正在手動遠端觸發 OpenClaw 晨間排程...")
     await _run_legacy_morning(ctx.channel)
+
+@architect_bot.command(name='test_public_morning')
+async def test_public_morning(ctx):
+    """僅能由私人助手工作室觸發，將測試晨報直接送至公開 #晨報。"""
+    public_channel = get_architect_channel(MORNING_CHANNEL_ID)
+    if not public_channel:
+        await ctx.send(f"❌ 找不到公開晨報頻道：MORNING_CHANNEL_ID={MORNING_CHANNEL_ID}")
+        return
+    await ctx.send("📤 正在執行公開晨報測試，產出將直接發送至 `2_Xiaoxia / #晨報`。")
+    await _run_legacy_morning(public_channel)
 
 # 🌟 擴建：其他企劃 (外部圖片上傳)
 @architect_bot.command(name="upload_project")
@@ -3343,8 +3354,20 @@ async def trigger_radio(ctx, *, topic: str = None):
     cmd_args = [] 
     if topic:
         cmd_args = ["--topic", topic]
-    # 呼叫下方的執行函式
+    # 私人預覽：輸出仍留在 #助手小夏工作室
     await _run_fomo_radio(ctx.channel, cmd_args)
+
+@architect_bot.command(name='test_public_radio')
+async def test_public_radio(ctx, *, topic: str = None):
+    """僅能由私人助手工作室觸發，將測試廣播直接送至公開 #fomo廣播電台。"""
+    public_channel = get_architect_channel(FOMO_CHANNEL_ID)
+    if not public_channel:
+        await ctx.send(f"❌ 找不到公開 FOMO 頻道：FOMO_CHANNEL_ID={FOMO_CHANNEL_ID}")
+        return
+    cmd_args = ["--topic", topic] if topic else []
+    topic_note = f"；指定主題：{topic}" if topic else ""
+    await ctx.send(f"📤 正在執行公開 FOMO 廣播測試，產出將直接發送至 `2_Xiaoxia / #fomo廣播電台`{topic_note}。")
+    await _run_fomo_radio(public_channel, cmd_args)
 
 @architect_bot.command(name='筆記')
 async def save_knowledge(ctx):
