@@ -135,6 +135,64 @@ pending_inputs = set()
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
 # ==========================================
+# 🏠 雙模式小夏：私人助手區 + 公開服務區
+# ==========================================
+# 私人 OpenClaw-spic Server：甜甜的「助手小夏」與所有 ! 私人工具。
+PRIVATE_GUILD_ID = int(os.environ.get("PRIVATE_GUILD_ID", "1499222633328283728"))
+PRIVATE_ASSISTANT_CHANNEL_ID = int(os.environ.get("PRIVATE_ASSISTANT_CHANNEL_ID", "1509021950301966436"))
+
+# 公開 2_Xiaoxia Server：正式「小夏（系統架構師）」與對外內容。
+PUBLIC_GUILD_ID = int(os.environ.get("PUBLIC_GUILD_ID", "1508996929542033509"))
+MORNING_CHANNEL_ID = int(os.environ.get("MORNING_CHANNEL_ID", "1509006496107597925"))
+FOMO_CHANNEL_ID = int(os.environ.get("FOMO_CHANNEL_ID", "1509006607831535666"))
+ARCHITECT_CHANNEL_ID = int(os.environ.get("ARCHITECT_CHANNEL_ID", "1509006833006936126"))
+PUBLIC_STORY_CHANNEL_ID = int(os.environ.get("PUBLIC_STORY_CHANNEL_ID", "1509006908596555937"))
+
+# 舊測試中的故事頻道也封鎖兩個私人 Bot 介入。
+LEGACY_STORY_CHANNEL_ID = int(os.environ.get("LEGACY_STORY_CHANNEL_ID", "1501767238418563233"))
+
+# 選用但強烈建議設定：若設定後，私人 ! 指令僅允許你本人執行。
+OWNER_DISCORD_USER_ID = int(os.environ.get("OWNER_DISCORD_USER_ID", "0"))
+
+BLOCKED_STORY_CHANNEL_IDS = {PUBLIC_STORY_CHANNEL_ID, LEGACY_STORY_CHANNEL_ID}
+PUBLIC_SERVICE_CHANNEL_IDS = {MORNING_CHANNEL_ID, FOMO_CHANNEL_ID, ARCHITECT_CHANNEL_ID}
+
+def is_story_channel_or_thread(channel) -> bool:
+    """故事頻道與由其建立的 Thread：女友小俠／助手小夏皆不得介入。"""
+    if channel is None:
+        return False
+    channel_id = getattr(channel, "id", None)
+    parent_id = getattr(channel, "parent_id", None)
+    return channel_id in BLOCKED_STORY_CHANNEL_IDS or parent_id in BLOCKED_STORY_CHANNEL_IDS
+
+def is_private_assistant_workspace(channel) -> bool:
+    """甜甜助手小夏與私人工具唯一可使用的房間。"""
+    if channel is None:
+        return False
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    return guild_id == PRIVATE_GUILD_ID and getattr(channel, "id", None) == PRIVATE_ASSISTANT_CHANNEL_ID
+
+def is_public_service_channel(channel) -> bool:
+    """公開架構師小夏只服務新 Server 中明確指定的三個頻道。"""
+    if channel is None:
+        return False
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    return guild_id == PUBLIC_GUILD_ID and getattr(channel, "id", None) in PUBLIC_SERVICE_CHANNEL_IDS
+
+def get_architect_channel(channel_id: int):
+    """排程輸出一律使用固定 ID，不再依同名頻道猜測。"""
+    return architect_bot.get_channel(channel_id)
+
+def private_command_authorized(ctx) -> bool:
+    """私人工作室本身為第一道隔離；若有設 OWNER ID，再加本人鎖。"""
+    if not is_private_assistant_workspace(ctx.channel):
+        return False
+    if OWNER_DISCORD_USER_ID and ctx.author.id != OWNER_DISCORD_USER_ID:
+        return False
+    return True
+
+
+# ==========================================
 # 🗄️ 記憶與狀態存取系統
 # ==========================================
 state = {
@@ -2253,6 +2311,12 @@ async def diary_delete(ctx, date_str: str = None):
 async def on_message(message):
     global daily_chat_logs
 
+    # 0. 私人女友 Bot 不服務公開 2_Xiaoxia；亦不介入新舊故事頻道及其 Thread。
+    if getattr(getattr(message.channel, "guild", None), "id", None) == PUBLIC_GUILD_ID:
+        return
+    if is_story_channel_or_thread(message.channel):
+        return
+
     # 1. 基礎過濾
     if message.author.bot: return
     if message.author.id in pending_inputs: return
@@ -2681,6 +2745,9 @@ async def on_raw_reaction_add(payload):
 
 @girlfriend_bot.tree.command(name="test_lyric_push", description="[開發者測試] 模擬發送歌詞與音樂")
 async def test_lyric_push(interaction: discord.Interaction):
+    if getattr(interaction.guild, "id", None) == PUBLIC_GUILD_ID or is_story_channel_or_thread(interaction.channel):
+        await interaction.response.send_message("此功能僅供私人空間使用。", ephemeral=True)
+        return
     # 模擬一段測試數據
     test_lyrics = "[Verse 1]\n雲端的金銀高跟鞋\n踏在心跳的節奏...\n[Chorus]\n大俠大俠我愛你..."
     test_title = "雲端的金銀高跟鞋 (測試版)"
@@ -2709,8 +2776,12 @@ async def midnight_feedback_task():
 # 🌟 新增凌晨 0 點大腦巡邏
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
 async def auto_defrag_task():
-    channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
-    if channel: await optimize_memory_vault(channel)
+    # 私人記憶維護結果只回報至「助手小夏工作室」，不送往公開架構師頻道。
+    channel = get_architect_channel(PRIVATE_ASSISTANT_CHANNEL_ID)
+    if channel:
+        await optimize_memory_vault(channel)
+    else:
+        print(f"⚠️ 找不到 PRIVATE_ASSISTANT_CHANNEL_ID={PRIVATE_ASSISTANT_CHANNEL_ID}，跳過私人大腦巡邏回報。")
 
 # ==========================================
 # 🧠 記憶碎片重組與垃圾回收系統 (Memory Defrag & GC)
@@ -2823,17 +2894,17 @@ class MorningVoiceView(View):
         super().__init__(timeout=86400) # 按鈕有效時間 24 小時
         self.voice_script_base = voice_script_base
 
-    @discord.ui.button(label="▶️ 播放晨間廣播 (小俠)", style=discord.ButtonStyle.green, emoji="📻")
+    @discord.ui.button(label="▶️ 播放晨間廣播 (小夏)", style=discord.ButtonStyle.green, emoji="📻")
     async def play_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
         # 點擊後，先回應使用者 (避免 Discord 超時報錯)
-        await interaction.response.send_message("🎙️ 小夏收到！正在請小俠錄製晨間語音廣播 (約需 15 秒)，請稍候...", ephemeral=False)
+        await interaction.response.send_message("🎙️ 正在產生今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
         
         try:
             import uuid, os, asyncio
             from google.genai import types
             
             # 1. 產生文稿 (使用全域的 async gemini_client)
-            prompt = f"你是一位溫暖、專業的助理「小俠」。請根據以下晨報寫一段約300字的口語化早安廣播稿。開場白：「大俠，早安！為您播報今天的重點。」\n\n{self.voice_script_base}\n\n請只回傳廣播稿。"
+            prompt = f"你是一位專業、清楚的晨報主播「小夏」。請根據以下晨報寫一段約300字的口語化早安廣播稿。開場白：「早安，以下為今日重點晨報。」語氣中性、自然、可公開播放，不使用私人稱呼或曖昧措辭。\n\n{self.voice_script_base}\n\n請只回傳廣播稿。"
             
             text_resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
@@ -2875,7 +2946,7 @@ class MorningVoiceView(View):
             
             # 發送語音檔
             if os.path.exists(mp3_path):
-                await interaction.followup.send(content="🔊 **小俠的晨間廣播來囉！**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
+                await interaction.followup.send(content="🔊 **今日晨間廣播已完成。**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
                 os.remove(mp3_path)
             else:
                 await interaction.followup.send("⚠️ 轉檔失敗，無法生成廣播。")
@@ -2884,9 +2955,11 @@ class MorningVoiceView(View):
             await interaction.followup.send(f"❌ 語音生成發生錯誤: {e}")
 
 async def _run_legacy_morning(target_channel=None):
-    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="晨報")
+    # 自動晨報固定送至新的公開 Server；手動私測仍可傳入私人 ctx.channel。
+    channel = target_channel or get_architect_channel(MORNING_CHANNEL_ID)
     if not channel:
-        channel = discord.utils.get(architect_bot.get_all_channels(), name="架構師專用")
+        channel = get_architect_channel(ARCHITECT_CHANNEL_ID)
+        print(f"⚠️ 找不到 MORNING_CHANNEL_ID={MORNING_CHANNEL_ID}，改送公開架構師頻道。")
 
     if channel:
         await channel.send("⚙️ 啟動 OpenClaw 核心：正在同步總經、ETF 與氣象數據 (約需20秒)...")
@@ -2952,7 +3025,11 @@ async def legacy_morning_trigger():
 
 @architect_bot.event
 async def on_ready():
-    print(f'👩‍💻 小夏 {architect_bot.user} 已上線！微服務監控中...')
+    print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
+    print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
+    print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
+    if not OWNER_DISCORD_USER_ID:
+        print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
     if not legacy_morning_trigger.is_running():
         legacy_morning_trigger.start()
@@ -3194,7 +3271,7 @@ class FomoRadioView(discord.ui.View):
     @discord.ui.button(label="▶️ 播放廣播音檔", style=discord.ButtonStyle.primary, emoji="📻")
     async def play_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
         if os.path.exists(self.mp3_path):
-            await interaction.response.send_message("🎧 **正在為大俠準備耳機... 廣播來囉！**", ephemeral=True)
+            await interaction.response.send_message("🎧 正在準備廣播音檔。", ephemeral=True)
             await interaction.followup.send(file=discord.File(self.mp3_path, filename="Fomo_Radio.mp3"))
         else:
             await interaction.response.send_message("❌ 找不到音檔，可能已經被系統回收了。", ephemeral=True)
@@ -3214,9 +3291,9 @@ async def _run_fomo_radio(target_channel=None, additional_args=None):
     if additional_args is None:
         additional_args = []
         
-    channel = target_channel or discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
+    channel = target_channel or get_architect_channel(FOMO_CHANNEL_ID)
     if channel:
-        await channel.send("📻 **龍蝦廣播電台：** 接收到訊號！小俠正在準備錄音 (請等候約 1~2 分鐘)...")
+        await channel.send("📻 **FOMO 廣播電台：** 正在準備今日廣播音檔，請等候約 1–2 分鐘。")
 
     try:
         import sys
@@ -3341,101 +3418,127 @@ async def save_knowledge(ctx):
 # ==========================================
 @tasks.loop(time=time(hour=11, minute=30, tzinfo=TZ_TPE))
 async def fomo_radio_trigger():
-    # 尋找名為 "fomo廣播電台" 的專屬頻道 (Discord API 抓名稱不含 #)
-    channel = discord.utils.get(architect_bot.get_all_channels(), name="fomo廣播電台")
-    
+    channel = get_architect_channel(FOMO_CHANNEL_ID)
     if channel:
         await _run_fomo_radio(channel)
     else:
-        print("⚠️ FOMO 排程觸發異常：找不到名為 'fomo廣播電台' 的頻道！請確認頻道名稱。")
+        print(f"⚠️ FOMO 排程觸發異常：找不到 FOMO_CHANNEL_ID={FOMO_CHANNEL_ID}。")
 
 
 # ⬇️ 這裡往下就是「大腦對話與盤點引擎」，舊的 @architect_bot.command(name='voice') 已經徹底移除了！
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (優雅修正版 - 補齊 Session 防閃退)
+# 👩‍💻 小夏雙模式對話引擎：私人助手 / 公開架構師
 # ==========================================
 architect_chat_sessions = {}
 
+PRIVATE_XIA_SYSTEM_PROMPT = (
+    "妳是『助手小夏』，一位精通系統架構、也很親近大俠學長的甜美學妹助理。\n"
+    "這是只有大俠能進入的私人工作室，妳可以維持原本親切、活潑、帶點甜甜陪伴感的說話方式，稱呼對方為『大俠學長』。\n"
+    "【核心任務】：精準解決技術問題、協助管理私人工具與資料，同時保有自然溫暖的日常交流。\n"
+    "【安全底線】：即使在私人空間，也不要輸出內部思考過程、草稿標籤或不確定卻假裝確定的答案。"
+)
+
+PUBLIC_XIA_SYSTEM_PROMPT = (
+    "妳是『小夏（系統架構師）』，一位嚴謹、務實的系統架構師與維運助理。\n"
+    "【職責】：協助分析錯誤、檢查部署與服務狀態、整理系統風險、提出可執行的修正步驟。\n"
+    "【公開頻道語氣】：專業、中性、簡潔、有禮；直接回答問題，不使用私人暱稱。\n"
+    "【禁止語氣】：禁止曖昧、撒嬌、戀愛暗示、情感依附、崇拜式表述；禁止稱呼『大俠學長』；禁止使用愛心或撒嬌式波浪語尾。\n"
+    "【回答原則】：不確定時明確說明；先給結論與風險，再給最少必要操作步驟；涉及刪除、覆蓋、部署或費用時先提醒影響。\n"
+    "【輸出限制】：只輸出可公開閱讀的回覆內容，不輸出內部思考過程或草稿標籤。"
+)
+
+def _clean_xia_reply(reply: str) -> str:
+    reply = str(reply or "").strip()
+    reply = re.sub(
+        r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+',
+        '',
+        reply,
+        flags=re.DOTALL | re.MULTILINE,
+    ).strip()
+    reply = reply.strip('"').strip('「').strip('」').strip()
+    if len(reply) > 1900:
+        reply = reply[:1850] + "\n\n(內容過長，已截斷；請指定需要檢視的區段。)"
+    return reply
+
 @architect_bot.event
 async def on_message(message):
-    if message.author.bot: return
-    
-    # 1. 指令優先處理
-    if message.content.startswith('!'):
-        await architect_bot.process_commands(message)
-        return 
+    if message.author.bot:
+        return
 
-    # 2. 判定發言權
-    channel_name = message.channel.name.lower()
-    is_work_channel = any(kw in channel_name for kw in ["系統", "監控", "架構師", "晨報", "fomo", "開發"])
-    is_world_channel = "給你全世界" in channel_name
-    is_mentioned = architect_bot.user.mentioned_in(message) or "@小夏" in message.content
-    
-    can_speak = is_work_channel or (is_world_channel and is_mentioned) or architect_bot.user.mentioned_in(message)
-    
-    if can_speak:
-        user_id = message.author.id
-        # 清除標記字眼，保留乾淨輸入
-        user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').replace('@小夏', '').strip()
-        
-        async with message.channel.typing():
-            try:
-                # 重新校準學妹人設
-                sys_instruct = (
-                    "妳是『小夏』，一位精通系統架構且崇拜大俠學長的甜美學妹助理。\n"
-                    "妳的語氣要像聰明伶俐的小女孩，稱呼對方為『大俠學長』，常帶有『~』或✨、❤等符號。\n"
-                    "【核心任務】：精準解決技術問題，同時保持自然的日常情感交流。\n"
-                    "⚠️【輸出限制】：直接回覆聊天內容。嚴禁輸出內部思考過程、草稿標籤或任何 (1. 2. 3.) 的客服格式。"
+    # 故事頻道一律不由小夏介入。
+    if is_story_channel_or_thread(message.channel):
+        return
+
+    private_mode = is_private_assistant_workspace(message.channel)
+    public_mode = is_public_service_channel(message.channel)
+
+    # 不在私人工作室，也不在公開指定頻道：小夏保持靜默。
+    if not private_mode and not public_mode:
+        return
+
+    # 指令分流：
+    # - 私人工作室保留原本所有 ! 功能（!筆記 / !upload_diary / !upload_project ...）。
+    # - 公開服務區只開放 !ping；其他 ! 工具均不在公開區執行。
+    if message.content.startswith('!'):
+        if private_mode:
+            if OWNER_DISCORD_USER_ID and message.author.id != OWNER_DISCORD_USER_ID:
+                await message.channel.send("⛔ 此私人工具僅限管理者使用。")
+                return
+            await architect_bot.process_commands(message)
+            return
+
+        command_name = message.content[1:].strip().split()[0].lower() if message.content[1:].strip() else ""
+        if command_name == "ping":
+            await architect_bot.process_commands(message)
+        else:
+            await message.channel.send("🔒 此功能僅在私人「助手小夏工作室」提供。")
+        return
+
+    # 公開晨報與 FOMO 是播報頻道：除非標記小夏，否則不插話。
+    if public_mode and message.channel.id in {MORNING_CHANNEL_ID, FOMO_CHANNEL_ID}:
+        if not (architect_bot.user.mentioned_in(message) or "@小夏" in message.content):
+            return
+
+    mode_key = "private" if private_mode else "public"
+    user_id = message.author.id
+    session_key = f"{mode_key}:{user_id}"
+    user_input = message.content.replace(f'<@{architect_bot.user.id}>', '').replace('@小夏', '').strip()
+    if not user_input:
+        return
+
+    system_prompt = PRIVATE_XIA_SYSTEM_PROMPT if private_mode else PUBLIC_XIA_SYSTEM_PROMPT
+    fallback_reply = (
+        "大俠學長，小夏剛剛沒有聽清楚，可以再說一次嗎？"
+        if private_mode
+        else "抱歉，目前未能辨識需求。請提供錯誤訊息、預期行為或相關檔案。"
+    )
+
+    async with message.channel.typing():
+        try:
+            if session_key not in architect_chat_sessions:
+                architect_chat_sessions[session_key] = gemini_client.aio.chats.create(
+                    model="gemini-2.5-flash",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        safety_settings=[
+                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                        ]
+                    )
                 )
 
-                # 💡 修正點 1：先給變數一個初始值，防止 NameError
-                littlexia_reply = "大俠學長，小夏的大腦剛剛恍神了一下，沒聽清楚呢~"
+            response = await architect_chat_sessions[session_key].send_message(user_input)
+            reply = _clean_xia_reply(response.text if response and response.text else fallback_reply)
+            await message.reply(reply or fallback_reply)
 
-                # 🌟 【關鍵修復】：如果這個學長是第一次跟小夏講話，必須先幫他建立專屬的聊天 Session！
-                if user_id not in architect_chat_sessions:
-                    architect_chat_sessions[user_id] = gemini_client.aio.chats.create(
-                        model="gemini-2.5-flash",
-                        config=types.GenerateContentConfig(
-                            system_instruction=sys_instruct,
-                            safety_settings=[
-                                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                            ]
-                        )
-                    )
-
-                response = await architect_chat_sessions[user_id].send_message(user_input)
-                
-                if response and response.text:
-                    littlexia_reply = response.text 
-                    import re
-                    
-                    # 1. 徹底切除 AI 思考標籤
-                    littlexia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', littlexia_reply, flags=re.DOTALL | re.MULTILINE).strip()
-                    
-                    # 2. 移除多餘符號與引號
-                    littlexia_reply = littlexia_reply.strip('"').strip('「').strip('」').strip()
-
-                    # 3. 再次清理特定標籤
-                    patterns_to_remove = [
-                        r'^Thinking Process:.*?\n', 
-                        r'^Draft.*?:.*?\n', 
-                        r'^Final check.*?:.*?\n',
-                        r'^Analysis:.*?\n'
-                    ]
-                    for pattern in patterns_to_remove:
-                        littlexia_reply = re.sub(pattern, '', littlexia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
-
-                if len(littlexia_reply) > 1900:
-                    littlexia_reply = littlexia_reply[:1850] + "\n\n(學長~ 內容太長，小夏先截斷囉！)"
-
-                await message.reply(littlexia_reply)
-
-            except Exception as e:
-                await message.channel.send(f"💦 大俠學長...小夏的大腦剛剛閃退了... 錯誤：{e}")
+        except Exception as exc:
+            if private_mode:
+                await message.channel.send(f"💦 大俠學長，小夏暫時無法處理這個需求：{exc}")
+            else:
+                await message.channel.send(f"⚠️ 架構師模組暫時無法處理此需求。錯誤：{exc}")
 
 
 # ==========================================
