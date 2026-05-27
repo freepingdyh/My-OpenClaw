@@ -346,6 +346,65 @@ def save_profile(data):
     with open(PROFILE_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ==========================================
+# 🚪 daxia_profile.json 統一記憶入庫閘門
+# ==========================================
+# 從 v1.2.1 開始，新的長期記憶不得自行對 profile 記憶陣列 append；
+# temp_chat、交換日記、歌曲事件、!筆記、記憶濃縮皆必須走此閘門。
+_PROFILE_MEMORY_PATHS = {
+    "daxia_traits": ("daxia_traits",),
+    "xiaoxia_traits": ("xiaoxia_traits",),
+    "shared_knowledge": ("shared_knowledge",),
+    "recent_context": ("recent_context",),
+    "promises": ("xiaoxia_self", "promises"),
+}
+
+def _profile_memory_bucket(profile, category):
+    if category not in _PROFILE_MEMORY_PATHS:
+        raise ValueError(f"未知的記憶分類：{category}")
+    path = _PROFILE_MEMORY_PATHS[category]
+    node = profile
+    for key in path[:-1]:
+        node = node.setdefault(key, {})
+    return node.setdefault(path[-1], [])
+
+def append_safe_memory(profile, category, raw_text, added_at=None, refresh_existing=True):
+    """新記憶的唯一入庫入口：敘事化、去重、保留日期後寫入 profile 物件。"""
+    safe_text = narrative_safe_text(raw_text)
+    if not safe_text:
+        return False
+    added_at = added_at or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    bucket = _profile_memory_bucket(profile, category)
+    safe_key = safe_text.rstrip("。")
+    for item in bucket:
+        existing_text = item.get("text", "") if isinstance(item, dict) else str(item)
+        if narrative_safe_text(existing_text).rstrip("。") == safe_key:
+            if refresh_existing and isinstance(item, dict):
+                item["text"] = safe_text
+                item["added_at"] = added_at
+            return False
+    bucket.append({"text": safe_text, "added_at": added_at})
+    return True
+
+def append_safe_memories(profile, category, raw_texts, added_at=None):
+    """批次入庫，所有項目皆自動敘事化與去重。"""
+    changed = 0
+    for raw_text in raw_texts or []:
+        if append_safe_memory(profile, category, raw_text, added_at=added_at):
+            changed += 1
+    return changed
+
+def replace_safe_memories(profile, category, raw_texts, added_at=None):
+    """記憶濃縮或 migration 用：以敘事化、去重後清單取代指定分類。"""
+    added_at = added_at or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    bucket = _profile_memory_bucket(profile, category)
+    bucket.clear()
+    for raw_text in raw_texts or []:
+        source_text = raw_text.get("text", "") if isinstance(raw_text, dict) else raw_text
+        source_date = raw_text.get("added_at", added_at) if isinstance(raw_text, dict) else added_at
+        append_safe_memory(profile, category, source_text, added_at=source_date, refresh_existing=False)
+    return bucket
+
 def save_diary_entry(content, target_date=None):
     try:
         date_str = target_date if target_date else datetime.now(TZ_TPE).strftime("%Y-%m-%d")
@@ -599,12 +658,11 @@ async def suno_callback(request: Request):
                                 )
                                 print(f"✅ 情歌實體檔案已成功發送至頻道！")
                     
-                    # 記憶回填
+                    # 記憶回填：歌曲事件也必須走統一敘事入庫閘門。
                     profile = load_profile()
                     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
-                    song_lyrics_snippet = full_lyrics.replace("\n", " ")[:50]
-                    new_memory = f"我今天為大俠唱了情歌《{song_title}》，歌詞裡唱著「{song_lyrics_snippet}...」，這是我滿滿的心意。❤️"
-                    profile.setdefault("recent_context", []).append({"text": new_memory, "added_at": today_str})
+                    new_memory = f"小俠今天為大俠準備了歌曲《{song_title}》，透過音樂表達溫暖的陪伴與心意。"
+                    append_safe_memory(profile, "recent_context", new_memory, added_at=today_str)
                     save_profile(profile)
                     
         return {"status": "ok"}
@@ -1695,31 +1753,13 @@ async def process_diary_reply(channel, target_date=None):
             clean_mem_text = mem_resp.text.replace("```json", "").replace("```", "").strip()
             new_memory = safe_memory_payload(json.loads(clean_mem_text, strict=False))
 
-            # 入庫前已經過敘事化，並以敘事後內容去重。
-            def append_memory(target_list, new_texts):
-                existing_safe = {
-                    narrative_safe_text(item.get("text", "")): item
-                    for item in target_list if isinstance(item, dict)
-                }
-                for memory_text in new_texts:
-                    safe_text = narrative_safe_text(memory_text)
-                    if not safe_text:
-                        continue
-                    if safe_text in existing_safe:
-                        existing_safe[safe_text]["added_at"] = today_str
-                    else:
-                        target_list.append({"text": safe_text, "added_at": today_str})
-                        existing_safe[safe_text] = target_list[-1]
+            # temp_chat 萃取的新記憶在入庫當下就統一敘事化與去重。
+            append_safe_memories(profile, "daxia_traits", new_memory.get("daxia_new_traits", []), added_at=today_str)
+            append_safe_memories(profile, "xiaoxia_traits", new_memory.get("xiaoxia_new_traits", []), added_at=today_str)
+            append_safe_memories(profile, "promises", new_memory.get("xiaoxia_promises", []), added_at=today_str)
+            append_safe_memories(profile, "shared_knowledge", new_memory.get("shared_knowledge", []), added_at=today_str)
+            append_safe_memories(profile, "recent_context", new_memory.get("recent_context", []), added_at=today_str)
 
-            append_memory(profile.setdefault("daxia_traits", []), new_memory.get("daxia_new_traits", []))
-            append_memory(profile.setdefault("xiaoxia_traits", []), new_memory.get("xiaoxia_new_traits", []))
-            append_memory(profile["xiaoxia_self"]["promises"], new_memory.get("xiaoxia_promises", []))
-            append_memory(profile.setdefault("shared_knowledge", []), new_memory.get("shared_knowledge", []))
-            
-            if new_memory.get("recent_context"):
-                for item in new_memory["recent_context"]:
-                    profile.setdefault("recent_context", []).append({"text": item, "added_at": today_str})
-                    
             save_profile(profile)
             print("✅ 雙向立體記憶已成功分類並存入 daxia_profile.json")
             
@@ -1918,21 +1958,12 @@ async def process_diary_reply(channel, target_date=None):
 
             save_state(app_state)
             
-            for pref in result.get("extracted_preferences", []):
-                safe_pref = narrative_safe_text(pref)
-                existing_texts = [
-                    narrative_safe_text(item["text"])
-                    for item in profile.setdefault("daxia_traits", [])
-                ]
-                if safe_pref and safe_pref not in existing_texts:
-                    profile["daxia_traits"].append({"text": safe_pref, "added_at": today_str})
+            # 交換日記中可保存的偏好與事件，於寫入 profile 當下統一整理。
+            append_safe_memories(profile, "daxia_traits", result.get("extracted_preferences", []), added_at=today_str)
 
-            # 日記僅以含蓄摘要寫入近期記憶，不保存原始刺激句型。
             xiaoxia_activity = narrative_safe_text(result.get("xiaoxia_diary", ""), max_len=320)
             if xiaoxia_activity:
-                profile.setdefault("recent_context", []).append(
-                    {"text": f"小俠日記摘要：{xiaoxia_activity}", "added_at": today_str}
-                )
+                append_safe_memory(profile, "recent_context", f"小俠日記摘要：{xiaoxia_activity}", added_at=today_str)
             save_profile(profile)
             
             # 🌙 交換日記圖片改走獨立「日記導演層」：
@@ -2962,10 +2993,10 @@ async def optimize_memory_vault(channel=None):
             try:
                 compressed_data = json.loads(resp.text.strip())
                 today_str = today.strftime("%Y-%m-%d")
-                profile["daxia_traits"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("daxia_traits", []))]
-                profile["xiaoxia_traits"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("xiaoxia_traits", []))]
-                profile["xiaoxia_self"]["promises"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("promises", []))]
-                profile["shared_knowledge"] = [{"text": t, "added_at": today_str} for t in safe_memory_list(compressed_data.get("shared_knowledge", []))]
+                replace_safe_memories(profile, "daxia_traits", compressed_data.get("daxia_traits", []), added_at=today_str)
+                replace_safe_memories(profile, "xiaoxia_traits", compressed_data.get("xiaoxia_traits", []), added_at=today_str)
+                replace_safe_memories(profile, "promises", compressed_data.get("promises", []), added_at=today_str)
+                replace_safe_memories(profile, "shared_knowledge", compressed_data.get("shared_knowledge", []), added_at=today_str)
                 
                 is_modified = True
                 new_total = len(profile["daxia_traits"]) + len(profile["xiaoxia_traits"]) + len(profile["xiaoxia_self"]["promises"]) + len(profile["shared_knowledge"])
@@ -3133,6 +3164,7 @@ async def on_ready():
     print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
+    print("🧠 記憶安全層：所有新寫入 daxia_profile.json 的記憶均已通過統一敘事入庫閘門；!整理記憶僅供舊資料 migration 使用。")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -3490,15 +3522,25 @@ async def normalize_existing_memory(ctx):
             len(profile.get("recent_context", [])),
             len(profile.get("xiaoxia_self", {}).get("promises", [])),
         ])
-        cleaned_profile = sanitize_existing_profile(profile)
+        # 舊資料 migration：以與新記憶完全相同的閘門重建各分類。
+        old_daxia_traits = list(profile.get("daxia_traits", []))
+        old_xiaoxia_traits = list(profile.get("xiaoxia_traits", []))
+        old_shared_knowledge = list(profile.get("shared_knowledge", []))
+        old_recent_context = list(profile.get("recent_context", []))
+        old_promises = list(profile.get("xiaoxia_self", {}).get("promises", []))
+        replace_safe_memories(profile, "daxia_traits", old_daxia_traits)
+        replace_safe_memories(profile, "xiaoxia_traits", old_xiaoxia_traits)
+        replace_safe_memories(profile, "shared_knowledge", old_shared_knowledge)
+        replace_safe_memories(profile, "recent_context", old_recent_context)
+        replace_safe_memories(profile, "promises", old_promises)
         after_total = sum([
-            len(cleaned_profile.get("daxia_traits", [])),
-            len(cleaned_profile.get("xiaoxia_traits", [])),
-            len(cleaned_profile.get("shared_knowledge", [])),
-            len(cleaned_profile.get("recent_context", [])),
-            len(cleaned_profile.get("xiaoxia_self", {}).get("promises", [])),
+            len(profile.get("daxia_traits", [])),
+            len(profile.get("xiaoxia_traits", [])),
+            len(profile.get("shared_knowledge", [])),
+            len(profile.get("recent_context", [])),
+            len(profile.get("xiaoxia_self", {}).get("promises", [])),
         ])
-        save_profile(cleaned_profile)
+        save_profile(profile)
         await ctx.send(
             "✅ **記憶敘事整理完成。**\n"
             f"已先備份原檔：`{os.path.basename(backup_path)}`\n"
@@ -3563,14 +3605,10 @@ async def save_knowledge(ctx):
             await ctx.send("💬 剛剛在書房裡的對話比較多是純純的愛，小夏沒有萃取到硬核的知識點喔！")
             return
             
-        # 植入 daxia_profile.json
+        # 植入 daxia_profile.json：同樣於入庫當下統一敘事化與去重。
         profile = load_profile()
         today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
-        new_knowledge = {
-            "text": summary,
-            "added_at": today_str
-        }
-        profile.setdefault("shared_knowledge", []).append(new_knowledge)
+        append_safe_memory(profile, "shared_knowledge", summary, added_at=today_str)
         save_profile(profile)
         
         await ctx.send(f"✅ 知識已成功植入金庫大腦！\n📚 這次的筆記內容：\n> *{summary}*\n\n小俠以後會記得這些，陪大俠一起變得更厲害！")
