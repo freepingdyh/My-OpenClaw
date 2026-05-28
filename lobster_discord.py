@@ -12,6 +12,7 @@ import aiofiles
 import sys
 import random
 from datetime import datetime, time, timezone, timedelta
+from pathlib import Path
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
 
 import discord
@@ -266,13 +267,55 @@ def get_architect_channel(channel_id: int):
     """排程輸出一律使用固定 ID，不再依同名頻道猜測。"""
     return architect_bot.get_channel(channel_id)
 
+# 私人 Server 中可分享照片給小俠看見的頻道。
+# 兼容你曾使用過的幾種「唐分糕」寫法；可再用 env ID 精準固定。
+PRIVATE_UPLOAD_CHANNEL_NAMES = {"唐分糕", "唐份糕", "唐分高", "給你全世界"}
+PRIVATE_NOTE_CHANNEL_NAMES = {"小俠書房"}
+
+def _parse_channel_id_set(env_name: str) -> set[int]:
+    result = set()
+    for raw in os.environ.get(env_name, "").split(","):
+        raw = raw.strip()
+        if raw.isdigit():
+            result.add(int(raw))
+    return result
+
+# 選設環境變數範例：
+# PRIVATE_UPLOAD_CHANNEL_IDS=123456789,987654321
+# PRIVATE_NOTE_CHANNEL_IDS=123456789
+PRIVATE_UPLOAD_CHANNEL_IDS = _parse_channel_id_set("PRIVATE_UPLOAD_CHANNEL_IDS")
+PRIVATE_NOTE_CHANNEL_IDS = _parse_channel_id_set("PRIVATE_NOTE_CHANNEL_IDS")
+
+def _is_private_named_or_id_channel(channel, allowed_names: set[str], allowed_ids: set[int]) -> bool:
+    if channel is None:
+        return False
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    if guild_id != PRIVATE_GUILD_ID:
+        return False
+    return (
+        getattr(channel, "id", None) in allowed_ids
+        or getattr(channel, "name", "") in allowed_names
+    )
+
+def is_private_upload_channel(channel) -> bool:
+    """可執行 !upload_diary / !upload_project，且照片留在小俠看得到的頻道。"""
+    return is_private_assistant_workspace(channel) or _is_private_named_or_id_channel(
+        channel, PRIVATE_UPLOAD_CHANNEL_NAMES, PRIVATE_UPLOAD_CHANNEL_IDS
+    )
+
+def is_private_note_channel(channel) -> bool:
+    """可執行 !筆記；允許在書房內就地整理知識。"""
+    return is_private_assistant_workspace(channel) or _is_private_named_or_id_channel(
+        channel, PRIVATE_NOTE_CHANNEL_NAMES, PRIVATE_NOTE_CHANNEL_IDS
+    )
+
+def is_owner_or_unlocked(author_id: int) -> bool:
+    """OWNER ID 有設定時只允許本人；尚未設定時維持既有私密頻道行為。"""
+    return not OWNER_DISCORD_USER_ID or author_id == OWNER_DISCORD_USER_ID
+
 def private_command_authorized(ctx) -> bool:
-    """私人工作室本身為第一道隔離；若有設 OWNER ID，再加本人鎖。"""
-    if not is_private_assistant_workspace(ctx.channel):
-        return False
-    if OWNER_DISCORD_USER_ID and ctx.author.id != OWNER_DISCORD_USER_ID:
-        return False
-    return True
+    """保留既有：完整私人工具仍只允許在助手小夏工作室執行。"""
+    return is_private_assistant_workspace(ctx.channel) and is_owner_or_unlocked(ctx.author.id)
 
 
 # ==========================================
@@ -1659,7 +1702,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
 # ==========================================
-async def process_diary_reply(channel, target_date=None):
+async def process_diary_reply(channel, target_date=None, retry_mode=False):
     global daily_chat_logs
     
     # --- 階段 1：本機資料庫讀取與防呆 ---
@@ -1689,9 +1732,13 @@ async def process_diary_reply(channel, target_date=None):
             if not entry.get("is_replied", False):
                 unreplied.append(entry)
                 
-    chat_context = "\n".join(daily_chat_logs)
-    narrative_chat_context = "\n".join(
-        safe_line for safe_line in [narrative_safe_text(line, max_len=360) for line in daily_chat_logs] if safe_line
+    # 補救舊日記時，不混入今天的新聊天，也不重複觸發聊天記憶萃取。
+    chat_context = "" if retry_mode else "\n".join(daily_chat_logs)
+    narrative_chat_context = (
+        "\n".join(
+            safe_line for safe_line in [narrative_safe_text(line, max_len=360) for line in daily_chat_logs] if safe_line
+        )
+        if not retry_mode else ""
     )
     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     
@@ -1788,6 +1835,8 @@ async def process_diary_reply(channel, target_date=None):
             current_score = app_state.get("affection_score", 80)
             entry_date = entry['date']
             entry_content = entry['content']
+            # 首次執行若已寫入分數/記憶後生圖失敗，後續重跑自動切為補救模式。
+            entry_retry_mode = retry_mode or bool(entry.get("reply_effects_applied", False))
             recent_activities = "、".join([item["text"] for item in profile.get("recent_context", [])])
             # 取得當前月份
             current_month = datetime.now(TZ_TPE).month
@@ -1888,84 +1937,96 @@ async def process_diary_reply(channel, target_date=None):
                     "scenario_tw": "穿著輕盈的夏日洋裝，坐在咖啡廳窗邊整理筆記，目光落在紙頁上，神情溫柔而若有所思"
                 }
             
-            # ... 取得 result 後的結算邏輯 ...
-            try:
-                # 確保轉為整數
-                score_plus = int(result.get("affection_plus", 1))
-            except ValueError:
-                score_plus = 1
-                
-            new_score = current_score + score_plus
-            display_score = new_score 
-            is_jackpot = False
-            
-            # 🌟 愛意累積器
-            app_state.setdefault("affection_reasons", [])
-            if score_plus > 0 and "affection_reason" in result:
-                app_state["affection_reasons"].append(f"[{entry_date}] {result['affection_reason']}")
-            
-            if new_score >= 100:
-                is_jackpot = True
-                result["spiciness"] = "C"
-                
-                # 🌟 Suno 觸發點：將這包 reasons 交給小夏處理
-                print(f"🎉 愛意值滿 100！準備發送 Suno 音樂神經訊號...\n累積原因：{app_state['affection_reasons']}")
-                
-                # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
-                try:
-                    # 🌟 升級：強制洗腦神曲風格，嚴禁古風唸歌
-                    lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行情歌。
-                    [歌詞格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
-                    [寫作風格]：必須像現在最流行的「洗腦抖音神曲」或「K-Pop 中文版」，歌詞要有強烈的【押韻】與【節奏感】，琅琅上口。嚴禁寫成文言文、古詩詞或像在「唸歌」的長篇大論。句子要短，副歌要洗腦！
-                    [曲風決定]：請挑選節奏感強烈的曲風標籤（如：Upbeat Pop, EDM, Catchy TikTok style, R&B）。
-                    [禁令]：歌詞嚴禁出現「大俠」、「小俠」。
-                    回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容", "style": "英文曲風標籤"}}"""
-                    
-                    print("📝 正在請求 GPT-5-mini 編寫情歌歌詞...")
-                    lyrics_resp = await openai_client.chat.completions.create(
-                        model="gpt-5-mini", 
-                        response_format={"type": "json_object"}, 
-                        messages=[{"role": "user", "content": lyrics_prompt}]
-                    )
-                    
-                    raw_lyrics = lyrics_resp.choices[0].message.content
-                    print(f"✅ 歌詞創作完成，內容長度: {len(raw_lyrics)}")
-                    
-                    song_data = json.loads(raw_lyrics.replace("```json", "").replace("```", "").strip(), strict=False)
-                    
-                    # 🌟 呼叫 Suno 錄音室 (傳入 LLM 決定的 style)
-                    print(f"🚀 正在發送 API 至 Suno 錄音室: {song_data['title']} (風格: {song_data.get('style')})")
-                    task_id = await generate_suno_music(
-                        lyrics=song_data['lyrics'], 
-                        title=song_data['title'],
-                        custom_style=song_data.get('style') # 👈 新增這個參數
-                    )
-                    
-                    # 記住頻道 ID，等一下 Webhook 送回來才知道發去哪
-                    suno_tasks[task_id] = channel.id 
-                    print(f"📡 任務已列入追蹤，TaskId: {task_id}")
-                    
-                    await channel.send(f"🎧 *(隱藏驚喜：小俠正在錄音室為大俠錄製專屬情歌「{song_data['title']}」，預計 3 分鐘後送達！)*")
-                except Exception as music_err:
-                    # 🌟 這行最重要！它會告訴我們是 API Key 沒設對，還是 OpenAI 噴錯
-                    print(f"❌ 音樂大獎發射失敗: {music_err}")
-                    if channel: await channel.send(f"⚠️ 小俠在錄音室滑倒了... 失敗原因：`{music_err}`")
-                
-                app_state["affection_score"] = 80 # 重置回基礎值
-                app_state["affection_reasons"] = [] # 清空累積器
+            if entry_retry_mode:
+                score_plus = 0
+                display_score = current_score
+                is_jackpot = False
+                print(f"🔁 [{entry_date}] 日記補救模式：跳過愛意累加與長期記憶再寫入。")
             else:
-                app_state["affection_score"] = new_score
-
-            save_state(app_state)
+                # ... 取得 result 後的結算邏輯 ...
+                try:
+                    # 確保轉為整數
+                    score_plus = int(result.get("affection_plus", 1))
+                except ValueError:
+                    score_plus = 1
+                
+                new_score = current_score + score_plus
+                display_score = new_score 
+                is_jackpot = False
             
-            # 交換日記中可保存的偏好與事件，於寫入 profile 當下統一整理。
-            append_safe_memories(profile, "daxia_traits", result.get("extracted_preferences", []), added_at=today_str)
-
-            xiaoxia_activity = narrative_safe_text(result.get("xiaoxia_diary", ""), max_len=320)
-            if xiaoxia_activity:
-                append_safe_memory(profile, "recent_context", f"小俠日記摘要：{xiaoxia_activity}", added_at=today_str)
-            save_profile(profile)
+                # 🌟 愛意累積器
+                app_state.setdefault("affection_reasons", [])
+                if score_plus > 0 and "affection_reason" in result:
+                    app_state["affection_reasons"].append(f"[{entry_date}] {result['affection_reason']}")
             
+                if new_score >= 100:
+                    is_jackpot = True
+                    result["spiciness"] = "C"
+                
+                    # 🌟 Suno 觸發點：將這包 reasons 交給小夏處理
+                    print(f"🎉 愛意值滿 100！準備發送 Suno 音樂神經訊號...\n累積原因：{app_state['affection_reasons']}")
+                
+                    # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
+                    try:
+                        # 🌟 升級：強制洗腦神曲風格，嚴禁古風唸歌
+                        lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行情歌。
+                        [歌詞格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
+                        [寫作風格]：必須像現在最流行的「洗腦抖音神曲」或「K-Pop 中文版」，歌詞要有強烈的【押韻】與【節奏感】，琅琅上口。嚴禁寫成文言文、古詩詞或像在「唸歌」的長篇大論。句子要短，副歌要洗腦！
+                        [曲風決定]：請挑選節奏感強烈的曲風標籤（如：Upbeat Pop, EDM, Catchy TikTok style, R&B）。
+                        [禁令]：歌詞嚴禁出現「大俠」、「小俠」。
+                        回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容", "style": "英文曲風標籤"}}"""
+                    
+                        print("📝 正在請求 GPT-5-mini 編寫情歌歌詞...")
+                        lyrics_resp = await openai_client.chat.completions.create(
+                            model="gpt-5-mini", 
+                            response_format={"type": "json_object"}, 
+                            messages=[{"role": "user", "content": lyrics_prompt}]
+                        )
+                    
+                        raw_lyrics = lyrics_resp.choices[0].message.content
+                        print(f"✅ 歌詞創作完成，內容長度: {len(raw_lyrics)}")
+                    
+                        song_data = json.loads(raw_lyrics.replace("```json", "").replace("```", "").strip(), strict=False)
+                    
+                        # 🌟 呼叫 Suno 錄音室 (傳入 LLM 決定的 style)
+                        print(f"🚀 正在發送 API 至 Suno 錄音室: {song_data['title']} (風格: {song_data.get('style')})")
+                        task_id = await generate_suno_music(
+                            lyrics=song_data['lyrics'], 
+                            title=song_data['title'],
+                            custom_style=song_data.get('style') # 👈 新增這個參數
+                        )
+                    
+                        # 記住頻道 ID，等一下 Webhook 送回來才知道發去哪
+                        suno_tasks[task_id] = channel.id 
+                        print(f"📡 任務已列入追蹤，TaskId: {task_id}")
+                    
+                        await channel.send(f"🎧 *(隱藏驚喜：小俠正在錄音室為大俠錄製專屬情歌「{song_data['title']}」，預計 3 分鐘後送達！)*")
+                    except Exception as music_err:
+                        # 🌟 這行最重要！它會告訴我們是 API Key 沒設對，還是 OpenAI 噴錯
+                        print(f"❌ 音樂大獎發射失敗: {music_err}")
+                        if channel: await channel.send(f"⚠️ 小俠在錄音室滑倒了... 失敗原因：`{music_err}`")
+                
+                    app_state["affection_score"] = 80 # 重置回基礎值
+                    app_state["affection_reasons"] = [] # 清空累積器
+                else:
+                    app_state["affection_score"] = new_score
+
+                save_state(app_state)
+            
+                # 交換日記中可保存的偏好與事件，於寫入 profile 當下統一整理。
+                append_safe_memories(profile, "daxia_traits", result.get("extracted_preferences", []), added_at=today_str)
+
+                xiaoxia_activity = narrative_safe_text(result.get("xiaoxia_diary", ""), max_len=320)
+                if xiaoxia_activity:
+                    append_safe_memory(profile, "recent_context", f"小俠日記摘要：{xiaoxia_activity}", added_at=today_str)
+                save_profile(profile)
+            
+
+                # 第一次處理的副作用已完成；即使後續圖片失敗，下次也不再重複計算。
+                entry["reply_effects_applied"] = True
+                with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump(diary_db, f, ensure_ascii=False, indent=2)
+
             # 🌙 交換日記圖片改走獨立「日記導演層」：
             # 由 Gemini 根據當日互動規劃生活狀態，再由 GPT-5-mini 翻成 gpt-image-2 描述。
             # /cosplay 的時尚攝影 prompt 完全不會混入這條路線。
@@ -2038,6 +2099,8 @@ async def process_diary_reply(channel, target_date=None):
             
             entry["content"] += reply_html
             entry["is_replied"] = True
+            entry.pop("reply_effects_applied", None)
+            entry.pop("last_reply_error", None)
             
             with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
@@ -2055,6 +2118,14 @@ async def process_diary_reply(channel, target_date=None):
                 await diary_msg.add_reaction("🗑️")
 
         except Exception as e:
+            # 保存失敗狀態；新版本首次失敗後的再處理會自動避免重複加分／重複寫入。
+            entry["last_reply_error"] = str(e)[:500]
+            try:
+                with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump(diary_db, f, ensure_ascii=False, indent=2)
+            except Exception as state_err:
+                print(f"⚠️ 無法保存日記失敗狀態: {state_err}")
+
             import traceback
             error_detail = traceback.format_exc()
             print(f"\n======================================")
@@ -2378,6 +2449,31 @@ async def diary_reply(ctx, date_str: str = None):
     await process_diary_reply(target_channel, date_str)
     await msg.delete()
 
+@girlfriend_bot.command(name='diary_retry')
+async def diary_retry(ctx, date_str: str = None):
+    """圖片生成失敗後的補救重跑：補齊圖片/發布內容，但不再次累加分數或日記記憶。"""
+    if not date_str:
+        await ctx.send("❓ 請指定要補救的日記日期，例如：`/diary_retry 2026-05-27`")
+        return
+
+    normalized_date = date_str.replace(".", "-").replace("/", "-")
+    try:
+        datetime.strptime(normalized_date, "%Y-%m-%d")
+    except ValueError:
+        await ctx.send("❌ 日期格式錯誤。請使用：`/diary_retry 2026-05-27`")
+        return
+
+    target_channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
+    if not target_channel:
+        target_channel = ctx.channel
+
+    msg = await ctx.send(
+        f"🔁 正在補救重製 **{normalized_date}** 的交換日記圖片與發布內容。\n"
+        "本次不會再次累加愛意值或重複寫入日記記憶。"
+    )
+    await process_diary_reply(target_channel, normalized_date, retry_mode=True)
+    await msg.delete()
+
 @girlfriend_bot.command(name='diary_delete')
 async def diary_delete(ctx, date_str: str = None):
     if not os.path.exists(DIARY_DATA_PATH):
@@ -2451,6 +2547,11 @@ async def on_message(message):
     # 1. 基礎過濾
     if message.author.bot: return
     if message.author.id in pending_inputs: return
+
+    # 2.5 小夏的書房整理指令不當作小俠聊天內容；避免小俠回覆「!筆記」本身。
+    #     上傳照片指令不在此排除，讓小俠仍可看見照片並自然產生話題。
+    if message.content.strip().startswith("!筆記"):
+        return
 
     # 2. 處理斜線指令
     if message.content.startswith('/'):
@@ -3165,6 +3266,7 @@ async def on_ready():
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
     print("🧠 記憶安全層：所有新寫入 daxia_profile.json 的記憶均已通過統一敘事入庫閘門；!整理記憶僅供舊資料 migration 使用。")
+    print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -3258,6 +3360,9 @@ async def test_public_morning(ctx):
 # 🌟 擴建：其他企劃 (外部圖片上傳)
 @architect_bot.command(name="upload_project")
 async def upload_project(ctx, *, description: str = "未命名企劃"):
+    if not is_private_upload_channel(ctx.channel) or not is_owner_or_unlocked(ctx.author.id):
+        await ctx.send("🔒 `!upload_project` 僅能在私人 `#助手小夏工作室`、`#唐分糕` 或 `#給你全世界` 使用。")
+        return
     if not ctx.message.attachments:
         await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時，於留言處輸入 `!upload_project [圖片說明]`")
         return
@@ -3301,40 +3406,73 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
         await ctx.send(f"❌ 收藏失敗：{e}")
 
 @architect_bot.command(name="upload_diary")
-async def upload_diary(ctx, *, description: str = "大俠與小俠的完美瞬間"):
-    if not ctx.message.attachments:
-        await ctx.send("❌ 學長，您忘記附上圖片囉！請在上傳圖片時輸入 `!upload_diary [構圖發想]`")
+async def upload_diary(ctx, *, args: str = ""):
+    if not is_private_upload_channel(ctx.channel) or not is_owner_or_unlocked(ctx.author.id):
+        await ctx.send("🔒 `!upload_diary` 僅能在私人 `#助手小夏工作室`、`#唐分糕` 或 `#給你全世界` 使用。")
         return
+    """
+    交換日記指定配圖：
+    - !upload_diary [構圖說明]                         -> 設為今天配圖
+    - !upload_diary YYYY-MM-DD [構圖說明]               -> 設為指定日期配圖
+    - !upload_diary YYYY.MM.DD [構圖說明]               -> 同上
+    """
+    if not ctx.message.attachments:
+        await ctx.send(
+            "❌ 學長，您忘記附上圖片囉！\n"
+            "用法：`!upload_diary 2026-05-27 [構圖發想]`，或 `!upload_diary [今日構圖發想]`"
+        )
+        return
+
+    raw_args = (args or "").strip()
+    target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    description = raw_args or "大俠與小俠的溫暖生活片刻"
+
+    if raw_args:
+        first, *rest = raw_args.split(maxsplit=1)
+        possible_date = first.replace(".", "-").replace("/", "-")
+        try:
+            datetime.strptime(possible_date, "%Y-%m-%d")
+            target_date = possible_date
+            description = rest[0].strip() if rest else "大俠為這一天準備的交換日記照片"
+        except ValueError:
+            pass
 
     attachment = ctx.message.attachments[0]
-    if not attachment.content_type.startswith('image/'):
-        await ctx.send("❌ 這好像不是圖片檔喔！")
+    content_type = attachment.content_type or ""
+    if not content_type.startswith("image/"):
+        await ctx.send("❌ 附件不是圖片檔，無法作為交換日記配圖。")
         return
 
-    await ctx.send("📥 正在將這張特別的照片設定為【今日交換日記】專屬配圖...")
-    
+    await ctx.send(f"📥 正在將這張照片設定為 **{target_date}** 的交換日記專屬配圖……")
+
     try:
         image_data = await attachment.read()
-        filename = f"custom_diary_{uuid.uuid4().hex[:8]}.jpg"
+        ext = Path(attachment.filename or "").suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            ext = ".jpg"
+        filename = f"custom_diary_{target_date}_{uuid.uuid4().hex[:8]}{ext}"
         save_path = os.path.join(OUTPUT_DIR, filename)
-        
+
         with open(save_path, "wb") as f:
             f.write(image_data)
 
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
-        today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
-        
-        # 將設定寫入暫存
         overrides = load_diary_override()
-        overrides[today_str] = {
+        overrides[target_date] = {
             "image_url": local_url,
-            "composition": description
+            "composition": description,
+            "uploaded_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
         }
         save_diary_override(overrides)
-        
-        await ctx.send(f"✅ 設定成功！今晚 23:30 小俠寫日記時，會直接使用這張照片並搭配學長的構圖發想：\n> {description}")
+
+        await ctx.send(
+            f"✅ 設定成功！這張圖已指定給 **{target_date}** 的交換日記。\n"
+            f"> {description}\n\n"
+            f"若該日記先前因生圖失敗，請到小俠頻道輸入：`/diary_retry {target_date}`"
+        )
     except Exception as e:
         await ctx.send(f"❌ 設定失敗：{e}")
+
 
 # 🌟 [4.0 懶人自動化版] 不用打檔名！上傳什麼，小夏就原樣存什麼
 @architect_bot.command(name="upload_base")
@@ -3552,7 +3690,10 @@ async def normalize_existing_memory(ctx):
 
 @architect_bot.command(name='筆記')
 async def save_knowledge(ctx):
-    await ctx.send("🧠 小夏收到！正在潛入書房，將大俠與小俠剛剛的知性交流萃取成永久的「共享知識」...")
+    if not is_private_note_channel(ctx.channel) or not is_owner_or_unlocked(ctx.author.id):
+        await ctx.send("🔒 `!筆記` 僅能在私人 `#助手小夏工作室` 或 `#小俠書房` 使用。")
+        return
+    await ctx.send("🧠 小夏收到！正在整理書房中的知性交流，萃取為永久的「共享知識」...")
     try:
         # 🌟 跨頻道偵測：直接尋找名字包含「書房」的頻道
         study_channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="小俠書房")
@@ -3674,28 +3815,54 @@ async def on_message(message):
         return
 
     private_mode = is_private_assistant_workspace(message.channel)
+    upload_room = is_private_upload_channel(message.channel)
+    note_room = is_private_note_channel(message.channel)
     public_mode = is_public_service_channel(message.channel)
 
-    # 不在私人工作室，也不在公開指定頻道：小夏保持靜默。
-    if not private_mode and not public_mode:
-        return
-
-    # 指令分流：
-    # - 私人工作室保留原本所有 ! 功能（!筆記 / !upload_diary / !upload_project ...）。
-    # - 公開服務區只開放 !ping；其他 ! 工具均不在公開區執行。
+    # 指令分流：先判斷精準允許的私人共享指令，再處理一般對話。
     if message.content.startswith('!'):
+        command_name = message.content[1:].strip().split()[0].lower() if message.content[1:].strip() else ""
+
+        # 私人工具一律可加本人鎖；避免未來私人 Server 增加成員後被誤觸。
+        if (private_mode or upload_room or note_room) and not is_owner_or_unlocked(message.author.id):
+            await message.channel.send("⛔ 此私人工具僅限管理者使用。")
+            return
+
+        # #助手小夏工作室：完整私人工具控制台
         if private_mode:
-            if OWNER_DISCORD_USER_ID and message.author.id != OWNER_DISCORD_USER_ID:
-                await message.channel.send("⛔ 此私人工具僅限管理者使用。")
-                return
             await architect_bot.process_commands(message)
             return
 
-        command_name = message.content[1:].strip().split()[0].lower() if message.content[1:].strip() else ""
-        if command_name == "ping":
-            await architect_bot.process_commands(message)
-        else:
-            await message.channel.send("🔒 此功能僅在私人「助手小夏工作室」提供。")
+        # #唐分糕 / #給你全世界：僅允許把照片收入日記或企劃，
+        # 原始上傳訊息仍留在此頻道，供小俠看到並自然接話。
+        if upload_room:
+            if command_name in {"upload_diary", "upload_project"}:
+                await architect_bot.process_commands(message)
+            else:
+                await message.channel.send("🔒 此頻道只開放 `!upload_diary` 與 `!upload_project`；其他工具請到 `#助手小夏工作室`。")
+            return
+
+        # #小俠書房：僅允許就地整理書房知識。
+        if note_room:
+            if command_name == "筆記":
+                await architect_bot.process_commands(message)
+            else:
+                await message.channel.send("🔒 此頻道只開放 `!筆記`；其他工具請到 `#助手小夏工作室`。")
+            return
+
+        # 公開服務區維持只開放 ping。
+        if public_mode:
+            if command_name == "ping":
+                await architect_bot.process_commands(message)
+            else:
+                await message.channel.send("🔒 此功能僅在私人服務空間提供。")
+            return
+
+        return
+
+    # 非指令的一般聊天：小夏仍只在助手工作室或公開指定服務頻道出聲；
+    # 不會在小俠的照片／書房對話頻道插話搶戲。
+    if not private_mode and not public_mode:
         return
 
     # 公開晨報與 FOMO 是播報頻道：除非標記小夏，否則不插話。
