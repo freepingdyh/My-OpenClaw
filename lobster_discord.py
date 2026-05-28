@@ -3136,18 +3136,18 @@ class MorningVoiceView(View):
         await interaction.response.send_message("🎙️ 小俠正在準備今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
         
         try:
-            import uuid, os, asyncio
+            import uuid, os, asyncio, re
             from google.genai import types
             
             # 1. 產生文稿 (使用全域的 async gemini_client)
-            prompt = f"""你是公開晨間廣播的固定主持人「小俠」。請根據以下晨報資料，寫一段約300字、溫暖自然且適合大眾收聽的口語化晨報正文。
+            prompt = f"""你是公開晨間廣播的固定主持人「小俠」。請根據以下晨報資料，寫一段約300字、年輕自然且適合大眾收聽的口語化晨報正文。
 
-【固定規則】
-1. 主持人永遠是「小俠」，不得寫成「小夏」或其他名字。
-2. 這是公開晨報，不可稱呼「大俠」、「大俠學長」或任何私人對象。
-3. 不要自行寫開場自我介紹；程式會固定加上小俠的問安開場，避免重複。
-4. 語氣要有溫度，像親切的電台晨間主持人，但內容仍應清楚、精簡。
-5. 請只回傳開場後的播報正文，不要加標題或額外說明。
+【必要規則】
+1. 主持人固定是「小俠」，但不要寫問安或自我介紹；程式會在最前面統一加入一次。
+2. 第一個字就直接進入今日內容，例如市場表現、焦點消息或天氣提醒。
+3. 這是公開晨報，不可稱呼「大俠」、「大俠學長」或任何私人對象。
+4. 語氣像二十多歲的親切女主持人：清爽、有朝氣、有溫度，但不要過度活潑或裝可愛。
+5. 請只回傳播報正文，不要加標題、角色名稱或額外說明。
 
 【晨報資料】
 {self.voice_script_base}
@@ -3157,25 +3157,39 @@ class MorningVoiceView(View):
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            body_text = text_resp.text.strip()
+            body_text = text_resp.text.strip().strip('"').strip("「」").strip()
 
-            # 固定公開晨報主持人與問安開場，不將身份穩定性寄託於模型輸出。
-            # 若模型仍自行補開場，先清掉再接固定版本，避免重複自我介紹。
-            body_text = re.sub(
-                r"^(?:(?:大家|各位(?:聽眾|朋友)?|大俠)?[，, ]*)?早安[！!，,。:： ]*",
-                "",
-                body_text,
-            ).strip()
-            body_text = re.sub(
-                r"^(?:我是|這裡是|由)(?:晨間廣播主持人)?[「『]?(?:小俠|小夏)[」』]?[，,。！! ]*",
-                "",
-                body_text,
-            ).strip()
+            # 開場由程式固定加入一次；模型若違規自行問安／自介，先清除，避免重複。
+            for _ in range(3):
+                before = body_text
+                body_text = re.sub(
+                    r"^\s*(?:(?:大家|各位(?:聽眾|朋友)?|朋友們)?\s*[，,]?\s*)?"
+                    r"早安[！!，,。:：\s]*",
+                    "",
+                    body_text,
+                    count=1,
+                ).strip()
+                body_text = re.sub(
+                    r"^\s*(?:我是|這裡是|由)\s*(?:晨間廣播主持人\s*)?[「『]?"
+                    r"小[俠夏][」』]?[^。！？!?]*[。！？!?]\s*",
+                    "",
+                    body_text,
+                    count=1,
+                ).strip()
+                if body_text == before:
+                    break
+
             body_text = body_text.replace("大俠學長", "各位朋友").replace("大俠", "大家")
+            raw_text = "大家早安，我是小俠。" + ("\n" + body_text if body_text else "")
 
-            intro_text = "大家早安，我是小俠。現在為大家播報今天的晨間重點。"
-            raw_text = intro_text + ("\n" + body_text if body_text else "")
-            
+            # TTS 只朗讀台詞，並固定為年輕、清亮、自然的主持語氣。
+            tts_prompt = (
+                "請以二十多歲台灣女生晨間主持人的聲音朗讀下方【台詞】。"
+                "聲線清亮、年輕、自然帶著微笑，語速輕快但咬字清楚；"
+                "不要成熟沉重，不要傳統新聞播報腔，也不要自行增加、刪除或重複任何台詞。"
+                "\n【台詞】\n" + raw_text
+            )
+
             # 2. 轉成語音 (TTS)
             tts_config = types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
@@ -3186,7 +3200,7 @@ class MorningVoiceView(View):
             
             audio_resp = await gemini_client.aio.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
-                contents=[raw_text],
+                contents=[tts_prompt],
                 config=tts_config
             )
             
