@@ -3130,23 +3130,51 @@ class MorningVoiceView(View):
         super().__init__(timeout=86400) # 按鈕有效時間 24 小時
         self.voice_script_base = voice_script_base
 
-    @discord.ui.button(label="▶️ 播放晨間廣播 (小夏)", style=discord.ButtonStyle.green, emoji="📻")
+    @discord.ui.button(label="▶️ 播放晨間廣播 (小俠)", style=discord.ButtonStyle.green, emoji="📻")
     async def play_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
         # 點擊後，先回應使用者 (避免 Discord 超時報錯)
-        await interaction.response.send_message("🎙️ 正在產生今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
+        await interaction.response.send_message("🎙️ 小俠正在準備今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
         
         try:
             import uuid, os, asyncio
             from google.genai import types
             
             # 1. 產生文稿 (使用全域的 async gemini_client)
-            prompt = f"你是一位專業、清楚的晨報主播「小夏」。請根據以下晨報寫一段約300字的口語化早安廣播稿。開場白：「早安，以下為今日重點晨報。」語氣中性、自然、可公開播放，不使用私人稱呼或曖昧措辭。\n\n{self.voice_script_base}\n\n請只回傳廣播稿。"
+            prompt = f"""你是公開晨間廣播的固定主持人「小俠」。請根據以下晨報資料，寫一段約300字、溫暖自然且適合大眾收聽的口語化晨報正文。
+
+【固定規則】
+1. 主持人永遠是「小俠」，不得寫成「小夏」或其他名字。
+2. 這是公開晨報，不可稱呼「大俠」、「大俠學長」或任何私人對象。
+3. 不要自行寫開場自我介紹；程式會固定加上小俠的問安開場，避免重複。
+4. 語氣要有溫度，像親切的電台晨間主持人，但內容仍應清楚、精簡。
+5. 請只回傳開場後的播報正文，不要加標題或額外說明。
+
+【晨報資料】
+{self.voice_script_base}
+"""
             
             text_resp = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            raw_text = text_resp.text.strip()
+            body_text = text_resp.text.strip()
+
+            # 固定公開晨報主持人與問安開場，不將身份穩定性寄託於模型輸出。
+            # 若模型仍自行補開場，先清掉再接固定版本，避免重複自我介紹。
+            body_text = re.sub(
+                r"^(?:(?:大家|各位(?:聽眾|朋友)?|大俠)?[，, ]*)?早安[！!，,。:： ]*",
+                "",
+                body_text,
+            ).strip()
+            body_text = re.sub(
+                r"^(?:我是|這裡是|由)(?:晨間廣播主持人)?[「『]?(?:小俠|小夏)[」』]?[，,。！! ]*",
+                "",
+                body_text,
+            ).strip()
+            body_text = body_text.replace("大俠學長", "各位朋友").replace("大俠", "大家")
+
+            intro_text = "大家早安，我是小俠。現在為大家播報今天的晨間重點。"
+            raw_text = intro_text + ("\n" + body_text if body_text else "")
             
             # 2. 轉成語音 (TTS)
             tts_config = types.GenerateContentConfig(
@@ -3182,7 +3210,7 @@ class MorningVoiceView(View):
             
             # 發送語音檔
             if os.path.exists(mp3_path):
-                await interaction.followup.send(content="🔊 **今日晨間廣播已完成。**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
+                await interaction.followup.send(content="🔊 **小俠的今日晨間廣播已完成。**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
                 os.remove(mp3_path)
             else:
                 await interaction.followup.send("⚠️ 轉檔失敗，無法生成廣播。")
