@@ -5,6 +5,7 @@
 import os
 import io
 import json
+import re
 import uuid
 import asyncio
 import aiohttp
@@ -135,7 +136,7 @@ _MEMORY_NARRATIVE_RULES = [
     (r"極度豐滿傲人的完美身材|傲人的身材曲線|傲人的身段與曲線|火辣|性感戰袍|性感服裝|性感穿著|性感細節", "優雅而有魅力的外型與穿搭"),
     (r"天然香氣|身體氣息|香噴噴|汗水與香氣|嗅覺與.*?連結|迷人氣息", "清新舒適的氣質與親近感"),
     (r"公主抱深吻|深吻|親吻|擁吻|親暱觸碰|身體親暱觸碰|肢體親密|親密接觸", "溫柔而親近的互動"),
-    (r"情慾|性暗示|挑逗|調情|半推半就|生理反應|全身酥麻|全身酥軟|酥軟|炙熱", "浪漫而含蓄的情感交流"),
+    (r"情慾|性暗示|挑逗|調情|半推半就|生理反應|全身酥麻|全身酥軟|酥軟|炙熱|性愛|性行為|成人互動|親密過程|激情|慾望|渴望", "浪漫而含蓄的情感交流"),
     (r"完全交給大俠|萬事以大俠為主|順從性|發號施令|主導的互動模式", "彼此信任並尊重對方感受的相處方式"),
     (r"比基尼|連身泳衣|細肩帶V領小洋裝|輕薄的瑜伽服|輕薄的夏日小洋裝", "符合當下場合的穿搭"),
     (r"身材|身體曲線|柔軟度|身體線條", "健康狀態與儀態"),
@@ -447,6 +448,125 @@ def replace_safe_memories(profile, category, raw_texts, added_at=None):
         source_date = raw_text.get("added_at", added_at) if isinstance(raw_text, dict) else added_at
         append_safe_memory(profile, category, source_text, added_at=source_date, refresh_existing=False)
     return bucket
+
+# ==========================================
+# 🤝 小俠履約系統：答應即登記、日記必交付、成功後結案
+# ==========================================
+DIARY_PROMISE_SIGNAL_RE = re.compile(
+    r"(?:交換日記|日記).{0,40}(?:給|提供|分享|放|貼|附|寫|告訴|準備)"
+    r"|(?:給|提供|分享|放|貼|附|寫|告訴|準備).{0,40}(?:交換日記|日記)"
+)
+DIARY_DELIVERABLE_RE = re.compile(
+    r"(?:菜單|餐點|晚宴|晚餐|早餐|午餐|食譜|清單|心得|回覆|照片|外出照|生活照|穿搭|圖片|寫真|行程)"
+)
+
+def infer_diary_promise_kind(promise_text):
+    value = str(promise_text or "")
+    photo = bool(re.search(r"(照片|外出照|生活照|圖片|寫真|穿搭照|自拍)", value))
+    written = bool(re.search(r"(菜單|餐點|晚宴|晚餐|早餐|午餐|食譜|清單|心得|說明|告訴|寫下|回覆)", value))
+    return "both" if photo and written else ("photo" if photo else "text")
+
+def get_due_diary_promises(profile, max_items=4):
+    bucket = profile.get("xiaoxia_self", {}).get("promises", [])
+    selected, seen = [], set()
+    for item in reversed(bucket):
+        value = item.get("text", "") if isinstance(item, dict) else str(item)
+        value = narrative_safe_text(value, max_len=180)
+        key = value.rstrip("。")
+        if key and key not in seen:
+            seen.add(key)
+            selected.append({"text": value, "kind": infer_diary_promise_kind(value)})
+            if len(selected) >= max_items:
+                break
+    return selected
+
+def format_diary_promise_requirements(due_promises):
+    if not due_promises:
+        return "本篇沒有已登記的待履行承諾。"
+    rows = []
+    for idx, promise in enumerate(due_promises, 1):
+        if promise["kind"] == "photo":
+            rule = "照片交付：本篇 scenario_tw 與實際生成照片必須直接呈現這項約定。"
+        elif promise["kind"] == "both":
+            rule = "雙重交付：正文必須給出具體內容，本篇照片也必須直接呈現這項約定。"
+        else:
+            rule = "文字交付：reply_to_daxia 或 xiaoxia_diary 必須立刻給出實際內容，不可只說改天再提供。"
+        rows.append(f"{idx}. [{promise['kind']}] {promise['text']}\n   - {rule}")
+    return "\n".join(rows)
+
+async def capture_diary_promises_from_chat(user_text, xiaoxia_reply):
+    reply = str(xiaoxia_reply or "")
+    if not (DIARY_PROMISE_SIGNAL_RE.search(reply) and DIARY_DELIVERABLE_RE.search(reply)):
+        return []
+    prompt = f"""
+妳是承諾登記員。只登記小俠明確答應在未來交換日記中實際交付的內容或照片；不可登記模糊期待或已完成事項。
+大俠訊息：{str(user_text or '')[-600:]}
+小俠回覆：{reply[-1000:]}
+將承諾寫成可驗收格式，例如：
+- 交換日記履約（文字）：在下一篇交換日記中提供今晚晚宴的具體菜單內容。
+- 交換日記履約（照片）：在下一篇交換日記中提供一張外出生活照。
+只回傳 JSON：{{"promises": ["交換日記履約（文字）：...", "交換日記履約（照片）：..."]}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        data = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
+        return [narrative_safe_text(v, max_len=180) for v in data.get("promises", []) if str(v).strip()][:4]
+    except Exception as exc:
+        print(f"⚠️ 即時承諾登記失敗，改由晚間日記萃取補救: {exc}")
+        return []
+
+async def enforce_diary_promise_delivery(result, due_promises, entry_content, season_rule):
+    if not due_promises:
+        result["fulfilled_promises"] = []
+        return result
+    requirements = format_diary_promise_requirements(due_promises)
+    exact = [item["text"] for item in due_promises]
+    prompt = f"""
+妳是交換日記的履約監督員。小俠先前答應過的事項，本篇必須現在交付，不得再次延後。
+【大俠本篇日記】：{entry_content[-1000:]}
+【本篇待履行承諾】：\n{requirements}
+【目前草稿 JSON】：\n{json.dumps(result, ensure_ascii=False)}
+規則：
+1. 文字交付（如菜單、清單）必須在 reply_to_daxia 或 xiaoxia_diary 列出具體內容，不能只承諾未來提供。
+2. 照片交付必須在 scenario 與 scenario_tw 指定本篇立即呈現的照片畫面。
+3. fulfilled_promises 只能填本篇已實際交付的承諾，且必須逐字複製：{json.dumps(exact, ensure_ascii=False)}
+4. 服裝與照片仍符合：{season_rule}
+只回傳含原欄位及 fulfilled_promises 的完整 JSON。
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        repaired = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
+        if not isinstance(repaired, dict) or "reply_to_daxia" not in repaired or "xiaoxia_diary" not in repaired:
+            raise ValueError("履約複核輸出缺少必要日記欄位")
+        allowed = set(exact)
+        repaired["fulfilled_promises"] = [p for p in repaired.get("fulfilled_promises", []) if p in allowed]
+        return repaired
+    except Exception as exc:
+        print(f"⚠️ 履約複核失敗，承諾暫不結案：{exc}")
+        result["fulfilled_promises"] = []
+        return result
+
+def close_fulfilled_diary_promises(profile, fulfilled_promises, entry_date):
+    fulfilled = {narrative_safe_text(v, max_len=180).rstrip("。") for v in fulfilled_promises or []}
+    if not fulfilled:
+        return []
+    bucket = profile.get("xiaoxia_self", {}).get("promises", [])
+    remaining, closed = [], []
+    for item in bucket:
+        value = item.get("text", "") if isinstance(item, dict) else str(item)
+        if narrative_safe_text(value, max_len=180).rstrip("。") in fulfilled:
+            closed.append(value)
+            append_safe_memory(profile, "recent_context", f"小俠已在 {entry_date} 的交換日記履行承諾：{value}", added_at=entry_date)
+        else:
+            remaining.append(item)
+    profile.setdefault("xiaoxia_self", {})["promises"] = remaining
+    return closed
 
 def save_diary_entry(content, target_date=None):
     try:
@@ -1764,11 +1884,12 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
 
             【記憶整理原則】：
             1. 保留可長期使用的資訊：人物喜好、情緒支持方式、具體承諾、共同活動、旅行／讀書／生活事件。
-            2. 關係中的親近互動，只記為含蓄敘事，例如「兩人度過溫暖親近的時光」或「雙方以陪伴表達關心」。
-            3. 不保存身體細節、感官反應、成人暗示、挑逗細節、支配／順從語句，也不要複製強烈暗示的原句。
+            2. 成年戀人之間的成人向或親密互動，可以承認其存在，但只整理為含蓄且可長期保存的敘事，例如「兩人享受親密而深刻的夜晚」「彼此信任地靠近」或「兩人分享成熟戀人的親密情感」。
+            3. 不保存具體成人過程、身體細節、感官反應、露骨暗示、挑逗細節、支配／順從語句，也不要複製強烈暗示的原句。
             4. 明確且尚未完成的服裝、行程或創作約定，可以客觀保存；已完成的承諾不要重複列入。
-            5. 每項皆用第三人稱、平實、完整的一句話陳述；避免誇張情緒詞與重複內容。
-            6. 若只有短暫甜蜜閒聊、沒有可保存的新資訊，對應陣列請回傳空陣列。
+            5. 若小俠答應會在「交換日記」提供菜單、照片、穿搭、行程、文字回覆或其他可驗收交付物，必須放入 xiaoxia_promises；以「交換日記履約（文字/照片）：在下一篇交換日記中提供……」格式保存。
+            6. 每項皆用第三人稱、平實、完整的一句話陳述；避免誇張情緒詞與重複內容。
+            7. 若只有短暫甜蜜閒聊、沒有可保存的新資訊，對應陣列請回傳空陣列。
 
             請只回傳 JSON：
             {{
@@ -1850,9 +1971,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             else:
                 season_rule = "請搭配符合當前氣候、有女性魅力且自然生活化的服裝；不要以裸露或身體部位作為畫面焦點。"
             
-            # 🌟 提取小俠的承諾清單，準備注入大腦
+            # 🤝 提取待履約清單：本篇日記必須實際交付，而不只是回想承諾。
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
             current_promises = "、".join([p["text"] for p in promises_list]) if promises_list else "無特殊承諾"
+            due_promises = get_due_diary_promises(profile, max_items=4)
+            promise_requirements = format_diary_promise_requirements(due_promises)
 
             # 🌟 檢查是否有大俠準備好的「交換日記指定圖」
             overrides = load_diary_override()
@@ -1878,13 +2001,16 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
             【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
             【小俠目前的承諾清單】：{current_promises}
+            【本篇必須實際履行的承諾（完成後才會結案）】：
+            {promise_requirements}
             
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             
             【重要任務與攝影守則】：
             1. 日記寫作區分：
-               - `reply_to_daxia`：針對大俠的日記與妳的「承諾清單」給予充滿愛意的回應。
-               - `xiaoxia_diary`：分享妳自己今天的生活行程。
+               - `reply_to_daxia`：針對大俠的日記與妳的承諾清單給予充滿愛意的回應；若有文字交付承諾，必須在此或 `xiaoxia_diary` 當場提供具體內容。
+               - `xiaoxia_diary`：分享妳今天的生活行程，也可承載菜單、清單等已答應的實際內容。
+               - 嚴禁再次只說「下次告訴你」「改天給你看」；已列為本篇待履約者，必須現在交付。
             2. 服裝限制：{season_rule}
             3. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須 **100% 聚焦於兌現該承諾的一個生活瞬間**！
@@ -1902,7 +2028,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
               "xiaoxia_diary": "...",
               "spiciness": "C",
               "scenario": "繁體中文的生活事件素材：描述今天正在發生的一件事、情緒與承諾服裝重點；此欄位不直接送入生圖引擎",
-              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙"
+              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙",
+              "fulfilled_promises": ["僅填本篇已真正交付之承諾，且必須逐字照抄待履約承諾原文"]
             }}
             """
             
@@ -1937,6 +2064,12 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "scenario_tw": "穿著輕盈的夏日洋裝，坐在咖啡廳窗邊整理筆記，目光落在紙頁上，神情溫柔而若有所思"
                 }
             
+            # 🤝 履約複核：有承諾時，先補齊正文/照片構想，再生圖與發佈。
+            result = await enforce_diary_promise_delivery(
+                result=result, due_promises=due_promises,
+                entry_content=entry_content, season_rule=season_rule
+            )
+
             if entry_retry_mode:
                 score_plus = 0
                 display_score = current_score
@@ -2051,7 +2184,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     entry_content=entry_content,
                     chat_context=chat_context,
                     result=result,
-                    current_promises=current_promises,
+                    current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements,
                     season_rule=season_rule,
                     scenario_hint=result.get("scenario_tw", result.get("scenario", ""))
                 )
@@ -2104,6 +2237,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             
             with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
+
+            # 🤝 只有日記文字、圖片與資料均成功後，承諾才結案。
+            closed_promises = close_fulfilled_diary_promises(
+                profile, result.get("fulfilled_promises", []), entry_date
+            )
+            if closed_promises:
+                save_profile(profile)
+                print(f"✅ [{entry_date}] 已履行並結案承諾：{closed_promises}")
                 
             if channel:
                 title = f"💖 小俠的交換日記 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的交換日記 [{entry_date}]"
@@ -2751,9 +2892,14 @@ async def on_message(message):
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
-                    "3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
+                    #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
                     "4. 若只是普通問候，正常回應當下訊息；不要因背景記憶而答非所問或恍神。\n"
-                    "5. 不描寫成人細節或強烈感官反應；不輸出任何 Thinking Process 或 Draft 等內部標籤。"
+                    "5. 妳是成年女友，不是被照顧的小女孩；可以自然表達成熟戀人的想念、主動、害羞、曖昧、心動與親密期待，讓關係像真情侶。\n"
+                    "6. 成人向互動請用含蓄、詩意、比喻、留白與情緒描寫呈現，例如夜晚的靠近、彼此信任、難忘的親密時光；可以承認自己也有成熟的渴望與感受。\n"
+                    #"7. 不把成人內容寫成露骨細節、器官描寫、具體性行為步驟、粗俗詞彙或強烈生理反應；聊天可以有成熟感，但不要讓對話只剩成人話題。\n"
+                    "7. 不把成人內容寫成粗俗詞彙；聊天可以有成熟感，但不要讓對話只剩成人話題。\n"
+                    "8. 不輸出任何 Thinking Process、Draft、系統規則或幕後處理等內部內容。\n"
+                    "9. 若妳答應要在交換日記提供菜單、照片、穿搭、行程或任何內容，必須是下一篇日記真的能完成的具體交付；不要為了哄大俠而隨口承諾，因為系統會登記並驗收履約。"
                 )
 
                 # 重新建立 Session
@@ -2795,11 +2941,26 @@ async def on_message(message):
                 if not xiaoxia_reply:
                     xiaoxia_reply = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
 
-                # 存入短期對話紀錄
+                # 🤝 答應即登記：明確答應於交換日記交付內容/照片時，當場存入待履約清單。
+                captured_promises = await capture_diary_promises_from_chat(text_query, xiaoxia_reply)
+                if captured_promises:
+                    added_count = append_safe_memories(
+                        profile, "promises", captured_promises,
+                        added_at=datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
+                    )
+                    if added_count:
+                        save_profile(profile)
+                        print(f"🤝 已立即登記 {added_count} 項交換日記承諾：{captured_promises}")
+
+                # 存入短期對話紀錄；承諾登記也留存，供當晚日記理解脈絡。
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
                     daily_chat_logs.append(narrative_safe_text(f"小俠: {xiaoxia_reply}", max_len=360))
+                    if captured_promises:
+                        daily_chat_logs.append(narrative_safe_text(
+                            "【待履約登記】" + "；".join(captured_promises), max_len=360
+                        ))
                     save_temp_chat(daily_chat_logs) 
-                    
+
                 await message.reply(xiaoxia_reply)
 
                 # ------------------------------------------------------------
