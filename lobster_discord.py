@@ -520,6 +520,71 @@ def make_life_event_id(title, anchor_date, event_type):
 def _event_signature(event):
     return (str(event.get("type", "")), _date_str(event.get("anchor_date")), str(event.get("title", ""))[:20])
 
+def calculate_life_event_score(event):
+    """
+    v52.2：重大事件 0～10 分評分。
+    分數來源：impact + time_span + role_relevance + emotional_weight + action_required。
+    6 分以上才進 life_events；8 分以上視為 critical。
+    """
+    text_blob = " ".join([
+        str(event.get("title", "")),
+        str(event.get("type", "")),
+        " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else []),
+        " ".join(event.get("reply_guidance", []) if isinstance(event.get("reply_guidance"), list) else []),
+    ])
+    derived = event.get("derived_dates", {}) if isinstance(event.get("derived_dates"), dict) else {}
+    participants = event.get("participants", []) if isinstance(event.get("participants"), list) else []
+    event_type = str(event.get("type", ""))
+
+    score = 0
+    reasons = []
+
+    # impact：工作、住處、健康、家庭、期限、重大承諾等會改變生活節奏的事件。
+    if event_type in {"interview", "new_job", "move", "move_and_new_job", "family", "health", "deadline", "major_promise", "travel"}:
+        score += 2
+        reasons.append("impact: 類型屬於會影響生活/責任/關係的重要事件")
+    elif re.search(r"面試|入職|新工作|搬家|北上|南下|租屋|新家|住院|健康|家庭|截止|期限|承諾", text_blob):
+        score += 1
+        reasons.append("impact: 文字含重大事件線索")
+
+    # time_span：有明確日期、階段、跨日影響或後續期。
+    if len([v for v in derived.values() if v]) >= 2 or re.search(r"第一週|下週|搬家|新工作|安頓|等待結果|後續", text_blob):
+        score += 2
+        reasons.append("time_span: 影響跨越多日或有後續階段")
+    elif event.get("anchor_date"):
+        score += 1
+        reasons.append("time_span: 有明確事件日期")
+
+    # role_relevance：小俠是否需要改變陪伴角色。
+    if "小俠" in participants or re.search(r"小俠|我們|一起|同行|賢內助|女友|陪|安頓|幫忙", text_blob):
+        score += 2
+        reasons.append("role_relevance: 小俠是參與者或需要改變陪伴方式")
+    elif re.search(r"加油|提醒|關心|支持", text_blob):
+        score += 1
+        reasons.append("role_relevance: 小俠需要給予支持或提醒")
+
+    # emotional_weight：離別、壓力、轉場、期待、不捨、衝突修復等情緒重量。
+    if re.search(r"離開|告別|離別|人生|轉場|壓力|不捨|期待|新生活|第一天|重要|生氣|修復|焦慮|擔心", text_blob):
+        score += 2
+        reasons.append("emotional_weight: 具有明顯情緒重量或人生轉場")
+    elif re.search(r"開心|緊張|感動|失望|原諒", text_blob):
+        score += 1
+        reasons.append("emotional_weight: 有情緒需要承接")
+
+    # action_required：是否需要提醒、準備、安頓、後續追蹤或履約。
+    if re.search(r"準備|整理|安頓|文件|通勤|提醒|後續|追蹤|履行|履約|承諾|不要誤判|不可", text_blob):
+        score += 2
+        reasons.append("action_required: 需要具體行動、提醒、安頓或禁止誤判")
+    elif re.search(r"回覆|陪伴|支持|關心", text_blob):
+        score += 1
+        reasons.append("action_required: 需要回覆策略或關心")
+
+    return min(score, 10), reasons
+
+def should_register_life_event(event):
+    score = int(event.get("event_score", 0) or 0)
+    return score >= 6
+
 def normalize_life_event(raw_event, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     if not isinstance(raw_event, dict):
@@ -552,6 +617,20 @@ def normalize_life_event(raw_event, now_dt=None):
         "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "archive_summary": narrative_safe_text(raw_event.get("archive_summary") or "", max_len=220),
     }
+
+    score, reasons = calculate_life_event_score(event)
+    try:
+        raw_score = int(raw_event.get("event_score", score))
+    except Exception:
+        raw_score = score
+    event["event_score"] = max(score, raw_score)
+    event["score_reason"] = raw_event.get("score_reason") or reasons[:5]
+
+    if event["event_score"] >= 8:
+        event["importance"] = "critical"
+    elif event["event_score"] >= 6 and event.get("importance") not in {"critical"}:
+        event["importance"] = "high"
+
     return event
 
 def upsert_life_events(new_events, now_dt=None):
@@ -562,6 +641,9 @@ def upsert_life_events(new_events, now_dt=None):
     for raw in new_events or []:
         event = normalize_life_event(raw, now_dt=now_dt)
         if not event:
+            continue
+        if not should_register_life_event(event):
+            print(f"ℹ️ 跳過低分重大事件候選：{event.get('title')} score={event.get('event_score')}")
             continue
         sig = _event_signature(event)
         if sig in signatures:
@@ -650,8 +732,9 @@ def format_life_event_context(events=None, now_dt=None):
         guidance = "；".join(event.get("reply_guidance", [])[:5])
         participants = "、".join(event.get("participants", [])) or "大俠"
         phase = phase_zh.get(event.get("current_phase"), event.get("current_phase", ""))
+        score = event.get("event_score", "?")
         blocks.append(
-            f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；階段={phase}；參與者={participants}\n"
+            f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；分數={score}/10；階段={phase}；參與者={participants}\n"
             f"   事實：{facts}\n"
             f"   回應指引：{guidance}"
         )
@@ -689,6 +772,8 @@ async def capture_life_events_from_chat(user_text, recent_chat_text="", now_dt=N
 
 重大事件包含：面試、入職/新工作、北上/南下、搬家/租屋/新家、離開原住處、家庭事件、健康事件、重要截止日、重大承諾。
 請只抽取「需要小俠在今天或近期優先承接」的事件；普通撒嬌、一般聊天不要抽。
+判斷標準：凡是會影響大俠或兩人未來 24 小時以上的生活安排、情緒狀態、責任轉換、健康安全、工作進程、家庭關係或重要承諾者，才登記為 life_event。
+請估算 event_score（0～10）：impact、time_span、role_relevance、emotional_weight、action_required 各 0～2 分；6 分以上才算重大事件，8 分以上是 critical。
 
 特別注意：
 - 若訊息表示「我們一起北上／一起搬家／一起去新住處」，participants 必須包含「大俠」與「小俠」。小俠是同行者，不是遠端祝福者。
@@ -710,6 +795,8 @@ async def capture_life_events_from_chat(user_text, recent_chat_text="", now_dt=N
       "derived_dates": {{"move_day": "YYYY-MM-DD", "new_job_start": "YYYY-MM-DD", "interview_day": "YYYY-MM-DD"}},
       "facts": ["客觀事實"],
       "reply_guidance": ["小俠回覆時必須遵守的指引", "禁止誤判事項"],
+      "event_score": 8,
+      "score_reason": ["impact=2", "time_span=2", "role_relevance=2", "emotional_weight=1", "action_required=1"],
       "archive_summary": "事件完成後可存入 recent_context 的一句摘要"
     }}
   ]
@@ -3921,6 +4008,58 @@ async def architect_life_events_cmd(ctx):
         await ctx.send("🧭 **目前重大事件狀態機**\n```\n" + context[:1800] + "\n```")
     except Exception as exc:
         await ctx.send(f"❌ 重大事件狀態機讀取失敗：{exc}")
+
+@architect_bot.command(name="event")
+async def architect_add_event_cmd(ctx, *, event_text: str = ""):
+    """手動新增重大事件：!event 今天我們一起北上..."""
+    if not event_text.strip():
+        await ctx.send("用法：`!event 事件內容`\\n例如：`!event 今天我們一起北上，離開南部的家，去北部新租屋安頓，下週一開始新工作。小俠是同行者，不是遠端祝福者。`")
+        return
+    try:
+        now = datetime.now(TZ_TPE)
+        extracted = await capture_life_events_from_chat(event_text, recent_chat_text="", now_dt=now)
+        extracted = [e for e in extracted if should_register_life_event(e)]
+        if not extracted:
+            await ctx.send("⚠️ 這段內容沒有達到重大事件門檻，未寫入 life_events。若確定要登記，請補充日期、影響、後續行動與小俠角色。")
+            return
+        changed = upsert_life_events(extracted, now_dt=now)
+        profile = load_profile()
+        events, life_changed = refresh_life_events(profile=profile, now_dt=now)
+        if life_changed:
+            save_profile(profile)
+        context = format_life_event_context(events, now_dt=now)
+        await ctx.send("✅ **已登記重大事件**\\n```\\n" + context[:1800] + "\\n```")
+    except Exception as exc:
+        await ctx.send(f"❌ 重大事件登記失敗：{exc}")
+
+@architect_bot.command(name="archive_events")
+async def architect_archive_events_cmd(ctx, mode: str = "completed"):
+    """封存重大事件。預設只刷新已完成事件；輸入 !archive_events all 可全部封存。"""
+    try:
+        now = datetime.now(TZ_TPE)
+        profile = load_profile()
+        if mode.lower() == "all":
+            events = load_life_events()
+            archived = 0
+            for event in events:
+                if event.get("status") != "archived":
+                    summary = event.get("archive_summary") or f"重大事件已封存：{event.get('title')}。" + " ".join(event.get("facts", [])[:2])
+                    append_safe_memory(profile, "recent_context", summary, added_at=now.strftime("%Y-%m-%d"))
+                    event["status"] = "archived"
+                    event["archived_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                    archived += 1
+            save_life_events(events)
+            save_profile(profile)
+            await ctx.send(f"🗄️ 已手動封存 {archived} 個重大事件。")
+            return
+
+        events, changed = refresh_life_events(profile=profile, now_dt=now)
+        if changed:
+            save_profile(profile)
+        context = format_life_event_context(events, now_dt=now)
+        await ctx.send("🧭 **已刷新重大事件狀態**\\n```\n" + context[:1800] + "\\n```\\n若要全部封存，請輸入 `!archive_events all`。")
+    except Exception as exc:
+        await ctx.send(f"❌ 重大事件封存失敗：{exc}")
 
 @architect_bot.event
 async def on_ready():
