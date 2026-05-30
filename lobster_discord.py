@@ -3908,6 +3908,20 @@ async def _run_legacy_morning(target_channel=None):
 async def legacy_morning_trigger():
     await _run_legacy_morning()
 
+
+@architect_bot.command(name="life_events")
+async def architect_life_events_cmd(ctx):
+    """在小夏工作室查看目前重大事件狀態機。"""
+    try:
+        profile = load_profile()
+        events, changed = refresh_life_events(profile=profile)
+        if changed:
+            save_profile(profile)
+        context = format_life_event_context(events)
+        await ctx.send("🧭 **目前重大事件狀態機**\n```\n" + context[:1800] + "\n```")
+    except Exception as exc:
+        await ctx.send(f"❌ 重大事件狀態機讀取失敗：{exc}")
+
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
@@ -4457,6 +4471,19 @@ def _clean_xia_reply(reply: str) -> str:
 @architect_bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # v52.1：在小夏工作室支援 /life_events，避免被一般聊天流程吃掉。
+    if message.content.strip() == "/life_events":
+        try:
+            profile = load_profile()
+            events, changed = refresh_life_events(profile=profile)
+            if changed:
+                save_profile(profile)
+            context = format_life_event_context(events)
+            await message.channel.send("🧭 **目前重大事件狀態機**\n```\n" + context[:1800] + "\n```")
+        except Exception as exc:
+            await message.channel.send(f"❌ 重大事件狀態機讀取失敗：{exc}")
         return
 
     # 故事頻道一律不由小夏介入。
