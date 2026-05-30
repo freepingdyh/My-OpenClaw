@@ -585,6 +585,80 @@ def should_register_life_event(event):
     score = int(event.get("event_score", 0) or 0)
     return score >= 6
 
+def life_event_category(event):
+    """v52.3：將相似事件歸到同一類，避免北上/搬家/新工作被拆成多筆。"""
+    blob = " ".join([
+        str(event.get("type", "")),
+        str(event.get("title", "")),
+        " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else []),
+        " ".join(event.get("reply_guidance", []) if isinstance(event.get("reply_guidance"), list) else []),
+    ])
+    if re.search(r"北上|南下|搬家|租屋|新租屋|新家|安頓|離開南部|新工作|入職|上班", blob):
+        return "move_or_new_job"
+    if re.search(r"面試|interview", blob, re.I):
+        return "interview"
+    if re.search(r"健康|體檢|看醫生|住院|health", blob, re.I):
+        return "health"
+    if re.search(r"家庭|家人|父母|老家|family", blob, re.I):
+        return "family"
+    if re.search(r"承諾|履約|約定|promise", blob, re.I):
+        return "major_promise"
+    return str(event.get("type", "general"))
+
+def life_event_merge_key(event):
+    """相同日期 + 相同大類的事件視為同一重大事件候選。"""
+    return (life_event_category(event), _date_str(event.get("anchor_date")))
+
+def merge_life_event_records(events, now_dt=None):
+    """
+    v52.3：正規化舊事件、補 event_score，並合併同日同類事件。
+    這會修掉：
+    1) 舊 seed 事件顯示 score=?/10
+    2) 「北上新生活」與「大俠與小俠北上」重複顯示
+    """
+    merged = {}
+    changed = False
+    for raw in events or []:
+        event = normalize_life_event(raw, now_dt=now_dt)
+        if not event:
+            continue
+        if not should_register_life_event(event):
+            changed = True
+            continue
+        key = life_event_merge_key(event)
+        if key not in merged:
+            merged[key] = event
+            if json.dumps(raw, ensure_ascii=False, sort_keys=True) != json.dumps(event, ensure_ascii=False, sort_keys=True):
+                changed = True
+            continue
+
+        old = merged[key]
+        # 保留資訊較完整或分數較高的事件作為主體。
+        old_weight = int(old.get("event_score", 0) or 0) + len(old.get("facts", []) or []) + len(old.get("reply_guidance", []) or [])
+        new_weight = int(event.get("event_score", 0) or 0) + len(event.get("facts", []) or []) + len(event.get("reply_guidance", []) or [])
+        if new_weight > old_weight:
+            base, extra = event, old
+        else:
+            base, extra = old, event
+
+        base["facts"] = list(dict.fromkeys((base.get("facts") or []) + (extra.get("facts") or [])))[:10]
+        base["reply_guidance"] = list(dict.fromkeys((base.get("reply_guidance") or []) + (extra.get("reply_guidance") or [])))[:10]
+        base["participants"] = list(dict.fromkeys((base.get("participants") or []) + (extra.get("participants") or [])))[:6]
+        base["derived_dates"] = {**(extra.get("derived_dates") or {}), **(base.get("derived_dates") or {})}
+        base["phase_rules"] = (base.get("phase_rules") or []) or (extra.get("phase_rules") or [])
+        base["event_score"] = max(int(base.get("event_score", 0) or 0), int(extra.get("event_score", 0) or 0))
+        if base["event_score"] >= 8 or old.get("importance") == "critical" or event.get("importance") == "critical":
+            base["importance"] = "critical"
+        elif base["event_score"] >= 6:
+            base["importance"] = "high"
+        if not base.get("archive_summary"):
+            base["archive_summary"] = extra.get("archive_summary", "")
+        base["updated_at"] = (now_dt or datetime.now(TZ_TPE)).strftime("%Y-%m-%d %H:%M:%S")
+        merged[key] = base
+        changed = True
+
+    return list(merged.values()), changed
+
 def normalize_life_event(raw_event, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     if not isinstance(raw_event, dict):
@@ -635,9 +709,9 @@ def normalize_life_event(raw_event, now_dt=None):
 
 def upsert_life_events(new_events, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
-    events = load_life_events()
+    events, merge_changed = merge_life_event_records(load_life_events(), now_dt=now_dt)
     signatures = {_event_signature(e): i for i, e in enumerate(events)}
-    changed = False
+    changed = merge_changed
     for raw in new_events or []:
         event = normalize_life_event(raw, now_dt=now_dt)
         if not event:
@@ -659,7 +733,9 @@ def upsert_life_events(new_events, now_dt=None):
             signatures[sig] = len(events) - 1
         changed = True
     if changed:
+        events, merge_changed = merge_life_event_records(events, now_dt=now_dt)
         save_life_events(events)
+        changed = True or merge_changed
     return changed
 
 def infer_life_event_phase(event, now_dt=None):
@@ -691,10 +767,11 @@ def infer_life_event_phase(event, now_dt=None):
 
 def refresh_life_events(profile=None, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
-    events = load_life_events()
-    if not events:
+    raw_events = load_life_events()
+    if not raw_events:
         return [], False
-    changed, active_events, kept = False, [], []
+    events, merge_changed = merge_life_event_records(raw_events, now_dt=now_dt)
+    changed, active_events, kept = merge_changed, [], []
     for event in events:
         if event.get("status") == "archived":
             kept.append(event)
@@ -732,7 +809,10 @@ def format_life_event_context(events=None, now_dt=None):
         guidance = "；".join(event.get("reply_guidance", [])[:5])
         participants = "、".join(event.get("participants", [])) or "大俠"
         phase = phase_zh.get(event.get("current_phase"), event.get("current_phase", ""))
-        score = event.get("event_score", "?")
+        score = event.get("event_score")
+        if score in (None, "", "?"):
+            score, _ = calculate_life_event_score(event)
+            event["event_score"] = score
         blocks.append(
             f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；分數={score}/10；階段={phase}；參與者={participants}\n"
             f"   事實：{facts}\n"
