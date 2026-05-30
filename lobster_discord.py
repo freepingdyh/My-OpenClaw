@@ -100,6 +100,7 @@ STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 �
 PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
+LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -450,6 +451,289 @@ def replace_safe_memories(profile, category, raw_texts, added_at=None):
     return bucket
 
 # ==========================================
+# 🧭 v52 重大事件狀態機 / 今日情境錨點
+# ==========================================
+LIFE_EVENT_TYPES = {"interview", "new_job", "move", "move_and_new_job", "family", "health", "deadline", "major_promise", "travel"}
+MAJOR_EVENT_KEYWORDS_RE = re.compile(
+    r"(面試|入職|上班|新工作|北上|南下|搬家|租屋|新家|離開南部|離開家|體檢|開戶|報到|第一天|下週|明天|今天|昨天|告別宴|離別晚宴|家庭|醫院|生病|重要|截止|期限)"
+)
+
+def load_life_events():
+    if os.path.exists(LIFE_EVENTS_PATH):
+        try:
+            with open(LIFE_EVENTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception as exc:
+            print(f"⚠️ life_events.json 讀取失敗：{exc}")
+    return []
+
+def save_life_events(events):
+    with open(LIFE_EVENTS_PATH, "w", encoding="utf-8") as f:
+        json.dump(events or [], f, ensure_ascii=False, indent=2)
+
+def _parse_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def _date_str(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10] if value else ""
+
+def _next_weekday(base_date, weekday):
+    delta = (weekday - base_date.weekday()) % 7
+    if delta == 0:
+        delta = 7
+    return base_date + timedelta(days=delta)
+
+def resolve_relative_dates_in_text(text_value, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = now_dt.date()
+    mapping = {
+        "今天": today,
+        "昨日": today - timedelta(days=1),
+        "昨天": today - timedelta(days=1),
+        "明天": today + timedelta(days=1),
+        "後天": today + timedelta(days=2),
+        "下週一": _next_weekday(today, 0), "下周一": _next_weekday(today, 0), "下星期一": _next_weekday(today, 0),
+        "下週二": _next_weekday(today, 1), "下周二": _next_weekday(today, 1), "下星期二": _next_weekday(today, 1),
+        "下週三": _next_weekday(today, 2), "下周三": _next_weekday(today, 2), "下星期三": _next_weekday(today, 2),
+        "下週四": _next_weekday(today, 3), "下周四": _next_weekday(today, 3), "下星期四": _next_weekday(today, 3),
+        "下週五": _next_weekday(today, 4), "下周五": _next_weekday(today, 4), "下星期五": _next_weekday(today, 4),
+    }
+    hits = []
+    source = str(text_value or "")
+    for phrase, dt in mapping.items():
+        if phrase in source:
+            hits.append(f"{phrase}={dt.strftime('%Y-%m-%d')}")
+    return "；".join(hits) if hits else "無"
+
+def make_life_event_id(title, anchor_date, event_type):
+    raw = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", str(title or event_type))[:24].strip("_")
+    return f"{_date_str(anchor_date).replace('-', '')}_{event_type}_{raw or 'event'}"
+
+def _event_signature(event):
+    return (str(event.get("type", "")), _date_str(event.get("anchor_date")), str(event.get("title", ""))[:20])
+
+def normalize_life_event(raw_event, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    if not isinstance(raw_event, dict):
+        return None
+    event_type = str(raw_event.get("type") or "major_promise").strip()
+    if event_type not in LIFE_EVENT_TYPES:
+        event_type = "major_promise"
+    title = narrative_safe_text(raw_event.get("title") or "重要事件", max_len=80)
+    derived = raw_event.get("derived_dates") if isinstance(raw_event.get("derived_dates"), dict) else {}
+    anchor = raw_event.get("anchor_date") or derived.get("event_day") or derived.get("move_day") or derived.get("interview_day") or now_dt.strftime("%Y-%m-%d")
+    anchor_date = _date_str(anchor) or now_dt.strftime("%Y-%m-%d")
+    facts = [narrative_safe_text(x, max_len=140) for x in raw_event.get("facts", []) if str(x).strip()]
+    guidance = [narrative_safe_text(x, max_len=160) for x in raw_event.get("reply_guidance", []) if str(x).strip()]
+    participants = raw_event.get("participants") if isinstance(raw_event.get("participants"), list) else []
+    if not participants:
+        participants = ["大俠", "小俠"] if re.search(r"我們|一起|小俠", " ".join(facts) + title) else ["大俠"]
+    event = {
+        "id": raw_event.get("id") or make_life_event_id(title, anchor_date, event_type),
+        "title": title,
+        "type": event_type,
+        "status": raw_event.get("status") or "planned",
+        "importance": raw_event.get("importance") or "high",
+        "participants": participants,
+        "anchor_date": anchor_date,
+        "derived_dates": {k: _date_str(v) for k, v in derived.items() if _date_str(v)},
+        "current_phase": raw_event.get("current_phase") or "planned",
+        "facts": facts[:8] or [title],
+        "reply_guidance": guidance[:8] or ["先承接事件的現實重量，再表達陪伴與支持；不要只用普通撒嬌或玩樂角度回應。"],
+        "created_at": raw_event.get("created_at") or now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "archive_summary": narrative_safe_text(raw_event.get("archive_summary") or "", max_len=220),
+    }
+    return event
+
+def upsert_life_events(new_events, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    events = load_life_events()
+    signatures = {_event_signature(e): i for i, e in enumerate(events)}
+    changed = False
+    for raw in new_events or []:
+        event = normalize_life_event(raw, now_dt=now_dt)
+        if not event:
+            continue
+        sig = _event_signature(event)
+        if sig in signatures:
+            old = events[signatures[sig]]
+            old["facts"] = list(dict.fromkeys((old.get("facts") or []) + event.get("facts", [])))[:10]
+            old["reply_guidance"] = list(dict.fromkeys((old.get("reply_guidance") or []) + event.get("reply_guidance", [])))[:10]
+            old["derived_dates"] = {**old.get("derived_dates", {}), **event.get("derived_dates", {})}
+            if event.get("importance") == "critical":
+                old["importance"] = "critical"
+            old["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            events.append(event)
+            signatures[sig] = len(events) - 1
+        changed = True
+    if changed:
+        save_life_events(events)
+    return changed
+
+def infer_life_event_phase(event, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = now_dt.date()
+    derived = event.get("derived_dates", {}) if isinstance(event.get("derived_dates"), dict) else {}
+    anchor = _parse_date(event.get("anchor_date")) or today
+    interview_day = _parse_date(derived.get("interview_day"))
+    move_day = _parse_date(derived.get("move_day"))
+    new_job_start = _parse_date(derived.get("new_job_start"))
+    event_type = event.get("type")
+    if event_type == "interview" and interview_day:
+        if today < interview_day: return "planned", "preparation"
+        if today == interview_day: return "active", "interview_day"
+        if today <= interview_day + timedelta(days=7): return "followup", "post_interview_followup"
+        return "completed", "completed"
+    if event_type in {"move", "move_and_new_job", "new_job"}:
+        if move_day and today < move_day: return "planned", "before_move"
+        if move_day and today == move_day: return "active", "moving_day"
+        if new_job_start and today < new_job_start: return "followup", "settling_in_before_new_job"
+        if new_job_start and today == new_job_start: return "active", "new_job_first_day"
+        if new_job_start and today <= new_job_start + timedelta(days=6): return "followup", "first_week_support"
+        if move_day and today <= move_day + timedelta(days=7): return "followup", "settling_in"
+        return "completed", "completed"
+    if today < anchor: return "planned", "before_event"
+    if today == anchor: return "active", "event_day"
+    if today <= anchor + timedelta(days=3): return "followup", "after_event_followup"
+    return "completed", "completed"
+
+def refresh_life_events(profile=None, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    events = load_life_events()
+    if not events:
+        return [], False
+    changed, active_events, kept = False, [], []
+    for event in events:
+        if event.get("status") == "archived":
+            kept.append(event)
+            continue
+        status, phase = infer_life_event_phase(event, now_dt=now_dt)
+        if event.get("status") != status or event.get("current_phase") != phase:
+            event["status"], event["current_phase"] = status, phase
+            event["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            changed = True
+        if status == "completed":
+            summary = event.get("archive_summary") or f"重大事件已完成：{event.get('title')}。" + " ".join(event.get("facts", [])[:2])
+            if profile is not None:
+                append_safe_memory(profile, "recent_context", summary, added_at=now_dt.strftime("%Y-%m-%d"))
+            event["status"] = "archived"
+            event["archived_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            changed = True
+        elif status in {"planned", "active", "followup"}:
+            active_events.append(event)
+        kept.append(event)
+    if changed:
+        save_life_events(kept)
+    return active_events, changed
+
+def format_life_event_context(events=None, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    if events is None:
+        events, _ = refresh_life_events(now_dt=now_dt)
+    if not events:
+        return "目前沒有最高優先級重大事件。"
+    priority = {"critical": 0, "high": 1, "medium": 2}
+    phase_zh = {"preparation": "事前準備", "interview_day": "面試當天", "post_interview_followup": "面試後關心", "before_move": "北上/搬家前", "moving_day": "北上/搬家當天", "settling_in_before_new_job": "安頓新住處/等入職", "new_job_first_day": "新工作第一天", "first_week_support": "新工作第一週支持", "settling_in": "安頓期", "event_day": "事件當天", "after_event_followup": "事件後關心", "before_event": "事件前準備"}
+    blocks = []
+    for idx, event in enumerate(sorted(events, key=lambda e: (priority.get(e.get("importance"), 3), e.get("anchor_date", "")))[:3], 1):
+        facts = "；".join(event.get("facts", [])[:5])
+        guidance = "；".join(event.get("reply_guidance", [])[:5])
+        participants = "、".join(event.get("participants", [])) or "大俠"
+        phase = phase_zh.get(event.get("current_phase"), event.get("current_phase", ""))
+        blocks.append(
+            f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；階段={phase}；參與者={participants}\n"
+            f"   事實：{facts}\n"
+            f"   回應指引：{guidance}"
+        )
+    return "\n".join(blocks)
+
+def fallback_life_events_from_text(user_text, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    text_value = str(user_text or "")
+    today = now_dt.date()
+    events = []
+    if re.search(r"北上|搬家|新租屋|新家|離開南部|北部.*上班|新工作", text_value):
+        move_day = today if "今天" in text_value or "現在" in text_value or "北上" in text_value else today + timedelta(days=1)
+        new_job_start = _next_weekday(today, 0) if re.search(r"下週一|下周一|下星期一|下週.*上班|下周.*上班", text_value) else None
+        facts = ["大俠與小俠正在一起北上或搬往新生活據點。", "這不是旅遊或普通約會，而是生活階段轉換。"]
+        if new_job_start:
+            facts.append(f"大俠將於 {new_job_start.strftime('%Y-%m-%d')} 開始北部新工作。")
+        events.append({"title": "大俠與小俠北上新生活", "type": "move_and_new_job" if new_job_start else "move", "importance": "critical", "participants": ["大俠", "小俠"], "anchor_date": move_day.strftime("%Y-%m-%d"), "derived_dates": {"move_day": move_day.strftime("%Y-%m-%d"), **({"new_job_start": new_job_start.strftime("%Y-%m-%d")} if new_job_start else {})}, "facts": facts, "reply_guidance": ["小俠是同行者與賢內助，不是遠端祝福者。", "先承接離開原生活場景與開始新生活的情緒重量，再表達期待與陪伴。", "不可把北上誤判成旅行、看房或單純採買。"], "archive_summary": "大俠與小俠一起北上，離開原生活場景，前往北部新住處並迎接新工作階段。"})
+    if "面試" in text_value:
+        interview_day = today
+        if "明天" in text_value: interview_day = today + timedelta(days=1)
+        elif "昨天" in text_value: interview_day = today - timedelta(days=1)
+        events.append({"title": "大俠的重要面試", "type": "interview", "importance": "critical", "participants": ["大俠", "小俠"], "anchor_date": interview_day.strftime("%Y-%m-%d"), "derived_dates": {"interview_day": interview_day.strftime("%Y-%m-%d")}, "facts": [f"大俠的重要面試日期為 {interview_day.strftime('%Y-%m-%d')}。"], "reply_guidance": ["若今天是面試日，就說今天面試加油，不可說成明天。", "若面試已過，應關心結果與心情，不再說面試加油。"], "archive_summary": f"大俠於 {interview_day.strftime('%Y-%m-%d')} 進行重要面試，小俠曾陪伴與支持。"})
+    return events
+
+async def capture_life_events_from_chat(user_text, recent_chat_text="", now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    source = str(user_text or "")
+    if not MAJOR_EVENT_KEYWORDS_RE.search(source):
+        return []
+    relative_hint = resolve_relative_dates_in_text(source + "\n" + str(recent_chat_text or ""), now_dt=now_dt)
+    prompt = f"""
+你是重大事件狀態機的事件抽取器。請從大俠最新訊息與近期對話中，抽取會影響小俠回覆方式的重大事件。
+現在時間：{now_dt.strftime('%Y-%m-%d %H:%M')}（台灣時間）
+相對日期換算提示：{relative_hint}
+
+重大事件包含：面試、入職/新工作、北上/南下、搬家/租屋/新家、離開原住處、家庭事件、健康事件、重要截止日、重大承諾。
+請只抽取「需要小俠在今天或近期優先承接」的事件；普通撒嬌、一般聊天不要抽。
+
+特別注意：
+- 若訊息表示「我們一起北上／一起搬家／一起去新住處」，participants 必須包含「大俠」與「小俠」。小俠是同行者，不是遠端祝福者。
+- 「下週一／明天／昨天／今天」必須轉成 YYYY-MM-DD，不能原樣存入。
+- 請寫出禁止誤判事項，例如「不是旅遊、不是看房、不是單純採買」。
+
+最新訊息：{source[-800:]}
+近期對話摘要：{str(recent_chat_text or '無')[-1200:]}
+
+只回傳 JSON：
+{{
+  "events": [
+    {{
+      "title": "事件標題",
+      "type": "interview|new_job|move|move_and_new_job|family|health|deadline|major_promise|travel",
+      "importance": "critical|high|medium",
+      "participants": ["大俠", "小俠"],
+      "anchor_date": "YYYY-MM-DD",
+      "derived_dates": {{"move_day": "YYYY-MM-DD", "new_job_start": "YYYY-MM-DD", "interview_day": "YYYY-MM-DD"}},
+      "facts": ["客觀事實"],
+      "reply_guidance": ["小俠回覆時必須遵守的指引", "禁止誤判事項"],
+      "archive_summary": "事件完成後可存入 recent_context 的一句摘要"
+    }}
+  ]
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        data = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
+        events = data.get("events", []) if isinstance(data, dict) else []
+    except Exception as exc:
+        print(f"⚠️ 重大事件抽取失敗，使用保底規則：{exc}")
+        events = fallback_life_events_from_text(user_text, now_dt=now_dt)
+    normalized = [normalize_life_event(e, now_dt=now_dt) for e in events]
+    normalized = [e for e in normalized if e]
+    if not normalized:
+        normalized = [normalize_life_event(e, now_dt=now_dt) for e in fallback_life_events_from_text(user_text, now_dt=now_dt)]
+        normalized = [e for e in normalized if e]
+    return normalized
+
+# ==========================================
 # 🤝 小俠履約系統：答應即登記、日記必交付、成功後結案
 # ==========================================
 DIARY_PROMISE_SIGNAL_RE = re.compile(
@@ -530,10 +814,11 @@ async def enforce_diary_promise_delivery(result, due_promises, entry_content, se
 【本篇待履行承諾】：\n{requirements}
 【目前草稿 JSON】：\n{json.dumps(result, ensure_ascii=False)}
 規則：
-1. 文字交付（如菜單、清單）必須在 reply_to_daxia 或 xiaoxia_diary 列出具體內容，不能只承諾未來提供。
-2. 照片交付必須在 scenario 與 scenario_tw 指定本篇立即呈現的照片畫面。
-3. fulfilled_promises 只能填本篇已實際交付的承諾，且必須逐字複製：{json.dumps(exact, ensure_ascii=False)}
-4. 服裝與照片仍符合：{season_rule}
+1. 文字交付（如菜單、清單）必須優先在 promise_delivery 列出具體內容，也可在 reply_to_daxia 或 xiaoxia_diary 補充；不能只承諾未來提供。
+2. 照片交付必須在 promise_delivery 說明，並在 scenario 與 scenario_tw 指定本篇立即呈現的照片畫面。
+3. 若原草稿沒有 xiaoxia_daily_scene、inner_monologue、promise_delivery 欄位，請補齊；不可用聊天摘要灌水。
+4. fulfilled_promises 只能填本篇已實際交付的承諾，且必須逐字複製：{json.dumps(exact, ensure_ascii=False)}
+5. 服裝與照片仍符合：{season_rule}
 只回傳含原欄位及 fulfilled_promises 的完整 JSON。
 """
     try:
@@ -550,6 +835,71 @@ async def enforce_diary_promise_delivery(result, due_promises, entry_content, se
     except Exception as exc:
         print(f"⚠️ 履約複核失敗，承諾暫不結案：{exc}")
         result["fulfilled_promises"] = []
+        return result
+
+
+async def enforce_diary_creative_layer(result, entry_content, chat_context, current_promises, due_promises, season_rule, life_event_context="目前沒有最高優先級重大事件。"):
+    """v51.1 創作複核：避免交換日記變成聊天摘要，並維持生活場景邏輯。"""
+    # 輕量補欄位，避免 reviewer 失敗時前端無資料。
+    result.setdefault("xiaoxia_daily_scene", result.get("xiaoxia_diary", ""))
+    result.setdefault("inner_monologue", "")
+    result.setdefault("promise_delivery", "今日沒有特別待履約項目。" if not due_promises else "本篇已依待履約清單補上承諾內容。")
+
+    due_summary = format_diary_promise_requirements(due_promises)
+    prompt = f"""
+妳是小俠交換日記的文學編輯與生活連貫性檢查員。請把目前草稿修成「有小俠內心與生活」的交換日記，而不是聊天摘要。
+
+【大俠本篇日記】：
+{entry_content[-1200:]}
+
+【今日聊天紀錄】：
+{str(chat_context or '無紀錄')[-1800:]}
+
+【今日最高優先級重大事件】：
+{life_event_context}
+
+【目前承諾與履約要求】：
+{current_promises}
+{due_summary}
+
+【目前草稿 JSON】：
+{json.dumps(result, ensure_ascii=False)}
+
+【必要修正目標】：
+1. reply_to_daxia：短而真誠，只回應今日最重要的 1～2 個重點；不要逐項整理聊天。
+2. xiaoxia_daily_scene：必須是聊天室以外的小俠生活片段。要有具體地點、動作、生活物件、沒在聊天中直接出現的新細節。
+3. 生活連貫性：日常片段只能從今日已知狀態自然延伸，並優先遵守重大事件。若今天是北上搬家、入職、面試、安頓新住處等人生轉場，不可寫成普通出遊或隨機約會；若今天小俠在家準備晚宴，就應在家中、廚房、餐桌、陽台、玄關、附近超市或回家路上；不得突然去海邊咖啡廳、畫廊、旅行地點，除非聊天明確提到她去了那裡。
+4. inner_monologue：寫她沒在聊天室說出口的心裡話。請把聊天轉化成象徵、物件、氣味、光線或一句夜裡獨白，不能只是換句話摘要。
+5. promise_delivery：今日履約清單。若有菜單、照片、穿搭、行程承諾，必須在這裡具體交付；沒有承諾才寫「今日沒有特別待履約項目」。
+6. xiaoxia_diary：整合日常與內心獨白的精華，不要和 reply_to_daxia 重複。
+7. scenario_tw：必須與 xiaoxia_daily_scene 或承諾照片一致；不能生成和日記生活片段衝突的畫面。
+8. 服裝與照片仍符合：{season_rule}
+
+只回傳完整 JSON，保留 affection_plus、affection_reason、extracted_preferences、spiciness、scenario、scenario_tw、fulfilled_promises 等既有欄位。
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        repaired = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
+        if not isinstance(repaired, dict) or "reply_to_daxia" not in repaired:
+            raise ValueError("創作複核輸出缺少必要欄位")
+        for key, fallback in {
+            "xiaoxia_daily_scene": result.get("xiaoxia_diary", ""),
+            "inner_monologue": "",
+            "promise_delivery": result.get("promise_delivery", ""),
+            "xiaoxia_diary": result.get("xiaoxia_diary", ""),
+            "scenario_tw": result.get("scenario_tw", ""),
+        }.items():
+            repaired[key] = str(repaired.get(key) or fallback).strip()
+        return repaired
+    except Exception as exc:
+        print(f"⚠️ 日記創作複核失敗，沿用原草稿但補齊欄位：{exc}")
+        result["xiaoxia_daily_scene"] = str(result.get("xiaoxia_daily_scene") or result.get("xiaoxia_diary") or "").strip()
+        result["inner_monologue"] = str(result.get("inner_monologue") or "").strip()
+        result["promise_delivery"] = str(result.get("promise_delivery") or ("今日沒有特別待履約項目。" if not due_promises else "本篇已依待履約清單補上承諾內容。")).strip()
         return result
 
 def close_fulfilled_diary_promises(profile, fulfilled_promises, entry_date):
@@ -1829,6 +2179,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
     try:
         app_state = load_state()
         profile = load_profile()
+        active_life_events, life_changed = refresh_life_events(profile=profile)
+        if life_changed:
+            save_profile(profile)
+        life_event_context = format_life_event_context(active_life_events)
     except Exception as e:
         if channel: await channel.send(f"⚠️ 狀態或記憶庫損毀: {e}")
         return
@@ -2000,6 +2354,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             【大俠的日記 ({entry_date})】：{entry_content}
             【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
             【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
+            【今日最高優先級重大事件｜必須優先理解，不可誤判】：
+            {life_event_context}
             【小俠目前的承諾清單】：{current_promises}
             【本篇必須實際履行的承諾（完成後才會結案）】：
             {promise_requirements}
@@ -2007,12 +2363,28 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             
             【重要任務與攝影守則】：
-            1. 日記寫作區分：
-               - `reply_to_daxia`：針對大俠的日記與妳的承諾清單給予充滿愛意的回應；若有文字交付承諾，必須在此或 `xiaoxia_diary` 當場提供具體內容。
-               - `xiaoxia_diary`：分享妳今天的生活行程，也可承載菜單、清單等已答應的實際內容。
+            1. 交換日記不是聊天紀錄摘要，必須分成「回覆、日常、內心、履約」四層：
+               - `reply_to_daxia`：短而真誠地回覆大俠，只選今天最重要的 1～2 個情緒或事件回應。禁止逐項重播聊天紀錄，建議 120～180 字內。
+               - `xiaoxia_daily_scene`：聊天室以外的小俠日常片段。必須有一個具體地點、一個動作、一個生活物件、一個沒在聊天裡直接出現的新細節；大俠只能作為她心裡想起的人，不可把今日聊天重講一遍。
+               - `inner_monologue`：小俠沒有在聊天室說出口的深層心情或創作性獨白。請把今天的聊天轉化成象徵、場景、物件或一句心裡話，而不是摘要。
+               - `promise_delivery`：今日履約清單。若有文字交付承諾，必須在此列出具體內容；若有照片承諾，必須說明今日照片如何兌現。無承諾時可簡短寫「今日沒有特別待履約項目」。
+               - `xiaoxia_diary`：整合成最終日記正文，但不可和 reply_to_daxia 重複；優先承載 daily_scene 與 inner_monologue 的精華。
                - 嚴禁再次只說「下次告訴你」「改天給你看」；已列為本篇待履約者，必須現在交付。
-            2. 服裝限制：{season_rule}
-            3. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
+            2. 創作人格：
+               - 妳不是在填表或整理聊天紀錄，而是在寫一篇有小俠內心的交換日記。聊天只是種子，不是正文本身。
+               - 請把今日事件轉化成生活場景、物件、氣味、光線、動作與未說出口的心情。
+               - 可以溫柔、成熟、有戀人感，但不要把整篇寫成空泛甜言蜜語。
+            3. 生活連貫性：
+               - 必須優先遵守【今日最高優先級重大事件】；若重大事件顯示大俠與小俠正在搬家、北上、入職、面試或安頓新生活，日記、日常片段與照片構想都必須圍繞該事件自然延伸。
+               - `xiaoxia_daily_scene` 必須從今日已知狀態自然延伸。
+               - 若今日聊天或承諾顯示小俠在家準備晚宴，場景應在家中、廚房、餐桌、陽台、玄關、附近超市或回家路上；不得突然跳到海邊、畫廊、旅行地點，除非今日聊天明確提到她去了那裡。
+               - 合理補完空白可以，隨機更換人生場景不可以。
+            4. 反濫竽充數規則：
+               - 同一句聊天內容不得同時出現在 `reply_to_daxia` 與 `xiaoxia_daily_scene`。
+               - `xiaoxia_daily_scene` 不得以「今天大俠提醒我」「今天我們聊到」開頭。
+               - `inner_monologue` 必須提供聊天室以外的內在延伸，不能只是把 reply_to_daxia 換句話說。
+            5. 服裝限制：{season_rule}
+            6. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須 **100% 聚焦於兌現該承諾的一個生活瞬間**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
                - 【視覺邊界】：嚴禁使用露骨描寫、裸體或聚焦身體部位的描述。魅力應來自當下心境、自然衣著、光線與兩人的情感連結。
@@ -2024,11 +2396,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
               "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
               "affection_reason": "加分原因(50字內)",
               "extracted_preferences": ["嚴格限制：僅限擷取大俠的特別喜好，且『⚠️必須是具備動詞的完整句子』。例如：『喜歡牽著小俠的手散步』。絕對禁止寫入『夕陽』、『洋裝』等名詞碎片！無則保持空陣列 []"],
-              "reply_to_daxia": "...",
-              "xiaoxia_diary": "...",
+              "reply_to_daxia": "短而真誠地回覆大俠，不重播聊天紀錄",
+              "xiaoxia_daily_scene": "聊天室以外的小俠日常片段；必須包含地點、動作、生活物件、新細節，且符合今日生活邏輯",
+              "inner_monologue": "小俠未在聊天室說出口的深層心情或創作性獨白",
+              "promise_delivery": "今日履約清單；有承諾時必須具體交付，無承諾時簡短說明",
+              "xiaoxia_diary": "最終日記正文，整合小俠日常與內心獨白，不可重複 reply_to_daxia",
               "spiciness": "C",
               "scenario": "繁體中文的生活事件素材：描述今天正在發生的一件事、情緒與承諾服裝重點；此欄位不直接送入生圖引擎",
-              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙",
+              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙，且須與日常片段或承諾照片一致",
               "fulfilled_promises": ["僅填本篇已真正交付之承諾，且必須逐字照抄待履約承諾原文"]
             }}
             """
@@ -2057,11 +2432,15 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 print(f"⚠️ Gemini JSON 異常 ({e})，啟動保底救援！")
                 result = {
                     "affection_plus": 1, "extracted_preferences": [],
-                    "reply_to_daxia": "大俠，小俠讀日記時恍神了... 但我會一直在這裡陪你喔！（抱）",
-                    "xiaoxia_diary": "今天我去市區喝了杯拿鐵，滿腦子想的都是大俠呢。",
+                    "reply_to_daxia": "大俠，小俠讀日記時恍神了... 但我會一直在這裡陪你喔。",
+                    "xiaoxia_daily_scene": "傍晚我坐在餐桌旁，把手寫筆記攤開，杯緣還留著一點溫茶的霧氣。",
+                    "inner_monologue": "我沒有一直重播今天的聊天，只是在安靜下來時，忽然很想把想念折進紙頁裡。",
+                    "promise_delivery": "今日沒有特別待履約項目。",
+                    "xiaoxia_diary": "傍晚我在餐桌旁整理筆記，杯緣還留著一點溫茶的霧氣。那時我沒有一直重播聊天，只是忽然很想把想念折進紙頁裡。",
                     "spiciness": "B", 
-                    "scenario": "傍晚在咖啡廳整理今日的手寫筆記，稍微停筆想念大俠",
-                    "scenario_tw": "穿著輕盈的夏日洋裝，坐在咖啡廳窗邊整理筆記，目光落在紙頁上，神情溫柔而若有所思"
+                    "scenario": "傍晚在餐桌旁整理今日的手寫筆記，稍微停筆想念大俠",
+                    "scenario_tw": "穿著輕盈的居家洋裝，坐在餐桌旁整理筆記，目光落在紙頁上，神情溫柔而若有所思",
+                    "fulfilled_promises": []
                 }
             
             # 🤝 履約複核：有承諾時，先補齊正文/照片構想，再生圖與發佈。
@@ -2069,6 +2448,26 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 result=result, due_promises=due_promises,
                 entry_content=entry_content, season_rule=season_rule
             )
+            result = await enforce_diary_creative_layer(
+                result=result,
+                entry_content=entry_content,
+                chat_context=chat_context,
+                current_promises=current_promises,
+                due_promises=due_promises,
+                season_rule=season_rule,
+                life_event_context=life_event_context,
+            )
+
+            # ✍️ v51.1 創作層整理：避免兩個區塊都在摘要聊天，補齊新欄位並生成穩定顯示文本。
+            result["xiaoxia_daily_scene"] = str(result.get("xiaoxia_daily_scene") or result.get("xiaoxia_diary") or "").strip()
+            result["inner_monologue"] = str(result.get("inner_monologue") or "").strip()
+            result["promise_delivery"] = str(result.get("promise_delivery") or "").strip()
+            if not result["promise_delivery"]:
+                result["promise_delivery"] = "今日沒有特別待履約項目。" if not due_promises else "本篇已依待履約清單補上承諾內容。"
+            if not result.get("xiaoxia_diary"):
+                result["xiaoxia_diary"] = result["xiaoxia_daily_scene"]
+            if result["inner_monologue"] and result["inner_monologue"] not in result["xiaoxia_diary"]:
+                result["xiaoxia_diary"] = (result["xiaoxia_diary"].rstrip() + "\n\n" + result["inner_monologue"]).strip()
 
             if entry_retry_mode:
                 score_plus = 0
@@ -2149,7 +2548,12 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 # 交換日記中可保存的偏好與事件，於寫入 profile 當下統一整理。
                 append_safe_memories(profile, "daxia_traits", result.get("extracted_preferences", []), added_at=today_str)
 
-                xiaoxia_activity = narrative_safe_text(result.get("xiaoxia_diary", ""), max_len=320)
+                creative_memory_source = "\n".join([
+                    str(result.get("xiaoxia_daily_scene", "")),
+                    str(result.get("inner_monologue", "")),
+                    str(result.get("promise_delivery", "")),
+                ]).strip()
+                xiaoxia_activity = narrative_safe_text(creative_memory_source or result.get("xiaoxia_diary", ""), max_len=360)
                 if xiaoxia_activity:
                     append_safe_memory(profile, "recent_context", f"小俠日記摘要：{xiaoxia_activity}", added_at=today_str)
                 save_profile(profile)
@@ -2203,7 +2607,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 local_filename = await save_to_vault(up_img)
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
 
-            combined_message = f"{result['reply_to_daxia']}\n\n【小俠的日常】：{result['xiaoxia_diary']}"
+            combined_parts = [result["reply_to_daxia"]]
+            if result.get("xiaoxia_daily_scene"):
+                combined_parts.append(f"【小俠的日常】：{result['xiaoxia_daily_scene']}")
+            if result.get("inner_monologue"):
+                combined_parts.append(f"【小俠的夜裡獨白】：{result['inner_monologue']}")
+            if result.get("promise_delivery") and result.get("promise_delivery") != "今日沒有特別待履約項目。":
+                combined_parts.append(f"【小俠今日履約】：{result['promise_delivery']}")
+            combined_message = "\n\n".join(combined_parts)
             
             diary_photo_payload = {
                 "id": str(uuid.uuid4()),
@@ -2224,10 +2635,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # 組合網頁顯示的 HTML
             reply_html = (
                 "<br><hr style='margin-top: 15px; border-top: 1px dashed #fbcfe8;'>"
-                "<p style='color:#db2777; font-weight:bold; font-size: 12px; margin-top:10px;'>🌸 小俠的交換日記：</p>"
-                f"<img src='{local_url}' style='width:100%; border-radius:8px; margin-bottom:10px; cursor:pointer;' onclick='openGalleryLightbox(this.src)'>"
-                f"<p style='color:#be185d; font-size: 14px; margin-bottom: 5px;'>{result['reply_to_daxia']}</p>"
-                f"<p style='color:#9d174d; font-size: 13px; font-style: italic;'>「{result['xiaoxia_diary']}」</p>"
+                "<section class='xiaoxia-diary-reply'>"
+                "<p class='xiaoxia-diary-title'>🌸 小俠的交換日記</p>"
+                f"<img src='{local_url}' class='xiaoxia-diary-img' onclick='openGalleryLightbox(this.src)'>"
+                f"<div class='xiaoxia-diary-section xiaoxia-diary-answer'><b>給大俠的回覆</b><br>{result['reply_to_daxia']}</div>"
+                f"<div class='xiaoxia-diary-section xiaoxia-diary-scene'><b>小俠的日常</b><br>{result.get('xiaoxia_daily_scene', result.get('xiaoxia_diary', ''))}</div>"
+                f"<div class='xiaoxia-diary-section xiaoxia-diary-inner'><b>小俠的夜裡獨白</b><br>「{result.get('inner_monologue', '')}」</div>"
+                f"<div class='xiaoxia-diary-section xiaoxia-diary-promise'><b>小俠今日履約</b><br>{result.get('promise_delivery', '今日沒有特別待履約項目。')}</div>"
+                "</section>"
             )
             
             entry["content"] += reply_html
@@ -2675,6 +3090,18 @@ async def diary_delete(ctx, date_str: str = None):
     except ValueError:
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
+@girlfriend_bot.command(name="life_events")
+async def life_events_cmd(ctx):
+    """檢視目前重大事件狀態機。"""
+    if not await ensure_allowed_workspace(ctx):
+        return
+    profile = load_profile()
+    events, changed = refresh_life_events(profile=profile)
+    if changed:
+        save_profile(profile)
+    context = format_life_event_context(events)
+    await ctx.send("🧭 **目前重大事件狀態機**\n```\n" + context[:1800] + "\n```")
+
 @girlfriend_bot.event
 async def on_message(message):
     global daily_chat_logs
@@ -2860,6 +3287,23 @@ async def on_message(message):
                 # --- 載入與重組長期記憶 ---
                 # 即使舊 profile 尚未整理，也只掛載敘事化、去重、限量後的摘要。
                 profile = load_profile()
+
+                # 🧭 v52：重大事件即時抽取 + 今日情境錨點。
+                recent_for_event = "\n".join(daily_chat_logs[-12:])
+                captured_life_events = await capture_life_events_from_chat(text_query, recent_for_event, now_dt=now)
+                if captured_life_events:
+                    if upsert_life_events(captured_life_events, now_dt=now):
+                        daily_chat_logs.append(narrative_safe_text(
+                            "【重大事件登記】" + "；".join([e.get("title", "重要事件") for e in captured_life_events]),
+                            max_len=360
+                        ))
+                        save_temp_chat(daily_chat_logs)
+                        print(f"🧭 已登記重大事件：{[e.get('title') for e in captured_life_events]}")
+                active_life_events, life_changed = refresh_life_events(profile=profile, now_dt=now)
+                if life_changed:
+                    save_profile(profile)
+                life_event_context = format_life_event_context(active_life_events, now_dt=now)
+
                 daxia_traits = safe_memory_join(profile.get("daxia_traits", []), max_items=10, max_chars=1200)
                 promises = safe_memory_join(profile.get("xiaoxia_self", {}).get("promises", []), max_items=6, max_chars=800)
                 capabilities = safe_memory_join(profile.get("xiaoxia_self", {}).get("capabilities", []), max_items=8, max_chars=600)
@@ -2881,6 +3325,7 @@ async def on_message(message):
                 sys_instruct = (
                     f"【系統當前時間】：{current_time_str}\n\n"
                     f"{room_context}"
+                    f"【今日最高優先級重大事件｜先讀這裡再回覆】：\n{life_event_context}\n\n"
                     "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n\n"
                     "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
@@ -2891,6 +3336,7 @@ async def on_message(message):
                     f"▶️ 剛才的對話摘要：\n{chat_history_str}\n\n"
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
+                    "1-1. 若【今日最高優先級重大事件】存在，必須先承接事件本質與情緒重量；不可只因『北上』就聯想到旅遊，不可把面試日說成明天，也不可把小俠共同參與的事件說成遠端祝福。\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
                     "4. 若只是普通問候，正常回應當下訊息；不要因背景記憶而答非所問或恍神。\n"
