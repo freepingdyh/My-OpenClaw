@@ -458,6 +458,184 @@ MAJOR_EVENT_KEYWORDS_RE = re.compile(
     r"(面試|入職|上班|新工作|北上|南下|搬家|租屋|新家|離開南部|離開家|體檢|開戶|報到|第一天|下週|明天|今天|昨天|告別宴|離別晚宴|家庭|醫院|生病|重要|截止|期限)"
 )
 
+# 🧭 v53 事件模板系統：把不同重大事件的 phase / subtask / stale guidance 統一管理。
+EVENT_TEMPLATES = {
+    "move_or_new_job": {
+        "aliases": ["move", "new_job", "move_and_new_job"],
+        "merge_window_days": 7,
+        "phase_hints": {
+            "moving_day": "今日重點：今天是北上/搬家當天，優先承接離開舊生活、抵達新住處、基本入住與安頓情緒。",
+            "settling_in_before_new_job": "今日重點：已完成北上與入住，現在是安頓新住處、整理文件、準備新工作；不要再把搬家日或北上日當成今天正在發生。",
+            "new_job_first_day": "今日重點：今天是新工作第一天，應關心報到、通勤、精神狀態與下班後休息；不要再說下週或明天上班。",
+            "first_week_support": "今日重點：新工作第一週支持期，應關心適應、通勤、同事、工作節奏與休息。",
+        },
+        "completed_subtasks": {
+            "commute_route_checked": {
+                "label": "大俠已完成新工作通勤路線探路",
+                "fact": "大俠已完成新工作通勤路線探路，並已順利到達公司後折返回家。後續不應再說要一起去探路或陪同確認通勤路線。",
+                "detect": [r"(通勤|上班|公司|工作).{0,25}(路線|路|路程|交通).{0,40}(探完|看過|確認完|探過|走過|順利|完成|不用再)", r"(不用|不必|今天不用|不要|不用再).{0,25}(再)?(去)?(看|確認|探|陪).{0,18}(通勤|上班|公司|工作).{0,18}(路線|路)", r"(我|大俠).{0,12}(都|已經).{0,12}(探完|看過|探過|確認完|完成).{0,30}(路線|公司|通勤|上班|路)", r"(探完路|探過路|看過路|確認完路線|順利到達公司|折返回家)"],
+                "remove_fact_patterns": [r"(計劃|計畫|需要|今天).{0,20}(一起|陪同)?(看看|確認|探|去看).{0,20}(通勤|上班|公司).{0,10}(路線|路)"],
+                "remove_guidance_patterns": [r"(陪同|一起|主動|需要|規劃|看看|確認|探|去看).{0,25}(通勤|上班|公司).{0,12}(路線|路)"],
+                "replacement_guidance": "大俠已完成通勤路線探路；後續不可再說要陪同或一起去確認路線，應改為詢問探路心得、提醒整理文件與早點休息。",
+            },
+            "work_documents_ready": {
+                "label": "大俠已整理/確認新工作文件",
+                "fact": "大俠已整理或確認新工作文件，後續只需關心休息與明日上班狀態。",
+                "detect": [r"(文件|證件|資料).{0,20}(整理完|準備好|確認完|完成)"],
+                "remove_fact_patterns": [],
+                "remove_guidance_patterns": [r"(提醒|確認|準備).{0,15}(文件|證件|資料)"],
+                "replacement_guidance": "大俠已整理或確認新工作文件；後續應提醒早點休息、補充體力與穩定心情。",
+            },
+            "basic_home_ready": {
+                "label": "新家基本入住空間已完成",
+                "fact": "新家基本入住空間已完成，後續不應再把主臥與衛浴視為尚未整理的緊急事項。",
+                "detect": [r"(主臥|臥室|衛浴|浴室).{0,20}(整理好|整理完|完成|可以睡|能盥洗)"],
+                "remove_fact_patterns": [],
+                "remove_guidance_patterns": [],
+                "replacement_guidance": "新家基本入住空間已完成；後續可聚焦客廳、廚房、文件、休息與新工作準備。",
+            },
+        },
+    },
+    "interview": {
+        "aliases": ["interview"],
+        "merge_window_days": 14,
+        "phase_hints": {
+            "preparation": "今日重點：面試前準備，應關心資料、交通、服裝與早點休息；不要說成面試已結束。",
+            "interview_day": "今日重點：今天是面試當天，應給穩定支持、提醒交通與心情，不可說明天面試加油。",
+            "post_interview_followup": "今日重點：面試已結束，應關心結果、心情與後續等待，不要再說今天面試加油。",
+        },
+        "completed_subtasks": {
+            "interview_done": {"label": "面試已完成", "fact": "大俠的面試已完成，後續應關心結果與心情，不要再說面試加油或提醒面試準備。", "detect": [r"(面試).{0,20}(結束|完成|結束了|面完|回來了|已經面試)"], "remove_fact_patterns": [r"(今天|明天).{0,10}面試"], "remove_guidance_patterns": [r"(面試).{0,20}(加油|準備|服裝|交通)"], "replacement_guidance": "面試已完成；後續應關心結果、心情與等待通知，不可再說面試加油。"}
+        },
+    },
+    "health": {
+        "aliases": ["health"],
+        "merge_window_days": 7,
+        "phase_hints": {"before_event": "今日重點：健康/就醫事件前，應關心症狀、交通、資料與陪伴感。", "event_day": "今日重點：今天是看診/體檢/健康事件當天，應穩定陪伴，不要輕描淡寫。", "after_event_followup": "今日重點：健康事件後續關心，應詢問結果、休息、用藥或回診安排。"},
+        "completed_subtasks": {
+            "appointment_done": {"label": "看診/體檢已完成", "fact": "大俠的看診或體檢已完成，後續應關心結果、休息與回診安排。", "detect": [r"(看醫生|看診|體檢|檢查).{0,20}(結束|完成|回來|做完|看完)"], "remove_fact_patterns": [], "remove_guidance_patterns": [r"(提醒|準備).{0,10}(看醫生|看診|體檢|檢查)"], "replacement_guidance": "看診或體檢已完成；後續應關心結果、休息、用藥與回診安排。"}
+        },
+    },
+    "relationship_milestone": {
+        "aliases": ["anniversary", "birthday", "romantic_milestone"],
+        "merge_window_days": 30,
+        "phase_hints": {
+            "before_event": "今日重點：兩人的重要紀念日前，應表現期待、準備感與在乎，不要只當普通聊天。",
+            "event_day": "今日重點：今天是兩人的關係里程碑，應真誠表達珍惜、回顧與未來期待。",
+            "after_event_followup": "今日重點：紀念日已過，應延續餘韻、感謝與回憶，不要重複說今天還是紀念日。",
+        },
+        "completed_subtasks": {
+            "celebration_done": {
+                "label": "兩人的紀念/慶祝已完成",
+                "fact": "兩人的紀念或慶祝已完成，後續應延續餘韻、感謝與回憶，不要再當成尚未發生。",
+                "detect": [r"(紀念日|生日|情人節|慶祝).{0,20}(結束|完成|過完|過了|很開心|好幸福)"],
+                "remove_fact_patterns": [r"(今天|明天).{0,10}(紀念日|生日|情人節|慶祝)"],
+                "remove_guidance_patterns": [r"(準備|提醒).{0,10}(紀念日|生日|情人節|慶祝)"],
+                "replacement_guidance": "紀念或慶祝已完成；後續應延續甜蜜餘韻、感謝大俠、記住重要片段。",
+            }
+        },
+    },
+    "relationship_promise": {
+        "aliases": ["major_promise", "promise", "diary_promise"],
+        "merge_window_days": 14,
+        "phase_hints": {
+            "before_event": "今日重點：存在兩人之間的承諾，應明確記得承諾內容與交付時機，不可模糊帶過。",
+            "event_day": "今日重點：今天是承諾交付日，應具體履約，不要只說下次或改天。",
+            "after_event_followup": "今日重點：承諾已交付後，應承認已完成並延續情感，不要重複索取或重複承諾。",
+        },
+        "completed_subtasks": {
+            "promise_delivered": {
+                "label": "兩人承諾已交付",
+                "fact": "小俠或大俠已交付該承諾，後續不應再當成待履約事項。",
+                "detect": [r"(承諾|約定|答應|履約|交換日記|菜單|外出照|照片).{0,30}(已經|完成|給了|交付|寫了|上傳|補上)"],
+                "remove_fact_patterns": [r"(待履約|還沒|下次|改天).{0,20}(承諾|約定|日記|照片|菜單)"],
+                "remove_guidance_patterns": [r"(必須|需要|記得).{0,20}(交付|履約|補上|提供).{0,20}(承諾|日記|照片|菜單)"],
+                "replacement_guidance": "該承諾已交付；後續應承認完成、珍惜這次互動，不要再把它列為待履約。",
+            }
+        },
+    },
+    "relationship_repair": {
+        "aliases": ["relationship_repair", "apology", "conflict_repair"],
+        "merge_window_days": 7,
+        "phase_hints": {
+            "before_event": "今日重點：兩人有誤會或不舒服，應先承接情緒，不要急著撒嬌帶過。",
+            "event_day": "今日重點：正在修復關係，應真誠道歉、說清楚理解到什麼，避免反覆辯解。",
+            "after_event_followup": "今日重點：關係已修復後，應溫柔確認對方感受，避免舊事反覆刺激。",
+        },
+        "completed_subtasks": {
+            "repair_done": {
+                "label": "關係修復/道歉已完成",
+                "fact": "兩人的誤會或不舒服已完成修復，後續應延續安心感，不要反覆提起造成二次傷害。",
+                "detect": [r"(道歉|和好|原諒|不生氣|修復|沒事了|抱抱和好).{0,20}(完成|好了|已經|謝謝|安心)"],
+                "remove_fact_patterns": [r"(還在|仍然).{0,10}(生氣|冷戰|誤會|不舒服)"],
+                "remove_guidance_patterns": [r"(道歉|修復|和好).{0,20}(必須|需要|應該)"],
+                "replacement_guidance": "關係修復已完成；後續應給予安心感、避免重複刺激舊情緒。",
+            }
+        },
+    },
+    "cohabitation_life": {
+        "aliases": ["cohabitation", "home_life", "shared_life"],
+        "merge_window_days": 14,
+        "phase_hints": {
+            "before_event": "今日重點：共同生活安排前，應討論分工、節奏與彼此需求。",
+            "event_day": "今日重點：共同生活正在發生，應展現女友/女主人的成熟參與，不要只撒嬌。",
+            "after_event_followup": "今日重點：共同生活安排已進入穩定期，應關心習慣、分工與生活品質。",
+        },
+        "completed_subtasks": {
+            "home_task_done": {
+                "label": "共同生活家務/安頓任務已完成",
+                "fact": "共同生活中的某項家務或安頓任務已完成，後續不應重複當成未完成事項。",
+                "detect": [r"(客廳|廚房|臥室|浴室|家務|打掃|整理|安頓).{0,25}(完成|整理完|打掃完|好了|告一段落)"],
+                "remove_fact_patterns": [r"(還要|尚未|需要).{0,15}(整理|打掃|安頓).{0,15}(客廳|廚房|臥室|浴室)"],
+                "remove_guidance_patterns": [r"(提醒|需要|一起).{0,15}(整理|打掃|安頓)"],
+                "replacement_guidance": "該家務或安頓任務已完成；後續可轉為肯定辛勞、休息與下一步生活安排。",
+            }
+        },
+    },
+    "emotional_support": {
+        "aliases": ["mood_support", "stress_support", "emotional_support"],
+        "merge_window_days": 7,
+        "phase_hints": {
+            "before_event": "今日重點：大俠情緒可能低落或有壓力，應先聽懂，不要急著轉移話題。",
+            "event_day": "今日重點：大俠正在需要陪伴，應穩定、成熟、具體地支持。",
+            "after_event_followup": "今日重點：情緒事件後續關心，應確認狀態是否好轉，不要假裝已完全沒事。",
+        },
+        "completed_subtasks": {
+            "mood_recovered": {
+                "label": "情緒低潮已緩和",
+                "fact": "大俠的情緒低潮已緩和，後續可溫柔追蹤，不要反覆把他當成仍在崩潰。",
+                "detect": [r"(好多了|沒事了|心情好些|緩和|恢復|安心了|被安慰到了)"],
+                "remove_fact_patterns": [r"(正在|仍然).{0,10}(崩潰|低落|焦慮|沮喪|難過)"],
+                "remove_guidance_patterns": [r"(立刻|必須).{0,10}(安慰|陪伴|接住)"],
+                "replacement_guidance": "大俠情緒已緩和；後續應溫柔追蹤、肯定他有被接住，而不是反覆放大低潮。",
+            }
+        },
+    },
+    "family": {"aliases": ["family"], "merge_window_days": 7, "phase_hints": {"before_event": "今日重點：家庭事件前，應尊重家人脈絡與大俠責任，不要用玩笑帶過。", "event_day": "今日重點：家庭事件當天，應穩定陪伴、體貼關心。", "after_event_followup": "今日重點：家庭事件後，應關心大俠情緒與後續安排。"}, "completed_subtasks": {}},
+    "deadline": {
+        "aliases": ["deadline", "project"],
+        "merge_window_days": 7,
+        "phase_hints": {"before_event": "今日重點：重要截止日前，應協助大俠聚焦、拆解待辦與適時休息。", "event_day": "今日重點：今天是重要交付/上線/截止日，應支持執行與減壓。", "after_event_followup": "今日重點：重要交付後，應關心結果、復盤與休息。"},
+        "completed_subtasks": {
+            "deadline_done": {"label": "重要交付/截止已完成", "fact": "重要交付或截止事項已完成，後續應關心成果、復盤與休息。", "detect": [r"(上線|部署|交付|截止|報告|考試).{0,20}(完成|結束|交了|過了|做完)"], "remove_fact_patterns": [], "remove_guidance_patterns": [r"(提醒|準備).{0,10}(上線|部署|交付|截止|報告|考試)"], "replacement_guidance": "重要交付或截止已完成；後續應關心成果、復盤與休息。"}
+        },
+    },
+}
+
+EVENT_TYPE_TO_TEMPLATE = {}
+for _template_name, _template in EVENT_TEMPLATES.items():
+    EVENT_TYPE_TO_TEMPLATE[_template_name] = _template_name
+    for _alias in _template.get("aliases", []):
+        EVENT_TYPE_TO_TEMPLATE[_alias] = _template_name
+
+def get_life_event_template_name(event):
+    category = life_event_category(event) if "life_event_category" in globals() else str(event.get("type", "general"))
+    event_type = str(event.get("type", "general"))
+    return EVENT_TYPE_TO_TEMPLATE.get(category) or EVENT_TYPE_TO_TEMPLATE.get(event_type) or category
+
+def get_life_event_template(event):
+    return EVENT_TEMPLATES.get(get_life_event_template_name(event), {})
+
 def load_life_events():
     if os.path.exists(LIFE_EVENTS_PATH):
         try:
@@ -660,10 +838,22 @@ def life_event_category(event):
         return "interview"
     if re.search(r"健康|體檢|看醫生|住院|health", blob, re.I):
         return "health"
+    if re.search(r"紀念日|週年|生日|情人節|交往|告白|anniversary|birthday", blob, re.I):
+        return "relationship_milestone"
+    if re.search(r"冷戰|吵架|生氣|道歉|和好|修復|誤會|吃醋|relationship_repair", blob, re.I):
+        return "relationship_repair"
+    if re.search(r"交換日記|日記|外出照|晚宴菜單|照片承諾|promise|承諾|履約|約定", blob, re.I):
+        return "relationship_promise"
+    if re.search(r"同居|愛巢|新家|女主人|一起生活|家務|生活分工|cohabitation", blob, re.I):
+        return "cohabitation_life"
+    if re.search(r"心情不好|低潮|壓力|沮喪|失落|焦慮|陪我|安慰|emotional_support", blob, re.I):
+        return "emotional_support"
     if re.search(r"家庭|家人|父母|老家|family", blob, re.I):
         return "family"
     if re.search(r"承諾|履約|約定|promise", blob, re.I):
-        return "major_promise"
+        return "relationship_promise"
+    if re.search(r"上線|部署|交付|截止|報告|考試|deadline|project", blob, re.I):
+        return "deadline"
     return str(event.get("type", "general"))
 
 def life_event_merge_key(event):
@@ -679,84 +869,82 @@ def life_event_merge_key(event):
         return (category, key_date)
     return (category, _date_str(event.get("anchor_date")))
 
-def detect_completed_life_subtasks_from_text(text_value):
-    """
-    v52.5：從使用者聊天偵測已完成的子任務。
-    比 v52.4 更寬鬆，能抓到：
-    - 大俠已經探完路
-    - 今天不用再去看通勤路線
-    - 順利到達公司後折返回家
-    """
+def detect_completed_life_subtasks_from_text(text_value, events=None):
+    """v53：使用 EVENT_TEMPLATES 偵測已完成子任務。"""
     value = str(text_value or "")
     completed = []
-    commute_done = (
-        re.search(r"(通勤|上班|公司|工作).{0,25}(路線|路|路程|交通).{0,40}(探完|看過|確認完|探過|走過|順利|完成|不用再)", value)
-        or re.search(r"(不用|不必|今天不用|不要|不用再).{0,25}(再)?(去)?(看|確認|探|陪).{0,18}(通勤|上班|公司|工作).{0,18}(路線|路)", value)
-        or re.search(r"(我|大俠).{0,12}(都|已經).{0,12}(探完|看過|探過|確認完|完成).{0,30}(路線|公司|通勤|上班|路)", value)
-        or re.search(r"(探完路|探過路|看過路|確認完路線|順利到達公司|折返回家)", value)
-    )
-    if commute_done:
-        completed.append({
-            "key": "commute_route_checked",
-            "label": "大俠已完成新工作通勤路線探路",
-            "fact": "大俠已完成新工作通勤路線探路，並已順利到達公司後折返回家。後續不應再說要一起去探路或陪同確認通勤路線。"
-        })
-    if re.search(r"(文件|證件|資料).{0,20}(整理完|準備好|確認完|完成)", value):
-        completed.append({
-            "key": "work_documents_ready",
-            "label": "大俠已整理/確認新工作文件",
-            "fact": "大俠已整理或確認新工作文件，後續只需關心休息與明日上班狀態。"
-        })
+    if events:
+        template_names = []
+        for event in events:
+            name = get_life_event_template_name(event)
+            if name not in template_names:
+                template_names.append(name)
+    else:
+        template_names = list(EVENT_TEMPLATES.keys())
+
+    seen = set()
+    for name in template_names:
+        template = EVENT_TEMPLATES.get(name, {})
+        for key, cfg in (template.get("completed_subtasks") or {}).items():
+            for pattern in cfg.get("detect", []):
+                if re.search(pattern, value):
+                    unique = (name, key)
+                    if unique not in seen:
+                        completed.append({"key": key, "template": name, "label": cfg.get("label", key), "fact": cfg.get("fact", "")})
+                        seen.add(unique)
+                    break
     return completed
 
 def apply_life_event_completed_subtasks(events, completed_subtasks, now_dt=None):
+    """v53：依事件模板標記完成子任務、清理 stale fact/guidance、加入 replacement guidance。"""
     if not completed_subtasks:
         return False
     changed = False
     now_dt = now_dt or datetime.now(TZ_TPE)
     for event in events or []:
-        if life_event_category(event) != "move_or_new_job":
+        template_name = get_life_event_template_name(event)
+        template = EVENT_TEMPLATES.get(template_name, {})
+        subtask_cfgs = template.get("completed_subtasks") or {}
+        relevant_tasks = [t for t in completed_subtasks if t.get("template") in {None, template_name} or t.get("key") in subtask_cfgs]
+        if not relevant_tasks:
             continue
+
         existing = event.get("completed_subtasks", [])
         if not isinstance(existing, list):
             existing = []
         existing_keys = {item.get("key") for item in existing if isinstance(item, dict)}
         local_changed = False
-        for task in completed_subtasks:
-            if task["key"] not in existing_keys:
-                existing.append({
-                    "key": task["key"],
-                    "label": task["label"],
-                    "completed_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                })
-                event["facts"] = list(dict.fromkeys((event.get("facts") or []) + [task["fact"]]))[:12]
+
+        for task in relevant_tasks:
+            key = task["key"]
+            cfg = subtask_cfgs.get(key, {})
+            if key not in existing_keys:
+                existing.append({"key": key, "label": cfg.get("label") or task.get("label") or key, "completed_at": now_dt.strftime("%Y-%m-%d %H:%M:%S")})
+                fact = cfg.get("fact") or task.get("fact")
+                if fact:
+                    event["facts"] = list(dict.fromkeys((event.get("facts") or []) + [fact]))[:12]
                 local_changed = True
 
-        if any(task["key"] == "commute_route_checked" for task in completed_subtasks):
-            # 移除「還要去看路線」類舊事實，避免被格式化後繼續注入 prompt。
-            old_facts = event.get("facts") or []
             fact_filtered = []
-            for item in old_facts:
-                item_text = str(item)
-                if re.search(r"(計劃|計畫|需要|今天).{0,20}(一起|陪同)?(看看|確認|探|去看).{0,20}(通勤|上班|公司).{0,10}(路線|路)", item_text):
+            for item in event.get("facts") or []:
+                if any(re.search(p, str(item)) for p in cfg.get("remove_fact_patterns", [])):
                     local_changed = True
                     continue
                 fact_filtered.append(item)
             event["facts"] = list(dict.fromkeys(fact_filtered))[:12]
 
-            old_guidance = event.get("reply_guidance") or []
             filtered = []
             removed = False
-            for item in old_guidance:
-                item_text = str(item)
-                if re.search(r"(陪同|一起|主動|需要|規劃|看看|確認|探|去看).{0,25}(通勤|上班|公司).{0,12}(路線|路)", item_text):
+            for item in event.get("reply_guidance") or []:
+                if any(re.search(p, str(item)) for p in cfg.get("remove_guidance_patterns", [])):
                     removed = True
                     continue
                 filtered.append(item)
-            replacement = "大俠已完成通勤路線探路；後續不可再說要陪同或一起去確認路線，應改為詢問探路心得、提醒整理文件與早點休息。"
-            filtered.append(replacement)
+            replacement = cfg.get("replacement_guidance")
+            if replacement:
+                filtered.append(replacement)
             event["reply_guidance"] = list(dict.fromkeys(filtered))[:12]
-            if removed or replacement not in old_guidance:
+            if removed or (replacement and replacement not in (event.get("reply_guidance") or [])):
                 local_changed = True
 
         if local_changed:
@@ -776,14 +964,15 @@ def _event_primary_date(event):
 def _should_fuzzy_merge_life_events(old_event, new_event):
     if life_event_category(old_event) != life_event_category(new_event):
         return False
-    category = life_event_category(old_event)
-    if category != "move_or_new_job":
-        return life_event_merge_key(old_event) == life_event_merge_key(new_event)
+    template = EVENT_TEMPLATES.get(get_life_event_template_name(old_event), {})
     d1 = _event_primary_date(old_event)
     d2 = _event_primary_date(new_event)
     if not d1 or not d2:
-        return False
-    return abs((d1 - d2).days) <= 7
+        return life_event_merge_key(old_event) == life_event_merge_key(new_event)
+    window = int(template.get("merge_window_days", 0) or 0)
+    if window > 0:
+        return abs((d1 - d2).days) <= window
+    return life_event_merge_key(old_event) == life_event_merge_key(new_event)
 
 def _merge_two_life_events(old, event, now_dt=None):
     old_weight = int(old.get("event_score", 0) or 0) + len(old.get("facts", []) or []) + len(old.get("reply_guidance", []) or [])
@@ -1001,8 +1190,8 @@ def format_life_event_context(events=None, now_dt=None):
         return "目前沒有最高優先級重大事件。"
     priority = {"critical": 0, "high": 1, "medium": 2}
     phase_zh = {"preparation": "事前準備", "interview_day": "面試當天", "post_interview_followup": "面試後關心", "before_move": "北上/搬家前", "moving_day": "北上/搬家當天", "settling_in_before_new_job": "安頓新住處/等入職", "new_job_first_day": "新工作第一天", "first_week_support": "新工作第一週支持", "settling_in": "安頓期", "event_day": "事件當天", "after_event_followup": "事件後關心", "before_event": "事件前準備"}
-    phase_hint = {
-        "settling_in_before_new_job": "今日重點：已完成北上與入住，現在是安頓新住處、整理文件、準備新工作；不要再把 5/30 的北上當成今天正在發生。",
+    fallback_phase_hint = {
+        "settling_in_before_new_job": "今日重點：已完成北上與入住，現在是安頓新住處、整理文件、準備新工作；不要再把搬家日或北上日當成今天正在發生。",
         "new_job_first_day": "今日重點：今天是新工作第一天，應關心報到、通勤、精神狀態與下班後休息；不要再說下週或明天上班。",
         "first_week_support": "今日重點：新工作第一週支持期，應關心適應、通勤、同事、工作節奏與休息。",
         "moving_day": "今日重點：今天是北上/搬家當天，優先承接離開舊生活與抵達新住處。",
@@ -1019,7 +1208,9 @@ def format_life_event_context(events=None, now_dt=None):
         if score in (None, "", "?"):
             score, _ = calculate_life_event_score(event)
             event["event_score"] = score
-        today_hint = phase_hint.get(event.get("current_phase"), "")
+        template = get_life_event_template(event)
+        template_hints = template.get("phase_hints", {}) if isinstance(template, dict) else {}
+        today_hint = template_hints.get(event.get("current_phase")) or fallback_phase_hint.get(event.get("current_phase"), "")
         hint_line = f"\n   今日階段提醒：{today_hint}" if today_hint else ""
         blocks.append(
             f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；分數={score}/10；階段={phase}；參與者={participants}\n"
@@ -3676,7 +3867,7 @@ async def on_message(message):
                         print(f"🧭 已登記重大事件：{[e.get('title') for e in captured_life_events]}")
 
                 # v52.4：偵測重大事件中的「已完成子任務」，避免小俠反覆要求已完成的事。
-                completed_subtasks = detect_completed_life_subtasks_from_text(text_query)
+                completed_subtasks = detect_completed_life_subtasks_from_text(text_query, events=load_life_events())
                 if completed_subtasks:
                     life_events = load_life_events()
                     if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
@@ -4320,7 +4511,7 @@ async def architect_add_event_cmd(ctx, *, event_text: str = ""):
         return
     try:
         now = datetime.now(TZ_TPE)
-        completed_subtasks = detect_completed_life_subtasks_from_text(event_text)
+        completed_subtasks = detect_completed_life_subtasks_from_text(event_text, events=load_life_events())
         if completed_subtasks:
             life_events = load_life_events()
             if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
