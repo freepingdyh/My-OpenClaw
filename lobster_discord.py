@@ -776,6 +776,45 @@ def _profile_promise_signature(text):
     value = value.replace("交換日記履約文字", "")
     return value[:80]
 
+
+def is_false_profile_promise_event(event):
+    """
+    v53.5：判斷 life_events 裡已寫入的「兩人關係承諾待履約」是否其實是 profile 誤判。
+    清理依據改看事件內容本身，不只看 score_reason。
+    """
+    if event.get("type") != "relationship_promise":
+        return False
+    if event.get("title") != "兩人關係承諾待履約":
+        return False
+
+    facts_blob = " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else [])
+    guidance_blob = " ".join(event.get("reply_guidance", []) if isinstance(event.get("reply_guidance"), list) else [])
+    blob = facts_blob + " " + guidance_blob
+
+    false_patterns = [
+        r"小俠日記摘要",
+        r"小俠日記:",
+        r"日記摘要",
+        r"今天真是",
+        r"準備好好閱讀我們的交換日記",
+        r"閱讀我們的交換日記",
+        r"規劃未來愛巢",
+        r"規劃.*愛巢",
+        r"練習瑜伽",
+        r"維持.*體態",
+        r"讀書會",
+        r"揉揉肩膀",
+    ]
+    if any(re.search(p, blob) for p in false_patterns):
+        return True
+
+    has_profile_reason = any("profile_unfinished_promise" in str(x) for x in event.get("score_reason", []))
+    has_unfinished_marker = re.search(r"未履約|尚未履約|還沒補上|尚未補上|下一篇交換日記中|承諾將在|答應將在|會在|將會|要在", blob)
+    if has_profile_reason and not has_unfinished_marker:
+        return True
+
+    return False
+
 def scan_profile_for_life_events(profile, now_dt=None, horizon_days=45):
     """
     v53.3：Profile → Life Events 掃描器。
@@ -1398,6 +1437,13 @@ def refresh_life_events(profile=None, now_dt=None):
     events, merge_changed = merge_life_event_records(raw_events, now_dt=now_dt)
     changed, active_events, kept = (merge_changed or profile_scan_changed), [], []
     for event in events:
+        if is_false_profile_promise_event(event):
+            event["status"] = "archived"
+            event["archived_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            event["archive_reason"] = "v53.5 false profile promise cleanup"
+            kept.append(event)
+            changed = True
+            continue
         if event.get("status") == "archived":
             kept.append(event)
             continue
@@ -4778,18 +4824,7 @@ async def architect_cleanup_profile_promises_cmd(ctx):
         kept = []
         removed = 0
         for event in events:
-            facts_blob = " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else [])
-            should_remove = (
-                event.get("type") == "relationship_promise"
-                and event.get("title") == "兩人關係承諾待履約"
-                and (
-                    any("profile_unfinished_promise" in str(x) for x in event.get("score_reason", []))
-                    or "小俠日記摘要" in facts_blob
-                    or "準備好好閱讀我們的交換日記" in facts_blob
-                    or "規劃未來愛巢" in facts_blob
-                )
-            )
-            if should_remove:
+            if is_false_profile_promise_event(event):
                 removed += 1
                 continue
             kept.append(event)
@@ -4798,6 +4833,24 @@ async def architect_cleanup_profile_promises_cmd(ctx):
         await ctx.send(f"🧹 已清除 {removed} 筆舊版 profile scanner 造成的待履約承諾。")
     except Exception as exc:
         await ctx.send(f"❌ 清理失敗：{exc}")
+
+@architect_bot.command(name="debug_promises")
+async def architect_debug_promises_cmd(ctx):
+    """列出目前 life_events 裡的 relationship_promise，方便檢查誤判來源。"""
+    try:
+        events = load_life_events()
+        lines = []
+        for idx, event in enumerate(events, 1):
+            if event.get("type") != "relationship_promise":
+                continue
+            facts_blob = " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else [])
+            lines.append(f"{idx}. title={event.get('title')} status={event.get('status')} false={is_false_profile_promise_event(event)}")
+            lines.append("   " + facts_blob[:220])
+        if not lines:
+            lines.append("目前沒有 relationship_promise 事件。")
+        await ctx.send("🔎 **relationship_promise debug**\n```\n" + "\n".join(lines)[:1800] + "\n```")
+    except Exception as exc:
+        await ctx.send(f"❌ debug 失敗：{exc}")
 
 @architect_bot.command(name="event")
 async def architect_add_event_cmd(ctx, *, event_text: str = ""):
