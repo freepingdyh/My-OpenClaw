@@ -485,6 +485,67 @@ def _date_str(value):
         return value.strftime("%Y-%m-%d")
     return str(value)[:10] if value else ""
 
+def _event_text_reference_date(event, now_dt=None):
+    """
+    v52.6：判斷事件文字中的「今天 / 昨天 / 明天」原本指哪一天。
+    優先使用 created_at，因為 LLM 產生 fact 的「今天」通常是登記當天；
+    沒有 created_at 時才退回 anchor_date。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    for key in ("created_at", "updated_at", "anchor_date"):
+        dt = _parse_date(event.get(key))
+        if dt:
+            return dt
+    return now_dt.date()
+
+def normalize_relative_temporal_text(text_value, event, now_dt=None):
+    """
+    v52.6：把 life_events 裡的相對時間詞轉成絕對日期，避免 5/31 還顯示「今天一起北上」。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = now_dt.date()
+    ref_date = _event_text_reference_date(event, now_dt=now_dt)
+    value = str(text_value or "")
+
+    # 已有括號日期者，直接移除錯誤的「今天」標籤。
+    value = re.sub(r"(\d{4}-\d{2}-\d{2})（今天）", r"\1", value)
+    value = re.sub(r"今天（(\d{4}-\d{2}-\d{2})）", r"\1", value)
+    value = re.sub(r"(\d{4}/\d{2}/\d{2})（今天）", r"\1", value)
+    value = re.sub(r"今天（(\d{4}/\d{2}/\d{2})）", r"\1", value)
+
+    # 只有跨日後才把「今天」改掉；當天仍保留自然語氣。
+    if ref_date != today:
+        value = value.replace("今天", f"{ref_date.strftime('%Y-%m-%d')}當天")
+        value = value.replace("昨日", f"{(ref_date - timedelta(days=1)).strftime('%Y-%m-%d')}")
+        value = value.replace("昨天", f"{(ref_date - timedelta(days=1)).strftime('%Y-%m-%d')}")
+        value = value.replace("明天", f"{(ref_date + timedelta(days=1)).strftime('%Y-%m-%d')}")
+        value = value.replace("後天", f"{(ref_date + timedelta(days=2)).strftime('%Y-%m-%d')}")
+
+    derived = event.get("derived_dates", {}) if isinstance(event.get("derived_dates"), dict) else {}
+    new_job_start = _date_str(derived.get("new_job_start"))
+    if new_job_start:
+        value = value.replace("下週一", new_job_start).replace("下周一", new_job_start).replace("下星期一", new_job_start)
+
+    return value
+
+def normalize_life_event_temporal_fields(event, now_dt=None):
+    """
+    v52.6：把既有 facts / reply_guidance 中過期的相對時間詞寫回 JSON。
+    """
+    changed = False
+    for field in ("facts", "reply_guidance"):
+        values = event.get(field)
+        if not isinstance(values, list):
+            continue
+        normalized = []
+        for item in values:
+            new_item = normalize_relative_temporal_text(item, event, now_dt=now_dt)
+            if new_item != item:
+                changed = True
+            normalized.append(new_item)
+        event[field] = list(dict.fromkeys(normalized))[:12]
+    return changed
+
 def _next_weekday(base_date, weekday):
     delta = (weekday - base_date.weekday()) % 7
     if delta == 0:
@@ -770,6 +831,8 @@ def merge_life_event_records(events, now_dt=None):
         event = normalize_life_event(raw, now_dt=now_dt)
         if not event:
             continue
+        if normalize_life_event_temporal_fields(event, now_dt=now_dt):
+            changed = True
         if not should_register_life_event(event):
             changed = True
             continue
@@ -913,6 +976,9 @@ def refresh_life_events(profile=None, now_dt=None):
             event["status"], event["current_phase"] = status, phase
             event["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
             changed = True
+        if normalize_life_event_temporal_fields(event, now_dt=now_dt):
+            event["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            changed = True
         if status == "completed":
             summary = event.get("archive_summary") or f"重大事件已完成：{event.get('title')}。" + " ".join(event.get("facts", [])[:2])
             if profile is not None:
@@ -935,10 +1001,16 @@ def format_life_event_context(events=None, now_dt=None):
         return "目前沒有最高優先級重大事件。"
     priority = {"critical": 0, "high": 1, "medium": 2}
     phase_zh = {"preparation": "事前準備", "interview_day": "面試當天", "post_interview_followup": "面試後關心", "before_move": "北上/搬家前", "moving_day": "北上/搬家當天", "settling_in_before_new_job": "安頓新住處/等入職", "new_job_first_day": "新工作第一天", "first_week_support": "新工作第一週支持", "settling_in": "安頓期", "event_day": "事件當天", "after_event_followup": "事件後關心", "before_event": "事件前準備"}
+    phase_hint = {
+        "settling_in_before_new_job": "今日重點：已完成北上與入住，現在是安頓新住處、整理文件、準備新工作；不要再把 5/30 的北上當成今天正在發生。",
+        "new_job_first_day": "今日重點：今天是新工作第一天，應關心報到、通勤、精神狀態與下班後休息；不要再說下週或明天上班。",
+        "first_week_support": "今日重點：新工作第一週支持期，應關心適應、通勤、同事、工作節奏與休息。",
+        "moving_day": "今日重點：今天是北上/搬家當天，優先承接離開舊生活與抵達新住處。",
+    }
     blocks = []
     for idx, event in enumerate(sorted(events, key=lambda e: (priority.get(e.get("importance"), 3), e.get("anchor_date", "")))[:3], 1):
-        facts = "；".join(event.get("facts", [])[:5])
-        guidance = "；".join(event.get("reply_guidance", [])[:5])
+        facts = "；".join([normalize_relative_temporal_text(x, event, now_dt=now_dt) for x in event.get("facts", [])[:5]])
+        guidance = "；".join([normalize_relative_temporal_text(x, event, now_dt=now_dt) for x in event.get("reply_guidance", [])[:5]])
         participants = "、".join(event.get("participants", [])) or "大俠"
         phase = phase_zh.get(event.get("current_phase"), event.get("current_phase", ""))
         completed = "；".join([item.get("label", "") for item in event.get("completed_subtasks", []) if isinstance(item, dict) and item.get("label")])
@@ -947,9 +1019,11 @@ def format_life_event_context(events=None, now_dt=None):
         if score in (None, "", "?"):
             score, _ = calculate_life_event_score(event)
             event["event_score"] = score
+        today_hint = phase_hint.get(event.get("current_phase"), "")
+        hint_line = f"\n   今日階段提醒：{today_hint}" if today_hint else ""
         blocks.append(
             f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；分數={score}/10；階段={phase}；參與者={participants}\n"
-            f"   事實：{facts}{completed_line}\n"
+            f"   事實：{facts}{completed_line}{hint_line}\n"
             f"   回應指引：{guidance}"
         )
     return "\n".join(blocks)
