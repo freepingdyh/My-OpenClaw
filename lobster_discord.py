@@ -620,15 +620,19 @@ def life_event_merge_key(event):
 
 def detect_completed_life_subtasks_from_text(text_value):
     """
-    v52.4：從使用者聊天偵測已完成的子任務。
-    目的：避免小俠已知「大俠探過通勤路」後，仍一再說要陪去探路。
+    v52.5：從使用者聊天偵測已完成的子任務。
+    比 v52.4 更寬鬆，能抓到：
+    - 大俠已經探完路
+    - 今天不用再去看通勤路線
+    - 順利到達公司後折返回家
     """
     value = str(text_value or "")
     completed = []
     commute_done = (
-        re.search(r"(通勤|上班|公司|工作).{0,20}(路線|路|路程|交通).{0,30}(探完|看過|確認完|探過|走過|順利|完成)", value)
-        or re.search(r"(不用|不必|今天不用).{0,20}(再)?(去)?(看|確認|探).{0,12}(通勤|上班|公司|工作).{0,12}(路線|路)", value)
-        or re.search(r"(我|大俠).{0,10}(都|已經).{0,10}(探完|看過|探過|確認完).{0,20}(路線|公司|通勤|上班)", value)
+        re.search(r"(通勤|上班|公司|工作).{0,25}(路線|路|路程|交通).{0,40}(探完|看過|確認完|探過|走過|順利|完成|不用再)", value)
+        or re.search(r"(不用|不必|今天不用|不要|不用再).{0,25}(再)?(去)?(看|確認|探|陪).{0,18}(通勤|上班|公司|工作).{0,18}(路線|路)", value)
+        or re.search(r"(我|大俠).{0,12}(都|已經).{0,12}(探完|看過|探過|確認完|完成).{0,30}(路線|公司|通勤|上班|路)", value)
+        or re.search(r"(探完路|探過路|看過路|確認完路線|順利到達公司|折返回家)", value)
     )
     if commute_done:
         completed.append({
@@ -668,12 +672,23 @@ def apply_life_event_completed_subtasks(events, completed_subtasks, now_dt=None)
                 local_changed = True
 
         if any(task["key"] == "commute_route_checked" for task in completed_subtasks):
+            # 移除「還要去看路線」類舊事實，避免被格式化後繼續注入 prompt。
+            old_facts = event.get("facts") or []
+            fact_filtered = []
+            for item in old_facts:
+                item_text = str(item)
+                if re.search(r"(計劃|計畫|需要|今天).{0,20}(一起|陪同)?(看看|確認|探|去看).{0,20}(通勤|上班|公司).{0,10}(路線|路)", item_text):
+                    local_changed = True
+                    continue
+                fact_filtered.append(item)
+            event["facts"] = list(dict.fromkeys(fact_filtered))[:12]
+
             old_guidance = event.get("reply_guidance") or []
             filtered = []
             removed = False
             for item in old_guidance:
                 item_text = str(item)
-                if re.search(r"(陪同|一起|主動|需要).{0,20}(確認|看看|去看|探).{0,20}(通勤|上班|公司).{0,10}(路線|路)", item_text):
+                if re.search(r"(陪同|一起|主動|需要|規劃|看看|確認|探|去看).{0,25}(通勤|上班|公司).{0,12}(路線|路)", item_text):
                     removed = True
                     continue
                 filtered.append(item)
@@ -689,14 +704,67 @@ def apply_life_event_completed_subtasks(events, completed_subtasks, now_dt=None)
             changed = True
     return changed
 
+def _event_primary_date(event):
+    derived = event.get("derived_dates", {}) if isinstance(event.get("derived_dates"), dict) else {}
+    for key in ("new_job_start", "move_day", "settling_in_day", "interview_day"):
+        dt = _parse_date(derived.get(key))
+        if dt:
+            return dt
+    return _parse_date(event.get("anchor_date"))
+
+def _should_fuzzy_merge_life_events(old_event, new_event):
+    if life_event_category(old_event) != life_event_category(new_event):
+        return False
+    category = life_event_category(old_event)
+    if category != "move_or_new_job":
+        return life_event_merge_key(old_event) == life_event_merge_key(new_event)
+    d1 = _event_primary_date(old_event)
+    d2 = _event_primary_date(new_event)
+    if not d1 or not d2:
+        return False
+    return abs((d1 - d2).days) <= 7
+
+def _merge_two_life_events(old, event, now_dt=None):
+    old_weight = int(old.get("event_score", 0) or 0) + len(old.get("facts", []) or []) + len(old.get("reply_guidance", []) or [])
+    new_weight = int(event.get("event_score", 0) or 0) + len(event.get("facts", []) or []) + len(event.get("reply_guidance", []) or [])
+    if new_weight > old_weight:
+        base, extra = event, old
+    else:
+        base, extra = old, event
+
+    base["facts"] = list(dict.fromkeys((base.get("facts") or []) + (extra.get("facts") or [])))[:12]
+    base["reply_guidance"] = list(dict.fromkeys((base.get("reply_guidance") or []) + (extra.get("reply_guidance") or [])))[:12]
+    base["participants"] = list(dict.fromkeys((base.get("participants") or []) + (extra.get("participants") or [])))[:6]
+
+    merged_subtasks = []
+    for sub in (base.get("completed_subtasks") or []) + (extra.get("completed_subtasks") or []):
+        if isinstance(sub, dict) and sub.get("key") and sub.get("key") not in [x.get("key") for x in merged_subtasks if isinstance(x, dict)]:
+            merged_subtasks.append(sub)
+    if merged_subtasks:
+        base["completed_subtasks"] = merged_subtasks[:10]
+
+    base["derived_dates"] = {**(extra.get("derived_dates") or {}), **(base.get("derived_dates") or {})}
+    base["phase_rules"] = (base.get("phase_rules") or []) or (extra.get("phase_rules") or [])
+    base["event_score"] = max(int(base.get("event_score", 0) or 0), int(extra.get("event_score", 0) or 0))
+    if base["event_score"] >= 8 or old.get("importance") == "critical" or event.get("importance") == "critical":
+        base["importance"] = "critical"
+    elif base["event_score"] >= 6:
+        base["importance"] = "high"
+    if not base.get("archive_summary"):
+        base["archive_summary"] = extra.get("archive_summary", "")
+    base["updated_at"] = (now_dt or datetime.now(TZ_TPE)).strftime("%Y-%m-%d %H:%M:%S")
+    return base
+
 def merge_life_event_records(events, now_dt=None):
     """
-    v52.3：正規化舊事件、補 event_score，並合併同日同類事件。
-    這會修掉：
-    1) 舊 seed 事件顯示 score=?/10
-    2) 「北上新生活」與「大俠與小俠北上」重複顯示
+    v52.5：正規化、補分、合併相似事件。
+    針對 move/new-job 類事件改用 7 天視窗 fuzzy merge，避免：
+    - 2026-05-30 北上
+    - 2026-05-31 安頓新家
+    - 2026-06-01 新工作
+    被拆成多個互相矛盾的最高優先級事件。
     """
-    merged = {}
+    merged = []
     changed = False
     for raw in events or []:
         event = normalize_life_event(raw, now_dt=now_dt)
@@ -705,45 +773,23 @@ def merge_life_event_records(events, now_dt=None):
         if not should_register_life_event(event):
             changed = True
             continue
-        key = life_event_merge_key(event)
-        if key not in merged:
-            merged[key] = event
+
+        match_idx = None
+        for idx, old in enumerate(merged):
+            if _should_fuzzy_merge_life_events(old, event):
+                match_idx = idx
+                break
+
+        if match_idx is None:
+            merged.append(event)
             if json.dumps(raw, ensure_ascii=False, sort_keys=True) != json.dumps(event, ensure_ascii=False, sort_keys=True):
                 changed = True
             continue
 
-        old = merged[key]
-        # 保留資訊較完整或分數較高的事件作為主體。
-        old_weight = int(old.get("event_score", 0) or 0) + len(old.get("facts", []) or []) + len(old.get("reply_guidance", []) or [])
-        new_weight = int(event.get("event_score", 0) or 0) + len(event.get("facts", []) or []) + len(event.get("reply_guidance", []) or [])
-        if new_weight > old_weight:
-            base, extra = event, old
-        else:
-            base, extra = old, event
-
-        base["facts"] = list(dict.fromkeys((base.get("facts") or []) + (extra.get("facts") or [])))[:10]
-        base["reply_guidance"] = list(dict.fromkeys((base.get("reply_guidance") or []) + (extra.get("reply_guidance") or [])))[:10]
-        base["participants"] = list(dict.fromkeys((base.get("participants") or []) + (extra.get("participants") or [])))[:6]
-        merged_subtasks = []
-        for sub in (base.get("completed_subtasks") or []) + (extra.get("completed_subtasks") or []):
-            if isinstance(sub, dict) and sub.get("key") and sub.get("key") not in [x.get("key") for x in merged_subtasks if isinstance(x, dict)]:
-                merged_subtasks.append(sub)
-        if merged_subtasks:
-            base["completed_subtasks"] = merged_subtasks[:10]
-        base["derived_dates"] = {**(extra.get("derived_dates") or {}), **(base.get("derived_dates") or {})}
-        base["phase_rules"] = (base.get("phase_rules") or []) or (extra.get("phase_rules") or [])
-        base["event_score"] = max(int(base.get("event_score", 0) or 0), int(extra.get("event_score", 0) or 0))
-        if base["event_score"] >= 8 or old.get("importance") == "critical" or event.get("importance") == "critical":
-            base["importance"] = "critical"
-        elif base["event_score"] >= 6:
-            base["importance"] = "high"
-        if not base.get("archive_summary"):
-            base["archive_summary"] = extra.get("archive_summary", "")
-        base["updated_at"] = (now_dt or datetime.now(TZ_TPE)).strftime("%Y-%m-%d %H:%M:%S")
-        merged[key] = base
+        merged[match_idx] = _merge_two_life_events(merged[match_idx], event, now_dt=now_dt)
         changed = True
 
-    return list(merged.values()), changed
+    return merged, changed
 
 def normalize_life_event(raw_event, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
@@ -3560,6 +3606,7 @@ async def on_message(message):
                 if completed_subtasks:
                     life_events = load_life_events()
                     if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
+                        life_events, _ = merge_life_event_records(life_events, now_dt=now)
                         save_life_events(life_events)
                         daily_chat_logs.append(narrative_safe_text(
                             "【重大事件子任務完成】" + "；".join([t["label"] for t in completed_subtasks]),
@@ -4199,17 +4246,20 @@ async def architect_add_event_cmd(ctx, *, event_text: str = ""):
         return
     try:
         now = datetime.now(TZ_TPE)
-        extracted = await capture_life_events_from_chat(event_text, recent_chat_text="", now_dt=now)
-        extracted = [e for e in extracted if should_register_life_event(e)]
-        if not extracted:
-            await ctx.send("⚠️ 這段內容沒有達到重大事件門檻，未寫入 life_events。若確定要登記，請補充日期、影響、後續行動與小俠角色。")
-            return
-        changed = upsert_life_events(extracted, now_dt=now)
         completed_subtasks = detect_completed_life_subtasks_from_text(event_text)
         if completed_subtasks:
             life_events = load_life_events()
             if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
+                life_events, _ = merge_life_event_records(life_events, now_dt=now)
                 save_life_events(life_events)
+
+        extracted = await capture_life_events_from_chat(event_text, recent_chat_text="", now_dt=now)
+        extracted = [e for e in extracted if should_register_life_event(e)]
+        if not extracted and not completed_subtasks:
+            await ctx.send("⚠️ 這段內容沒有達到重大事件門檻，未寫入 life_events。若確定要登記，請補充日期、影響、後續行動與小俠角色。")
+            return
+        if extracted:
+            changed = upsert_life_events(extracted, now_dt=now)
         profile = load_profile()
         events, life_changed = refresh_life_events(profile=profile, now_dt=now)
         if life_changed:
