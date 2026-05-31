@@ -728,33 +728,44 @@ def _normalize_profile_calendar(profile):
 
 def _profile_promise_is_actionable(bucket, text, added_at=""):
     """
-    v53.3：判斷 profile 文字是否真的是「待履約承諾」。
-    避免把「大俠重視承諾」「小俠已履行承諾」「關係重視信任」這種人格/歷史摘要誤判成待辦。
+    v53.4：更嚴格判斷 profile 文字是否真的是「待履約承諾」。
+    原則：profile scanner 只抓「明確未完成 / 明確要求未來交付」的承諾；
+    不抓日記摘要、人格描述、生活計畫、閱讀交換日記、規劃愛巢等敘事。
     """
     value = str(text or "")
 
-    # 已完成 / 歷史摘要 / 人格描述，一律不當待履約。
-    if re.search(r"已履行|履行承諾|已完成|已交付|已補上|已在\\s*\\d{4}-\\d{2}-\\d{2}|獲得大俠原諒|已經|已決定|已同意|已為|記錄兩人|重視承諾|不能容忍失信|遵守承諾|信任", value):
+    # 日記摘要、歌詞、歷史敘事不是待辦。
+    if re.search(r"小俠日記摘要|小俠日記:|日記摘要|今天真是|回憶|度過|一起|共同|準備好好閱讀我們的交換日記|規劃未來愛巢", value):
         return False
 
-    # 人格 trait 裡的「重視承諾」不是待辦。
+    # 已完成 / 歷史摘要 / 人格描述，一律不當待履約。
+    if re.search(r"已履行|履行承諾|已完成|已交付|已補上|已在\s*\d{4}-\d{2}-\d{2}|獲得大俠原諒|已經|已決定|已同意|已為|記錄兩人|重視承諾|不能容忍失信|遵守承諾|信任", value):
+        return False
+
+    # traits 永遠不掃承諾，避免人格特質變待辦。
     if bucket in {"daxia_traits", "xiaoxia_traits"}:
         return False
 
-    # 太長的 diary summary 容易是摘要，不是待辦。
-    if len(value) > 220:
+    # recent_context 預設不掃，除非有非常明確的未履約語句。
+    if bucket == "recent_context" and not re.search(r"未履約|尚未履約|還沒履約|還沒補上|尚未補上|下一篇交換日記中|承諾將在|答應將在", value):
         return False
 
-    # 必須有明確未來/待辦語氣。
-    future_markers = r"會|將|要|待|等|下次|明天|今晚|今天晚上|下一篇|之後|工作有所進展|準備|提供|補上|交付"
-    promise_markers = r"承諾|約定|答應|交換日記|外出照|菜單|照片|晚宴|獎勵|履約"
-
-    if not re.search(promise_markers, value):
-        return False
-    if not re.search(future_markers, value):
+    if len(value) > 180:
         return False
 
-    # 「大俠承諾」若是寫成已履約日記項，前面已擋；其餘可保留給 relationship_promise。
+    # 必須是明確承諾詞 + 明確未來交付詞。
+    explicit_promise = r"承諾|約定|答應|保證"
+    explicit_delivery = r"未履約|尚未履約|還沒|尚未|下一篇|明天|今晚|之後會|將會|會在|要在|補上|提供|交付|履約"
+
+    if not re.search(explicit_promise, value):
+        return False
+    if not re.search(explicit_delivery, value):
+        return False
+
+    # 「閱讀交換日記」「規劃愛巢」不是承諾交付。
+    if re.search(r"閱讀交換日記|規劃.*愛巢|練習瑜伽|維持.*體態", value):
+        return False
+
     return True
 
 def _profile_promise_signature(text):
@@ -4767,11 +4778,18 @@ async def architect_cleanup_profile_promises_cmd(ctx):
         kept = []
         removed = 0
         for event in events:
-            if (
+            facts_blob = " ".join(event.get("facts", []) if isinstance(event.get("facts"), list) else [])
+            should_remove = (
                 event.get("type") == "relationship_promise"
                 and event.get("title") == "兩人關係承諾待履約"
-                and any("profile_unfinished_promise" in str(x) for x in event.get("score_reason", []))
-            ):
+                and (
+                    any("profile_unfinished_promise" in str(x) for x in event.get("score_reason", []))
+                    or "小俠日記摘要" in facts_blob
+                    or "準備好好閱讀我們的交換日記" in facts_blob
+                    or "規劃未來愛巢" in facts_blob
+                )
+            )
+            if should_remove:
                 removed += 1
                 continue
             kept.append(event)
