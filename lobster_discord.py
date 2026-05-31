@@ -606,8 +606,88 @@ def life_event_category(event):
     return str(event.get("type", "general"))
 
 def life_event_merge_key(event):
-    """相同日期 + 相同大類的事件視為同一重大事件候選。"""
-    return (life_event_category(event), _date_str(event.get("anchor_date")))
+    """v52.4：相似事件合併鍵。北上/搬家/新工作優先用新工作日期或搬家日，避免跨日重複。"""
+    category = life_event_category(event)
+    derived = event.get("derived_dates", {}) if isinstance(event.get("derived_dates"), dict) else {}
+    if category == "move_or_new_job":
+        key_date = (
+            _date_str(derived.get("new_job_start"))
+            or _date_str(derived.get("move_day"))
+            or _date_str(event.get("anchor_date"))
+        )
+        return (category, key_date)
+    return (category, _date_str(event.get("anchor_date")))
+
+def detect_completed_life_subtasks_from_text(text_value):
+    """
+    v52.4：從使用者聊天偵測已完成的子任務。
+    目的：避免小俠已知「大俠探過通勤路」後，仍一再說要陪去探路。
+    """
+    value = str(text_value or "")
+    completed = []
+    commute_done = (
+        re.search(r"(通勤|上班|公司|工作).{0,20}(路線|路|路程|交通).{0,30}(探完|看過|確認完|探過|走過|順利|完成)", value)
+        or re.search(r"(不用|不必|今天不用).{0,20}(再)?(去)?(看|確認|探).{0,12}(通勤|上班|公司|工作).{0,12}(路線|路)", value)
+        or re.search(r"(我|大俠).{0,10}(都|已經).{0,10}(探完|看過|探過|確認完).{0,20}(路線|公司|通勤|上班)", value)
+    )
+    if commute_done:
+        completed.append({
+            "key": "commute_route_checked",
+            "label": "大俠已完成新工作通勤路線探路",
+            "fact": "大俠已完成新工作通勤路線探路，並已順利到達公司後折返回家。後續不應再說要一起去探路或陪同確認通勤路線。"
+        })
+    if re.search(r"(文件|證件|資料).{0,20}(整理完|準備好|確認完|完成)", value):
+        completed.append({
+            "key": "work_documents_ready",
+            "label": "大俠已整理/確認新工作文件",
+            "fact": "大俠已整理或確認新工作文件，後續只需關心休息與明日上班狀態。"
+        })
+    return completed
+
+def apply_life_event_completed_subtasks(events, completed_subtasks, now_dt=None):
+    if not completed_subtasks:
+        return False
+    changed = False
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    for event in events or []:
+        if life_event_category(event) != "move_or_new_job":
+            continue
+        existing = event.get("completed_subtasks", [])
+        if not isinstance(existing, list):
+            existing = []
+        existing_keys = {item.get("key") for item in existing if isinstance(item, dict)}
+        local_changed = False
+        for task in completed_subtasks:
+            if task["key"] not in existing_keys:
+                existing.append({
+                    "key": task["key"],
+                    "label": task["label"],
+                    "completed_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                event["facts"] = list(dict.fromkeys((event.get("facts") or []) + [task["fact"]]))[:12]
+                local_changed = True
+
+        if any(task["key"] == "commute_route_checked" for task in completed_subtasks):
+            old_guidance = event.get("reply_guidance") or []
+            filtered = []
+            removed = False
+            for item in old_guidance:
+                item_text = str(item)
+                if re.search(r"(陪同|一起|主動|需要).{0,20}(確認|看看|去看|探).{0,20}(通勤|上班|公司).{0,10}(路線|路)", item_text):
+                    removed = True
+                    continue
+                filtered.append(item)
+            replacement = "大俠已完成通勤路線探路；後續不可再說要陪同或一起去確認路線，應改為詢問探路心得、提醒整理文件與早點休息。"
+            filtered.append(replacement)
+            event["reply_guidance"] = list(dict.fromkeys(filtered))[:12]
+            if removed or replacement not in old_guidance:
+                local_changed = True
+
+        if local_changed:
+            event["completed_subtasks"] = existing
+            event["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            changed = True
+    return changed
 
 def merge_life_event_records(events, now_dt=None):
     """
@@ -644,6 +724,12 @@ def merge_life_event_records(events, now_dt=None):
         base["facts"] = list(dict.fromkeys((base.get("facts") or []) + (extra.get("facts") or [])))[:10]
         base["reply_guidance"] = list(dict.fromkeys((base.get("reply_guidance") or []) + (extra.get("reply_guidance") or [])))[:10]
         base["participants"] = list(dict.fromkeys((base.get("participants") or []) + (extra.get("participants") or [])))[:6]
+        merged_subtasks = []
+        for sub in (base.get("completed_subtasks") or []) + (extra.get("completed_subtasks") or []):
+            if isinstance(sub, dict) and sub.get("key") and sub.get("key") not in [x.get("key") for x in merged_subtasks if isinstance(x, dict)]:
+                merged_subtasks.append(sub)
+        if merged_subtasks:
+            base["completed_subtasks"] = merged_subtasks[:10]
         base["derived_dates"] = {**(extra.get("derived_dates") or {}), **(base.get("derived_dates") or {})}
         base["phase_rules"] = (base.get("phase_rules") or []) or (extra.get("phase_rules") or [])
         base["event_score"] = max(int(base.get("event_score", 0) or 0), int(extra.get("event_score", 0) or 0))
@@ -809,13 +895,15 @@ def format_life_event_context(events=None, now_dt=None):
         guidance = "；".join(event.get("reply_guidance", [])[:5])
         participants = "、".join(event.get("participants", [])) or "大俠"
         phase = phase_zh.get(event.get("current_phase"), event.get("current_phase", ""))
+        completed = "；".join([item.get("label", "") for item in event.get("completed_subtasks", []) if isinstance(item, dict) and item.get("label")])
+        completed_line = f"\n   已完成子任務：{completed}" if completed else ""
         score = event.get("event_score")
         if score in (None, "", "?"):
             score, _ = calculate_life_event_score(event)
             event["event_score"] = score
         blocks.append(
             f"{idx}. 【{event.get('title')}】重要度={event.get('importance')}；分數={score}/10；階段={phase}；參與者={participants}\n"
-            f"   事實：{facts}\n"
+            f"   事實：{facts}{completed_line}\n"
             f"   回應指引：{guidance}"
         )
     return "\n".join(blocks)
@@ -3466,6 +3554,20 @@ async def on_message(message):
                         ))
                         save_temp_chat(daily_chat_logs)
                         print(f"🧭 已登記重大事件：{[e.get('title') for e in captured_life_events]}")
+
+                # v52.4：偵測重大事件中的「已完成子任務」，避免小俠反覆要求已完成的事。
+                completed_subtasks = detect_completed_life_subtasks_from_text(text_query)
+                if completed_subtasks:
+                    life_events = load_life_events()
+                    if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
+                        save_life_events(life_events)
+                        daily_chat_logs.append(narrative_safe_text(
+                            "【重大事件子任務完成】" + "；".join([t["label"] for t in completed_subtasks]),
+                            max_len=240
+                        ))
+                        save_temp_chat(daily_chat_logs)
+                        print(f"🧭 已標記重大事件子任務完成：{[t['label'] for t in completed_subtasks]}")
+
                 active_life_events, life_changed = refresh_life_events(profile=profile, now_dt=now)
                 if life_changed:
                     save_profile(profile)
@@ -4103,6 +4205,11 @@ async def architect_add_event_cmd(ctx, *, event_text: str = ""):
             await ctx.send("⚠️ 這段內容沒有達到重大事件門檻，未寫入 life_events。若確定要登記，請補充日期、影響、後續行動與小俠角色。")
             return
         changed = upsert_life_events(extracted, now_dt=now)
+        completed_subtasks = detect_completed_life_subtasks_from_text(event_text)
+        if completed_subtasks:
+            life_events = load_life_events()
+            if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
+                save_life_events(life_events)
         profile = load_profile()
         events, life_changed = refresh_life_events(profile=profile, now_dt=now)
         if life_changed:
