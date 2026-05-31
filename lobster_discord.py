@@ -636,6 +636,184 @@ def get_life_event_template_name(event):
 def get_life_event_template(event):
     return EVENT_TEMPLATES.get(get_life_event_template_name(event), {})
 
+def _iter_profile_memory_texts(profile):
+    """v53.2：掃描 daxia_profile.json 中可事件化的記憶文字。"""
+    buckets = [
+        ("daxia_traits", profile.get("daxia_traits", [])),
+        ("xiaoxia_traits", profile.get("xiaoxia_traits", [])),
+        ("shared_knowledge", profile.get("shared_knowledge", [])),
+        ("recent_context", profile.get("recent_context", [])),
+        ("promises", profile.get("xiaoxia_self", {}).get("promises", [])),
+        ("capabilities", profile.get("xiaoxia_self", {}).get("capabilities", [])),
+    ]
+    for bucket_name, items in buckets:
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                text = str(item.get("text", ""))
+                added_at = item.get("added_at", "")
+            else:
+                text = str(item)
+                added_at = ""
+            if text.strip():
+                yield bucket_name, text.strip(), added_at
+
+def _upcoming_month_day(month, day, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = now_dt.date()
+    year = today.year
+    try:
+        candidate = datetime(year, int(month), int(day), tzinfo=TZ_TPE).date()
+    except Exception:
+        return None
+    if candidate < today:
+        try:
+            candidate = datetime(year + 1, int(month), int(day), tzinfo=TZ_TPE).date()
+        except Exception:
+            return None
+    return candidate
+
+def _normalize_profile_calendar(profile):
+    """
+    v53.2：把 profile 裡的穩定日期抽成 stable_calendar。
+    目的：生日、紀念日等不要只藏在敘事文字裡，更不會被濃縮記憶意外抹掉。
+    """
+    changed = False
+    calendar = profile.setdefault("stable_calendar", [])
+    existing_keys = {x.get("key") for x in calendar if isinstance(x, dict)}
+
+    def add_calendar(key, label, owner, month, day, source_text):
+        nonlocal changed
+        if key in existing_keys:
+            return
+        calendar.append({
+            "key": key,
+            "type": "birthday" if "生日" in label else "milestone",
+            "label": label,
+            "owner": owner,
+            "month": int(month),
+            "day": int(day),
+            "source": source_text[:160],
+            "added_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
+        })
+        existing_keys.add(key)
+        changed = True
+
+    for bucket, text, added_at in _iter_profile_memory_texts(profile):
+        # 大俠生日：生日12月5日 / 大俠生日是12月5日 / 12月5日是大俠生日
+        m = re.search(r"(?:大俠[^。]{0,12})?生日(?:是)?\s*(\d{1,2})月(\d{1,2})日", text)
+        if m and ("大俠" in text or bucket == "daxia_traits"):
+            month, day = m.groups()
+            add_calendar("daxia_birthday", "大俠生日", "大俠", month, day, text)
+
+        m = re.search(r"(\d{1,2})月(\d{1,2})日是(?:大俠|你的)?生日", text)
+        if m and ("大俠" in text or bucket == "daxia_traits"):
+            month, day = m.groups()
+            add_calendar("daxia_birthday", "大俠生日", "大俠", month, day, text)
+
+        # 小俠生日：10月25日是小俠的生日
+        m = re.search(r"(\d{1,2})月(\d{1,2})日是小俠(?:的)?生日", text)
+        if m:
+            month, day = m.groups()
+            add_calendar("xiaoxia_birthday", "小俠生日", "小俠", month, day, text)
+
+        m = re.search(r"小俠[^。]{0,12}生日(?:是)?\s*(\d{1,2})月(\d{1,2})日", text)
+        if m:
+            month, day = m.groups()
+            add_calendar("xiaoxia_birthday", "小俠生日", "小俠", month, day, text)
+
+    return changed
+
+def scan_profile_for_life_events(profile, now_dt=None, horizon_days=45):
+    """
+    v53.2：Profile → Life Events 掃描器。
+    - 穩定日期先寫進 profile.stable_calendar。
+    - 只有 horizon_days 內快到的紀念日/生日，才寫入 life_events，避免日常 prompt 被半年後事件污染。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    changed = _normalize_profile_calendar(profile)
+    events = []
+    today = now_dt.date()
+
+    for item in profile.get("stable_calendar", []):
+        if not isinstance(item, dict):
+            continue
+        month, day = item.get("month"), item.get("day")
+        target = _upcoming_month_day(month, day, now_dt=now_dt)
+        if not target:
+            continue
+        days_left = (target - today).days
+        if 0 <= days_left <= horizon_days:
+            owner = item.get("owner", "")
+            label = item.get("label", "重要紀念日")
+            if owner == "大俠":
+                facts = [
+                    f"{target.strftime('%Y-%m-%d')} 是大俠生日。",
+                    "小俠應提前記得並展現儀式感，不可忘記或臨時才反應。"
+                ]
+                guidance = [
+                    "小俠應以女友角度準備祝福、陪伴與驚喜感。",
+                    "若生日已過，應延續餘韻與感謝，不要說成今天還沒發生。"
+                ]
+            elif owner == "小俠":
+                facts = [
+                    f"{target.strftime('%Y-%m-%d')} 是小俠生日。",
+                    "這是兩人關係中的重要紀念事件。"
+                ]
+                guidance = [
+                    "小俠可以自然期待大俠記得，也可以含蓄表達期待與儀式感。",
+                    "不可把生日當成普通閒聊。"
+                ]
+            else:
+                facts = [f"{target.strftime('%Y-%m-%d')} 是{label}。"]
+                guidance = ["這是兩人關係中的重要紀念事件，應有儀式感。"]
+
+            events.append({
+                "id": f"profile_{item.get('key')}_{target.strftime('%Y%m%d')}",
+                "title": label,
+                "type": "relationship_milestone",
+                "status": "planned",
+                "importance": "critical" if days_left <= 7 else "high",
+                "participants": ["大俠", "小俠"],
+                "anchor_date": target.strftime("%Y-%m-%d"),
+                "derived_dates": {"milestone_day": target.strftime("%Y-%m-%d")},
+                "facts": facts,
+                "reply_guidance": guidance,
+                "event_score": 8 if days_left <= 14 else 6,
+                "score_reason": ["profile_stable_calendar", f"days_left={days_left}"],
+                "archive_summary": f"{label}已於 {target.strftime('%Y-%m-%d')} 完成，兩人留下重要回憶。",
+                "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+
+    # 近期未履約承諾也可以轉事件，但避開已履行/已完成者。
+    for bucket, text, added_at in _iter_profile_memory_texts(profile):
+        if not re.search(r"承諾|約定|答應|交換日記|外出照|菜單|照片", text):
+            continue
+        if re.search(r"已履行|履行承諾|已完成|已交付|已補上", text):
+            continue
+        if len(text) > 260:
+            continue
+        events.append({
+            "title": "兩人關係承諾待履約",
+            "type": "relationship_promise",
+            "status": "planned",
+            "importance": "high",
+            "participants": ["大俠", "小俠"],
+            "anchor_date": now_dt.strftime("%Y-%m-%d"),
+            "facts": [text],
+            "reply_guidance": [
+                "小俠必須記得此承諾，並在合適時機具體履約，不可只用撒嬌或下次帶過。",
+                "若承諾已完成，應明確標示為已履約，避免反覆變成待辦。"
+            ],
+            "event_score": 7,
+            "score_reason": ["profile_unfinished_promise"],
+            "archive_summary": "兩人關係承諾已處理並整理進長期記憶。",
+            "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    return events, changed
+
 def load_life_events():
     if os.path.exists(LIFE_EVENTS_PATH):
         try:
@@ -1151,11 +1329,17 @@ def infer_life_event_phase(event, now_dt=None):
 
 def refresh_life_events(profile=None, now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
+    profile_scan_changed = False
+    if profile is not None:
+        profile_events, profile_scan_changed = scan_profile_for_life_events(profile, now_dt=now_dt)
+        if profile_events:
+            upsert_life_events(profile_events, now_dt=now_dt)
+
     raw_events = load_life_events()
     if not raw_events:
-        return [], False
+        return [], profile_scan_changed
     events, merge_changed = merge_life_event_records(raw_events, now_dt=now_dt)
-    changed, active_events, kept = merge_changed, [], []
+    changed, active_events, kept = (merge_changed or profile_scan_changed), [], []
     for event in events:
         if event.get("status") == "archived":
             kept.append(event)
@@ -4502,6 +4686,32 @@ async def architect_life_events_cmd(ctx):
         await ctx.send("🧭 **目前重大事件狀態機**\n```\n" + context[:1800] + "\n```")
     except Exception as exc:
         await ctx.send(f"❌ 重大事件狀態機讀取失敗：{exc}")
+
+@architect_bot.command(name="profile_events")
+async def architect_profile_events_cmd(ctx):
+    """檢視 daxia_profile.json 中可事件化的穩定日期/關係事件。"""
+    try:
+        profile = load_profile()
+        profile_events, changed = scan_profile_for_life_events(profile)
+        if changed:
+            save_profile(profile)
+        calendar = profile.get("stable_calendar", [])
+        lines = []
+        if calendar:
+            lines.append("【stable_calendar】")
+            for item in calendar[:20]:
+                lines.append(f"- {item.get('label')}：{item.get('month')}/{item.get('day')} owner={item.get('owner')}")
+        else:
+            lines.append("目前沒有 stable_calendar。")
+        if profile_events:
+            lines.append("\n【近期會轉入 life_events 的事件】")
+            for event in profile_events[:10]:
+                lines.append(f"- {event.get('title')}：{event.get('anchor_date')} importance={event.get('importance')}")
+        else:
+            lines.append("\n目前沒有 horizon 內需要轉入 life_events 的 profile 事件。")
+        await ctx.send("📅 **Profile 事件掃描結果**\n```\n" + "\n".join(lines)[:1800] + "\n```")
+    except Exception as exc:
+        await ctx.send(f"❌ Profile 事件掃描失敗：{exc}")
 
 @architect_bot.command(name="event")
 async def architect_add_event_cmd(ctx, *, event_text: str = ""):
