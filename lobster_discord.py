@@ -6,6 +6,7 @@ import os
 import io
 import json
 import re
+import hashlib
 import uuid
 import asyncio
 import aiohttp
@@ -725,11 +726,51 @@ def _normalize_profile_calendar(profile):
 
     return changed
 
+def _profile_promise_is_actionable(bucket, text, added_at=""):
+    """
+    v53.3：判斷 profile 文字是否真的是「待履約承諾」。
+    避免把「大俠重視承諾」「小俠已履行承諾」「關係重視信任」這種人格/歷史摘要誤判成待辦。
+    """
+    value = str(text or "")
+
+    # 已完成 / 歷史摘要 / 人格描述，一律不當待履約。
+    if re.search(r"已履行|履行承諾|已完成|已交付|已補上|已在\\s*\\d{4}-\\d{2}-\\d{2}|獲得大俠原諒|已經|已決定|已同意|已為|記錄兩人|重視承諾|不能容忍失信|遵守承諾|信任", value):
+        return False
+
+    # 人格 trait 裡的「重視承諾」不是待辦。
+    if bucket in {"daxia_traits", "xiaoxia_traits"}:
+        return False
+
+    # 太長的 diary summary 容易是摘要，不是待辦。
+    if len(value) > 220:
+        return False
+
+    # 必須有明確未來/待辦語氣。
+    future_markers = r"會|將|要|待|等|下次|明天|今晚|今天晚上|下一篇|之後|工作有所進展|準備|提供|補上|交付"
+    promise_markers = r"承諾|約定|答應|交換日記|外出照|菜單|照片|晚宴|獎勵|履約"
+
+    if not re.search(promise_markers, value):
+        return False
+    if not re.search(future_markers, value):
+        return False
+
+    # 「大俠承諾」若是寫成已履約日記項，前面已擋；其餘可保留給 relationship_promise。
+    return True
+
+def _profile_promise_signature(text):
+    value = re.sub(r"\\s+", "", str(text or ""))
+    value = re.sub(r"[，。！？、：:；;「」『』（）()\\[\\]【】]", "", value)
+    # 去掉日期與常見前綴，避免同義承諾重複。
+    value = re.sub(r"\\d{4}-\\d{2}-\\d{2}", "", value)
+    value = value.replace("交換日記履約文字", "")
+    return value[:80]
+
 def scan_profile_for_life_events(profile, now_dt=None, horizon_days=45):
     """
-    v53.2：Profile → Life Events 掃描器。
+    v53.3：Profile → Life Events 掃描器。
     - 穩定日期先寫進 profile.stable_calendar。
-    - 只有 horizon_days 內快到的紀念日/生日，才寫入 life_events，避免日常 prompt 被半年後事件污染。
+    - 只有 horizon_days 內快到的紀念日/生日，才寫入 life_events。
+    - 承諾掃描改為高門檻、去重，只抓真正待履約事項。
     """
     now_dt = now_dt or datetime.now(TZ_TPE)
     changed = _normalize_profile_calendar(profile)
@@ -786,15 +827,20 @@ def scan_profile_for_life_events(profile, now_dt=None, horizon_days=45):
                 "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
             })
 
-    # 近期未履約承諾也可以轉事件，但避開已履行/已完成者。
+    # 只從較可能保存待辦的區域掃描承諾；traits 不掃，避免人格描述變待辦。
+    seen_promises = set()
     for bucket, text, added_at in _iter_profile_memory_texts(profile):
-        if not re.search(r"承諾|約定|答應|交換日記|外出照|菜單|照片", text):
+        if bucket not in {"promises", "shared_knowledge", "recent_context"}:
             continue
-        if re.search(r"已履行|履行承諾|已完成|已交付|已補上", text):
+        if not _profile_promise_is_actionable(bucket, text, added_at):
             continue
-        if len(text) > 260:
+        sig = _profile_promise_signature(text)
+        if sig in seen_promises:
             continue
+        seen_promises.add(sig)
+
         events.append({
+            "id": f"profile_promise_{hashlib.md5(sig.encode('utf-8')).hexdigest()[:10]}",
             "title": "兩人關係承諾待履約",
             "type": "relationship_promise",
             "status": "planned",
@@ -4712,6 +4758,28 @@ async def architect_profile_events_cmd(ctx):
         await ctx.send("📅 **Profile 事件掃描結果**\n```\n" + "\n".join(lines)[:1800] + "\n```")
     except Exception as exc:
         await ctx.send(f"❌ Profile 事件掃描失敗：{exc}")
+
+@architect_bot.command(name="cleanup_profile_promises")
+async def architect_cleanup_profile_promises_cmd(ctx):
+    """清除由舊版 profile scanner 誤寫入的重複待履約承諾。"""
+    try:
+        events = load_life_events()
+        kept = []
+        removed = 0
+        for event in events:
+            if (
+                event.get("type") == "relationship_promise"
+                and event.get("title") == "兩人關係承諾待履約"
+                and any("profile_unfinished_promise" in str(x) for x in event.get("score_reason", []))
+            ):
+                removed += 1
+                continue
+            kept.append(event)
+        if removed:
+            save_life_events(kept)
+        await ctx.send(f"🧹 已清除 {removed} 筆舊版 profile scanner 造成的待履約承諾。")
+    except Exception as exc:
+        await ctx.send(f"❌ 清理失敗：{exc}")
 
 @architect_bot.command(name="event")
 async def architect_add_event_cmd(ctx, *, event_text: str = ""):
