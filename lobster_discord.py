@@ -6,6 +6,14 @@ import os
 import io
 import json
 import re
+
+SOLO_XIAOXIA_VISUAL_RULES = """
+Strictly solo Xiaoxia only.
+Strictly only Xiaoxia appears in the image.
+No man, no male partner, no male hands, no male arms, no male silhouette,
+no male reflection, no cropped male body parts, no implied off-camera man.
+If the scene is from Daxia's perspective, the camera represents Daxia's point of view and Daxia must never be visually depicted.
+"""
 import hashlib
 import uuid
 import asyncio
@@ -2822,11 +2830,13 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 交換日記的服裝以當代台灣季節合宜的居家或日常穿著為主，可有柔和女性魅力，但不要變成戲服、宮廷睡袍、拖地晚禮服或古典歐洲感型錄。
 - 若需要手部細節，只寫成 one hand near the page / the other resting near the desk 之類自然描述，不要把左右手鎖太死。
 - 可描述 elegant, feminine, attractive, soft silk/knit/cotton 等自然衣著質感。
+- 畫面中只能出現小俠本人；不可出現任何男性、其他人物、男性手部/手臂、男性剪影、男性倒影、被裁切的男性身體部位，亦不可暗示鏡頭外有男人被拍進畫面。
+- 若是大俠視角，鏡頭只代表大俠的視角存在，大俠本人絕不能被畫出來。
 - 禁止 commercial campaign, perfume advertisement, runway, Vogue, model pose。
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist 或複雜肢體動作。
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -3006,12 +3016,16 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         if scenario_tw:
             lines.append(f"- Overall scene intent: {scenario_tw}.")
 
+        lines.append("- Character visibility rule: strictly only Xiaoxia appears in the image.")
+        lines.append("- Forbidden visual intrusions: no man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man.")
+
         # A few extra hard constraints per mode
         if mode == "diary":
             lines.append("- This is a diary/lifestyle moment, not a glamour portrait, campaign image, or fashion pose.")
             lines.append("- Preserve the lived-in, intimate daily-life feeling and the task-based interaction with props.")
             lines.append("- Keep the scene grounded in a contemporary Taiwan everyday setting unless an explicit exception was requested.")
             lines.append("- Prefer modern, season-appropriate daily clothing over costume-like robes or historical styling.")
+            lines.append("- Camera rule: the camera represents Daxia's point of view only; Daxia must never be visually depicted.")
         elif mode == "cosplay":
             lines.append("- This is a story-driven cosplay scene, not a perfume advertisement, runway pose, or model showcase.")
             lines.append("- Preserve the character-task interaction and the sense that she is doing something in-scene.")
@@ -3051,13 +3065,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
     if mode == "diary":
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
-            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
+            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man. If it is a Daxia point-of-view scene, Daxia must never be visually depicted. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, elegant, story-driven cosplay image of an adult fictional Asian woman in a refined, character-appropriate outfit. "
-            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
+            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
