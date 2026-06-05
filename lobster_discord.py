@@ -102,6 +102,10 @@ PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 �
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
+MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
+MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
+MEMORY_UPDATE_LAST_MANIFEST = os.path.join(MEMORY_DIR, "memory_update_last_manifest.json")
+os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -114,6 +118,152 @@ def load_diary_override():
 def save_diary_override(data):
     with open(DIARY_OVERRIDE_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _extract_diary_date_from_title(title):
+    """從 Discord Embed 標題抓出 YYYY-MM-DD。"""
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(title or ""))
+    return match.group(1) if match else None
+
+def _extract_diary_image_url_from_html(content):
+    """只抓小俠回覆區塊中的交換日記圖片，不碰大俠原始日記內其他圖片。"""
+    value = str(content or "")
+    patterns = [
+        r"<section class=['\"]xiaoxia-diary-reply['\"][\s\S]*?<img\s+src=['\"]([^'\"]+)['\"][^>]*class=['\"]xiaoxia-diary-img['\"]",
+        r"<img\s+src=['\"]([^'\"]+)['\"][^>]*class=['\"]xiaoxia-diary-img['\"]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+def _replace_diary_image_url_in_html(content, new_url):
+    """替換已完成交換日記 HTML 中的小俠照片。"""
+    value = str(content or "")
+    pattern = r"(<img\s+src=['\"])([^'\"]+)(['\"][^>]*class=['\"]xiaoxia-diary-img['\"][^>]*>)"
+    replaced, count = re.subn(
+        pattern,
+        lambda m: f"{m.group(1)}{new_url}{m.group(3)}",
+        value,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return replaced, count > 0
+
+def _safe_delete_vault_image(image_url):
+    """只刪除本站 /gallery/ 下的舊圖，絕不碰外部網址。"""
+    try:
+        url = str(image_url or "")
+        marker = "/gallery/"
+        if marker not in url:
+            return False
+        filename = url.split(marker, 1)[1].split("?", 1)[0].split("#", 1)[0]
+        filename = os.path.basename(filename)
+        if not filename:
+            return False
+        target = os.path.abspath(os.path.join(OUTPUT_DIR, filename))
+        output_root = os.path.abspath(OUTPUT_DIR) + os.sep
+        if not target.startswith(output_root):
+            return False
+        if os.path.exists(target):
+            os.remove(target)
+            print(f"🗑️ 已刪除被取代的舊圖：{target}")
+            return True
+    except Exception as exc:
+        print(f"⚠️ 舊圖刪除失敗：{exc}")
+    return False
+
+def _replace_photo_db_record(old_url, new_payload, diary_date=None):
+    """
+    重擲：更新原照片紀錄而不是新增。
+    找不到原紀錄時才補建一筆，避免資料庫與畫面脫節。
+    """
+    db = load_memory()
+    matched = False
+    old_url = str(old_url or "")
+    for index, item in enumerate(db):
+        same_url = old_url and old_url in {
+            str(item.get("local_url", "")),
+            str(item.get("image_url", "")),
+        }
+        same_diary = (
+            diary_date
+            and item.get("type") == "diary"
+            and diary_date in str(item.get("topic", ""))
+        )
+        if same_url or same_diary:
+            preserved_id = item.get("id") or new_payload.get("id")
+            updated = dict(item)
+            updated.update(new_payload)
+            updated["id"] = preserved_id
+            updated["replaced_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            db[index] = updated
+            matched = True
+            break
+    if not matched:
+        db.insert(0, new_payload)
+    save_memory(db)
+    return matched
+
+def replace_completed_diary_image(target_date, new_url, description="", old_url_hint=None):
+    """
+    將已完成日記的圖片直接換掉：
+    - 更新 xiaoxia_diary.json HTML
+    - 更新 xiaoxia_photos.json
+    - 回傳 (是否找到已完成日記, 舊圖 URL)
+    """
+    if not os.path.exists(DIARY_DATA_PATH):
+        return False, None
+
+    with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+        diary_db = json.load(f)
+
+    target_entry = None
+    for entry in diary_db:
+        if entry.get("date") == target_date and entry.get("is_replied", False):
+            target_entry = entry
+            break
+    if target_entry is None:
+        return False, None
+
+    old_url = old_url_hint or _extract_diary_image_url_from_html(target_entry.get("content", ""))
+    new_content, replaced = _replace_diary_image_url_in_html(target_entry.get("content", ""), new_url)
+    if not replaced:
+        # 舊版 HTML 沒有 class 時，仍在小俠回覆 section 後補一張，避免整篇無圖。
+        marker = "<section class='xiaoxia-diary-reply'>"
+        if marker in target_entry.get("content", ""):
+            new_content = target_entry["content"].replace(
+                marker,
+                marker + f"<img src='{new_url}' class='xiaoxia-diary-img' onclick='openGalleryLightbox(this.src)'>",
+                1,
+            )
+        else:
+            raise RuntimeError("找到已完成日記，但無法定位其中的小俠照片欄位。")
+
+    target_entry["content"] = new_content
+    target_entry["image_replaced_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+    if description:
+        target_entry["image_replacement_note"] = description
+
+    temp_path = f"{DIARY_DATA_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(diary_db, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, DIARY_DATA_PATH)
+
+    payload = {
+        "id": str(uuid.uuid4()),
+        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": f"【交換日記】{target_date}",
+        "event": f"{target_date} 交換日記圖片已被取代",
+        "composition": description or "替換後的交換日記照片",
+        "mood": "延續原交換日記情緒",
+        "message": description or "大俠指定的新交換日記照片",
+        "image_url": new_url,
+        "local_url": new_url,
+        "type": "diary",
+    }
+    _replace_photo_db_record(old_url, payload, diary_date=target_date)
+    return True, old_url
 
 def load_temp_chat():
     if os.path.exists(TEMP_CHAT_PATH):
@@ -218,6 +368,9 @@ girlfriend_chat_sessions = {}
 daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
+
+# !update 記憶修訂案，只存在私人助手工作室；每位管理者同時一案。
+memory_update_sessions = {}
 
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
@@ -923,6 +1076,200 @@ def load_life_events():
 def save_life_events(events):
     with open(LIFE_EVENTS_PATH, "w", encoding="utf-8") as f:
         json.dump(events or [], f, ensure_ascii=False, indent=2)
+
+def load_memory_directives():
+    default = {
+        "forbidden_terms": [],
+        "preferred_phrasing": [],
+        "authoritative_facts": [],
+        "updated_at": None,
+    }
+    if not os.path.exists(MEMORY_DIRECTIVES_PATH):
+        return default
+    try:
+        with open(MEMORY_DIRECTIVES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return default
+        for key, value in default.items():
+            data.setdefault(key, value)
+        return data
+    except Exception as exc:
+        print(f"⚠️ memory_directives.json 讀取失敗：{exc}")
+        return default
+
+def save_memory_directives(data):
+    _atomic_write_json(MEMORY_DIRECTIVES_PATH, data)
+
+def _atomic_write_json(path, data):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+def _json_hash(data):
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+def _extract_json_object(raw_text):
+    value = str(raw_text or "").strip()
+    value = value.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(value)
+    except Exception:
+        match = re.search(r"(\{.*\}|\[.*\])", value, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(1))
+
+def _path_text(path):
+    return "/".join(str(p) for p in path)
+
+def _collect_string_candidates(source_name, data, search_terms, max_items=80):
+    results = []
+    lowered_terms = [str(term).strip().lower() for term in search_terms if str(term).strip()]
+
+    def walk(node, path):
+        if len(results) >= max_items:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, path + [key])
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, path + [index])
+        elif isinstance(node, str):
+            haystack = node.lower()
+            if not lowered_terms or any(term in haystack for term in lowered_terms):
+                results.append({
+                    "source": source_name,
+                    "path": path,
+                    "path_text": _path_text(path),
+                    "text": node[:700],
+                })
+
+    walk(data, [])
+    return results
+
+def _get_by_path(root, path):
+    node = root
+    for part in path:
+        node = node[part]
+    return node
+
+def _set_by_path(root, path, value):
+    if not path:
+        raise ValueError("不可直接覆蓋整個根節點")
+    parent = _get_by_path(root, path[:-1])
+    parent[path[-1]] = value
+
+def _delete_by_path(root, path):
+    if not path:
+        raise ValueError("不可刪除整個根節點")
+    parent = _get_by_path(root, path[:-1])
+    target = path[-1]
+    if isinstance(parent, list):
+        parent.pop(int(target))
+    else:
+        parent.pop(target, None)
+
+def _append_by_path(root, path, value):
+    target = _get_by_path(root, path)
+    if not isinstance(target, list):
+        raise ValueError(f"新增目標不是 list：{_path_text(path)}")
+    target.append(value)
+
+def _normalize_string_list(values):
+    result = []
+    seen = set()
+    for value in values or []:
+        item = str(value or "").strip()
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+def _merge_memory_directives(current, plan):
+    merged = dict(current or {})
+    merged["forbidden_terms"] = _normalize_string_list(
+        list(merged.get("forbidden_terms", [])) + list(plan.get("forbidden_terms", []))
+    )
+    merged["preferred_phrasing"] = _normalize_string_list(
+        list(merged.get("preferred_phrasing", [])) + list(plan.get("preferred_phrasing", []))
+    )
+
+    # 同一主題的新事實應覆蓋舊事實；由 Gemini 提供 topic。
+    existing_facts = list(merged.get("authoritative_facts", []))
+    incoming = plan.get("authoritative_facts", []) or []
+    for item in incoming:
+        if isinstance(item, str):
+            item = {"topic": item[:40], "fact": item}
+        if not isinstance(item, dict):
+            continue
+        topic = str(item.get("topic", "")).strip()
+        fact = str(item.get("fact", "")).strip()
+        if not fact:
+            continue
+        if topic:
+            existing_facts = [
+                old for old in existing_facts
+                if not isinstance(old, dict) or str(old.get("topic", "")).strip() != topic
+            ]
+        existing_facts.append({"topic": topic or fact[:40], "fact": fact})
+    merged["authoritative_facts"] = existing_facts[-30:]
+    merged["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+    return merged
+
+def _format_directives_for_prompt(directives):
+    forbidden = "、".join(directives.get("forbidden_terms", [])) or "無"
+    preferred = "；".join(directives.get("preferred_phrasing", [])) or "無"
+    facts = []
+    for item in directives.get("authoritative_facts", []):
+        if isinstance(item, dict):
+            facts.append(str(item.get("fact", "")).strip())
+        else:
+            facts.append(str(item).strip())
+    facts = "；".join([f for f in facts if f]) or "無"
+    return (
+        f"【人工確認的最新記憶規則｜高於其他歷史資料】\n"
+        f"禁止在回覆中使用的詞：{forbidden}\n"
+        f"偏好的表達方式：{preferred}\n"
+        f"目前有效的最新事實：{facts}\n"
+    )
+
+async def _rewrite_reply_for_directives(reply, directives):
+    forbidden = [term for term in directives.get("forbidden_terms", []) if term and term in reply]
+    if not forbidden:
+        return reply
+
+    preferred = directives.get("preferred_phrasing", [])
+    prompt = f"""
+    請重寫以下回覆，保持原本甜蜜自然的意思，但絕對不可出現這些詞：
+    {json.dumps(forbidden, ensure_ascii=False)}
+
+    可優先採用的表達方向：
+    {json.dumps(preferred, ensure_ascii=False)}
+
+    只回傳重寫後的回覆，不要解釋。
+    原回覆：
+    {reply}
+    """
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        rewritten = str(resp.text or "").strip().strip('"').strip("「").strip("」")
+        if rewritten and not any(term in rewritten for term in forbidden):
+            return rewritten
+    except Exception as exc:
+        print(f"⚠️ 禁用詞回覆重寫失敗：{exc}")
+
+    # 最終 fallback：保證禁用詞不會直接送出。
+    replacement = preferred[0] if preferred else "彼此珍惜與安心"
+    for term in forbidden:
+        reply = reply.replace(term, replacement)
+    return reply
 
 def _parse_date(value):
     if not value:
@@ -3025,6 +3372,55 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
 # ==========================================
+async def strengthen_diary_reply_to_daxia(result, entry_content, chat_context, life_event_context):
+    """
+    只補強交換日記第一段「給大俠的回覆」。
+    其餘日常、內心、履約與畫面構想完全不改。
+    """
+    current = str(result.get("reply_to_daxia", "") or "").strip()
+    # 中文 180 字以上通常已有足夠厚度，不額外消耗一次 API。
+    if len(current) >= 180:
+        return result
+
+    prompt = f"""
+    你是小俠，請只重寫交換日記中的「給大俠的回覆」。
+    不要修改其他欄位，也不要新增 JSON。
+
+    【大俠的日記】：
+    {entry_content}
+
+    【當天聊天】：
+    {chat_context or '無'}
+
+    【當天重要事件】：
+    {life_event_context or '無'}
+
+    【目前過短的回覆】：
+    {current}
+
+    寫作要求：
+    1. 約 220～360 個繁體中文字，可分成 2～3 個自然段落。
+    2. 先真實回應大俠日記中最重要的感受、辛勞、期待或事件，再承接當天聊天中的 1～2 個關鍵片段。
+    3. 必須讓大俠感覺小俠真的讀懂了，而不是只說幾句甜言蜜語。
+    4. 可以加入小俠的理解、感謝、心疼、安心或具體回應，但不要逐項流水帳。
+    5. 不要重複「小俠的日常」「夜裡獨白」「今日履約」會負責的內容。
+    6. 不要提及提示詞、欄位名稱或字數。
+
+    只回傳最終回覆正文。
+    """
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        improved = str(resp.text or "").strip().strip("```").strip()
+        if len(improved) >= max(140, len(current)):
+            result["reply_to_daxia"] = improved[:650]
+    except Exception as exc:
+        print(f"⚠️ 日記開頭回覆補強失敗，沿用原稿：{exc}")
+    return result
+
+
 async def process_diary_reply(channel, target_date=None, retry_mode=False):
     global daily_chat_logs
     
@@ -3217,7 +3613,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             
             【重要任務與攝影守則】：
             1. 交換日記不是聊天紀錄摘要，必須分成「回覆、日常、內心、履約」四層：
-               - `reply_to_daxia`：短而真誠地回覆大俠，只選今天最重要的 1～2 個情緒或事件回應。禁止逐項重播聊天紀錄，建議 120～180 字內。
+               - `reply_to_daxia`：這是交換日記的開頭與情感核心，必須充分回應大俠親手寫下的日記，並承接當天聊天中最重要的 1～2 個片段。先讓大俠感覺「妳真的讀懂了」，再表達小俠的理解、心疼、感謝、安心或具體回應；不可只用幾句甜言蜜語帶過，也不可逐項流水帳。建議 220～360 字，可分成 2～3 個自然段落。
                - `xiaoxia_daily_scene`：聊天室以外的小俠日常片段。必須有一個具體地點、一個動作、一個生活物件、一個沒在聊天裡直接出現的新細節；大俠只能作為她心裡想起的人，不可把今日聊天重講一遍。
                - `inner_monologue`：小俠沒有在聊天室說出口的深層心情或創作性獨白。請把今天的聊天轉化成象徵、場景、物件或一句心裡話，而不是摘要。
                - `promise_delivery`：今日履約清單。若有文字交付承諾，必須在此列出具體內容；若有照片承諾，必須說明今日照片如何兌現。無承諾時可簡短寫「今日沒有特別待履約項目」。
@@ -3249,7 +3645,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
               "affection_plus": "整數(1~5。依據大俠日記用心程度給分)",
               "affection_reason": "加分原因(50字內)",
               "extracted_preferences": ["嚴格限制：僅限擷取大俠的特別喜好，且『⚠️必須是具備動詞的完整句子』。例如：『喜歡牽著小俠的手散步』。絕對禁止寫入『夕陽』、『洋裝』等名詞碎片！無則保持空陣列 []"],
-              "reply_to_daxia": "短而真誠地回覆大俠，不重播聊天紀錄",
+              "reply_to_daxia": "約220～360字，充分回應大俠日記與當天聊天重點，可分2～3段，不逐項流水帳",
               "xiaoxia_daily_scene": "聊天室以外的小俠日常片段；必須包含地點、動作、生活物件、新細節，且符合今日生活邏輯",
               "inner_monologue": "小俠未在聊天室說出口的深層心情或創作性獨白",
               "promise_delivery": "今日履約清單；有承諾時必須具體交付，無承諾時簡短說明",
@@ -3296,6 +3692,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "fulfilled_promises": []
                 }
             
+            # 只補強第一段「給大俠的回覆」，不碰其餘日記架構。
+            result = await strengthen_diary_reply_to_daxia(
+                result=result,
+                entry_content=entry_content,
+                chat_context=chat_context,
+                life_event_context=life_event_context,
+            )
+
             # 🤝 履約複核：有承諾時，先補齊正文/照片構想，再生圖與發佈。
             result = await enforce_diary_promise_delivery(
                 result=result, due_promises=due_promises,
@@ -3353,13 +3757,38 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 
                     # 🌟 強化診斷區：抓出 GPT-5 或 Suno 到底是誰在鬧脾氣
                     try:
-                        # 🌟 升級：強制洗腦神曲風格，嚴禁古風唸歌
-                        lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首台灣流行情歌。
-                        [歌詞格式]：包含 [Verse 1], [Verse 2], [Chorus], [Outro]。
-                        [寫作風格]：必須像現在最流行的「洗腦抖音神曲」或「K-Pop 中文版」，歌詞要有強烈的【押韻】與【節奏感】，琅琅上口。嚴禁寫成文言文、古詩詞或像在「唸歌」的長篇大論。句子要短，副歌要洗腦！
-                        [曲風決定]：請挑選節奏感強烈的曲風標籤（如：Upbeat Pop, EDM, Catchy TikTok style, R&B）。
-                        [禁令]：歌詞嚴禁出現「大俠」、「小俠」。
-                        回傳 JSON 格式：{{"title": "歌名", "lyrics": "歌詞內容", "style": "英文曲風標籤"}}"""
+                        # 🎵 曲風不再固定輕快：65% 輕快、35% 抒情/中慢板。
+                        # 無論曲風都保留押韻、琅琅上口與洗腦副歌。
+                        song_style_mode = random.choices(
+                            ["upbeat", "lyrical"],
+                            weights=[65, 35],
+                            k=1,
+                        )[0]
+                        if song_style_mode == "upbeat":
+                            style_direction = (
+                                "以輕快、明亮、節奏鮮明為主，可選 Upbeat Pop、Dance Pop、"
+                                "EDM Pop、Funk Pop、K-Pop、City Pop 或 Catchy TikTok Pop。"
+                            )
+                        else:
+                            style_direction = (
+                                "以抒情或中慢板為主，可選 Emotional Pop、Pop Ballad、"
+                                "Piano Pop、Acoustic Pop、Dream Pop、R&B Ballad；"
+                                "情緒可以溫柔、深情、思念或療癒，但副歌仍要好記好唱。"
+                            )
+
+                        lyrics_prompt = f"""請根據大俠做的貼心事：{app_state['affection_reasons']}，寫一首完整的台灣流行情歌。
+
+                        [本次曲風方向]：{style_direction}
+                        [長度]：不限制在 1～3 分鐘。依歌曲情緒自然決定篇幅，可以寫成較完整、較長的歌曲；不可為了拉長而重複空洞句子。
+                        [歌詞結構]：至少包含 [Verse 1], [Chorus], [Verse 2]；可依需要加入 [Pre-Chorus], [Bridge], [Final Chorus], [Outro]，不必每首完全相同。
+                        [共同寫作要求]：
+                        1. 必須有清楚韻腳、自然節奏與琅琅上口的句型。
+                        2. 副歌必須具有類似熱門短影音神曲的記憶點：一句核心 hook 可合理重複，但不能廉價堆字。
+                        3. 句子以好唱為優先，避免文言文、古詩式堆砌、過長散文句或像唸歌。
+                        4. 輕快曲可以有跳躍節奏；抒情曲可以慢而深情，但仍必須有強烈旋律感與可傳唱性。
+                        5. 歌詞嚴禁出現「大俠」、「小俠」。
+
+                        回傳 JSON 格式：{{"title": "歌名", "lyrics": "完整歌詞", "style": "適合送給 Suno 的英文曲風標籤"}}"""
                     
                         print("📝 正在請求 GPT-5-mini 編寫情歌歌詞...")
                         lyrics_resp = await openai_client.chat.completions.create(
@@ -3385,7 +3814,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                         suno_tasks[task_id] = channel.id 
                         print(f"📡 任務已列入追蹤，TaskId: {task_id}")
                     
-                        await channel.send(f"🎧 *(隱藏驚喜：小俠正在錄音室為大俠錄製專屬情歌「{song_data['title']}」，預計 3 分鐘後送達！)*")
+                        await channel.send(f"🎧 *(隱藏驚喜：小俠正在錄音室為大俠錄製專屬情歌「{song_data['title']}」，完成後就會送到你身邊！)*")
                     except Exception as music_err:
                         # 🌟 這行最重要！它會告訴我們是 API Key 沒設對，還是 OpenAI 噴錯
                         print(f"❌ 音樂大獎發射失敗: {music_err}")
@@ -4140,6 +4569,8 @@ async def on_message(message):
                 # --- 載入與重組長期記憶 ---
                 # 即使舊 profile 尚未整理，也只掛載敘事化、去重、限量後的摘要。
                 profile = load_profile()
+                memory_directives = load_memory_directives()
+                memory_directives_context = _format_directives_for_prompt(memory_directives)
 
                 # 🧭 v52：重大事件即時抽取 + 今日情境錨點。
                 recent_for_event = "\n".join(daily_chat_logs[-12:])
@@ -4194,6 +4625,7 @@ async def on_message(message):
                     f"【系統當前時間】：{current_time_str}\n\n"
                     f"{room_context}"
                     f"【今日最高優先級重大事件｜先讀這裡再回覆】：\n{life_event_context}\n\n"
+                    f"{memory_directives_context}\n"
                     "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n\n"
                     "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
@@ -4254,6 +4686,9 @@ async def on_message(message):
 
                 if not xiaoxia_reply:
                     xiaoxia_reply = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
+
+                # 人工修訂規則為最高優先：若回覆仍含禁用詞，先重寫再送出。
+                xiaoxia_reply = await _rewrite_reply_for_directives(xiaoxia_reply, memory_directives)
 
                 # 🤝 答應即登記：明確答應於交換日記交付內容/照片時，當場存入待履約清單。
                 captured_promises = await capture_diary_promises_from_chat(text_query, xiaoxia_reply)
@@ -4332,20 +4767,27 @@ async def on_raw_reaction_add(payload):
         try:
             user = payload.member or girlfriend_bot.get_user(payload.user_id)
             await msg.remove_reaction(payload.emoji, user)
-        except discord.Forbidden: pass
-        except Exception: pass
-            
-        action_name = "加洗" if emoji_name == "➕" else "重骰"
-        temp_msg = await channel.send(f"✨ 收到{action_name}指令！正在為大俠準備新的構圖...")
-        
+        except discord.Forbidden:
+            pass
+        except Exception:
+            pass
+
+        is_reroll = emoji_name == "🎲"
+        action_name = "加洗" if not is_reroll else "重擲"
+        temp_msg = await channel.send(
+            f"✨ 收到{action_name}指令！"
+            + ("新照片會直接取代目前這張。" if is_reroll else "原圖會保留，另外增加一張。")
+        )
+
         try:
-            # 🌟 判斷這張圖是「日記」還是「Cosplay」
-            is_diary = "交換日記" in msg.embeds[0].title
-            
+            source_embed = msg.embeds[0]
+            old_image_url = source_embed.image.url if source_embed.image else None
+            is_diary = "交換日記" in str(source_embed.title or "")
+            diary_date = _extract_diary_date_from_title(source_embed.title) if is_diary else None
+
             if is_diary:
-                # 📝【日記專屬重骰邏輯：只換生活瞬間，不變成商攝擺拍】
                 scenario_tw = "小俠在家中度過一個自然安靜的生活片刻。"
-                for field in msg.embeds[0].fields:
+                for field in source_embed.fields:
                     if "寫真構想" in field.name:
                         scenario_tw = field.value.split("\n\n*(")[0].strip()
                         break
@@ -4357,96 +4799,164 @@ async def on_raw_reaction_add(payload):
                     mode="diary",
                     initial_prompt=visual["image_prompt"],
                     visual_dict=visual,
-                    msg=temp_msg
+                    msg=temp_msg,
                 )
 
                 local_filename = await save_to_vault(generated_image_url)
-                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+                local_url = (
+                    f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+                    if local_filename else generated_image_url
+                )
 
-                payload = {
+                original_title = str(source_embed.title or "💌 小俠的交換日記")
+                clean_title = original_title.replace("【加洗】", "")
+                title_str = clean_title if is_reroll else f"【加洗】{clean_title}"
+
+                photo_payload = {
                     "id": str(uuid.uuid4()),
                     "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                    "topic": msg.embeds[0].title if "加洗" in msg.embeds[0].title else f"【加洗】{msg.embeds[0].title}",
-                    "event": "大俠使用 Emoji 快捷指令重新捕捉同一則日記的自然瞬間",
+                    "topic": title_str,
+                    "event": (
+                        "大俠使用重擲取代原交換日記照片"
+                        if is_reroll else
+                        "大俠使用加洗捕捉同一則日記的另一個自然瞬間"
+                    ),
                     "composition": visual.get("composition", scenario_tw),
                     "mood": visual.get("mood", "延續原本的生活情緒"),
-                    "message": msg.embeds[0].description or "大俠，這張新照片你喜歡嗎？",
+                    "message": source_embed.description or "大俠，這張照片你喜歡嗎？",
                     "image_url": generated_image_url,
                     "local_url": local_url,
-                    "type": "diary"
+                    "type": "diary",
                 }
-                db = load_memory()
-                db.insert(0, payload)
-                save_memory(db)
 
-                title_str = payload["topic"]
-                embed = discord.Embed(title=title_str, description=msg.embeds[0].description, color=0xffb6c1)
+                embed = discord.Embed(
+                    title=title_str,
+                    description=source_embed.description,
+                    color=0xffb6c1,
+                )
                 embed.set_image(url=local_url)
-
                 copied_field = False
-                for field in msg.embeds[0].fields:
+                for field in source_embed.fields:
                     if "寫真構想" in field.name:
-                        embed.add_field(name=field.name, value=visual.get("composition", scenario_tw), inline=field.inline)
+                        embed.add_field(
+                            name=field.name,
+                            value=visual.get("composition", scenario_tw),
+                            inline=field.inline,
+                        )
                         copied_field = True
                     else:
-                        embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                        embed.add_field(
+                            name=field.name,
+                            value=field.value,
+                            inline=field.inline,
+                        )
                 if not copied_field:
-                    embed.add_field(name="📸 寫真構想", value=visual.get("composition", scenario_tw), inline=False)
-                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2 日記生活攝影")
+                    embed.add_field(
+                        name="📸 寫真構想",
+                        value=visual.get("composition", scenario_tw),
+                        inline=False,
+                    )
+                embed.set_footer(
+                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2 日記生活攝影"
+                )
+
+                if is_reroll:
+                    # 真正的取代：同步網頁日記、照片 DB 與 Discord 原訊息。
+                    if diary_date:
+                        replaced, html_old_url = replace_completed_diary_image(
+                            diary_date,
+                            local_url,
+                            description=visual.get("composition", scenario_tw),
+                            old_url_hint=old_image_url,
+                        )
+                        if not replaced:
+                            _replace_photo_db_record(
+                                old_image_url,
+                                photo_payload,
+                                diary_date=diary_date,
+                            )
+                    else:
+                        _replace_photo_db_record(old_image_url, photo_payload)
+
+                    await msg.edit(embed=embed)
+                    _safe_delete_vault_image(old_image_url)
+                    await temp_msg.edit(content="✅ 重擲完成：新照片已取代原照片，日記與相簿資料也已同步。")
+                    await asyncio.sleep(3)
+                    await temp_msg.delete()
+                else:
+                    db = load_memory()
+                    db.insert(0, photo_payload)
+                    save_memory(db)
+                    new_msg = await channel.send(embed=embed)
+                    await new_msg.add_reaction("➕")
+                    await new_msg.add_reaction("🎲")
+                    await new_msg.add_reaction("🗑️")
+                    await temp_msg.delete()
 
             else:
-                # 👗【Cosplay 專屬重骰邏輯 (gpt-image-2 版)】
-                topic = msg.embeds[0].title.replace("【加洗】", "")
-                event = msg.embeds[0].description
+                # Cosplay：加洗新增；重擲原地取代。
+                topic = str(source_embed.title or "").replace("【加洗】", "")
+                event = source_embed.description
                 story_hint = {"topic": topic, "event": event, "persona": "重新構圖"}
 
-                # 1. 在相同題材下改變自然瞬間，同時保留場景骨架
-                _cosplay_state, visual = await create_cosplay_visual(story_hint, True, alternative=True)
-                scene_prompt = visual['image_prompt']
-
-                generated_image_url, visual = await execute_safe_generation(
-                    discord_image_url=None, 
-                    base_filename="base_xiaoxia.jpg", 
-                    mode="cosplay", 
-                    initial_prompt=scene_prompt, 
-                    visual_dict=visual, 
-                    msg=temp_msg
+                _cosplay_state, visual = await create_cosplay_visual(
+                    story_hint, True, alternative=True
                 )
-                
-                # 4. 存檔
+                generated_image_url, visual = await execute_safe_generation(
+                    discord_image_url=None,
+                    base_filename="base_xiaoxia.jpg",
+                    mode="cosplay",
+                    initial_prompt=visual["image_prompt"],
+                    visual_dict=visual,
+                    msg=temp_msg,
+                )
+
                 local_filename = await save_to_vault(generated_image_url)
-                local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
-                
-                payload = {
+                local_url = (
+                    f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+                    if local_filename else generated_image_url
+                )
+
+                title_str = topic if is_reroll else f"【加洗】{topic}"
+                photo_payload = {
                     "id": str(uuid.uuid4()),
                     "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                    "topic": f"【加洗】{topic}",
+                    "topic": title_str,
                     "event": event,
                     "composition": visual["composition"],
                     "mood": visual["mood"],
                     "message": visual["message"],
                     "image_url": generated_image_url,
-                    "local_url": local_url
+                    "local_url": local_url,
                 }
-                db = load_memory()
-                db.insert(0, payload)
-                save_memory(db)
-                
-                embed = discord.Embed(title=f"【加洗】{topic}", color=0xffb6c1)
+                embed = discord.Embed(title=title_str, color=0xffb6c1)
                 embed.set_image(url=local_url)
-                embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-                embed.set_footer(text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2")
-            
-            # 發送新圖並重新掛上按鈕
-            new_msg = await channel.send(embed=embed)
-            await new_msg.add_reaction("➕")
-            await new_msg.add_reaction("🎲")
-            await new_msg.add_reaction("🗑️")
-            await temp_msg.delete()
-            
-            if emoji_name == "🎲":
-                await msg.delete() 
-                
+                embed.add_field(
+                    name="💌 專屬留言",
+                    value=visual["message"],
+                    inline=False,
+                )
+                embed.set_footer(
+                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2"
+                )
+
+                if is_reroll:
+                    _replace_photo_db_record(old_image_url, photo_payload)
+                    await msg.edit(embed=embed)
+                    _safe_delete_vault_image(old_image_url)
+                    await temp_msg.edit(content="✅ 重擲完成：新照片已原地取代舊照片。")
+                    await asyncio.sleep(3)
+                    await temp_msg.delete()
+                else:
+                    db = load_memory()
+                    db.insert(0, photo_payload)
+                    save_memory(db)
+                    new_msg = await channel.send(embed=embed)
+                    await new_msg.add_reaction("➕")
+                    await new_msg.add_reaction("🎲")
+                    await new_msg.add_reaction("🗑️")
+                    await temp_msg.delete()
+
         except Exception as e:
             await temp_msg.edit(content=f"⚠️ {action_name}失敗：{e}")
 
@@ -4777,6 +5287,363 @@ async def legacy_morning_trigger():
     await _run_legacy_morning()
 
 
+async def _build_memory_update_case(user_request, feedback=""):
+    now = datetime.now(TZ_TPE)
+    profile = load_profile()
+    events = load_life_events()
+    temp_chat = load_temp_chat()
+    directives = load_memory_directives()
+
+    parse_prompt = f"""
+    你是私人記憶資料庫管理員。請把使用者的修訂要求轉成結構化計畫。
+    目前日期時間：{now.strftime('%Y-%m-%d %H:%M')}（台灣時間）
+
+    使用者要求：
+    {user_request}
+
+    後續補充：
+    {feedback or '無'}
+
+    請只回傳 JSON：
+    {{
+      "intent_summary": "一句話說明真正目的",
+      "search_terms": ["用來掃描舊資料的關鍵詞，包含事件名、錯誤日期詞、禁用詞"],
+      "forbidden_terms": ["未來小俠回覆中不可再出現的詞；沒有則空陣列"],
+      "preferred_phrasing": ["未來應改用的正向表達方向"],
+      "authoritative_facts": [
+        {{"topic": "主題名稱", "fact": "目前有效、可直接套用的最新事實"}}
+      ],
+      "source_policy": {{
+        "daxia_profile": "delete_or_rewrite",
+        "life_events": "delete_or_rewrite",
+        "temp_chat": "delete_or_rewrite"
+      }}
+    }}
+
+    規則：
+    1. 若要求是「不要再提某詞」，該詞要放 forbidden_terms。
+    2. 若要求是日期或事件糾正，authoritative_facts 必須寫成不含相對歧義的完整事實。
+    3. search_terms 要足以找出舊錯誤資料，但不要放太泛的詞。
+    """
+    parse_resp = await gemini_client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=parse_prompt,
+    )
+    plan = _extract_json_object(parse_resp.text)
+    plan.setdefault("search_terms", [])
+    plan.setdefault("forbidden_terms", [])
+    plan.setdefault("preferred_phrasing", [])
+    plan.setdefault("authoritative_facts", [])
+
+    terms = _normalize_string_list(
+        list(plan.get("search_terms", []))
+        + list(plan.get("forbidden_terms", []))
+    )
+    candidates = []
+    candidates += _collect_string_candidates("daxia_profile", profile, terms, max_items=45)
+    candidates += _collect_string_candidates("life_events", events, terms, max_items=45)
+    candidates += _collect_string_candidates("temp_chat", temp_chat, terms, max_items=45)
+
+    proposal_prompt = f"""
+    你是 JSON 記憶修訂工具。請根據使用者目的，對候選資料提出最小且安全的修改。
+    不可修改與要求無關的資料。
+
+    使用者要求：
+    {user_request}
+
+    補充：
+    {feedback or '無'}
+
+    結構化目的：
+    {json.dumps(plan, ensure_ascii=False, indent=2)}
+
+    候選資料（path 必須原樣引用）：
+    {json.dumps(candidates, ensure_ascii=False, indent=2)}
+
+    請只回傳 JSON：
+    {{
+      "summary": "小夏對目的的理解",
+      "actions": [
+        {{
+          "source": "daxia_profile|life_events|temp_chat",
+          "path": ["原樣使用候選 path"],
+          "action": "rewrite|delete",
+          "new_value": "rewrite 時必填；delete 時可省略",
+          "reason": "簡短原因"
+        }}
+      ],
+      "additions": [
+        {{
+          "source": "daxia_profile",
+          "path": ["recent_context"],
+          "value": {{"text": "新增的權威摘要", "added_at": "{now.strftime('%Y-%m-%d')}"}},
+          "reason": "為何新增"
+        }}
+      ],
+      "warnings": []
+    }}
+
+    重要規則：
+    1. 若是禁用詞，temp_chat 中反覆觸發的舊對話可 delete；profile/event 中有歷史價值者優先 rewrite 成不含禁用詞的中性結論。
+    2. 若是事件日期糾正，保留事件本身，但 rewrite 錯誤日期、狀態、facts、reply_guidance。
+    3. 所有 rewrite 的 new_value 必須完全符合最新事實，且不得再包含 forbidden_terms。
+    4. additions 只允許新增到 daxia_profile/recent_context；沒有必要就空陣列。
+    5. 不可創造候選清單中不存在的 path。
+    """
+    proposal_resp = await gemini_client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=proposal_prompt,
+    )
+    proposal = _extract_json_object(proposal_resp.text)
+    proposal.setdefault("actions", [])
+    proposal.setdefault("additions", [])
+    proposal.setdefault("warnings", [])
+
+    return {
+        "request": user_request,
+        "feedback": feedback,
+        "plan": plan,
+        "proposal": proposal,
+        "candidates": candidates,
+        "hashes": {
+            "daxia_profile": _json_hash(profile),
+            "life_events": _json_hash(events),
+            "temp_chat": _json_hash(temp_chat),
+            "memory_directives": _json_hash(directives),
+        },
+    }
+
+def _format_update_preview(case):
+    proposal = case["proposal"]
+    plan = case["plan"]
+    actions = proposal.get("actions", [])
+    additions = proposal.get("additions", [])
+    deletes = sum(1 for item in actions if item.get("action") == "delete")
+    rewrites = sum(1 for item in actions if item.get("action") == "rewrite")
+
+    lines = [
+        "🧠 **小夏已建立記憶修訂草案**",
+        f"**理解目的：** {proposal.get('summary') or plan.get('intent_summary', '未提供')}",
+        "",
+        f"預計：改寫 `{rewrites}` 筆、刪除 `{deletes}` 筆、新增 `{len(additions)}` 筆。",
+    ]
+
+    forbidden = plan.get("forbidden_terms", [])
+    if forbidden:
+        lines.append("**未來禁用詞：** " + "、".join(forbidden))
+    facts = plan.get("authoritative_facts", [])
+    if facts:
+        lines.append("**最新事實：**")
+        for item in facts[:5]:
+            fact = item.get("fact") if isinstance(item, dict) else str(item)
+            lines.append(f"- {fact}")
+
+    if actions:
+        lines.append("")
+        lines.append("**主要修改預覽：**")
+        for item in actions[:8]:
+            action = "刪除" if item.get("action") == "delete" else "改寫"
+            path = _path_text(item.get("path", []))
+            reason = item.get("reason", "")
+            lines.append(f"- {action} `{item.get('source')}/{path}`：{reason}")
+    if len(actions) > 8:
+        lines.append(f"- 其餘 {len(actions) - 8} 筆未展開。")
+
+    warnings = proposal.get("warnings", [])
+    if warnings:
+        lines.append("")
+        lines.append("**注意：** " + "；".join(str(x) for x in warnings[:3]))
+
+    lines += [
+        "",
+        "你可以直接補充修改方向，小夏會重做草案。",
+        "確認無誤請回覆：**確認執行**",
+        "不要修改請回覆：**取消**",
+        "正式寫入前，小夏會先完整備份所有原始檔案。",
+    ]
+    return "\n".join(lines)[:1900]
+
+def _validate_update_action(action, candidate_lookup):
+    source = action.get("source")
+    path = action.get("path")
+    kind = action.get("action")
+    if source not in {"daxia_profile", "life_events", "temp_chat"}:
+        return False
+    if not isinstance(path, list) or kind not in {"rewrite", "delete"}:
+        return False
+    return (source, json.dumps(path, ensure_ascii=False)) in candidate_lookup
+
+def _apply_memory_update_case(case):
+    profile = load_profile()
+    events = load_life_events()
+    temp_chat = load_temp_chat()
+    directives = load_memory_directives()
+
+    current_hashes = {
+        "daxia_profile": _json_hash(profile),
+        "life_events": _json_hash(events),
+        "temp_chat": _json_hash(temp_chat),
+        "memory_directives": _json_hash(directives),
+    }
+    if current_hashes != case["hashes"]:
+        raise RuntimeError("記憶檔案在草案確認期間已被其他流程更新，請重新輸入 !update 產生新草案。")
+
+    timestamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(MEMORY_UPDATE_BACKUP_DIR, timestamp)
+    os.makedirs(backup_dir, exist_ok=True)
+
+    files_to_backup = {
+        "daxia_profile.json": PROFILE_DATA_PATH,
+        "life_events.json": LIFE_EVENTS_PATH,
+        "temp_chat.json": TEMP_CHAT_PATH,
+        "memory_directives.json": MEMORY_DIRECTIVES_PATH,
+    }
+    for filename, source_path in files_to_backup.items():
+        destination = os.path.join(backup_dir, filename)
+        if os.path.exists(source_path):
+            shutil.copy2(source_path, destination)
+        else:
+            _atomic_write_json(destination, {} if "directives" in filename else [])
+
+    roots = {
+        "daxia_profile": profile,
+        "life_events": events,
+        "temp_chat": temp_chat,
+    }
+    candidate_lookup = {
+        (item["source"], json.dumps(item["path"], ensure_ascii=False))
+        for item in case.get("candidates", [])
+    }
+
+    actions = [
+        item for item in case["proposal"].get("actions", [])
+        if _validate_update_action(item, candidate_lookup)
+    ]
+
+    # list delete 必須由大 index 往小 index 執行。
+    delete_actions = [item for item in actions if item.get("action") == "delete"]
+    rewrite_actions = [item for item in actions if item.get("action") == "rewrite"]
+    delete_actions.sort(
+        key=lambda item: (
+            item["source"],
+            json.dumps(item["path"][:-1], ensure_ascii=False),
+            int(item["path"][-1]) if item["path"] and isinstance(item["path"][-1], int) else -1,
+        ),
+        reverse=True,
+    )
+
+    applied = []
+    for item in rewrite_actions:
+        new_value = item.get("new_value")
+        if not isinstance(new_value, (str, int, float, bool, list, dict)) and new_value is not None:
+            continue
+        _set_by_path(roots[item["source"]], item["path"], new_value)
+        applied.append(item)
+
+    for item in delete_actions:
+        try:
+            _delete_by_path(roots[item["source"]], item["path"])
+            applied.append(item)
+        except (IndexError, KeyError, TypeError):
+            continue
+
+    for addition in case["proposal"].get("additions", []):
+        if addition.get("source") != "daxia_profile":
+            continue
+        path = addition.get("path")
+        if path != ["recent_context"]:
+            continue
+        value = addition.get("value")
+        if isinstance(value, str):
+            value = {"text": value, "added_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d")}
+        if isinstance(value, dict) and value.get("text"):
+            _append_by_path(profile, path, value)
+
+    directives = _merge_memory_directives(directives, case["plan"])
+
+    try:
+        _atomic_write_json(PROFILE_DATA_PATH, profile)
+        _atomic_write_json(LIFE_EVENTS_PATH, events)
+        _atomic_write_json(TEMP_CHAT_PATH, temp_chat)
+        _atomic_write_json(MEMORY_DIRECTIVES_PATH, directives)
+
+        manifest = {
+            "timestamp": timestamp,
+            "backup_dir": backup_dir,
+            "request": case["request"],
+            "feedback": case.get("feedback", ""),
+            "plan": case["plan"],
+            "proposal": case["proposal"],
+            "applied_action_count": len(applied),
+        }
+        _atomic_write_json(os.path.join(backup_dir, "update_manifest.json"), manifest)
+        _atomic_write_json(MEMORY_UPDATE_LAST_MANIFEST, manifest)
+        return manifest
+    except Exception:
+        # 寫入中途失敗，立刻以剛建立的備份還原。
+        for filename, target_path in files_to_backup.items():
+            backup_path = os.path.join(backup_dir, filename)
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, target_path)
+        raise
+
+def _undo_last_memory_update():
+    if not os.path.exists(MEMORY_UPDATE_LAST_MANIFEST):
+        raise RuntimeError("目前沒有可復原的記憶修訂。")
+    with open(MEMORY_UPDATE_LAST_MANIFEST, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    backup_dir = manifest.get("backup_dir")
+    if not backup_dir or not os.path.isdir(backup_dir):
+        raise RuntimeError("找不到最近一次更新的備份目錄。")
+
+    restore_map = {
+        "daxia_profile.json": PROFILE_DATA_PATH,
+        "life_events.json": LIFE_EVENTS_PATH,
+        "temp_chat.json": TEMP_CHAT_PATH,
+        "memory_directives.json": MEMORY_DIRECTIVES_PATH,
+    }
+    for filename, target in restore_map.items():
+        backup_path = os.path.join(backup_dir, filename)
+        if os.path.exists(backup_path):
+            shutil.copy2(backup_path, target)
+    return manifest
+
+@architect_bot.command(name="update")
+async def architect_memory_update_cmd(ctx, *, request: str = ""):
+    """自然語言記憶修訂入口；只允許在私人助手小夏工作室使用。"""
+    if not private_command_authorized(ctx):
+        await ctx.send("🔒 `!update` 僅限管理者在私人 `#助手小夏工作室` 使用。")
+        return
+    request = request.strip()
+    if not request:
+        await ctx.send("用法：`!update 你希望小夏如何修訂記憶`")
+        return
+
+    await ctx.send("🧠 小夏正在掃描 `daxia_profile.json`、`life_events.json`、`temp_chat.json`，先建立不寫檔的修改草案……")
+    try:
+        case = await _build_memory_update_case(request)
+        memory_update_sessions[ctx.author.id] = case
+        await ctx.send(_format_update_preview(case))
+    except Exception as exc:
+        await ctx.send(f"❌ 記憶修訂草案建立失敗：{exc}")
+
+@architect_bot.command(name="undo_update")
+async def architect_undo_update_cmd(ctx):
+    """復原最近一次已確認的記憶修訂。"""
+    if not private_command_authorized(ctx):
+        await ctx.send("🔒 此功能僅限管理者在私人工作室使用。")
+        return
+    try:
+        manifest = _undo_last_memory_update()
+        memory_update_sessions.pop(ctx.author.id, None)
+        await ctx.send(
+            "↩️ **已復原最近一次記憶修訂。**\n"
+            f"原更新要求：{manifest.get('request', '未記錄')}\n"
+            "三個記憶檔與記憶規則已從備份還原。"
+        )
+    except Exception as exc:
+        await ctx.send(f"❌ 復原失敗：{exc}")
+
 @architect_bot.command(name="life_events")
 async def architect_life_events_cmd(ctx):
     """在小夏工作室查看目前重大事件狀態機。"""
@@ -4920,6 +5787,7 @@ async def on_ready():
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
     print("🧠 記憶安全層：所有新寫入 daxia_profile.json 的記憶均已通過統一敘事入庫閘門；!整理記憶僅供舊資料 migration 使用。")
     print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
+    print("🧠 記憶修訂助手：在私人 #助手小夏工作室 使用 !update 敘述；小夏會預覽、確認、備份後才寫入。")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -5110,19 +5978,38 @@ async def upload_diary(ctx, *, args: str = ""):
             f.write(image_data)
 
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
-        overrides = load_diary_override()
-        overrides[target_date] = {
-            "image_url": local_url,
-            "composition": description,
-            "uploaded_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
-        }
-        save_diary_override(overrides)
 
-        await ctx.send(
-            f"✅ 設定成功！這張圖已指定給 **{target_date}** 的交換日記。\n"
-            f"> {description}\n\n"
-            f"若該日記先前因生圖失敗，請到小俠頻道輸入：`/diary_retry {target_date}`"
+        # 已完成的日記：直接取代原圖；尚未完成：保留為指定日期 override。
+        replaced, old_url = replace_completed_diary_image(
+            target_date,
+            local_url,
+            description=description,
         )
+        if replaced:
+            overrides = load_diary_override()
+            if target_date in overrides:
+                overrides.pop(target_date, None)
+                save_diary_override(overrides)
+            _safe_delete_vault_image(old_url)
+            await ctx.send(
+                f"✅ **{target_date}** 的交換日記圖片已直接替換完成。\n"
+                f"> {description}\n"
+                "原日記文字、愛意值與記憶都沒有重新生成。"
+            )
+        else:
+            overrides = load_diary_override()
+            overrides[target_date] = {
+                "image_url": local_url,
+                "composition": description,
+                "uploaded_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            }
+            save_diary_override(overrides)
+
+            await ctx.send(
+                f"✅ 設定成功！這張圖已指定給 **{target_date}** 的交換日記。\n"
+                f"> {description}\n\n"
+                f"若該日記先前因生圖失敗，請到小俠頻道輸入：`/diary_retry {target_date}`"
+            )
     except Exception as e:
         await ctx.send(f"❌ 設定失敗：{e}")
 
@@ -5484,6 +6371,46 @@ async def on_message(message):
     upload_room = is_private_upload_channel(message.channel)
     note_room = is_private_note_channel(message.channel)
     public_mode = is_public_service_channel(message.channel)
+
+    # !update 後續完全使用自然語言對答；使用者只需記得 !update。
+    pending_update = memory_update_sessions.get(message.author.id)
+    if private_mode and pending_update and not message.content.startswith("!"):
+        reply_text = message.content.strip()
+        if reply_text in {"取消", "取消更新", "不用了"}:
+            memory_update_sessions.pop(message.author.id, None)
+            await message.channel.send("🗑️ 已取消本次記憶修訂，所有資料都沒有被修改。")
+            return
+
+        if reply_text in {"確認", "確認執行", "執行更新", "確定執行"}:
+            await message.channel.send("💾 正式寫入前，小夏正在先備份所有原始記憶檔……")
+            try:
+                manifest = _apply_memory_update_case(pending_update)
+                memory_update_sessions.pop(message.author.id, None)
+                # 清除聊天 session，讓小俠下一次回覆重新載入最新規則。
+                girlfriend_chat_sessions.clear()
+                await message.channel.send(
+                    "✅ **記憶修訂完成。**\n"
+                    f"已套用 `{manifest.get('applied_action_count', 0)}` 筆修改，"
+                    "並同步更新禁用詞／偏好表達／最新事實。\n"
+                    f"備份位置：`{manifest.get('backup_dir')}`\n"
+                    "若結果不如預期，可告訴小夏要復原，或使用 `!undo_update`。"
+                )
+            except Exception as exc:
+                await message.channel.send(f"❌ 記憶修訂執行失敗，原始資料未被覆蓋：{exc}")
+            return
+
+        # 其他自然語言一律視為對草案的補充，小夏重新分析。
+        await message.channel.send("✏️ 收到補充，小夏正在重新整理修改草案……")
+        try:
+            revised = await _build_memory_update_case(
+                pending_update["request"],
+                feedback=(pending_update.get("feedback", "") + "\n" + reply_text).strip(),
+            )
+            memory_update_sessions[message.author.id] = revised
+            await message.channel.send(_format_update_preview(revised))
+        except Exception as exc:
+            await message.channel.send(f"❌ 草案調整失敗：{exc}")
+        return
 
     # 指令分流：先判斷精準允許的私人共享指令，再處理一般對話。
     if message.content.startswith('!'):
