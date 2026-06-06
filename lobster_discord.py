@@ -21,6 +21,7 @@ import aiohttp
 import aiofiles
 import sys
 import random
+import shutil
 from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
