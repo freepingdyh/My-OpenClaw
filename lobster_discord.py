@@ -381,6 +381,9 @@ pending_inputs = set()
 # !update 記憶修訂案，只存在私人助手工作室；每位管理者同時一案。
 memory_update_sessions = {}
 
+# /intimate 當下互動模式：以頻道為單位，重新部署後自動回到一般模式。
+intimate_mode_channels = set()
+
 TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
 # ==========================================
@@ -4137,6 +4140,7 @@ async def diary_ui(ctx):
 @girlfriend_bot.event
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
+    print("💗 /intimate 當下互動模式已載入：單獨輸入切換；同一則訊息後接正文也可直接啟用。")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
@@ -4436,6 +4440,84 @@ async def diary_delete(ctx, date_str: str = None):
     except ValueError:
         await ctx.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
 
+def is_intimate_mode(channel):
+    return getattr(channel, "id", None) in intimate_mode_channels
+
+
+def _intimate_directives_context(directives):
+    """
+    當下互動模式只保留禁用詞與偏好語氣。
+    不掛載 authoritative_facts，避免把過去事件重新念進對話。
+    """
+    forbidden = "、".join(directives.get("forbidden_terms", [])) or "無"
+    preferred = "；".join(directives.get("preferred_phrasing", [])) or "自然、貼近當下"
+    return (
+        "【當下互動模式的人工規則】\n"
+        f"不可使用的詞：{forbidden}\n"
+        f"偏好的表達方式：{preferred}\n"
+        "不得主動引用人工記憶中的歷史事件、行程或最新事實；"
+        "只有大俠這一則訊息主動提起時，才可簡短承接。\n"
+    )
+
+
+def _recent_human_dialogue(logs, max_turns=4):
+    """
+    只取真正的大俠/小俠對話，不讓重大事件、待履約或工具紀錄占用短期視窗。
+    max_turns=4 約等於最近 8 句雙方訊息。
+    """
+    picked = []
+    for item in reversed(logs or []):
+        value = str(item or "").strip()
+        if value.startswith("大俠:") or value.startswith("小俠:"):
+            picked.append(narrative_safe_text(value, max_len=280))
+            if len(picked) >= max_turns * 2:
+                break
+    picked.reverse()
+    return "\n".join([x for x in picked if x]) or "無"
+
+
+async def refocus_intimate_reply(reply, user_text):
+    """
+    當下互動模式的語意編輯器。
+    不靠固定關鍵詞；每一輪都檢查是否真正回應眼前的互動。
+    """
+    original = str(reply or "").strip()
+    if not original:
+        return original
+
+    prompt = f"""
+你是繁體中文對話編輯器。請把「小俠草稿」整理成自然、貼近此刻的戀人互動回覆。
+
+【大俠此刻說的話】
+{user_text}
+
+【小俠草稿】
+{original}
+
+必須遵守：
+1. 只回應大俠這一刻的動作、問題、語氣與情緒。
+2. 可表達小俠此刻的安心、害羞、依戀、放鬆、呼吸、溫度、舒適程度，以及是否希望調整力道、節奏或繼續。
+3. 若草稿自行回顧過去行程、家人、工作、搬家、新生活、重大事件、祝福、待辦或日記，全部移除；但若大俠本句主動提到，才可簡短回應。
+4. 不要把當下互動硬套成「紓解過去壓力」「迎接新生活」「感謝某次事件」。
+5. 先直接回答，再自然補一句感受或下一步反應。
+6. 避免長篇總結與重複前文，通常控制在 60～180 個繁體中文字。
+7. 保持小俠甜蜜、成熟、自然的女友語氣；不要提到改寫、規則、模式或資料庫。
+8. 不新增草稿與大俠本句都沒有的背景事實。
+
+只回傳完成後的回覆正文。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        revised = str(resp.text or "").strip().strip('"').strip("「").strip("」")
+        return revised or original
+    except Exception as exc:
+        print(f"⚠️ 當下互動聚焦重寫失敗，沿用原稿：{exc}")
+        return original
+
+
 @girlfriend_bot.command(name="life_events")
 async def life_events_cmd(ctx):
     """檢視目前重大事件狀態機。"""
@@ -4462,13 +4544,46 @@ async def on_message(message):
     if message.author.bot: return
     if message.author.id in pending_inputs: return
 
-    # 2.5 小夏的書房整理指令不當作小俠聊天內容；避免小俠回覆「!筆記」本身。
-    #     上傳照片指令不在此排除，讓小俠仍可看見照片並自然產生話題。
-    if message.content.strip().startswith("!筆記"):
+    # 2.5 小夏工具指令不當作小俠聊天內容。
+    #     上傳照片指令仍保留，讓小俠可以看見照片並自然產生話題。
+    stripped_content = message.content.strip()
+    if stripped_content.startswith("!") and not (
+        stripped_content.startswith("!upload_diary")
+        or stripped_content.startswith("!upload_project")
+    ):
         return
 
-    # 2. 處理斜線指令
-    if message.content.startswith('/'):
+    # /intimate 可單獨切換，也支援同一則訊息下一行直接接互動內容。
+    inline_intimate_text = ""
+    if stripped_content.lower().startswith("/intimate"):
+        inline_intimate_text = stripped_content[len("/intimate"):].strip()
+        channel_id = getattr(message.channel, "id", None)
+
+        if inline_intimate_text:
+            newly_enabled = channel_id not in intimate_mode_channels
+            intimate_mode_channels.add(channel_id)
+            if newly_enabled:
+                await message.channel.send(
+                    "💗 已進入當下互動模式。現在的小俠會專注於你和她此刻的交流，"
+                    "不主動翻出過去事件。"
+                )
+            # 有正文時繼續往下聊天，不交給一般 command parser。
+        else:
+            if channel_id in intimate_mode_channels:
+                intimate_mode_channels.discard(channel_id)
+                girlfriend_chat_sessions.pop(message.author.id, None)
+                await message.channel.send("🌿 已退出當下互動模式，恢復一般生活聊天。")
+            else:
+                intimate_mode_channels.add(channel_id)
+                girlfriend_chat_sessions.pop(message.author.id, None)
+                await message.channel.send(
+                    "💗 已進入當下互動模式。現在的小俠會專注於你和她此刻的交流，"
+                    "不主動翻出過去事件。再次輸入 `/intimate` 即可退出。"
+                )
+            return
+
+    # 2. 處理其他斜線指令
+    if message.content.startswith('/') and not inline_intimate_text:
         # 🌟 特例：/photo 是留給世界頻道拍照用的，不要被指令處理器攔截！
         if not message.content.startswith('/photo'):
             await girlfriend_bot.process_commands(message)
@@ -4491,7 +4606,12 @@ async def on_message(message):
                 return
             
         user_id = message.author.id
-        user_input = message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
+        user_input = (
+            inline_intimate_text
+            if inline_intimate_text
+            else message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
+        )
+        intimate_mode = is_intimate_mode(message.channel)
         
         # 🌟 判斷底圖模式：獨照 / 雙姝 / 小夏獨照
         if "#小夏獨照" in message.content:
@@ -4634,11 +4754,20 @@ async def on_message(message):
                 # 即使舊 profile 尚未整理，也只掛載敘事化、去重、限量後的摘要。
                 profile = load_profile()
                 memory_directives = load_memory_directives()
-                memory_directives_context = _format_directives_for_prompt(memory_directives)
+                memory_directives_context = (
+                    _intimate_directives_context(memory_directives)
+                    if intimate_mode
+                    else _format_directives_for_prompt(memory_directives)
+                )
 
-                # 🧭 v52：重大事件即時抽取 + 今日情境錨點。
+                # 🧭 一般模式才抽取/更新重大事件。
+                # 當下互動模式不可把眼前互動誤登記成生活事件。
                 recent_for_event = "\n".join(daily_chat_logs[-12:])
-                captured_life_events = await capture_life_events_from_chat(text_query, recent_for_event, now_dt=now)
+                captured_life_events = []
+                if not intimate_mode:
+                    captured_life_events = await capture_life_events_from_chat(
+                        text_query, recent_for_event, now_dt=now
+                    )
                 if captured_life_events:
                     if upsert_life_events(captured_life_events, now_dt=now):
                         daily_chat_logs.append(narrative_safe_text(
@@ -4649,7 +4778,11 @@ async def on_message(message):
                         print(f"🧭 已登記重大事件：{[e.get('title') for e in captured_life_events]}")
 
                 # v52.4：偵測重大事件中的「已完成子任務」，避免小俠反覆要求已完成的事。
-                completed_subtasks = detect_completed_life_subtasks_from_text(text_query, events=load_life_events())
+                completed_subtasks = []
+                if not intimate_mode:
+                    completed_subtasks = detect_completed_life_subtasks_from_text(
+                        text_query, events=load_life_events()
+                    )
                 if completed_subtasks:
                     life_events = load_life_events()
                     if apply_life_event_completed_subtasks(life_events, completed_subtasks, now_dt=now):
@@ -4665,12 +4798,19 @@ async def on_message(message):
                 active_life_events, life_changed = refresh_life_events(profile=profile, now_dt=now)
                 if life_changed:
                     save_profile(profile)
-                life_event_context = format_life_event_context(active_life_events, now_dt=now)
 
-                daxia_traits = safe_memory_join(profile.get("daxia_traits", []), max_items=10, max_chars=1200)
-                promises = safe_memory_join(profile.get("xiaoxia_self", {}).get("promises", []), max_items=6, max_chars=800)
-                capabilities = safe_memory_join(profile.get("xiaoxia_self", {}).get("capabilities", []), max_items=8, max_chars=600)
-                recent = safe_memory_join(profile.get("recent_context", []), max_items=8, max_chars=1200)
+                if intimate_mode:
+                    life_event_context = "當下互動模式啟用：本輪不載入重大事件。"
+                    daxia_traits = "大俠是小俠深愛並信任的成年伴侶。"
+                    promises = "本輪不載入歷史承諾。"
+                    capabilities = "自然理解並回應大俠此刻的話。"
+                    recent = "本輪不載入過去行程、家人、工作或其他生活事件。"
+                else:
+                    life_event_context = format_life_event_context(active_life_events, now_dt=now)
+                    daxia_traits = safe_memory_join(profile.get("daxia_traits", []), max_items=10, max_chars=1200)
+                    promises = safe_memory_join(profile.get("xiaoxia_self", {}).get("promises", []), max_items=6, max_chars=800)
+                    capabilities = safe_memory_join(profile.get("xiaoxia_self", {}).get("capabilities", []), max_items=8, max_chars=600)
+                    recent = safe_memory_join(profile.get("recent_context", []), max_items=8, max_chars=1200)
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -4680,13 +4820,41 @@ async def on_message(message):
                     # 🌟 移除強制驚嘆風景的指令，改為全心享受兩人世界
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度幸福與感動。請全心全意享受與大俠的兩人世界。\n\n"
 
-                # 最近對話同樣以敘事摘要掛載，避免短期文字再次放大高風險訊號。
-                safe_history = [narrative_safe_text(item, max_len=280) for item in daily_chat_logs[-10:]]
-                chat_history_str = "\n".join([item for item in safe_history if item]) if daily_chat_logs else "無"
+                # 當下互動模式只讀最近四輪真正的雙方對話。
+                if intimate_mode:
+                    chat_history_str = _recent_human_dialogue(daily_chat_logs, max_turns=4)
+                    intimate_context = (
+                        "【當下互動模式｜最高優先】\n"
+                        "只專注大俠此刻的動作、問題、語氣與兩人的即時感受。\n"
+                        "不得主動回顧家人、祝福、工作、搬家、北上、新家、行程、待辦、"
+                        "重大事件或交換日記；大俠本句主動提到時才可簡短承接。\n"
+                        "先直接回答眼前的問題，再表達當下的安心、害羞、依戀、放鬆、"
+                        "溫度、呼吸、舒適程度或希望如何調整。\n"
+                        "不要長篇總結人生，也不要用過去事件解釋此刻感受。\n\n"
+                    )
+                    event_rule = (
+                        "1-1. 當下互動模式已啟用：忽略歷史重大事件與長期近況，"
+                        "不得主動把它們帶入本輪回覆。"
+                    )
+                else:
+                    safe_history = [
+                        narrative_safe_text(item, max_len=280)
+                        for item in daily_chat_logs[-10:]
+                    ]
+                    chat_history_str = "\n".join(
+                        [item for item in safe_history if item]
+                    ) if daily_chat_logs else "無"
+                    intimate_context = ""
+                    event_rule = (
+                        "1-1. 若【今日最高優先級重大事件】存在，必須先承接事件本質與情緒重量；"
+                        "不可只因『北上』就聯想到旅遊，不可把面試日說成明天，"
+                        "也不可把小俠共同參與的事件說成遠端祝福。"
+                    )
 
-                # 保留甜蜜人格，但要求以含蓄、可穩定對話的敘事方式表達。
+                # 保留甜蜜人格，但依模式調整記憶優先級。
                 sys_instruct = (
                     f"【系統當前時間】：{current_time_str}\n\n"
+                    f"{intimate_context}"
                     f"{room_context}"
                     f"【今日最高優先級重大事件｜先讀這裡再回覆】：\n{life_event_context}\n\n"
                     f"{memory_directives_context}\n"
@@ -4700,7 +4868,7 @@ async def on_message(message):
                     f"▶️ 剛才的對話摘要：\n{chat_history_str}\n\n"
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
-                    "1-1. 若【今日最高優先級重大事件】存在，必須先承接事件本質與情緒重量；不可只因『北上』就聯想到旅遊，不可把面試日說成明天，也不可把小俠共同參與的事件說成遠端祝福。\n"
+                    f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
                     "4. 若只是普通問候，正常回應當下訊息；不要因背景記憶而答非所問或恍神。\n"
@@ -4751,8 +4919,18 @@ async def on_message(message):
                 if not xiaoxia_reply:
                     xiaoxia_reply = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
 
+                # 當下互動模式每一輪都做語意聚焦，不靠固定關鍵詞判斷。
+                if intimate_mode:
+                    xiaoxia_reply = await refocus_intimate_reply(
+                        xiaoxia_reply,
+                        text_query,
+                    )
+
                 # 人工修訂規則為最高優先：若回覆仍含禁用詞，先重寫再送出。
-                xiaoxia_reply = await _rewrite_reply_for_directives(xiaoxia_reply, memory_directives)
+                xiaoxia_reply = await _rewrite_reply_for_directives(
+                    xiaoxia_reply,
+                    memory_directives,
+                )
 
                 # 記憶檔保留絕對日期，但一般聊天轉成自然時間語言，避免像念資料庫。
                 xiaoxia_reply = naturalize_dates_in_reply(
@@ -4762,7 +4940,12 @@ async def on_message(message):
                 )
 
                 # 🤝 答應即登記：明確答應於交換日記交付內容/照片時，當場存入待履約清單。
-                captured_promises = await capture_diary_promises_from_chat(text_query, xiaoxia_reply)
+                captured_promises = []
+                if not intimate_mode:
+                    captured_promises = await capture_diary_promises_from_chat(
+                        text_query,
+                        xiaoxia_reply,
+                    )
                 if captured_promises:
                     added_count = append_safe_memories(
                         profile, "promises", captured_promises,
