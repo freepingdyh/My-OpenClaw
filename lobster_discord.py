@@ -326,6 +326,8 @@ def safe_memory_list(items, max_items=None, max_chars=None):
     cleaned, seen = [], set()
     for item in items or []:
         original = item.get("text", "") if isinstance(item, dict) else item
+        if not str(original or "").strip():
+            continue
         cleaned_text = narrative_safe_text(original)
         key = cleaned_text.rstrip("。")
         if cleaned_text and key not in seen:
@@ -515,6 +517,65 @@ def save_state(data):
     with open(STATE_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def _clean_profile_memory_items(items):
+    """
+    移除 {}, 缺少 text、text 為空白等不完整記憶。
+    字串型舊資料會轉為標準 dict，避免後續直接索引失敗。
+    """
+    cleaned = []
+    seen = set()
+    for item in items or []:
+        if isinstance(item, str):
+            value = item.strip()
+            added_at = "migration"
+        elif isinstance(item, dict):
+            value = str(item.get("text", "") or "").strip()
+            added_at = item.get("added_at", "migration")
+        else:
+            continue
+
+        if not value:
+            continue
+
+        key = value.rstrip("。")
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({"text": value, "added_at": added_at})
+    return cleaned
+
+
+def _repair_profile_memory_shape(profile):
+    """載入後修復所有會被交換日記與聊天流程使用的記憶陣列。"""
+    changed = False
+
+    for key in ("daxia_traits", "xiaoxia_traits", "shared_knowledge", "recent_context"):
+        original = profile.get(key, [])
+        cleaned = _clean_profile_memory_items(original)
+        if cleaned != original:
+            profile[key] = cleaned
+            changed = True
+
+    self_block = profile.setdefault("xiaoxia_self", {})
+    for key in ("capabilities", "promises"):
+        original = self_block.get(key, [])
+        cleaned = _clean_profile_memory_items(original)
+        if cleaned != original:
+            self_block[key] = cleaned
+            changed = True
+
+    return changed
+
+
+def _memory_text_values(items):
+    """安全取得有效文字，不因單筆缺少 text 而讓整個流程中止。"""
+    return [
+        item["text"]
+        for item in _clean_profile_memory_items(items)
+        if item.get("text")
+    ]
+
+
 def load_profile():
     default_profile = {
         "daxia_traits": [],
@@ -538,6 +599,17 @@ def load_profile():
                 data.setdefault("shared_knowledge", []) # 確保陣列存在
                 data.setdefault("xiaoxia_self", default_profile["xiaoxia_self"])
                 data.setdefault("recent_context", [])
+
+                # 修復歷史上由 update / memory extraction 留下的空 dict 或缺 text 項目。
+                if _repair_profile_memory_shape(data):
+                    try:
+                        temp_path = f"{PROFILE_DATA_PATH}.repair.tmp"
+                        with open(temp_path, "w", encoding="utf-8") as repair_file:
+                            json.dump(data, repair_file, ensure_ascii=False, indent=2)
+                        os.replace(temp_path, PROFILE_DATA_PATH)
+                        print("🧹 已自動清理 daxia_profile.json 中缺少 text 的殘缺記憶。")
+                    except Exception as repair_exc:
+                        print(f"⚠️ 記憶結構修復已套用於本次執行，但寫回失敗：{repair_exc}")
                 return data
                 
         except Exception as e:
@@ -3628,7 +3700,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             entry_content = entry['content']
             # 首次執行若已寫入分數/記憶後生圖失敗，後續重跑自動切為補救模式。
             entry_retry_mode = retry_mode or bool(entry.get("reply_effects_applied", False))
-            recent_activities = "、".join([item["text"] for item in profile.get("recent_context", [])])
+            recent_activities = "、".join(
+                _memory_text_values(profile.get("recent_context", []))
+            ) or "無"
             # 取得當前月份
             current_month = datetime.now(TZ_TPE).month
             
@@ -3643,7 +3717,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             
             # 🤝 提取待履約清單：本篇日記必須實際交付，而不只是回想承諾。
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
-            current_promises = "、".join([p["text"] for p in promises_list]) if promises_list else "無特殊承諾"
+            current_promise_texts = _memory_text_values(promises_list)
+            current_promises = "、".join(current_promise_texts) if current_promise_texts else "無特殊承諾"
             due_promises = get_due_diary_promises(profile, max_items=4)
             promise_requirements = format_diary_promise_requirements(due_promises)
 
@@ -4141,6 +4216,7 @@ async def diary_ui(ctx):
 async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
     print("💗 /intimate 當下互動模式已載入：單獨輸入切換；同一則訊息後接正文也可直接啟用。")
+    print("🧹 記憶欄位防護已載入：自動略過並清理缺少 text 的殘缺記憶。")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
