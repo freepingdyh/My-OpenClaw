@@ -571,6 +571,13 @@ class BusinessCardService:
         except ValueError:
             self.notes_max_chars = 180
 
+        try:
+            self.query_max_results = max(
+                1,
+                min(20, int(os.environ.get("BUSINESS_CARD_QUERY_MAX_RESULTS", "8"))),
+            )
+        except ValueError:
+            self.query_max_results = 8
 
         self.config_errors = []
         checks = {
@@ -655,6 +662,304 @@ class BusinessCardService:
         )
         return GoogleWorkspaceClient._hyperlink_formula(cleaned[0], label)
 
+    @staticmethod
+    def _formula_url(value: Any) -> str:
+        """從 =HYPERLINK("url","label") 或一般 URL 取出實際網址。"""
+        raw = str(value or "").strip()
+        match = re.match(
+            r'^=HYPERLINK\("((?:[^"]|"")*)"\s*,',
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).replace('""', '"')
+        if raw.startswith(("http://", "https://")):
+            return raw
+        return ""
+
+    @staticmethod
+    def _query_text(value: Any) -> str:
+        """用於搜尋的正規化文字：忽略空白、標點與大小寫。"""
+        raw = str(value or "").lower()
+        raw = re.sub(r"\s+", "", raw)
+        raw = re.sub(r"[，。！？、：:；;（）()【】\[\]「」『』\-_/\\.]", "", raw)
+        return raw
+
+    @staticmethod
+    def _query_candidate(text: str) -> bool:
+        """
+        只做低成本的候選判斷，真正意圖仍交給 Gemini。
+        避免 #架構師專用每一句普通聊天都呼叫名片查詢。
+        """
+        value = str(text or "").strip()
+        if not value or value.startswith(("!", "/")):
+            return False
+        patterns = [
+            r"名片|聯絡人|聯絡方式|聯繫方式",
+            r"(幫我|替我)?(找|查|搜尋|查詢|看看).{0,30}(人|公司|電話|手機|信箱|email|職稱|名片)",
+            r"(誰是|哪一位|哪些人|有誰).{0,30}(經理|主管|工程師|秘書長|公司|協會|部門)",
+            r"(電話|手機|email|信箱|分機|地址|網站).{0,12}(是什麼|多少|在哪|給我|查一下)",
+            r"給我看.{0,20}(名片|聯絡資料|資料)",
+        ]
+        return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+    async def _classify_text_query(self, user_text: str) -> dict:
+        prompt = f"""
+你是企業名片資料庫查詢意圖分析器。
+
+使用者訊息：
+{user_text}
+
+判斷這是否是在查詢 Google Sheets 名片／聯絡人資料。
+一般技術問答、聊天、要求寫程式、晨報或其他工作，不是名片查詢。
+
+只回傳 JSON：
+{{
+  "is_business_card_query": true,
+  "query_type": "detail",
+  "search_terms": ["劉哲輔"],
+  "filters": {{
+    "name": "",
+    "organization": "",
+    "department": "",
+    "job_title": "",
+    "phone": "",
+    "email": "",
+    "address": "",
+    "affiliation": ""
+  }},
+  "wants_card_image": false,
+  "wants_full_detail": true
+}}
+
+query_type 可用：
+- detail：查單一人的完整或部分資料
+- list：查某公司、部門、職稱有哪些人
+- image：要求看名片圖片
+- contact：只問電話、Email、地址等聯絡資料
+
+規則：
+- search_terms 放最具辨識力的姓名、公司、部門、職稱、電話尾碼或 Email 片段。
+- 不要把「幫我、請問、查一下」放入 search_terms。
+- 若不是名片查詢，is_business_card_query=false。
+"""
+        response = await asyncio.to_thread(
+            self.gemini.models.generate_content,
+            model=self.vision_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0,
+            ),
+        )
+        result = _extract_json(response.text)
+        result.setdefault("is_business_card_query", False)
+        result.setdefault("query_type", "detail")
+        result.setdefault("search_terms", [])
+        result.setdefault("filters", {})
+        result.setdefault("wants_card_image", False)
+        result.setdefault("wants_full_detail", False)
+        return result
+
+    def _score_query_row(self, row: dict, query: dict) -> int:
+        searchable_fields = {
+            "name": ["name_zh", "name_en"],
+            "organization": ["primary_organization"],
+            "department": ["primary_department"],
+            "job_title": ["primary_job_title"],
+            "phone": ["mobile", "phone", "phone_extension", "fax"],
+            "email": ["email"],
+            "address": ["postal_code", "address"],
+            "affiliation": ["affiliations_json"],
+            "general": [
+                "name_zh", "name_en", "primary_organization",
+                "primary_department", "primary_job_title", "affiliations_json",
+                "mobile", "phone", "phone_extension", "fax", "email",
+                "postal_code", "address", "websites", "tax_id", "notes",
+            ],
+        }
+
+        score = 0
+        matched_terms = 0
+
+        filters = query.get("filters") or {}
+        for filter_name, raw_term in filters.items():
+            term = self._query_text(raw_term)
+            if not term:
+                continue
+            fields = searchable_fields.get(filter_name, searchable_fields["general"])
+            values = [self._query_text(row.get(field, "")) for field in fields]
+            if any(term == value for value in values if value):
+                score += 100
+                matched_terms += 1
+            elif any(term in value for value in values if value):
+                score += 55
+                matched_terms += 1
+            else:
+                return 0  # 明確 filter 未命中即排除
+
+        for raw_term in query.get("search_terms") or []:
+            term = self._query_text(raw_term)
+            if not term:
+                continue
+            best = 0
+            for field in searchable_fields["general"]:
+                value = self._query_text(row.get(field, ""))
+                if not value:
+                    continue
+                if term == value:
+                    best = max(best, 90)
+                elif term in value:
+                    best = max(best, 45)
+                elif len(term) >= 3 and value in term:
+                    best = max(best, 20)
+            # 電話尾碼與 email 片段
+            digits = re.sub(r"\D+", "", str(raw_term))
+            if len(digits) >= 4:
+                for field in ("mobile", "phone", "fax"):
+                    row_digits = re.sub(r"\D+", "", str(row.get(field, "")))
+                    if row_digits.endswith(digits):
+                        best = max(best, 80)
+            if best:
+                score += best
+                matched_terms += 1
+
+        # 至少一個條件命中；沒有 terms/filters 時不回傳全表。
+        return score if matched_terms else 0
+
+    def _search_rows(self, rows: list[dict], query: dict) -> list[dict]:
+        scored = []
+        for row in rows:
+            score = self._score_query_row(row, query)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                str(item[1].get("name_zh") or item[1].get("name_en") or ""),
+            )
+        )
+        return [row for _, row in scored[: self.query_max_results]]
+
+    def _contact_summary(self, row: dict, include_links: bool = True) -> str:
+        name = row.get("name_zh") or row.get("name_en") or "未命名聯絡人"
+        name_en = row.get("name_en", "")
+        organization = row.get("primary_organization") or "機構未填"
+        department = row.get("primary_department") or ""
+        role = row.get("primary_job_title") or ""
+        mobile = row.get("mobile") or "未提供"
+        phone = row.get("phone") or "未提供"
+        extension = row.get("phone_extension") or ""
+        email = row.get("email") or "未提供"
+        address = row.get("address") or "未提供"
+
+        lines = [f"**{name}" + (f"（{name_en}）**" if name_en and name_en != name else "**")]
+        lines.append(f"機構：{organization}")
+        if department:
+            lines.append(f"部門：{department}")
+        if role:
+            lines.append(f"職稱：{role}")
+        lines.append(f"手機：{mobile}")
+        lines.append(f"電話：{phone}" + (f" 分機 {extension}" if extension else ""))
+        lines.append(f"Email：{email}")
+        lines.append(f"地址：{address}")
+
+        affiliations = str(row.get("affiliations_json") or "").strip()
+        if affiliations:
+            try:
+                parsed = json.loads(affiliations)
+                if isinstance(parsed, list) and parsed:
+                    rendered = []
+                    for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
+                        org = item.get("organization", "")
+                        dept = item.get("department", "")
+                        role_value = item.get("role", "")
+                        text = "｜".join(x for x in (org, dept, role_value) if x)
+                        if text:
+                            rendered.append(text)
+                    if rendered:
+                        lines.append("其他身分：" + "；".join(rendered[:5]))
+            except Exception:
+                pass
+
+        if include_links:
+            website_url = self._formula_url(row.get("websites"))
+            front_url = self._formula_url(row.get("card_front_image_url"))
+            back_url = self._formula_url(row.get("card_back_image_url"))
+            link_parts = []
+            if website_url:
+                link_parts.append(f"[網站]({website_url})")
+            if front_url:
+                link_parts.append(f"[名片正面]({front_url})")
+            if back_url:
+                link_parts.append(f"[名片背面]({back_url})")
+            if link_parts:
+                lines.append("連結：" + "｜".join(link_parts))
+
+        return "\n".join(lines)
+
+    def _format_query_results(self, rows: list[dict], query: dict) -> str:
+        if not rows:
+            terms = "、".join(str(x) for x in query.get("search_terms") or [])
+            return f"🔎 找不到符合「{terms or '這個條件'}」的名片資料。"
+
+        query_type = query.get("query_type", "detail")
+        wants_full = bool(query.get("wants_full_detail"))
+        wants_image = bool(query.get("wants_card_image")) or query_type == "image"
+
+        if len(rows) == 1:
+            return "📇 **找到 1 位聯絡人**\n\n" + self._contact_summary(
+                rows[0],
+                include_links=True,
+            )
+
+        lines = [f"📇 **找到 {len(rows)} 位符合的聯絡人**"]
+        for index, row in enumerate(rows, start=1):
+            name = row.get("name_zh") or row.get("name_en") or "未命名"
+            company = row.get("primary_organization") or "機構未填"
+            role = row.get("primary_job_title") or "職稱未填"
+            email = row.get("email") or ""
+            mobile = row.get("mobile") or ""
+            line = f"{index}. **{name}**｜{company}｜{role}"
+            if query_type == "contact":
+                contact = email or mobile
+                if contact:
+                    line += f"\n   {contact}"
+            if wants_image:
+                front_url = self._formula_url(row.get("card_front_image_url"))
+                if front_url:
+                    line += f"｜[名片]({front_url})"
+            lines.append(line)
+
+        lines.append("\n可再直接問「顯示某人的完整資料」。")
+        return "\n".join(lines)
+
+    async def handle_text_query(self, message: discord.Message) -> bool:
+        user_text = str(message.content or "").strip()
+        if not self._query_candidate(user_text):
+            return False
+        if not self.ready:
+            await message.channel.send(
+                "❌ 名片服務尚未完成設定：" + "、".join(self.config_errors)
+            )
+            return True
+
+        try:
+            query = await self._classify_text_query(user_text)
+            if not query.get("is_business_card_query"):
+                return False
+
+            headers, rows = await self.google.read_table(self.main_sheet)
+            self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
+            results = self._search_rows(rows, query)
+            await message.channel.send(self._format_query_results(results, query))
+            return True
+        except Exception as exc:
+            await message.channel.send(f"❌ 名片查詢失敗：{exc}")
+            return True
+
     @property
     def ready(self) -> bool:
         return not self.config_errors and self.gemini is not None and self.google is not None
@@ -663,7 +968,8 @@ class BusinessCardService:
         if self.ready:
             return (
                 f"ready | channel={self.architect_channel_id} | "
-                f"sheet={self.main_sheet}/{self.history_sheet} | model={self.vision_model}"
+                f"sheet={self.main_sheet}/{self.history_sheet} | "
+                f"model={self.vision_model} | natural_query=on"
             )
         return "missing: " + ", ".join(self.config_errors)
 
@@ -684,7 +990,7 @@ class BusinessCardService:
             )
         ]
         if not image_attachments:
-            return False
+            return await self.handle_text_query(message)
 
         if not self.ready:
             await message.channel.send(
