@@ -172,7 +172,7 @@ class GoogleWorkspaceClient:
         range_name = aiohttp.helpers.quote(f"{sheet_name}!A1", safe="")
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
-            f"/values/{range_name}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+            f"/values/{range_name}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
         )
         values = [[row.get(header, "") for header in headers]]
         await self._request_json("POST", url, json={"values": values})
@@ -191,7 +191,7 @@ class GoogleWorkspaceClient:
         )
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
-            f"/values/{range_name}?valueInputOption=RAW"
+            f"/values/{range_name}?valueInputOption=USER_ENTERED"
         )
         values = [[row.get(header, "") for header in headers]]
         await self._request_json("PUT", url, json={"values": values})
@@ -353,6 +353,45 @@ class GoogleWorkspaceClient:
         if max_chars and len(compact) > max_chars:
             return compact[:max_chars].rstrip("，、；,. ") + "…"
         return compact
+
+    @staticmethod
+    def _normalize_website_url(value: Any) -> str:
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            url = "https://" + url.lstrip("/")
+        return url
+
+    def _websites_formula(self, websites: Any) -> str:
+        """
+        Google Sheets 單一儲存格很難可靠保存多個獨立可點連結。
+        第一版將第一個網站做成可點的 HYPERLINK；
+        其餘網站保留在 notes 精簡摘要中，不會遺失。
+        """
+        if isinstance(websites, str):
+            raw = websites.strip()
+            try:
+                parsed = json.loads(raw)
+                values = parsed if isinstance(parsed, list) else [raw]
+            except Exception:
+                values = [raw]
+        elif isinstance(websites, list):
+            values = websites
+        else:
+            values = []
+
+        cleaned = []
+        for item in values:
+            url = self._normalize_website_url(item)
+            if url and url not in cleaned:
+                cleaned.append(url)
+
+        if not cleaned:
+            return ""
+
+        label = "🌐 開啟網站" if len(cleaned) == 1 else f"🌐 開啟網站（共{len(cleaned)}個）"
+        return GoogleWorkspaceClient._hyperlink_formula(cleaned[0], label)
 
     async def upload_drive_image(
         self,
@@ -758,7 +797,10 @@ class BusinessCardService:
     def _normalize_card(self, card: dict, analysis: dict) -> dict:
         normalized = {key: card.get(key, "") for key in MAIN_HEADERS}
         normalized["affiliations_json"] = _json_text(card.get("affiliations", []))
-        normalized["websites"] = _json_text(card.get("websites", []))
+
+        raw_websites = card.get("websites", [])
+        normalized["websites"] = self._websites_formula(raw_websites)
+
         normalized["ocr_confidence"] = card.get(
             "ocr_confidence",
             analysis.get("classification_confidence", 0),
@@ -768,10 +810,26 @@ class BusinessCardService:
             if self.store_raw_text
             else ""
         )
-        normalized["notes"] = self._single_line(
+        notes_value = self._single_line(
             card.get("notes", ""),
             max_chars=self.notes_max_chars,
         )
+
+        # 若有多個網站，第一個放在 websites 可點欄位，其餘保留在 notes。
+        website_values = raw_websites if isinstance(raw_websites, list) else []
+        extra_websites = [
+            self._normalize_website_url(item)
+            for item in website_values[1:]
+            if self._normalize_website_url(item)
+        ]
+        if extra_websites:
+            extra_text = "其他網站：" + "、".join(extra_websites)
+            notes_value = self._single_line(
+                f"{notes_value}；{extra_text}" if notes_value else extra_text,
+                max_chars=self.notes_max_chars,
+            )
+
+        normalized["notes"] = notes_value
         normalized["card_language"] = card.get("card_language", "")
         normalized["review_status"] = (
             "AUTO_SAVED"
