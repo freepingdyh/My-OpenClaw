@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
+from business_card_service import BusinessCardService
 
 # 🌐 Web 服務元件
 import uvicorn
@@ -401,6 +402,11 @@ MORNING_CHANNEL_ID = int(os.environ.get("MORNING_CHANNEL_ID", "15090064961075979
 FOMO_CHANNEL_ID = int(os.environ.get("FOMO_CHANNEL_ID", "1509006607831535666"))
 ARCHITECT_CHANNEL_ID = int(os.environ.get("ARCHITECT_CHANNEL_ID", "1509006833006936126"))
 PUBLIC_STORY_CHANNEL_ID = int(os.environ.get("PUBLIC_STORY_CHANNEL_ID", "1509006908596555937"))
+
+# 📇 名片自動辨識模組：完整邏輯放在 business_card_service.py。
+business_card_service = BusinessCardService(
+    architect_channel_id=ARCHITECT_CHANNEL_ID,
+)
 
 # 舊測試中的故事頻道也封鎖兩個私人 Bot 介入。
 LEGACY_STORY_CHANNEL_ID = int(os.environ.get("LEGACY_STORY_CHANNEL_ID", "1501767238418563233"))
@@ -6314,6 +6320,7 @@ async def on_ready():
     print("🧠 記憶安全層：所有新寫入 daxia_profile.json 的記憶均已通過統一敘事入庫閘門；!整理記憶僅供舊資料 migration 使用。")
     print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
     print("🧠 記憶修訂助手：在私人 #助手小夏工作室 使用 !update 敘述；小夏會預覽、確認、備份後才寫入。")
+    print(f"📇 名片自動辨識服務：{business_card_service.status_text()}")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -6892,6 +6899,14 @@ async def on_message(message):
     # 故事頻道一律不由小夏介入。
     if is_story_channel_or_thread(message.channel):
         return
+
+    # 📇 #架構師專用：圖片附件先交給名片服務自動判斷。
+    # 非名片會回傳 False，繼續原本的小夏對話流程。
+    try:
+        if await business_card_service.handle_message(message):
+            return
+    except Exception as exc:
+        print(f"⚠️ 名片模組未攔截的例外：{exc}")
 
     private_mode = is_private_assistant_workspace(message.channel)
     upload_room = is_private_upload_channel(message.channel)
