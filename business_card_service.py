@@ -98,6 +98,7 @@ class GoogleWorkspaceClient:
         self._access_token = ""
         self._token_expiry = 0.0
         self._lock = asyncio.Lock()
+        self._formatted_sheet_names = set()
 
     async def access_token(self) -> str:
         async with self._lock:
@@ -531,7 +532,6 @@ class BusinessCardService:
         except ValueError:
             self.notes_max_chars = 180
 
-        self._formatted_sheet_names = set()
 
         self.config_errors = []
         checks = {
