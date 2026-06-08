@@ -150,6 +150,7 @@ class GoogleWorkspaceClient:
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
             f"{self.spreadsheet_id}/values/{range_name}"
+            f"?valueRenderOption=FORMULA"
         )
         data = await self._request_json("GET", url)
         values = data.get("values", [])
@@ -201,6 +202,156 @@ class GoogleWorkspaceClient:
             number, remainder = divmod(number - 1, 26)
             result = chr(65 + remainder) + result
         return result
+
+    async def _sheet_id(self, sheet_name: str) -> int:
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
+            f"?fields=sheets(properties(sheetId,title))"
+        )
+        data = await self._request_json("GET", url)
+        for sheet in data.get("sheets", []):
+            properties = sheet.get("properties", {})
+            if properties.get("title") == sheet_name:
+                return int(properties["sheetId"])
+        raise RuntimeError(f"找不到 Google Sheets 分頁：{sheet_name}")
+
+    async def ensure_compact_layout(self, sheet_name: str, headers: list[str]) -> None:
+        if sheet_name in self._formatted_sheet_names:
+            return
+
+        sheet_id = await self._sheet_id(sheet_name)
+        header_index = {name: index for index, name in enumerate(headers)}
+        requests = [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {"bold": True},
+                            "verticalAlignment": "MIDDLE",
+                            "wrapStrategy": "CLIP",
+                        }
+                    },
+                    "fields": (
+                        "userEnteredFormat.textFormat.bold,"
+                        "userEnteredFormat.verticalAlignment,"
+                        "userEnteredFormat.wrapStrategy"
+                    ),
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": 1,
+                    },
+                    "properties": {"pixelSize": 42},
+                    "fields": "pixelSize",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet_id, "startRowIndex": 1},
+                    "cell": {
+                        "userEnteredFormat": {"verticalAlignment": "MIDDLE"}
+                    },
+                    "fields": "userEnteredFormat.verticalAlignment",
+                }
+            },
+        ]
+
+        for column_name in ("raw_extracted_text", "notes"):
+            column_index = header_index.get(column_name)
+            if column_index is None:
+                continue
+            requests.extend([
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "startColumnIndex": column_index,
+                            "endColumnIndex": column_index + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "wrapStrategy": "CLIP",
+                                "verticalAlignment": "MIDDLE",
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat.wrapStrategy,"
+                            "userEnteredFormat.verticalAlignment"
+                        ),
+                    }
+                },
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": column_index,
+                            "endIndex": column_index + 1,
+                        },
+                        "properties": {"pixelSize": 120},
+                        "fields": "pixelSize",
+                    }
+                },
+            ])
+
+        for column_name in ("card_front_image_url", "card_back_image_url"):
+            column_index = header_index.get(column_name)
+            if column_index is None:
+                continue
+            requests.append({
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": column_index,
+                        "endIndex": column_index + 1,
+                    },
+                    "properties": {"pixelSize": 115},
+                    "fields": "pixelSize",
+                }
+            })
+
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{self.spreadsheet_id}:batchUpdate"
+        )
+        await self._request_json("POST", url, json={"requests": requests})
+        self._formatted_sheet_names.add(sheet_name)
+
+    @staticmethod
+    def _hyperlink_formula(url: str, label: str) -> str:
+        value = str(url or "").strip()
+        if not value:
+            return ""
+        safe_url = value.replace('"', '""')
+        safe_label = str(label or "開啟").replace('"', '""')
+        return f'=HYPERLINK("{safe_url}","{safe_label}")'
+
+    @staticmethod
+    def _single_line(value: Any, max_chars: int = 180) -> str:
+        compact = re.sub(r"\s+", " ", str(value or "")).strip()
+        if max_chars and len(compact) > max_chars:
+            return compact[:max_chars].rstrip("，、；,. ") + "…"
+        return compact
 
     async def upload_drive_image(
         self,
@@ -367,6 +518,21 @@ class BusinessCardService:
             or ""
         )
 
+        # Google Sheets 顯示策略：預設不保存冗長 OCR 原文。
+        self.store_raw_text = (
+            os.environ.get("BUSINESS_CARD_STORE_RAW_TEXT", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        try:
+            self.notes_max_chars = max(
+                0,
+                int(os.environ.get("BUSINESS_CARD_NOTES_MAX_CHARS", "180")),
+            )
+        except ValueError:
+            self.notes_max_chars = 180
+
+        self._formatted_sheet_names = set()
+
         self.config_errors = []
         checks = {
             "GEMINI_API_KEY": self.gemini_api_key,
@@ -469,6 +635,7 @@ class BusinessCardService:
             card = self._normalize_card(cards[0], analysis)
             headers, rows = await self.google.read_table(self.main_sheet)
             self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
+            await self.google.ensure_compact_layout(self.main_sheet, headers)
 
             exact, possible = self._find_matches(card, rows)
             if exact:
@@ -588,7 +755,15 @@ class BusinessCardService:
             "ocr_confidence",
             analysis.get("classification_confidence", 0),
         )
-        normalized["raw_extracted_text"] = card.get("raw_extracted_text", "")
+        normalized["raw_extracted_text"] = (
+            self._single_line(card.get("raw_extracted_text", ""), max_chars=1200)
+            if self.store_raw_text
+            else ""
+        )
+        normalized["notes"] = self._single_line(
+            card.get("notes", ""),
+            max_chars=self.notes_max_chars,
+        )
         normalized["card_language"] = card.get("card_language", "")
         normalized["review_status"] = (
             "AUTO_SAVED"
@@ -681,6 +856,7 @@ class BusinessCardService:
     ) -> str:
         headers, _ = await self.google.read_table(self.main_sheet)
         self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
+        await self.google.ensure_compact_layout(self.main_sheet, headers)
 
         person_id = (
             f"BC-{datetime.now(TZ_TPE).strftime('%Y%m%d')}-"
@@ -696,8 +872,14 @@ class BusinessCardService:
                 "updated_at": now,
                 "uploaded_by": str(source_message.author),
                 "discord_message_url": _message_url(source_message),
-                "card_front_image_url": front_url,
-                "card_back_image_url": back_url,
+                "card_front_image_url": self.google._hyperlink_formula(
+                    front_url,
+                    "📇 查看正面",
+                ),
+                "card_back_image_url": self.google._hyperlink_formula(
+                    back_url,
+                    "📇 查看背面",
+                ),
                 "match_status": match_status,
             }
         )
@@ -720,6 +902,8 @@ class BusinessCardService:
             HISTORY_HEADERS,
             self.history_sheet,
         )
+        await self.google.ensure_compact_layout(self.main_sheet, main_headers)
+        await self.google.ensure_compact_layout(self.history_sheet, history_headers)
 
         person_id = existing.get("person_id") or (
             f"BC-{datetime.now(TZ_TPE).strftime('%Y%m%d')}-"
@@ -751,8 +935,16 @@ class BusinessCardService:
                 "updated_at": now,
                 "uploaded_by": str(source_message.author),
                 "discord_message_url": _message_url(source_message),
-                "card_front_image_url": front_url or existing.get("card_front_image_url", ""),
-                "card_back_image_url": back_url or existing.get("card_back_image_url", ""),
+                "card_front_image_url": (
+                    self.google._hyperlink_formula(front_url, "📇 查看正面")
+                    if front_url
+                    else existing.get("card_front_image_url", "")
+                ),
+                "card_back_image_url": (
+                    self.google._hyperlink_formula(back_url, "📇 查看背面")
+                    if back_url
+                    else existing.get("card_back_image_url", "")
+                ),
                 "match_status": match_status,
             }
         )
