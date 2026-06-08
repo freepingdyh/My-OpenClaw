@@ -612,6 +612,49 @@ class BusinessCardService:
             return compact[:max_chars].rstrip("，、；,. ") + "…"
         return compact
 
+    @staticmethod
+    def _normalize_website_url(value: Any) -> str:
+        """補齊網站協定，讓 Google Sheets HYPERLINK 可以正常開啟。"""
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            url = "https://" + url.lstrip("/")
+        return url
+
+    def _websites_formula(self, websites: Any) -> str:
+        """
+        將第一個網站轉成 Google Sheets 可點擊 HYPERLINK。
+        其他網站會保留在 notes。
+        """
+        if isinstance(websites, str):
+            raw = websites.strip()
+            try:
+                parsed = json.loads(raw)
+                values = parsed if isinstance(parsed, list) else [raw]
+            except Exception:
+                values = [raw]
+        elif isinstance(websites, list):
+            values = websites
+        else:
+            values = []
+
+        cleaned = []
+        for item in values:
+            url = self._normalize_website_url(item)
+            if url and url not in cleaned:
+                cleaned.append(url)
+
+        if not cleaned:
+            return ""
+
+        label = (
+            "🌐 開啟網站"
+            if len(cleaned) == 1
+            else f"🌐 開啟網站（共{len(cleaned)}個）"
+        )
+        return GoogleWorkspaceClient._hyperlink_formula(cleaned[0], label)
+
     @property
     def ready(self) -> bool:
         return not self.config_errors and self.gemini is not None and self.google is not None
