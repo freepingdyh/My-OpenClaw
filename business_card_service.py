@@ -8,6 +8,7 @@ import mimetypes
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
+from urllib.parse import quote
 
 import aiohttp
 import discord
@@ -841,17 +842,51 @@ query_type 可用：
         )
         return [row for _, row in scored[: self.query_max_results]]
 
+    @staticmethod
+    def _dialable_number(value: Any) -> str:
+        """建立 tel: 使用的主號碼；分機由 phone_extension 另外顯示。"""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        digits = re.sub(r"\D+", "", raw)
+        return f"+{digits}" if digits else ""
+
+    @classmethod
+    def _phone_markdown(cls, value: Any) -> str:
+        """產生可點擊撥號連結，同時保留原始號碼文字。"""
+        raw = str(value or "").strip()
+        if not raw:
+            return "未提供"
+        dialable = cls._dialable_number(raw)
+        return f"[{raw}](tel:{dialable})" if dialable else raw
+
+    @staticmethod
+    def _gmail_markdown(email: Any) -> str:
+        """點擊後開啟 Gmail 撰寫頁，並自動帶入收件人。"""
+        raw = str(email or "").strip()
+        if not raw:
+            return "未提供"
+        gmail_url = (
+            "https://mail.google.com/mail/?view=cm&fs=1&to="
+            + quote(raw, safe="")
+        )
+        return f"[{raw}]({gmail_url})"
+
     def _contact_summary(self, row: dict, include_links: bool = True) -> str:
         name = row.get("name_zh") or row.get("name_en") or "未命名聯絡人"
         name_en = row.get("name_en", "")
         organization = row.get("primary_organization") or "機構未填"
         department = row.get("primary_department") or ""
         role = row.get("primary_job_title") or ""
-        mobile = row.get("mobile") or "未提供"
-        phone = row.get("phone") or "未提供"
+        mobile_raw = row.get("mobile") or ""
+        phone_raw = row.get("phone") or ""
         extension = row.get("phone_extension") or ""
-        email = row.get("email") or "未提供"
+        email_raw = row.get("email") or ""
         address = row.get("address") or "未提供"
+
+        mobile = self._phone_markdown(mobile_raw)
+        phone = self._phone_markdown(phone_raw)
+        email = self._gmail_markdown(email_raw)
 
         lines = [f"**{name}" + (f"（{name_en}）**" if name_en and name_en != name else "**")]
         lines.append(f"機構：{organization}")
