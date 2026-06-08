@@ -565,6 +565,14 @@ class BusinessCardService:
             else None
         )
 
+    @staticmethod
+    def _single_line(value: Any, max_chars: int = 180) -> str:
+        """將 OCR/備註壓成單行，避免 Google Sheets 列高被長文字撐大。"""
+        compact = re.sub(r"\s+", " ", str(value or "")).strip()
+        if max_chars and len(compact) > max_chars:
+            return compact[:max_chars].rstrip("，、；,. ") + "…"
+        return compact
+
     @property
     def ready(self) -> bool:
         return not self.config_errors and self.gemini is not None and self.google is not None
