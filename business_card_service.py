@@ -17,24 +17,11 @@ from google.genai import types
 
 
 TZ_TPE = timezone(timedelta(hours=8))
+MODULE_VERSION = "1.5.1"
 
-MAIN_HEADERS = [
-    "person_id", "created_at", "updated_at", "uploaded_by", "discord_message_url",
-    "card_front_image_url", "card_back_image_url", "name_zh", "name_en",
-    "primary_organization", "primary_department", "primary_job_title",
-    "affiliations_json", "mobile", "phone", "phone_extension", "fax", "email",
-    "postal_code", "address", "websites", "line_id", "tax_id", "card_language",
-    "ocr_confidence", "match_status", "review_status", "raw_extracted_text", "notes",
-]
+MAIN_HEADERS = ['person_id', 'created_at', 'updated_at', 'uploaded_by', 'discord_message_url', 'card_front_image_url', 'card_back_image_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_language', 'ocr_confidence', 'critical_confidence', 'match_status', 'review_status', 'raw_extracted_text', 'notes']
 
-HISTORY_HEADERS = [
-    "history_id", "person_id", "archived_at", "change_reason",
-    "replaced_by_message_url", "name_zh", "name_en", "primary_organization",
-    "primary_department", "primary_job_title", "affiliations_json", "mobile",
-    "phone", "phone_extension", "fax", "email", "postal_code", "address",
-    "websites", "line_id", "tax_id", "card_front_image_url",
-    "card_back_image_url", "raw_extracted_text", "notes",
-]
+HISTORY_HEADERS = ['history_id', 'person_id', 'archived_at', 'change_reason', 'replaced_by_message_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_front_image_url', 'card_back_image_url', 'ocr_confidence', 'critical_confidence', 'review_status', 'raw_extracted_text', 'notes']
 
 
 def _now_str() -> str:
@@ -169,13 +156,67 @@ class GoogleWorkspaceClient:
             rows.append(row)
         return headers, rows
 
+    @staticmethod
+    def _sheet_safe_value(header: str, value: Any) -> Any:
+        """
+        valueInputOption=USER_ENTERED is required for HYPERLINK formulas,
+        but phone numbers such as 886-3-4527005 would otherwise be evaluated
+        as subtraction. Prefix literal text with an apostrophe; Sheets displays
+        the text without the apostrophe.
+        """
+        if value is None:
+            return ""
+
+        raw = str(value)
+
+        formula_headers = {
+            "card_front_image_url",
+            "card_back_image_url",
+            "websites",
+        }
+        if header in formula_headers and raw.startswith("="):
+            return raw
+
+        text_headers = {
+            "person_id", "history_id",
+            "uploaded_by",
+            "name_zh", "name_en",
+            "primary_organization", "primary_department",
+            "primary_job_title", "affiliations_json",
+            "country_code",
+            "mobile", "mobile_normalized",
+            "phone", "phone_normalized", "phone_extension",
+            "fax", "fax_normalized",
+            "email",
+            "postal_code", "address",
+            "line_id", "tax_id", "card_language",
+            "match_status", "review_status",
+            "raw_extracted_text", "notes",
+        }
+
+        if header in text_headers:
+            return "'" + raw
+
+        # Protect any other string that starts like a formula.
+        if raw.startswith(("=", "+", "-")):
+            return "'" + raw
+
+        return value
+
+    @classmethod
+    def _sheet_safe_row(cls, headers: list[str], row: dict) -> list[Any]:
+        return [
+            cls._sheet_safe_value(header, row.get(header, ""))
+            for header in headers
+        ]
+
     async def append_row(self, sheet_name: str, headers: list[str], row: dict) -> None:
         range_name = aiohttp.helpers.quote(f"{sheet_name}!A1", safe="")
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
             f"/values/{range_name}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
         )
-        values = [[row.get(header, "") for header in headers]]
+        values = [self._sheet_safe_row(headers, row)]
         await self._request_json("POST", url, json={"values": values})
 
     async def update_row(
@@ -194,7 +235,7 @@ class GoogleWorkspaceClient:
             f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
             f"/values/{range_name}?valueInputOption=USER_ENTERED"
         )
-        values = [[row.get(header, "") for header in headers]]
+        values = [self._sheet_safe_row(headers, row)]
         await self._request_json("PUT", url, json={"values": values})
 
     @staticmethod
@@ -580,6 +621,16 @@ class BusinessCardService:
         except ValueError:
             self.query_max_results = 8
 
+        try:
+            self.query_session_minutes = max(
+                1,
+                min(60, int(os.environ.get("BUSINESS_CARD_QUERY_SESSION_MINUTES", "10"))),
+            )
+        except ValueError:
+            self.query_session_minutes = 10
+
+        self.query_sessions = {}
+
         self.config_errors = []
         checks = {
             "GEMINI_API_KEY": self.gemini_api_key,
@@ -704,62 +755,103 @@ class BusinessCardService:
         ]
         return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
 
-    async def _classify_text_query(self, user_text: str) -> dict:
-        prompt = f"""
-你是企業名片資料庫查詢意圖分析器。
+    def _session_key(self, message: discord.Message) -> tuple[int, int]:
+        return (int(getattr(message.channel, "id", 0)), int(getattr(message.author, "id", 0)))
 
-使用者訊息：
+    def _get_query_session(self, message: discord.Message) -> Optional[dict]:
+        key = self._session_key(message)
+        session = self.query_sessions.get(key)
+        if not session:
+            return None
+        if datetime.now(TZ_TPE) >= session.get("expires_at"):
+            self.query_sessions.pop(key, None)
+            return None
+        return session
+
+    def _save_query_session(self, message: discord.Message, results: list[dict], last_query: str) -> None:
+        self.query_sessions[self._session_key(message)] = {
+            "results": results,
+            "last_query": last_query,
+            "expires_at": datetime.now(TZ_TPE) + timedelta(minutes=self.query_session_minutes),
+        }
+
+    @staticmethod
+    def _catalog_for_router(rows: list[dict], max_items: int = 80) -> str:
+        items, seen = [], set()
+        for row in rows:
+            for field, label in (("name_zh", "姓名"), ("name_en", "英文名"), ("primary_organization", "機構"), ("primary_department", "部門"), ("primary_job_title", "職稱")):
+                value = str(row.get(field, "") or "").strip()
+                key = (field, value)
+                if value and key not in seen:
+                    seen.add(key); items.append(f"{label}:{value}")
+                    if len(items) >= max_items:
+                        return "\n".join(items)
+        return "\n".join(items) or "資料庫目前沒有資料"
+
+    @staticmethod
+    def _session_context_for_router(session: Optional[dict]) -> str:
+        if not session:
+            return "無上一輪名片查詢候選。"
+        lines = ["上一輪名片查詢候選："]
+        for index, row in enumerate(session.get("results", [])[:20], start=1):
+            lines.append(f"{index}. {row.get('name_zh') or row.get('name_en') or '未命名'}｜{row.get('primary_organization') or '機構未填'}｜{row.get('primary_job_title') or '職稱未填'}")
+        return "\n".join(lines)
+
+    async def _classify_text_query(self, user_text: str, rows: list[dict], session: Optional[dict]) -> dict:
+        catalog = self._catalog_for_router(rows)
+        session_context = self._session_context_for_router(session)
+        prompt = f"""
+你是「系統架構師小夏」的意圖路由器與名片資料庫查詢解析器。
+
+【使用者本輪訊息】
 {user_text}
 
-判斷這是否是在查詢 Google Sheets 名片／聯絡人資料。
-一般技術問答、聊天、要求寫程式、晨報或其他工作，不是名片查詢。
+【上一輪名片查詢狀態】
+{session_context}
+
+【名片資料庫中實際存在的姓名、機構、部門、職稱】
+{catalog}
+
+請判斷本輪應交給哪個功能：
+1. business_card_search：搜尋、查看、列出或詢問名片／聯絡人／電話／Email／公司人員。
+2. business_card_select：在上一輪候選中選擇某一位，例如「2」「第二位」「林典永那位」。
+3. general_architect_chat：一般技術問答、程式、工作討論或其他非名片需求。
+4. clarify：可能是名片需求，但資訊不足，需要澄清。
+
+請理解同義與縮寫，不要依賴固定關鍵詞。例如「金屬中心」可依資料庫內容理解為「金屬工業研究發展中心」。
 
 只回傳 JSON：
 {{
-  "is_business_card_query": true,
-  "query_type": "detail",
-  "search_terms": ["劉哲輔"],
-  "filters": {{
-    "name": "",
-    "organization": "",
-    "department": "",
-    "job_title": "",
-    "phone": "",
-    "email": "",
-    "address": "",
-    "affiliation": ""
-  }},
+  "intent": "business_card_search",
+  "action": "detail",
+  "selection_index": null,
+  "selected_name": "",
+  "search_terms": [],
+  "filters": {{"name":"","organization":"","department":"","job_title":"","phone":"","email":"","address":"","affiliation":""}},
   "wants_card_image": false,
-  "wants_full_detail": true
+  "wants_full_detail": false,
+  "clarifying_question": ""
 }}
 
-query_type 可用：
-- detail：查單一人的完整或部分資料
-- list：查某公司、部門、職稱有哪些人
-- image：要求看名片圖片
-- contact：只問電話、Email、地址等聯絡資料
-
-規則：
-- search_terms 放最具辨識力的姓名、公司、部門、職稱、電話尾碼或 Email 片段。
-- 不要把「幫我、請問、查一下」放入 search_terms。
-- 若不是名片查詢，is_business_card_query=false。
+action 可用：detail、list、image、contact、select_result。
+selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入數字或序號，必須判定 business_card_select。
 """
         response = await asyncio.to_thread(
             self.gemini.models.generate_content,
             model=self.vision_model,
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.0,
-            ),
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
         )
         result = _extract_json(response.text)
-        result.setdefault("is_business_card_query", False)
-        result.setdefault("query_type", "detail")
+        result.setdefault("intent", "general_architect_chat")
+        result.setdefault("action", "detail")
+        result.setdefault("selection_index", None)
+        result.setdefault("selected_name", "")
         result.setdefault("search_terms", [])
         result.setdefault("filters", {})
         result.setdefault("wants_card_image", False)
         result.setdefault("wants_full_detail", False)
+        result.setdefault("clarifying_question", "")
         return result
 
     def _score_query_row(self, row: dict, query: dict) -> int:
@@ -768,14 +860,22 @@ query_type 可用：
             "organization": ["primary_organization"],
             "department": ["primary_department"],
             "job_title": ["primary_job_title"],
-            "phone": ["mobile", "phone", "phone_extension", "fax"],
+            "phone": [
+                "mobile", "mobile_normalized",
+                "phone", "phone_normalized",
+                "phone_extension",
+                "fax", "fax_normalized",
+            ],
             "email": ["email"],
             "address": ["postal_code", "address"],
             "affiliation": ["affiliations_json"],
             "general": [
                 "name_zh", "name_en", "primary_organization",
                 "primary_department", "primary_job_title", "affiliations_json",
-                "mobile", "phone", "phone_extension", "fax", "email",
+                "country_code",
+                "mobile", "mobile_normalized",
+                "phone", "phone_normalized", "phone_extension",
+                "fax", "fax_normalized", "email",
                 "postal_code", "address", "websites", "tax_id", "notes",
             ],
         }
@@ -852,25 +952,25 @@ query_type 可用：
         return f"+{digits}" if digits else ""
 
     @classmethod
-    def _phone_markdown(cls, value: Any) -> str:
-        """產生可點擊撥號連結，同時保留原始號碼文字。"""
+    def _phone_markdown(
+        cls,
+        value: Any,
+        normalized: Any = "",
+    ) -> str:
+        """顯示易讀格式，tel: 使用 normalized 國際格式。"""
         raw = str(value or "").strip()
         if not raw:
             return "未提供"
-        dialable = cls._dialable_number(raw)
+        dialable = str(normalized or "").strip() or cls._dialable_number(raw)
         return f"[{raw}](tel:{dialable})" if dialable else raw
 
     @staticmethod
-    def _gmail_markdown(email: Any) -> str:
-        """點擊後開啟 Gmail 撰寫頁，並自動帶入收件人。"""
+    def _email_markdown(email: Any) -> str:
+        """使用 mailto: 交給手機預設郵件 App，並帶入收件人。"""
         raw = str(email or "").strip()
         if not raw:
             return "未提供"
-        gmail_url = (
-            "https://mail.google.com/mail/?view=cm&fs=1&to="
-            + quote(raw, safe="")
-        )
-        return f"[{raw}]({gmail_url})"
+        return f"[{raw}](mailto:{quote(raw, safe='@._+-')})"
 
     def _contact_summary(self, row: dict, include_links: bool = True) -> str:
         name = row.get("name_zh") or row.get("name_en") or "未命名聯絡人"
@@ -884,9 +984,15 @@ query_type 可用：
         email_raw = row.get("email") or ""
         address = row.get("address") or "未提供"
 
-        mobile = self._phone_markdown(mobile_raw)
-        phone = self._phone_markdown(phone_raw)
-        email = self._gmail_markdown(email_raw)
+        mobile = self._phone_markdown(
+            mobile_raw,
+            row.get("mobile_normalized", ""),
+        )
+        phone = self._phone_markdown(
+            phone_raw,
+            row.get("phone_normalized", ""),
+        )
+        email = self._email_markdown(email_raw)
 
         lines = [f"**{name}" + (f"（{name_en}）**" if name_en and name_en != name else "**")]
         lines.append(f"機構：{organization}")
@@ -973,23 +1079,55 @@ query_type 可用：
 
     async def handle_text_query(self, message: discord.Message) -> bool:
         user_text = str(message.content or "").strip()
-        if not self._query_candidate(user_text):
+        if not user_text or user_text.startswith(("!", "/")):
             return False
         if not self.ready:
-            await message.channel.send(
-                "❌ 名片服務尚未完成設定：" + "、".join(self.config_errors)
-            )
-            return True
-
+            return False
         try:
-            query = await self._classify_text_query(user_text)
-            if not query.get("is_business_card_query"):
-                return False
-
             headers, rows = await self.google.read_table(self.main_sheet)
             self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
+            session = self._get_query_session(message)
+            route = await self._classify_text_query(user_text, rows, session)
+            intent = route.get("intent")
+            if intent == "general_architect_chat":
+                return False
+            if intent == "clarify":
+                await message.channel.send("🔎 " + (route.get("clarifying_question") or "你想查哪一位聯絡人、公司、部門或職稱？"))
+                return True
+            if intent == "business_card_select":
+                if not session or not session.get("results"):
+                    await message.channel.send("🔎 目前沒有可接續選擇的名片清單，請重新說明要找的人。")
+                    return True
+                selected = None
+                try:
+                    if route.get("selection_index") is not None:
+                        idx = int(route["selection_index"]) - 1
+                        if 0 <= idx < len(session["results"]): selected = session["results"][idx]
+                except (TypeError, ValueError):
+                    pass
+                if selected is None and route.get("selected_name"):
+                    target = self._query_text(route["selected_name"])
+                    for row in session["results"]:
+                        names = (self._query_text(row.get("name_zh", "")), self._query_text(row.get("name_en", "")))
+                        if target and any(target in v or v in target for v in names if v):
+                            selected = row; break
+                if selected is None:
+                    await message.channel.send("🔎 我無法確定你選的是哪一位，請回覆候選編號或姓名。")
+                    return True
+                self._save_query_session(message,[selected],user_text)
+                await message.channel.send("📇 **聯絡人完整資料**\n\n" + self._contact_summary(selected, include_links=True))
+                return True
+            query = dict(route)
+            query["query_type"] = route.get("action", "detail")
             results = self._search_rows(rows, query)
-            await message.channel.send(self._format_query_results(results, query))
+            if not results:
+                terms = "、".join(str(x) for x in query.get("search_terms") or [])
+                filters = query.get("filters") or {}
+                filters_text = "、".join(str(v) for v in filters.values() if str(v or "").strip())
+                await message.channel.send(f"🔎 找不到符合「{terms or filters_text or user_text}」的名片資料。")
+                return True
+            self._save_query_session(message,results,user_text)
+            await message.channel.send(self._format_query_results(results,query))
             return True
         except Exception as exc:
             await message.channel.send(f"❌ 名片查詢失敗：{exc}")
@@ -1003,8 +1141,10 @@ query_type 可用：
         if self.ready:
             return (
                 f"ready | channel={self.architect_channel_id} | "
+                f"version={MODULE_VERSION} | "
                 f"sheet={self.main_sheet}/{self.history_sheet} | "
-                f"model={self.vision_model} | natural_query=on"
+                f"model={self.vision_model} | llm_router=on | "
+                f"query_session=on | mailto=on"
             )
         return "missing: " + ", ".join(self.config_errors)
 
@@ -1063,7 +1203,47 @@ query_type 可用：
                 )
                 return True
 
-            card = self._normalize_card(cards[0], analysis)
+            verified = await self._verify_critical_fields(
+                image_items,
+                cards[0],
+            )
+            merged_card = dict(cards[0])
+
+            # 第二階段只覆蓋有明確辨識結果的關鍵欄位。
+            for field in (
+                "name_zh",
+                "name_en",
+                "primary_organization",
+                "primary_department",
+                "primary_job_title",
+                "mobile",
+                "phone",
+                "phone_extension",
+                "fax",
+                "email",
+                "country_code",
+                "postal_code",
+                "address",
+            ):
+                value = verified.get(field)
+                if value not in (None, ""):
+                    merged_card[field] = value
+
+            merged_card["_critical_confidence"] = verified.get(
+                "critical_confidence",
+                0,
+            )
+            merged_card["_needs_review"] = bool(
+                verified.get("needs_review", False)
+            )
+            merged_card["_review_reason"] = str(
+                verified.get("review_reason", "") or ""
+            ).strip()
+            merged_card["_english_notes"] = str(
+                verified.get("english_notes", "") or ""
+            ).strip()
+
+            card = self._normalize_card(merged_card, analysis)
             headers, rows = await self.google.read_table(self.main_sheet)
             self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
             await self.google.ensure_compact_layout(self.main_sheet, headers)
@@ -1133,6 +1313,7 @@ query_type 可用：
       "affiliations": [
         {"organization": "", "department": "", "role": ""}
       ],
+      "country_code": "",
       "mobile": "",
       "phone": "",
       "phone_extension": "",
@@ -1153,9 +1334,21 @@ query_type 可用：
 
 規則：
 - confidence 使用 0 到 100。
-- 電話與 Email 忠實保留原意。
+- 電話、手機、傳真與 Email 必須逐字逐碼忠實抄錄名片原文。
+- 對每組數字至少重新核對兩次；任何看不清楚的數字不得猜測。
+- 例如名片印「886-981058187」，不可漏字、換位或自行改成其他號碼。
+- country_code 使用 ISO 兩碼，例如 TW、CN、JP、KR、US；無法可靠判斷時留空。
+- 不要自行在原始電話欄位增刪國碼；格式統一會由程式完成。
 - 多重協會身分放 affiliations，不要擠進主要職稱。
 - primary_organization 應是主要任職機構。
+- 名片同時有繁體中文與英文時：
+  1. primary_organization 必須優先填繁體中文正式名稱。
+  2. primary_department 必須優先填繁體中文正式名稱。
+  3. primary_job_title 必須優先填繁體中文職稱。
+  4. address 必須優先填繁體中文地址。
+  5. 英文名稱與英文地址可放 notes，但不可取代上述主要欄位。
+- name_zh 必須逐字核對，不可依英文名猜中文姓氏或用相近字替代。
+- mobile 必須擷取完整號碼；若只看得到尾碼、局部號碼或內容模糊，請留空。
 - 沒印出的英文名、Line ID 等留空。
 """
         parts = [types.Part.from_text(text=prompt)]
@@ -1178,8 +1371,395 @@ query_type 可用：
         )
         return _extract_json(response.text)
 
+    async def _verify_critical_fields(
+        self,
+        image_items: list[dict],
+        first_card: dict,
+    ) -> dict:
+        """
+        第二次只核對最容易造成實務錯誤的欄位。
+        不接受第一階段 confidence 作為依據，必須重新看圖。
+        """
+        prompt = f"""
+你是企業名片的第二階段校對員。請重新查看附圖，不要直接相信第一次辨識結果。
+
+第一次辨識：
+{json.dumps(first_card, ensure_ascii=False)}
+
+請只核對以下關鍵欄位：
+- name_zh
+- name_en
+- primary_organization
+- primary_department
+- primary_job_title
+- mobile
+- phone
+- phone_extension
+- fax
+- email
+- country_code
+- postal_code
+- address
+
+要求：
+1. 中文姓名逐字核對，特別注意「蓁／蔡／秦／真」等相近字，不可猜測。
+2. 名片有繁體中文時，primary_organization、primary_department、primary_job_title、
+   address 一律使用繁體中文正式名稱或地址；英文只可放 english_notes。
+3. 若同時存在中文與英文地址，address 必須填中文地址；只有沒有中文地址時，
+   才可使用英文地址。
+4. 手機必須完整。若只辨識到尾碼、局部、破折號後數字，mobile 留空。
+4. 電話、分機、傳真不得混在手機欄位。
+5. country_code 使用 ISO 兩碼；台灣為 TW，中國為 CN。
+6. postal_code 只放郵遞區號；address 不得重複包含郵遞區號。
+7. 看不清楚就留空，不能補猜。
+8. critical_confidence 是你對上述關鍵欄位整體可靠度，0 到 100。
+
+只回傳 JSON：
+{{
+  "name_zh": "",
+  "name_en": "",
+  "primary_organization": "",
+  "primary_department": "",
+  "primary_job_title": "",
+  "mobile": "",
+  "phone": "",
+  "phone_extension": "",
+  "fax": "",
+  "email": "",
+  "country_code": "",
+  "postal_code": "",
+  "address": "",
+  "critical_confidence": 0,
+  "needs_review": true,
+  "review_reason": "",
+  "english_notes": "可保留英文公司、部門、職稱與英文地址；若無則留空"
+}}
+"""
+        parts = [types.Part.from_text(text=prompt)]
+        for item in image_items:
+            parts.append(
+                types.Part.from_bytes(
+                    data=item["content"],
+                    mime_type=item["mime_type"],
+                )
+            )
+
+        response = await asyncio.to_thread(
+            self.gemini.models.generate_content,
+            model=self.vision_model,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0,
+            ),
+        )
+        return _extract_json(response.text)
+
+    @staticmethod
+    def _valid_mobile(value: Any) -> bool:
+        raw = str(value or "").strip()
+        digits = re.sub(r"\D+", "", raw)
+        if not digits:
+            return False
+        # 台灣本地手機或含國碼的手機，至少應有 9 碼。
+        if len(digits) < 9 or len(digits) > 15:
+            return False
+        # 只有尾碼或異常短片段常會以破折號開頭。
+        if raw.startswith("-"):
+            return False
+        return True
+
+    @staticmethod
+    def _clean_zh_name(value: Any) -> str:
+        raw = re.sub(r"\s+", "", str(value or "")).strip()
+        return raw
+
+    @staticmethod
+    def _digits(value: Any) -> str:
+        return re.sub(r"\D+", "", str(value or ""))
+
+    @staticmethod
+    def _clean_extension(value: Any) -> str:
+        return re.sub(r"\D+", "", str(value or ""))
+
+    @staticmethod
+    def _infer_country_code(card: dict) -> str:
+        explicit = str(card.get("country_code", "") or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{2}", explicit):
+            return explicit
+
+        blob = " ".join(
+            str(card.get(key, "") or "")
+            for key in (
+                "address", "postal_code", "mobile", "phone", "fax",
+                "primary_organization", "card_language",
+            )
+        ).lower()
+        digits_blob = re.sub(r"\D+", "", blob)
+
+        if (
+            any(term in blob for term in ("台灣", "臺灣", "taiwan", "zh-tw"))
+            or digits_blob.startswith("886")
+        ):
+            return "TW"
+        if (
+            any(term in blob for term in ("中國", "中国", "china", "prc", "zh-cn"))
+            or digits_blob.startswith("86")
+        ):
+            return "CN"
+        if any(term in blob for term in ("日本", "japan", "ja-jp")) or digits_blob.startswith("81"):
+            return "JP"
+        if any(term in blob for term in ("韓國", "韩国", "korea", "ko-kr")) or digits_blob.startswith("82"):
+            return "KR"
+        if any(term in blob for term in ("united states", "usa", "美國", "美国")):
+            return "US"
+        if any(term in blob for term in ("canada", "加拿大")):
+            return "CA"
+        if any(term in blob for term in ("germany", "德國", "德国")) or digits_blob.startswith("49"):
+            return "DE"
+        if any(term in blob for term in ("united kingdom", "英國", "英国")) or digits_blob.startswith("44"):
+            return "GB"
+        return ""
+
+    @staticmethod
+    def _tw_area_length(local_digits: str) -> int:
+        """Taiwan landline area code length, including leading zero."""
+        if local_digits.startswith("02"):
+            return 2
+        for prefix in ("037", "049", "0826", "082", "0836", "089"):
+            if local_digits.startswith(prefix):
+                return len(prefix)
+        return 2
+
+    @classmethod
+    def _normalize_tw_number(cls, value: Any, kind: str) -> tuple[str, str]:
+        raw = str(value or "").strip()
+        digits = cls._digits(raw)
+        if not digits:
+            return "", ""
+
+        if digits.startswith("00886"):
+            digits = digits[5:]
+        elif digits.startswith("886"):
+            digits = digits[3:]
+
+        # Country-code form omits the domestic trunk 0.
+        if kind == "mobile":
+            if digits.startswith("9") and len(digits) == 9:
+                local = "0" + digits
+            elif digits.startswith("09") and len(digits) == 10:
+                local = digits
+            else:
+                return raw, ""
+            display = f"{local[:4]}-{local[4:7]}-{local[7:]}"
+            normalized = "+886" + local[1:]
+            return display, normalized
+
+        if digits.startswith("0"):
+            local = digits
+        else:
+            local = "0" + digits
+
+        if len(local) < 8 or len(local) > 11:
+            return raw, ""
+
+        area_len = cls._tw_area_length(local)
+        area = local[:area_len]
+        subscriber = local[area_len:]
+        if len(subscriber) == 8:
+            display_subscriber = subscriber[:4] + "-" + subscriber[4:]
+        elif len(subscriber) == 7:
+            display_subscriber = subscriber[:3] + "-" + subscriber[3:]
+        else:
+            midpoint = max(3, len(subscriber) // 2)
+            display_subscriber = subscriber[:midpoint] + "-" + subscriber[midpoint:]
+        display = f"{area}-{display_subscriber}"
+        normalized = "+886" + local[1:]
+        return display, normalized
+
+    @classmethod
+    def _normalize_cn_number(cls, value: Any, kind: str) -> tuple[str, str]:
+        raw = str(value or "").strip()
+        digits = cls._digits(raw)
+        if not digits:
+            return "", ""
+
+        if digits.startswith("0086"):
+            national = digits[4:]
+        elif digits.startswith("86") and len(digits) > 11:
+            national = digits[2:]
+        else:
+            national = digits.lstrip("0")
+
+        if kind == "mobile":
+            if len(national) != 11 or not national.startswith("1"):
+                return raw, ""
+            display = f"+86 {national[:3]} {national[3:7]} {national[7:]}"
+            return display, "+86" + national
+
+        if len(national) < 9 or len(national) > 12:
+            return raw, ""
+        # Typical China area code: 2 or 3 digits after country code.
+        area_len = 2 if national.startswith(("10", "20", "21", "22", "23", "24", "25", "27", "28", "29")) else 3
+        area = national[:area_len]
+        subscriber = national[area_len:]
+        if len(subscriber) == 8:
+            subscriber_display = subscriber[:4] + " " + subscriber[4:]
+        else:
+            subscriber_display = subscriber
+        return f"+86 {area} {subscriber_display}", "+86" + national
+
+    @classmethod
+    def _normalize_international_number(
+        cls,
+        value: Any,
+        country_code: str,
+    ) -> tuple[str, str]:
+        raw = str(value or "").strip()
+        digits = cls._digits(raw)
+        if not digits:
+            return "", ""
+
+        calling_codes = {
+            "JP": "81", "KR": "82", "US": "1", "CA": "1",
+            "GB": "44", "DE": "49", "FR": "33", "SG": "65",
+            "MY": "60", "TH": "66", "VN": "84", "IN": "91",
+            "AU": "61", "NZ": "64",
+        }
+        calling = calling_codes.get(country_code, "")
+
+        if raw.startswith("+"):
+            normalized = "+" + digits
+        elif digits.startswith("00"):
+            normalized = "+" + digits[2:]
+        elif calling:
+            national = digits
+            if national.startswith(calling) and len(national) > len(calling) + 5:
+                normalized = "+" + national
+            else:
+                national = national.lstrip("0")
+                normalized = "+" + calling + national
+        else:
+            # Unknown country: preserve readable input, do not invent a country code.
+            return raw, ""
+
+        body = normalized[1:]
+        if calling and body.startswith(calling):
+            national = body[len(calling):]
+            chunks = [national[i:i+3] for i in range(0, len(national), 3)]
+            display = "+" + calling + (" " + " ".join(chunks) if chunks else "")
+        else:
+            chunks = [body[i:i+3] for i in range(0, len(body), 3)]
+            display = "+" + " ".join(chunks)
+        return display, normalized
+
+    @classmethod
+    def _normalize_contact_number(
+        cls,
+        value: Any,
+        country_code: str,
+        kind: str,
+    ) -> tuple[str, str]:
+        if not str(value or "").strip():
+            return "", ""
+        if country_code == "TW":
+            return cls._normalize_tw_number(value, kind)
+        if country_code == "CN":
+            return cls._normalize_cn_number(value, kind)
+        return cls._normalize_international_number(value, country_code)
+
+    @staticmethod
+    def _normalize_postal_code(value: Any) -> str:
+        raw = str(value or "").strip()
+        if raw.endswith(".0") and raw[:-2].isdigit():
+            raw = raw[:-2]
+        return re.sub(r"\s+", "", raw)
+
+    @staticmethod
+    def _normalize_address(
+        value: Any,
+        postal_code: str,
+        country_code: str,
+    ) -> str:
+        address = re.sub(r"\s+", " ", str(value or "")).strip(" ,，")
+        if not address:
+            return ""
+
+        postal = re.escape(str(postal_code or "").strip())
+        if postal:
+            address = re.sub(rf"^\s*{postal}\s*[-,，]?\s*", "", address)
+            address = re.sub(rf"\s*[-,，]?\s*{postal}\s*$", "", address)
+
+        if country_code == "TW":
+            address = re.sub(
+                r"\s*[,，]?\s*(Taiwan|TAIWAN|台灣|臺灣|R\.?O\.?C\.?)\s*$",
+                "",
+                address,
+                flags=re.IGNORECASE,
+            )
+        address = re.sub(r"\s*[,，]\s*", "，" if re.search(r"[\u4e00-\u9fff]", address) else ", ", address)
+        return address.strip(" ,，")
+
     def _normalize_card(self, card: dict, analysis: dict) -> dict:
         normalized = {key: card.get(key, "") for key in MAIN_HEADERS}
+
+        normalized["name_zh"] = self._clean_zh_name(card.get("name_zh", ""))
+        normalized["name_en"] = str(card.get("name_en", "") or "").strip()
+        normalized["primary_organization"] = str(
+            card.get("primary_organization", "") or ""
+        ).strip()
+        normalized["primary_department"] = str(
+            card.get("primary_department", "") or ""
+        ).strip()
+        normalized["primary_job_title"] = str(
+            card.get("primary_job_title", "") or ""
+        ).strip()
+
+        country_code = self._infer_country_code(card)
+        normalized["country_code"] = country_code
+
+        mobile_raw = str(card.get("mobile", "") or "").strip()
+        phone_raw = str(card.get("phone", "") or "").strip()
+        fax_raw = str(card.get("fax", "") or "").strip()
+
+        mobile_display, mobile_normalized = self._normalize_contact_number(
+            mobile_raw, country_code, "mobile"
+        )
+        phone_display, phone_normalized = self._normalize_contact_number(
+            phone_raw, country_code, "phone"
+        )
+        fax_display, fax_normalized = self._normalize_contact_number(
+            fax_raw, country_code, "fax"
+        )
+
+        normalized["mobile"] = mobile_display
+        normalized["mobile_normalized"] = mobile_normalized
+        normalized["phone"] = phone_display
+        normalized["phone_normalized"] = phone_normalized
+        normalized["phone_extension"] = self._clean_extension(
+            card.get("phone_extension", "")
+        )
+        normalized["fax"] = fax_display
+        normalized["fax_normalized"] = fax_normalized
+
+        normalized["postal_code"] = self._normalize_postal_code(
+            card.get("postal_code", "")
+        )
+        normalized["address"] = self._normalize_address(
+            card.get("address", ""),
+            normalized["postal_code"],
+            country_code,
+        )
+
+        address_value = normalized.get("address", "")
+        address_has_zh = bool(re.search(r"[\u4e00-\u9fff]", address_value))
+        card_language = str(card.get("card_language", "") or "")
+        address_needs_review = bool(
+            card_language.lower().startswith("zh")
+            and address_value
+            and not address_has_zh
+        )
+
         normalized["affiliations_json"] = _json_text(card.get("affiliations", []))
 
         raw_websites = card.get("websites", [])
@@ -1189,13 +1769,21 @@ query_type 可用：
             "ocr_confidence",
             analysis.get("classification_confidence", 0),
         )
+        normalized["critical_confidence"] = card.get(
+            "_critical_confidence",
+            0,
+        )
         normalized["raw_extracted_text"] = (
             self._single_line(card.get("raw_extracted_text", ""), max_chars=1200)
             if self.store_raw_text
             else ""
         )
+        notes_parts = [
+            str(card.get("notes", "") or "").strip(),
+            str(card.get("_english_notes", "") or "").strip(),
+        ]
         notes_value = self._single_line(
-            card.get("notes", ""),
+            "；".join(part for part in notes_parts if part),
             max_chars=self.notes_max_chars,
         )
 
@@ -1213,11 +1801,44 @@ query_type 可用：
                 max_chars=self.notes_max_chars,
             )
 
+        review_reasons = []
+
+        critical_confidence = float(card.get("_critical_confidence") or 0)
+        overall_confidence = float(normalized.get("ocr_confidence") or 0)
+
+        if bool(card.get("_needs_review", False)):
+            review_reasons.append(
+                str(card.get("_review_reason", "") or "第二階段要求人工確認")
+            )
+        if critical_confidence < 92:
+            review_reasons.append(
+                f"關鍵欄位信心不足（{critical_confidence:.0f}）"
+            )
+        if not normalized.get("name_zh") and not normalized.get("name_en"):
+            review_reasons.append("姓名未完整辨識")
+        if mobile_raw and not normalized.get("mobile_normalized"):
+            review_reasons.append("手機號碼格式或國別無法可靠標準化")
+        if address_needs_review:
+            review_reasons.append("中文名片未可靠辨識出中文地址")
+        if not normalized.get("email") and not normalized.get("mobile"):
+            review_reasons.append("缺少可可靠識別個人的 Email 或完整手機")
+
+        if review_reasons:
+            review_text = "；".join(dict.fromkeys(review_reasons))
+            notes_value = self._single_line(
+                f"{notes_value}；待確認：{review_text}"
+                if notes_value
+                else f"待確認：{review_text}",
+                max_chars=self.notes_max_chars,
+            )
+
         normalized["notes"] = notes_value
         normalized["card_language"] = card.get("card_language", "")
         normalized["review_status"] = (
             "AUTO_SAVED"
-            if float(normalized.get("ocr_confidence") or 0) >= 90
+            if overall_confidence >= 95
+            and critical_confidence >= 92
+            and not review_reasons
             else "NEEDS_REVIEW"
         )
         return normalized
@@ -1236,7 +1857,7 @@ query_type 可用：
         rows: list[dict],
     ) -> tuple[Optional[dict], list[dict]]:
         email = _normalize_email(card.get("email"))
-        mobile = _normalize_phone(card.get("mobile"))
+        mobile = str(card.get("mobile_normalized") or "").strip()
         name_zh = _compact(card.get("name_zh"))
         name_en = _compact(card.get("name_en"))
 
@@ -1244,7 +1865,17 @@ query_type 可用：
         possible = []
         for row in rows:
             row_email = _normalize_email(row.get("email"))
-            row_mobile = _normalize_phone(row.get("mobile"))
+            row_mobile = str(
+                row.get("mobile_normalized")
+                or (
+                    self._normalize_contact_number(
+                        row.get("mobile", ""),
+                        str(row.get("country_code", "") or ""),
+                        "mobile",
+                    )[1]
+                )
+                or ""
+            ).strip()
             row_name_zh = _compact(row.get("name_zh"))
             row_name_en = _compact(row.get("name_en"))
 
@@ -1415,15 +2046,21 @@ query_type 可用：
         role = row.get("primary_job_title") or "未辨識職稱"
         email = row.get("email") or "未提供"
         mobile = row.get("mobile") or "未提供"
+        review_status = row.get("review_status") or "NEEDS_REVIEW"
+        title = (
+            f"📇 **名片已{action}完成**"
+            if review_status == "AUTO_SAVED"
+            else f"⚠️ **名片已{action}，但關鍵欄位需要確認**"
+        )
         return (
-            f"📇 **名片已{action}完成**\n"
+            f"{title}\n"
             f"姓名：{name}\n"
             f"機構：{company}\n"
             f"職稱：{role}\n"
             f"手機：{mobile}\n"
             f"Email：{email}\n"
             f"辨識可信度：{confidence or '未提供'}\n"
-            f"狀態：`{row.get('review_status') or 'NEEDS_REVIEW'}`"
+            f"狀態：`{review_status}`"
         )
 
     @staticmethod
