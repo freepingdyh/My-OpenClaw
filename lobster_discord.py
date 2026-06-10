@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.0"
+LOBSTER_VERSION = "1.4.1"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -471,7 +471,56 @@ def _commitments_for_prompt(profile, intimate_mode=False, max_items=5):
         if policy == "never_proactive":
             continue
         commitments.append(normalized["text"])
-    return "；".join(commitments[-max_items:]) if commitments else "目前沒有需要主動提起的未完成承諾"
+    if not commitments:
+        return "目前沒有需要主動提起的未完成承諾"
+    if max_items is None:
+        return "；".join(commitments)
+    return "；".join(commitments[-max_items:])
+
+
+def _is_explicit_commitment_query(text):
+    """
+    使用者明確詢問「承諾／答應過／約定過哪些事」時，
+    不套用一般聊天的數量與情境截斷，完整提供所有承諾給模型。
+    這不是一般意圖路由，只是承諾清單的完整讀取開關。
+    """
+    value = str(text or "").strip()
+    if not value:
+        return False
+    has_commitment_word = bool(
+        re.search(r"承諾|答應(?:過|要做)?|約定(?:過|要做)?", value)
+    )
+    has_query_intent = bool(
+        re.search(r"哪些|什麼|列出|告訴我|記得|還有|做過|要做|最近", value)
+    )
+    return has_commitment_word and has_query_intent
+
+
+def _all_commitments_for_explicit_query(profile):
+    """
+    明確詢問承諾時，如實列出所有有意義的承諾：
+    - 不限制 max_items
+    - 不因 intimate context 隱藏
+    - pending / completed / cancelled 都可提供給模型，
+      並附上狀態，讓模型不要把已完成項目說成仍待履行。
+    """
+    rows = []
+    for item in profile.get("xiaoxia_self", {}).get("promises", []):
+        normalized = _normalize_commitment_item(item)
+        if not normalized:
+            continue
+        status_labels = {
+            "pending": "尚待完成",
+            "completed": "已完成",
+            "cancelled": "已取消",
+        }
+        status = normalized.get("status", "pending")
+        context = normalized.get("context", "general")
+        rows.append(
+            f"[{status_labels.get(status, status)}｜{context}] "
+            f"{normalized['text']}"
+        )
+    return "；".join(rows) if rows else "目前沒有已登記的承諾"
 
 
 def _recent_context_for_prompt(profile, now_dt, max_items=6):
@@ -5394,11 +5443,14 @@ async def on_message(message):
                         max_items=6,
                         max_chars=700,
                     )
-                    promises = _commitments_for_prompt(
-                        profile,
-                        intimate_mode=False,
-                        max_items=4,
-                    )
+                    if _is_explicit_commitment_query(text_query):
+                        promises = _all_commitments_for_explicit_query(profile)
+                    else:
+                        promises = _commitments_for_prompt(
+                            profile,
+                            intimate_mode=False,
+                            max_items=4,
+                        )
                     capabilities = safe_memory_join(
                         profile.get("xiaoxia_self", {}).get("capabilities", []),
                         max_items=5,
