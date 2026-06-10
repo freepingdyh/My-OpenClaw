@@ -471,56 +471,7 @@ def _commitments_for_prompt(profile, intimate_mode=False, max_items=5):
         if policy == "never_proactive":
             continue
         commitments.append(normalized["text"])
-    if not commitments:
-        return "目前沒有需要主動提起的未完成承諾"
-    if max_items is None:
-        return "；".join(commitments)
-    return "；".join(commitments[-max_items:])
-
-
-def _is_explicit_commitment_query(text):
-    """
-    使用者明確詢問「承諾／答應過／約定過哪些事」時，
-    不套用一般聊天的數量與情境截斷，完整提供所有承諾給模型。
-    這不是一般意圖路由，只是承諾清單的完整讀取開關。
-    """
-    value = str(text or "").strip()
-    if not value:
-        return False
-    has_commitment_word = bool(
-        re.search(r"承諾|答應(?:過|要做)?|約定(?:過|要做)?", value)
-    )
-    has_query_intent = bool(
-        re.search(r"哪些|什麼|列出|告訴我|記得|還有|做過|要做|最近", value)
-    )
-    return has_commitment_word and has_query_intent
-
-
-def _all_commitments_for_explicit_query(profile):
-    """
-    明確詢問承諾時，如實列出所有有意義的承諾：
-    - 不限制 max_items
-    - 不因 intimate context 隱藏
-    - pending / completed / cancelled 都可提供給模型，
-      並附上狀態，讓模型不要把已完成項目說成仍待履行。
-    """
-    rows = []
-    for item in profile.get("xiaoxia_self", {}).get("promises", []):
-        normalized = _normalize_commitment_item(item)
-        if not normalized:
-            continue
-        status_labels = {
-            "pending": "尚待完成",
-            "completed": "已完成",
-            "cancelled": "已取消",
-        }
-        status = normalized.get("status", "pending")
-        context = normalized.get("context", "general")
-        rows.append(
-            f"[{status_labels.get(status, status)}｜{context}] "
-            f"{normalized['text']}"
-        )
-    return "；".join(rows) if rows else "目前沒有已登記的承諾"
+    return "；".join(commitments[-max_items:]) if commitments else "目前沒有需要主動提起的未完成承諾"
 
 
 def _recent_context_for_prompt(profile, now_dt, max_items=6):
@@ -850,6 +801,121 @@ def _safe_directives_context(directives):
     )
 
 
+
+CURRENT_SESSION_CONTEXT_MAX_CHARS = int(
+    os.environ.get("CURRENT_SESSION_CONTEXT_MAX_CHARS", "120000")
+)
+CURRENT_SESSION_RECENT_CHARS = int(
+    os.environ.get("CURRENT_SESSION_RECENT_CHARS", "90000")
+)
+CURRENT_SESSION_ANCHOR_CHARS = int(
+    os.environ.get("CURRENT_SESSION_ANCHOR_CHARS", "24000")
+)
+
+
+def _conversation_log_text(role, content, has_image=False, max_chars=5000):
+    """
+    temp_chat 是「目前連續會話」而非長期人物記憶，因此保留原意，
+    不再套 narrative_safe_text，避免衣服、晚餐、選擇等細節被改寫。
+    """
+    value = str(content or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if len(value) > max_chars:
+        value = value[:max_chars].rstrip() + "…"
+    suffix = "（附帶圖片）" if has_image else ""
+    return f"{role}: {value}{suffix}"
+
+
+def _is_internal_chat_marker(value):
+    raw = str(value or "").strip()
+    return raw.startswith(
+        (
+            "【重大事件登記】",
+            "【重大事件子任務完成】",
+            "【待履約登記】",
+        )
+    )
+
+
+def _session_anchor_score(value):
+    """
+    長會話超過上限時，從較早內容保留對後續最重要的事實與選擇，
+    例如：已吃完、已下訂、她挑了哪件、計畫變更、承諾完成。
+    這不是觸發回覆意圖，只是壓縮時挑選事實錨點。
+    """
+    raw = str(value or "")
+    terms = (
+        "已經", "已吃", "吃飽", "吃完", "挑了", "選了", "喜歡",
+        "下訂", "取消", "決定", "改成", "完成", "不是", "明明",
+        "記得", "答應", "承諾", "今天", "今晚", "剛剛", "現在",
+        "第一件", "第二件", "第三件", "第四件", "第五件", "第六件",
+        "上面", "下面", "兔子", "拖鞋", "衣服", "洋裝", "便當",
+    )
+    return sum(1 for term in terms if term in raw)
+
+
+def _build_current_session_context(logs):
+    """
+    優先把本次 temp_chat 的完整連續對話交給 Gemini。
+
+    - 一般情況：全量保留，不再只取最後 10 則。
+    - 超過字元上限：保留最近完整逐字內容，並從較早內容抽出高價值事實錨點。
+    - 內部事件登記標記不作為對話內容送入模型。
+    """
+    dialogue = [
+        str(item).strip()
+        for item in (logs or [])
+        if str(item or "").strip() and not _is_internal_chat_marker(item)
+    ]
+    if not dialogue:
+        return "無"
+
+    full_text = "\n".join(dialogue)
+    if len(full_text) <= CURRENT_SESSION_CONTEXT_MAX_CHARS:
+        return full_text
+
+    # 最近內容逐字保留。
+    recent = []
+    recent_chars = 0
+    split_index = len(dialogue)
+    for idx in range(len(dialogue) - 1, -1, -1):
+        line = dialogue[idx]
+        addition = len(line) + 1
+        if recent and recent_chars + addition > CURRENT_SESSION_RECENT_CHARS:
+            split_index = idx + 1
+            break
+        recent.append(line)
+        recent_chars += addition
+        split_index = idx
+    recent.reverse()
+
+    # 較早內容抽取決策、完成狀態與使用者糾正，避免「已吃完／自己挑的」被遺失。
+    older = dialogue[:split_index]
+    ranked = sorted(
+        enumerate(older),
+        key=lambda pair: (_session_anchor_score(pair[1]), pair[0]),
+        reverse=True,
+    )
+    selected_indices = set()
+    anchor_chars = 0
+    for idx, line in ranked:
+        score = _session_anchor_score(line)
+        if score <= 0:
+            continue
+        if anchor_chars + len(line) + 1 > CURRENT_SESSION_ANCHOR_CHARS:
+            continue
+        selected_indices.add(idx)
+        anchor_chars += len(line) + 1
+
+    anchors = [older[idx] for idx in sorted(selected_indices)]
+    return (
+        "【本次會話較早內容的重要事實錨點】\n"
+        + ("\n".join(anchors) if anchors else "無")
+        + "\n\n【本次會話最近完整逐字對話】\n"
+        + "\n".join(recent)
+    )
+
+
 def _gemini_finish_reason(response):
     try:
         if response and response.candidates:
@@ -867,31 +933,53 @@ async def _send_girlfriend_with_safe_retry(
     full_system_instruction,
 ):
     """
-    第一次用完整但已過濾的背景；若安全攔截/空回覆/例外，
-    第二次只用當前訊息與最小安全人格重試。
+    每輪都從 temp_chat 重建完整的本次會話長 context，因此：
+    - 平時不依賴記憶體 session 才能記得剛才發生的事；
+    - Zeabur Restart 後仍可從 temp_chat 恢復；
+    - 不再只靠最後幾輪對話。
+
+    若完整 context 被安全機制攔截，才以最小安全 context 重試一次。
     """
     try:
-        session = gemini_client.aio.chats.create(
+        response = await gemini_client.aio.models.generate_content(
             model="gemini-2.5-flash",
+            contents=msg_parts,
             config=types.GenerateContentConfig(
                 system_instruction=full_system_instruction,
                 safety_settings=[
-                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        threshold="BLOCK_NONE",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_HATE_SPEECH",
+                        threshold="BLOCK_NONE",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_HARASSMENT",
+                        threshold="BLOCK_NONE",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                        threshold="BLOCK_NONE",
+                    ),
                 ],
+                temperature=0.8,
             ),
         )
-        girlfriend_chat_sessions[user_id] = session
-        response = await session.send_message(msg_parts)
         reason = _gemini_finish_reason(response)
         response_text = str(getattr(response, "text", "") or "").strip()
-        if response_text and reason in {"FinishReason.STOP", "STOP"}:
-            return response_text, "PRIMARY_OK"
-        print(f"⚠️ [GEMINI_PRIMARY_BLOCK] reason={reason} empty={not bool(response_text)}")
+        if response_text:
+            return response_text, "LONG_CONTEXT_OK"
+        print(
+            f"⚠️ [GEMINI_LONG_CONTEXT_BLOCK] "
+            f"reason={reason} empty={not bool(response_text)}"
+        )
     except Exception as exc:
-        print(f"⚠️ [GEMINI_PRIMARY_ERROR] {type(exc).__name__}: {exc}")
+        print(
+            f"⚠️ [GEMINI_LONG_CONTEXT_ERROR] "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     minimal_system = (
         f"現在時間：{current_time_str}。\n"
@@ -915,9 +1003,15 @@ async def _send_girlfriend_with_safe_retry(
             return retry_text, "SAFE_RETRY_OK"
         print(f"❌ [GEMINI_SAFE_RETRY_EMPTY] reason={reason}")
     except Exception as exc:
-        print(f"❌ [GEMINI_SAFE_RETRY_ERROR] {type(exc).__name__}: {exc}")
+        print(
+            f"❌ [GEMINI_SAFE_RETRY_ERROR] "
+            f"{type(exc).__name__}: {exc}"
+        )
 
-    return "大俠，剛剛訊息沒有順利送達，再跟小俠說一次好嗎？🥺", "FALLBACK"
+    return (
+        "大俠，剛剛訊息沒有順利送達，再跟小俠說一次好嗎？🥺",
+        "FALLBACK",
+    )
 
 
 # --- 運行時變數 ---
@@ -5373,7 +5467,14 @@ async def on_message(message):
                 
                 prefix = f"({current_target}) " if current_target else ""
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    daily_chat_logs.append(narrative_safe_text(f"{prefix}大俠: {text_query} {'(附帶圖片)' if message.attachments else ''}", max_len=360))
+                    daily_chat_logs.append(
+                        _conversation_log_text(
+                            f"{prefix}大俠",
+                            text_query,
+                            has_image=bool(message.attachments),
+                            max_chars=5000,
+                        )
+                    )
                     save_temp_chat(daily_chat_logs)
 
                 # --- 載入與重組長期記憶 ---
@@ -5443,14 +5544,11 @@ async def on_message(message):
                         max_items=6,
                         max_chars=700,
                     )
-                    if _is_explicit_commitment_query(text_query):
-                        promises = _all_commitments_for_explicit_query(profile)
-                    else:
-                        promises = _commitments_for_prompt(
-                            profile,
-                            intimate_mode=False,
-                            max_items=4,
-                        )
+                    promises = _commitments_for_prompt(
+                        profile,
+                        intimate_mode=False,
+                        max_items=4,
+                    )
                     capabilities = safe_memory_join(
                         profile.get("xiaoxia_self", {}).get("capabilities", []),
                         max_items=5,
@@ -5470,9 +5568,11 @@ async def on_message(message):
                     # 🌟 移除強制驚嘆風景的指令，改為全心享受兩人世界
                     room_context = f"✨【情境催眠】：大俠現在正帶著妳{action_text}！妳現在極度幸福與感動。請全心全意享受與大俠的兩人世界。\n\n"
 
-                # 當下互動模式只讀最近四輪真正的雙方對話。
+                # temp_chat 負責「本次連續聊天」：一般與 intimate 模式都載入完整會話長 context。
+                # 不再只取最後 4 或 10 則，避免忘記剛吃完晚餐、剛做出的選擇與使用者糾正。
+                chat_history_str = _build_current_session_context(daily_chat_logs)
+
                 if intimate_mode:
-                    chat_history_str = _recent_human_dialogue(daily_chat_logs, max_turns=4)
                     intimate_context = (
                         "【當下互動模式｜最高優先】\n"
                         "只專注大俠此刻的動作、問題、語氣與兩人的即時感受。\n"
@@ -5487,13 +5587,6 @@ async def on_message(message):
                         "不得主動把它們帶入本輪回覆。"
                     )
                 else:
-                    safe_history = [
-                        narrative_safe_text(item, max_len=280)
-                        for item in daily_chat_logs[-10:]
-                    ]
-                    chat_history_str = "\n".join(
-                        [item for item in safe_history if item]
-                    ) if daily_chat_logs else "無"
                     intimate_context = ""
                     event_rule = (
                         "1-1. 若【今日最高優先級重大事件】存在，必須先承接事件本質與情緒重量；"
@@ -5515,9 +5608,9 @@ async def on_message(message):
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
                     f"▶️ 最近發生的事/大俠近況：{recent}\n"
-                    f"▶️ 剛才的對話摘要：\n{chat_history_str}\n\n"
+                    f"▶️ 本次連續會話紀錄（最高即時事實來源）：\n{chat_history_str}\n\n"
                     "【核心行為守則】：\n"
-                    "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
+                    "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n""1-A. 本次連續會話紀錄的優先級高於長期記憶與事件摘要。必須記住本次聊天中已完成的動作、剛做出的選擇、已吃完的餐點、已下訂的物品與大俠剛糾正的事實；不可把已完成的事重新說成尚未開始。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -5602,11 +5695,17 @@ async def on_message(message):
 
                 # 存入短期對話紀錄；承諾登記也留存，供當晚日記理解脈絡。
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    daily_chat_logs.append(narrative_safe_text(f"小俠: {xiaoxia_reply}", max_len=360))
+                    daily_chat_logs.append(
+                        _conversation_log_text(
+                            "小俠",
+                            xiaoxia_reply,
+                            max_chars=5000,
+                        )
+                    )
                     if captured_promises:
-                        daily_chat_logs.append(narrative_safe_text(
-                            "【待履約登記】" + "；".join(captured_promises), max_len=360
-                        ))
+                        daily_chat_logs.append(
+                            "【待履約登記】" + "；".join(captured_promises)
+                        )
                     save_temp_chat(daily_chat_logs) 
 
                 await message.reply(xiaoxia_reply)
@@ -6882,7 +6981,7 @@ async def on_ready():
     print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
-    print(f"🧠 記憶治理層 v{LOBSTER_VERSION}：每日無條件整理 profile/events/directives；承諾依狀態保存。")
+    print(f"🧠 記憶治理層 v{LOBSTER_VERSION}：每日整理長期記憶；temp_chat 以完整長 context 重建本次會話。")
     print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
     print("🧠 記憶修訂助手：在私人 #助手小夏工作室 使用 !update 敘述；小夏會預覽、確認、備份後才寫入。")
     if not OWNER_DISCORD_USER_ID:
