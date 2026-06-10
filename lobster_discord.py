@@ -7,6 +7,8 @@ import io
 import json
 import re
 
+LOBSTER_VERSION = "1.4.0"
+
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
 Strictly only Xiaoxia appears in the image.
@@ -34,7 +36,6 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
-from business_card_service import BusinessCardService
 
 # 🌐 Web 服務元件
 import uvicorn
@@ -115,7 +116,9 @@ LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
 MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
 MEMORY_UPDATE_LAST_MANIFEST = os.path.join(MEMORY_DIR, "memory_update_last_manifest.json")
+MEMORY_DAILY_BACKUP_DIR = os.path.join(MEMORY_DIR, "daily_memory_backups")
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
+os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -373,6 +376,501 @@ def sanitize_existing_profile(profile):
     self_block["promises"] = [{"text": t, "added_at": d} for t, d in unique.items()]
     return profile
 
+
+# ==========================================
+# 🧠 v1.4.0 每日記憶治理 / 承諾狀態 / 安全上下文
+# ==========================================
+
+def _parse_memory_date(value):
+    raw = str(value or "").strip()
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=TZ_TPE)
+        except Exception:
+            pass
+    return None
+
+
+def _memory_key(value):
+    return re.sub(r"[\s，。！？、；;：:'\"「」『』（）()]+", "", str(value or "")).lower()
+
+
+def _normalize_commitment_item(item, today_str=None):
+    """兼容舊 promise 文字，轉成不會被日常濃縮吃掉的結構化承諾。"""
+    today_str = today_str or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    if isinstance(item, str):
+        text_value = narrative_safe_text(item, max_len=300)
+        source = {}
+    elif isinstance(item, dict):
+        text_value = narrative_safe_text(item.get("text", ""), max_len=300)
+        source = item
+    else:
+        return None
+    if not text_value:
+        return None
+
+    commitment_id = source.get("commitment_id")
+    if not commitment_id:
+        commitment_id = "CMT-" + hashlib.sha1(text_value.encode("utf-8")).hexdigest()[:10].upper()
+
+    status = str(source.get("status", "pending") or "pending").lower()
+    if status not in {"pending", "completed", "cancelled"}:
+        status = "pending"
+
+    context = str(source.get("context", "general") or "general").lower()
+    if context not in {"general", "diary", "intimate", "event"}:
+        context = "general"
+
+    mention_policy = str(
+        source.get(
+            "mention_policy",
+            "only_when_relevant" if context != "intimate" else "intimate_or_user_initiated",
+        )
+    )
+    return {
+        "commitment_id": commitment_id,
+        "text": text_value,
+        "status": status,
+        "context": context,
+        "mention_policy": mention_policy,
+        "created_at": source.get("created_at") or source.get("added_at") or today_str,
+        "due_date": source.get("due_date"),
+        "completed_at": source.get("completed_at"),
+        "source": source.get("source", "memory"),
+    }
+
+
+def _normalize_commitments(profile):
+    self_block = profile.setdefault("xiaoxia_self", {})
+    original = self_block.get("promises", [])
+    result = []
+    seen = set()
+    for item in original:
+        normalized = _normalize_commitment_item(item)
+        if not normalized:
+            continue
+        key = _memory_key(normalized["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+    self_block["promises"] = result
+    return result != original
+
+
+def _commitments_for_prompt(profile, intimate_mode=False, max_items=5):
+    commitments = []
+    for item in profile.get("xiaoxia_self", {}).get("promises", []):
+        normalized = _normalize_commitment_item(item)
+        if not normalized or normalized["status"] != "pending":
+            continue
+        context = normalized.get("context", "general")
+        policy = normalized.get("mention_policy", "only_when_relevant")
+        if context == "intimate" and not intimate_mode:
+            continue
+        if policy == "never_proactive":
+            continue
+        commitments.append(normalized["text"])
+    return "；".join(commitments[-max_items:]) if commitments else "目前沒有需要主動提起的未完成承諾"
+
+
+def _recent_context_for_prompt(profile, now_dt, max_items=6):
+    """
+    普通聊天只讀真正近期、安全、非日記全文的內容。
+    added_at 很新但描述的是舊事件，也不因重新寫入而自動成為當前狀態。
+    """
+    picked = []
+    blocked_prefixes = (
+        "小俠日記摘要：",
+        "小俠已在",
+        "【待履約登記】",
+        "【重大事件登記】",
+        "【重大事件子任務完成】",
+    )
+    for item in profile.get("recent_context", []):
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("text", "") or "").strip()
+        if not value or value.startswith(blocked_prefixes):
+            continue
+        item_dt = _parse_memory_date(item.get("added_at"))
+        if item_dt and (now_dt - item_dt).days > 2:
+            continue
+        safe = narrative_safe_text(value, max_len=220)
+        if safe:
+            picked.append(safe)
+    return "；".join(picked[-max_items:]) if picked else "無"
+
+
+def _active_events_for_prompt(events, now_dt, max_items=3):
+    """封存或完成事件不再把 facts/reply_guidance 灌入普通聊天。"""
+    active = []
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        status = str(event.get("status", "")).lower()
+        phase = str(event.get("current_phase", "")).lower()
+        if status in {"archived", "completed", "cancelled"} or phase == "completed":
+            continue
+        summary = (
+            event.get("current_summary")
+            or event.get("archive_summary")
+            or event.get("title")
+            or ""
+        )
+        summary = narrative_safe_text(summary, max_len=220)
+        if summary:
+            active.append(summary)
+    return "；".join(active[:max_items]) if active else "目前沒有需要主動承接的重大事件"
+
+
+def _archive_stale_recent_context(profile, now_dt):
+    """將過期 recent_context 移到 archive，而不是直接刪掉。"""
+    recent = profile.setdefault("recent_context", [])
+    archive = profile.setdefault("memory_archive", [])
+    kept = []
+    moved = 0
+    for item in recent:
+        if not isinstance(item, dict):
+            continue
+        item_dt = _parse_memory_date(item.get("added_at"))
+        value = str(item.get("text", "") or "").strip()
+        stale = bool(item_dt and (now_dt - item_dt).days > 3)
+        long_diary = value.startswith("小俠日記摘要：")
+        fulfilled = "已在" in value and "履行承諾" in value
+        if stale or long_diary or fulfilled:
+            archived = dict(item)
+            archived["archived_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            archived["archive_reason"] = (
+                "stale" if stale else "long_diary_or_fulfilled_commitment"
+            )
+            archive.append(archived)
+            moved += 1
+        else:
+            kept.append(item)
+    profile["recent_context"] = kept
+    # Archive 只保留最近 500 筆，避免無限膨脹。
+    profile["memory_archive"] = archive[-500:]
+    return moved
+
+
+def _remove_harmful_trait_records(profile):
+    """不把時間記憶錯誤、恍神等失誤正式寫成人格特質。"""
+    removed = 0
+    patterns = (
+        "尤其在時間記憶上",
+        "時間記憶容易",
+        "常常恍神",
+        "容易恍神",
+    )
+    cleaned = []
+    for item in profile.get("xiaoxia_traits", []):
+        value = item.get("text", "") if isinstance(item, dict) else str(item)
+        if any(pattern in value for pattern in patterns):
+            removed += 1
+            continue
+        cleaned.append(item)
+    profile["xiaoxia_traits"] = cleaned
+    return removed
+
+
+def _dedupe_profile_semantically(profile):
+    """
+    先做保守型去重：完全正規化相同，或一條幾乎被另一條完整涵蓋時只留較完整者。
+    """
+    changed = 0
+    for key in ("daxia_traits", "xiaoxia_traits", "shared_knowledge", "recent_context"):
+        items = _clean_profile_memory_items(profile.get(key, []))
+        result = []
+        for item in items:
+            value = narrative_safe_text(item.get("text", ""), max_len=360)
+            if not value:
+                continue
+            key_value = _memory_key(value)
+            duplicate_index = None
+            for idx, old in enumerate(result):
+                old_value = old["text"]
+                old_key = _memory_key(old_value)
+                if key_value == old_key:
+                    duplicate_index = idx
+                    break
+                if len(key_value) >= 18 and (
+                    key_value in old_key or old_key in key_value
+                ):
+                    duplicate_index = idx
+                    break
+            if duplicate_index is None:
+                result.append({"text": value, "added_at": item.get("added_at", "整理後")})
+            else:
+                if len(value) > len(result[duplicate_index]["text"]):
+                    result[duplicate_index] = {
+                        "text": value,
+                        "added_at": item.get("added_at", "整理後"),
+                    }
+                changed += 1
+        profile[key] = result
+    return changed
+
+
+def _daily_memory_backup(now_dt):
+    stamp = now_dt.strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(MEMORY_DAILY_BACKUP_DIR, stamp)
+    os.makedirs(backup_dir, exist_ok=True)
+    for path in (
+        PROFILE_DATA_PATH,
+        LIFE_EVENTS_PATH,
+        MEMORY_DIRECTIVES_PATH,
+        TEMP_CHAT_PATH,
+    ):
+        if os.path.exists(path):
+            shutil.copy2(path, os.path.join(backup_dir, os.path.basename(path)))
+    # 保留最近 14 份每日備份。
+    folders = sorted(
+        [
+            os.path.join(MEMORY_DAILY_BACKUP_DIR, name)
+            for name in os.listdir(MEMORY_DAILY_BACKUP_DIR)
+            if os.path.isdir(os.path.join(MEMORY_DAILY_BACKUP_DIR, name))
+        ]
+    )
+    for old in folders[:-14]:
+        shutil.rmtree(old, ignore_errors=True)
+    return backup_dir
+
+
+def _correction_signals_from_chat(logs, max_items=100):
+    pattern = re.compile(
+        r"(不要再|別再|不准再|禁止再|已經說過|一直強調|請記住|這是昨天|不是今天|已經完成|已經結束)"
+    )
+    result = []
+    for value in logs[-max_items:]:
+        text_value = str(value or "").strip()
+        if text_value.startswith("大俠:") and pattern.search(text_value):
+            result.append(narrative_safe_text(text_value, max_len=280))
+    return result[-20:]
+
+
+async def _llm_daily_memory_organize(profile, events, directives, logs, now_dt):
+    """
+    每天都執行理解式整理，不以記憶數量作為條件。
+    只允許回傳整理後的核心陣列、事件與指令；其餘 profile 欄位由程式保留。
+    """
+    correction_signals = _correction_signals_from_chat(logs)
+    payload = {
+        "daxia_traits": profile.get("daxia_traits", []),
+        "xiaoxia_traits": profile.get("xiaoxia_traits", []),
+        "shared_knowledge": profile.get("shared_knowledge", []),
+        "recent_context": profile.get("recent_context", []),
+        "commitments": profile.get("xiaoxia_self", {}).get("promises", []),
+        "events": events,
+        "directives": directives,
+        "correction_signals": correction_signals,
+    }
+
+    prompt = f"""
+你是「小夏記憶治理系統」。今天是 {now_dt.strftime('%Y-%m-%d')}。
+請每天無條件整理記憶，不論資料量大小。
+
+【最高優先原則】
+1. 使用者反覆說「不要再／別再／我已經說過／不是今天／已經完成」代表強烈修正，
+   必須高於舊日記、舊事件與模型推測。
+2. 承諾不能因濃縮而消失。每項承諾保留 status：
+   pending / completed / cancelled，以及 context：
+   general / diary / intimate / event。
+3. 已完成或封存事件保留歷史摘要，但不得留下會讓日常回覆主動重提舊事的 reply_guidance。
+4. 同一搬家、探親、工作或健康事件要合併，不可因日期不同重複建立多筆。
+5. recent_context 只留真正當前狀態；舊日記全文、已履約內容與過期行程不留在 recent_context。
+6. 不把「迷糊、時間記憶錯誤、恍神」寫成小俠的人格特質。
+7. 親密承諾可保存，但 context=intimate，mention_policy=intimate_or_user_initiated。
+8. 一般生活承諾 context=general 或 diary，mention_policy=only_when_relevant。
+9. 禁止詞或不希望重提的主題寫入 directives，不要在人物特質中反覆保存。
+10. 不新增資料中沒有的事實。
+
+【目前資料】
+{json.dumps(payload, ensure_ascii=False)}
+
+只回傳 JSON：
+{{
+  "daxia_traits": [{{"text":"", "added_at":"YYYY-MM-DD"}}],
+  "xiaoxia_traits": [{{"text":"", "added_at":"YYYY-MM-DD"}}],
+  "shared_knowledge": [{{"text":"", "added_at":"YYYY-MM-DD"}}],
+  "recent_context": [{{"text":"", "added_at":"YYYY-MM-DD"}}],
+  "commitments": [{{
+    "commitment_id":"",
+    "text":"",
+    "status":"pending",
+    "context":"general",
+    "mention_policy":"only_when_relevant",
+    "created_at":"YYYY-MM-DD",
+    "due_date":null,
+    "completed_at":null,
+    "source":"daily_organizer"
+  }}],
+  "events": [],
+  "directive_additions": {{
+    "forbidden_terms": [],
+    "preferred_phrasing": [],
+    "authoritative_facts": []
+  }},
+  "summary": ""
+}}
+"""
+    resp = await gemini_client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        ),
+    )
+    return _extract_json_object(resp.text)
+
+
+def _validate_organized_events(events):
+    result = []
+    seen = set()
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        title = str(event.get("title", "") or "").strip()
+        event_id = str(event.get("id", "") or "").strip()
+        if not title:
+            continue
+        key = _memory_key(title + "|" + str(event.get("type", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        event.setdefault("id", event_id or "EVT-" + hashlib.sha1(key.encode()).hexdigest()[:10])
+        event.setdefault("status", "active")
+        event.setdefault("facts", [])
+        event.setdefault("reply_guidance", [])
+        if str(event.get("status", "")).lower() in {"archived", "completed", "cancelled"}:
+            # 歷史事件只留摘要，不再把舊 reply_guidance 注入未來對話。
+            event["reply_guidance"] = []
+            event["current_phase"] = "completed"
+        result.append(event)
+    return result
+
+
+def _apply_daily_organized_result(profile, events, directives, result, now_dt):
+    today_str = now_dt.strftime("%Y-%m-%d")
+    for key in ("daxia_traits", "xiaoxia_traits", "shared_knowledge", "recent_context"):
+        incoming = result.get(key)
+        if isinstance(incoming, list):
+            profile[key] = _clean_profile_memory_items(incoming)
+
+    commitments = []
+    for item in result.get("commitments", []):
+        normalized = _normalize_commitment_item(item, today_str=today_str)
+        if normalized:
+            commitments.append(normalized)
+    if commitments or result.get("commitments") == []:
+        profile.setdefault("xiaoxia_self", {})["promises"] = commitments
+
+    organized_events = _validate_organized_events(result.get("events", events))
+    additions = result.get("directive_additions", {})
+    merged_directives = _merge_memory_directives(directives, additions)
+
+    # 再跑一次保守型清理，防止 LLM 回傳重複資料。
+    _remove_harmful_trait_records(profile)
+    _normalize_commitments(profile)
+    _dedupe_profile_semantically(profile)
+    _archive_stale_recent_context(profile, now_dt)
+
+    return profile, organized_events, merged_directives
+
+
+def _safe_directives_context(directives):
+    """
+    普通聊天不逐字列出 forbidden_terms，避免禁詞本身反覆啟動模型；
+    真正禁詞仍由回覆後檢查器 _rewrite_reply_for_directives 執行。
+    """
+    preferred = "；".join(directives.get("preferred_phrasing", [])) or "自然承接當下"
+    facts = []
+    for item in directives.get("authoritative_facts", []):
+        if isinstance(item, dict):
+            value = str(item.get("fact", "") or "").strip()
+        else:
+            value = str(item or "").strip()
+        if value:
+            facts.append(value)
+    return (
+        "【人工確認的最高優先規則】\n"
+        "避免使用已由使用者禁止的措辭，也不要主動重提已完成、已封存或與當下無關的舊主題。\n"
+        f"偏好表達方式：{preferred}\n"
+        f"目前有效事實：{'；'.join(facts[-10:]) if facts else '無'}\n"
+    )
+
+
+def _gemini_finish_reason(response):
+    try:
+        if response and response.candidates:
+            return str(response.candidates[0].finish_reason)
+    except Exception:
+        pass
+    return "NO_CANDIDATE"
+
+
+async def _send_girlfriend_with_safe_retry(
+    user_id,
+    msg_parts,
+    text_query,
+    current_time_str,
+    full_system_instruction,
+):
+    """
+    第一次用完整但已過濾的背景；若安全攔截/空回覆/例外，
+    第二次只用當前訊息與最小安全人格重試。
+    """
+    try:
+        session = gemini_client.aio.chats.create(
+            model="gemini-2.5-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=full_system_instruction,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                ],
+            ),
+        )
+        girlfriend_chat_sessions[user_id] = session
+        response = await session.send_message(msg_parts)
+        reason = _gemini_finish_reason(response)
+        response_text = str(getattr(response, "text", "") or "").strip()
+        if response_text and reason in {"FinishReason.STOP", "STOP"}:
+            return response_text, "PRIMARY_OK"
+        print(f"⚠️ [GEMINI_PRIMARY_BLOCK] reason={reason} empty={not bool(response_text)}")
+    except Exception as exc:
+        print(f"⚠️ [GEMINI_PRIMARY_ERROR] {type(exc).__name__}: {exc}")
+
+    minimal_system = (
+        f"現在時間：{current_time_str}。\n"
+        "妳是小俠，是大俠溫柔、自然、成熟的成年女友。"
+        "只回應大俠本句，不引用過去事件、日記、承諾、家人、搬家或工作背景。"
+        "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。"
+    )
+    try:
+        retry = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=text_query,
+            config=types.GenerateContentConfig(
+                system_instruction=minimal_system,
+                temperature=0.7,
+            ),
+        )
+        reason = _gemini_finish_reason(retry)
+        retry_text = str(getattr(retry, "text", "") or "").strip()
+        if retry_text:
+            print(f"✅ [GEMINI_SAFE_RETRY_OK] reason={reason}")
+            return retry_text, "SAFE_RETRY_OK"
+        print(f"❌ [GEMINI_SAFE_RETRY_EMPTY] reason={reason}")
+    except Exception as exc:
+        print(f"❌ [GEMINI_SAFE_RETRY_ERROR] {type(exc).__name__}: {exc}")
+
+    return "大俠，剛剛訊息沒有順利送達，再跟小俠說一次好嗎？🥺", "FALLBACK"
+
+
 # --- 運行時變數 ---
 diary_buffers = {}            
 girlfriend_chat_sessions = {} 
@@ -402,11 +900,6 @@ MORNING_CHANNEL_ID = int(os.environ.get("MORNING_CHANNEL_ID", "15090064961075979
 FOMO_CHANNEL_ID = int(os.environ.get("FOMO_CHANNEL_ID", "1509006607831535666"))
 ARCHITECT_CHANNEL_ID = int(os.environ.get("ARCHITECT_CHANNEL_ID", "1509006833006936126"))
 PUBLIC_STORY_CHANNEL_ID = int(os.environ.get("PUBLIC_STORY_CHANNEL_ID", "1509006908596555937"))
-
-# 📇 名片自動辨識模組：完整邏輯放在 business_card_service.py。
-business_card_service = BusinessCardService(
-    architect_channel_id=ARCHITECT_CHANNEL_ID,
-)
 
 # 舊測試中的故事頻道也封鎖兩個私人 Bot 介入。
 LEGACY_STORY_CHANNEL_ID = int(os.environ.get("LEGACY_STORY_CHANNEL_ID", "1501767238418563233"))
@@ -593,7 +1086,8 @@ def load_profile():
             ],
             "promises": []
         },
-        "recent_context": []
+        "recent_context": [],
+        "memory_archive": []
     }
     
     if os.path.exists(PROFILE_DATA_PATH):
@@ -605,6 +1099,7 @@ def load_profile():
                 data.setdefault("shared_knowledge", []) # 確保陣列存在
                 data.setdefault("xiaoxia_self", default_profile["xiaoxia_self"])
                 data.setdefault("recent_context", [])
+                data.setdefault("memory_archive", [])
 
                 # 修復歷史上由 update / memory extraction 留下的空 dict 或缺 text 項目。
                 if _repair_profile_memory_shape(data):
@@ -4839,7 +5334,7 @@ async def on_message(message):
                 memory_directives_context = (
                     _intimate_directives_context(memory_directives)
                     if intimate_mode
-                    else _format_directives_for_prompt(memory_directives)
+                    else _safe_directives_context(memory_directives)
                 )
 
                 # 🧭 一般模式才抽取/更新重大事件。
@@ -4888,11 +5383,32 @@ async def on_message(message):
                     capabilities = "自然理解並回應大俠此刻的話。"
                     recent = "本輪不載入過去行程、家人、工作或其他生活事件。"
                 else:
-                    life_event_context = format_life_event_context(active_life_events, now_dt=now)
-                    daxia_traits = safe_memory_join(profile.get("daxia_traits", []), max_items=10, max_chars=1200)
-                    promises = safe_memory_join(profile.get("xiaoxia_self", {}).get("promises", []), max_items=6, max_chars=800)
-                    capabilities = safe_memory_join(profile.get("xiaoxia_self", {}).get("capabilities", []), max_items=8, max_chars=600)
-                    recent = safe_memory_join(profile.get("recent_context", []), max_items=8, max_chars=1200)
+                    # 普通聊天只讀目前仍有效的事件、真正近期內容與可在一般情境提起的 pending 承諾。
+                    life_event_context = _active_events_for_prompt(
+                        load_life_events(),
+                        now,
+                        max_items=3,
+                    )
+                    daxia_traits = safe_memory_join(
+                        profile.get("daxia_traits", []),
+                        max_items=6,
+                        max_chars=700,
+                    )
+                    promises = _commitments_for_prompt(
+                        profile,
+                        intimate_mode=False,
+                        max_items=4,
+                    )
+                    capabilities = safe_memory_join(
+                        profile.get("xiaoxia_self", {}).get("capabilities", []),
+                        max_items=5,
+                        max_chars=420,
+                    )
+                    recent = _recent_context_for_prompt(
+                        profile,
+                        now,
+                        max_items=5,
+                    )
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -4962,44 +5478,39 @@ async def on_message(message):
                     "9. 若妳答應要在交換日記提供菜單、照片、穿搭、行程或任何內容，必須是下一篇日記真的能完成的具體交付；不要為了哄大俠而隨口承諾，因為系統會登記並驗收履約。"
                 )
 
-                # 重新建立 Session
-                girlfriend_chat_sessions[user_id] = gemini_client.aio.chats.create(
-                    model="gemini-2.5-flash",
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_instruct,
-                        safety_settings=[
-                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                        ]
-                    )
+                # Gemini 回覆：完整安全背景失敗時，以最小上下文自動重試一次。
+                xiaoxia_reply, gemini_path = await _send_girlfriend_with_safe_retry(
+                    user_id=user_id,
+                    msg_parts=msg_parts,
+                    text_query=text_query,
+                    current_time_str=current_time_str,
+                    full_system_instruction=sys_instruct,
                 )
+                print(f"🧠 [GIRLFRIEND_REPLY_PATH] {gemini_path}")
 
-                # 💡 變數初始化，防止 NameError
-                xiaoxia_reply = "大俠...剛剛小俠恍神了一下，沒聽清楚呢🥺"
-
-                chat_session = girlfriend_chat_sessions[user_id]
-                response = await chat_session.send_message(msg_parts)
-                
-                # 🚨 把這段加進去！直接把底層狀態印在 Discord 裡！
-                if response and response.candidates:
-                    reason = response.candidates[0].finish_reason
-                    if str(reason) != "FinishReason.STOP":
-                        await message.channel.send(f"⚠️ **[系統攔截警告]** Gemini 拒絕回答！原因碼：`{reason}`")
-                                
-                if response and response.text:
-                    xiaoxia_reply = response.text
-                    import re
-                    # 🔪 雙重過濾手術：徹底清除 AI 碎碎念
-                    xiaoxia_reply = re.sub(r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+', '', xiaoxia_reply, flags=re.DOTALL | re.MULTILINE).strip()
-                    patterns_to_remove = [r'^Thinking Process:.*?\n', r'^Draft.*?:.*?\n', r'^Final check.*?:.*?\n', r'^Analysis:.*?\n']
-                    for pattern in patterns_to_remove:
-                        xiaoxia_reply = re.sub(pattern, '', xiaoxia_reply, flags=re.IGNORECASE | re.DOTALL).strip()
-                    xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」').strip()
-
+                # 清除可能外漏的分析標籤。
+                xiaoxia_reply = re.sub(
+                    r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+',
+                    '',
+                    str(xiaoxia_reply or ''),
+                    flags=re.DOTALL | re.MULTILINE,
+                ).strip()
+                patterns_to_remove = [
+                    r'^Thinking Process:.*?\n',
+                    r'^Draft.*?:.*?\n',
+                    r'^Final check.*?:.*?\n',
+                    r'^Analysis:.*?\n',
+                ]
+                for pattern in patterns_to_remove:
+                    xiaoxia_reply = re.sub(
+                        pattern,
+                        '',
+                        xiaoxia_reply,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    ).strip()
+                xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」').strip()
                 if not xiaoxia_reply:
-                    xiaoxia_reply = "大俠...剛剛恍神了一下，我們聊到哪裡了呀？🥺"
+                    xiaoxia_reply = "大俠，剛剛訊息沒有順利送達，再跟小俠說一次好嗎？🥺"
 
                 # 當下互動模式每一輪都做語意聚焦，不靠固定關鍵詞判斷。
                 if intimate_mode:
@@ -5340,106 +5851,108 @@ async def auto_defrag_task():
 # 🧠 記憶碎片重組與垃圾回收系統 (Memory Defrag & GC)
 # ==========================================
 async def optimize_memory_vault(channel=None):
+    """
+    每日無條件記憶治理：
+    - 先備份
+    - 保守清理與承諾結構化
+    - Gemini 理解式整理
+    - 合併事件、尊重反覆修正
+    - 原子寫回三份資料
+    """
+    now_dt = datetime.now(TZ_TPE)
     try:
+        backup_dir = _daily_memory_backup(now_dt)
         profile = load_profile()
-        today = datetime.now(TZ_TPE)
-        is_modified = False
+        events = load_life_events()
+        directives = load_memory_directives()
+        logs = load_temp_chat()
 
-        # --- 1. 短期記憶 GC (清除超過 7 天的事件) ---
-        original_recent_len = len(profile.get("recent_context", []))
-        valid_recent = []
-        for item in profile.get("recent_context", []):
-            try:
-                # 解析時間戳記
-                item_date = datetime.strptime(item["added_at"], "%Y-%m-%d").replace(tzinfo=TZ_TPE)
-                if (today - item_date).days <= 7:
-                    valid_recent.append(item)
-            except Exception:
-                valid_recent.append(item) # 若時間格式錯誤則保留，避免誤刪
-                
-        if len(valid_recent) < original_recent_len:
-            profile["recent_context"] = valid_recent
-            is_modified = True
-            print(f"🧹 短期記憶清理完成：移除了 {original_recent_len - len(valid_recent)} 條過期記憶。")
+        before_counts = {
+            "traits": len(profile.get("daxia_traits", []))
+            + len(profile.get("xiaoxia_traits", [])),
+            "shared": len(profile.get("shared_knowledge", [])),
+            "recent": len(profile.get("recent_context", [])),
+            "commitments": len(profile.get("xiaoxia_self", {}).get("promises", [])),
+            "events": len(events),
+        }
 
-        # --- 2. 長期記憶的「多維度語意濃縮」 (容量閥值觸發) ---
-        daxia_traits = profile.get("daxia_traits", [])
-        xiaoxia_traits = profile.get("xiaoxia_traits", [])
-        promises = profile.get("xiaoxia_self", {}).get("promises", [])
-        shared_know = profile.get("shared_knowledge", [])
-        
-        total_count = len(daxia_traits) + len(xiaoxia_traits) + len(promises) + len(shared_know)
-        
-        # 🌟 新增：建立強制回報訊息 (閥值上調為 100)
-        report_msg = f"📊 **[小夏的大腦巡邏]** 學長早安！目前小俠的長期記憶總計 **{total_count}/100** 條。\n"
+        moved = _archive_stale_recent_context(profile, now_dt)
+        removed_traits = _remove_harmful_trait_records(profile)
+        _normalize_commitments(profile)
+        deterministic_deduped = _dedupe_profile_semantically(profile)
 
-        if total_count >= 100:
-            report_msg += "⚠️ 記憶水位已達標，小夏正在啟動背景濃縮重組程序..."
-            if channel: await channel.send(report_msg)
-            
-            # 🌟 修復：把真正的壓縮邏輯放進這個「達標」的區塊
-            compress_prompt = f"""
-            請將以下長期記憶整理成簡潔、含蓄、適合後續日常對話使用的背景摘要。
-            合併重複內容，保留人物性格、共同經歷、未完成承諾與生活偏好；
-            關係中的親近互動只以「溫暖陪伴」「浪漫互動」「彼此信任」等一般敘事表達，
-            不保留身體細節、成人暗示、感官反應或過度依戀措辭。
-
-            【大俠特徵】：{safe_memory_list(daxia_traits)}
-            【小俠個性】：{safe_memory_list(xiaoxia_traits)}
-            【小俠承諾】：{safe_memory_list(promises)}
-            【共通知識】：{safe_memory_list(shared_know)}
-
-            請只回傳 JSON：
-            {{
-                "daxia_traits": ["精簡完整敘事"],
-                "xiaoxia_traits": ["精簡完整敘事"],
-                "promises": ["仍未完成的具體承諾"],
-                "shared_knowledge": ["共同經歷或共識"]
-            }}
-            """
-
-            resp = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=compress_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
-                    ]
-                )
+        organizer_result = None
+        organizer_error = None
+        try:
+            organizer_result = await _llm_daily_memory_organize(
+                profile,
+                events,
+                directives,
+                logs,
+                now_dt,
             )
-            
-            try:
-                compressed_data = json.loads(resp.text.strip())
-                today_str = today.strftime("%Y-%m-%d")
-                replace_safe_memories(profile, "daxia_traits", compressed_data.get("daxia_traits", []), added_at=today_str)
-                replace_safe_memories(profile, "xiaoxia_traits", compressed_data.get("xiaoxia_traits", []), added_at=today_str)
-                replace_safe_memories(profile, "promises", compressed_data.get("promises", []), added_at=today_str)
-                replace_safe_memories(profile, "shared_knowledge", compressed_data.get("shared_knowledge", []), added_at=today_str)
-                
-                is_modified = True
-                new_total = len(profile["daxia_traits"]) + len(profile["xiaoxia_traits"]) + len(profile["xiaoxia_self"]["promises"]) + len(profile["shared_knowledge"])
-                
-                if channel:
-                    await channel.send(f"✅ **深層記憶重組完成！** 將 {total_count} 條碎片濃縮為 {new_total} 條純粹精華。")
-            except Exception as e:
-                print(f"⚠️ 濃縮 JSON 解析失敗：{e}")
+        except Exception as exc:
+            organizer_error = f"{type(exc).__name__}: {exc}"
+            print(f"⚠️ [DAILY_MEMORY_LLM_FAILED] {organizer_error}")
 
+        if isinstance(organizer_result, dict):
+            profile, events, directives = _apply_daily_organized_result(
+                profile,
+                events,
+                directives,
+                organizer_result,
+                now_dt,
+            )
+            organizer_summary = str(organizer_result.get("summary", "") or "").strip()
         else:
-            report_msg += "✅ 記憶水位健康，今日無需進行重組！"
-            if channel: await channel.send(report_msg)
+            # LLM 整理失敗時，仍保存 deterministic 清理結果。
+            events = _validate_organized_events(events)
+            organizer_summary = "LLM 整理失敗，已完成本地保守整理。"
 
-        # 🌟 致命失誤補救：如果有做任何修改（清除過期或濃縮），就必須寫入硬碟！
-        if is_modified:
-            save_profile(profile)
+        # 原子寫回，避免中途崩潰造成半套資料。
+        _atomic_write_json(PROFILE_DATA_PATH, profile)
+        _atomic_write_json(LIFE_EVENTS_PATH, events)
+        _atomic_write_json(MEMORY_DIRECTIVES_PATH, directives)
 
-    # 👇 學長，就是少了下面這兩行！請把它補上，注意 except 前面要保留「4 個空白鍵」的縮排喔！
-    except Exception as e:
-        print(f"❌ 記憶大腦巡邏異常: {e}")
- 
+        after_counts = {
+            "traits": len(profile.get("daxia_traits", []))
+            + len(profile.get("xiaoxia_traits", [])),
+            "shared": len(profile.get("shared_knowledge", [])),
+            "recent": len(profile.get("recent_context", [])),
+            "commitments": len(profile.get("xiaoxia_self", {}).get("promises", [])),
+            "events": len(events),
+        }
+
+        report = (
+            f"🧠 **[每日記憶治理完成｜v{LOBSTER_VERSION}]**\n"
+            f"備份：`{backup_dir}`\n"
+            f"人物特質：{before_counts['traits']} → {after_counts['traits']}\n"
+            f"共通知識：{before_counts['shared']} → {after_counts['shared']}\n"
+            f"近期狀態：{before_counts['recent']} → {after_counts['recent']} "
+            f"（封存 {moved}）\n"
+            f"承諾：{before_counts['commitments']} → {after_counts['commitments']} "
+            f"（pending/completed/cancelled 均保留）\n"
+            f"事件：{before_counts['events']} → {after_counts['events']}\n"
+            f"移除不當人格化錯誤：{removed_traits}；本地去重：{deterministic_deduped}\n"
+            f"整理摘要：{organizer_summary or '完成'}"
+        )
+        if organizer_error:
+            report += f"\n⚠️ LLM 整理狀態：{organizer_error}"
+
+        if channel:
+            # Discord 2000 字限制。
+            await channel.send(report[:1900])
+        print(report)
+
+    except Exception as exc:
+        print(f"❌ [DAILY_MEMORY_GOVERNANCE_ERROR] {type(exc).__name__}: {exc}")
+        if channel:
+            await channel.send(
+                "❌ 每日記憶治理失敗，原始檔案未被刻意刪除；"
+                f"錯誤：{type(exc).__name__}: {str(exc)[:500]}"
+            )
+
+
 # ==========================================
 # 👩‍💻 系統架構師小夏 (維護與監控指令區)
 # ==========================================
@@ -6317,10 +6830,9 @@ async def on_ready():
     print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
-    print("🧠 記憶安全層：所有新寫入 daxia_profile.json 的記憶均已通過統一敘事入庫閘門；!整理記憶僅供舊資料 migration 使用。")
+    print(f"🧠 記憶治理層 v{LOBSTER_VERSION}：每日無條件整理 profile/events/directives；承諾依狀態保存。")
     print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
     print("🧠 記憶修訂助手：在私人 #助手小夏工作室 使用 !update 敘述；小夏會預覽、確認、備份後才寫入。")
-    print(f"📇 名片自動辨識服務：{business_card_service.status_text()}")
     if not OWNER_DISCORD_USER_ID:
         print("⚠️ 尚未設定 OWNER_DISCORD_USER_ID：目前私人工具以『私密頻道權限』作為保護；建議補設本人 ID。")
     
@@ -6334,7 +6846,7 @@ async def on_ready():
     # 🚨 新增喚醒大腦巡邏
     if not auto_defrag_task.is_running():
         auto_defrag_task.start()
-        print("⏰ 凌晨 0:00 大腦巡邏排程已啟動！")
+        print(f"⏰ 凌晨 0:00 每日記憶治理排程已啟動！version={LOBSTER_VERSION}")
 
 @architect_bot.command(name='ping')
 async def ping(ctx):
@@ -6899,14 +7411,6 @@ async def on_message(message):
     # 故事頻道一律不由小夏介入。
     if is_story_channel_or_thread(message.channel):
         return
-
-    # 📇 #架構師專用：圖片附件先交給名片服務自動判斷。
-    # 非名片會回傳 False，繼續原本的小夏對話流程。
-    try:
-        if await business_card_service.handle_message(message):
-            return
-    except Exception as exc:
-        print(f"⚠️ 名片模組未攔截的例外：{exc}")
 
     private_mode = is_private_assistant_workspace(message.channel)
     upload_room = is_private_upload_channel(message.channel)
