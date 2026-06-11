@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.1"
+LOBSTER_VERSION = "1.4.2"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
+from business_card_service import BusinessCardService
 
 # 🌐 Web 服務元件
 import uvicorn
@@ -1043,6 +1044,12 @@ MORNING_CHANNEL_ID = int(os.environ.get("MORNING_CHANNEL_ID", "15090064961075979
 FOMO_CHANNEL_ID = int(os.environ.get("FOMO_CHANNEL_ID", "1509006607831535666"))
 ARCHITECT_CHANNEL_ID = int(os.environ.get("ARCHITECT_CHANNEL_ID", "1509006833006936126"))
 PUBLIC_STORY_CHANNEL_ID = int(os.environ.get("PUBLIC_STORY_CHANNEL_ID", "1509006908596555937"))
+
+# 📇 名片自動辨識／自然語言查詢服務
+# 完整邏輯位於 business_card_service.py。
+business_card_service = BusinessCardService(
+    architect_channel_id=ARCHITECT_CHANNEL_ID,
+)
 
 # 舊測試中的故事頻道也封鎖兩個私人 Bot 介入。
 LEGACY_STORY_CHANNEL_ID = int(os.environ.get("LEGACY_STORY_CHANNEL_ID", "1501767238418563233"))
@@ -6978,6 +6985,10 @@ async def architect_archive_events_cmd(ctx, mode: str = "completed"):
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
+    try:
+        print(f"📇 名片服務橋接：{business_card_service.status_text()}")
+    except Exception as exc:
+        print(f"⚠️ 名片服務狀態讀取失敗：{type(exc).__name__}: {exc}")
     print(f"🏠 私人助手工作室：guild={PRIVATE_GUILD_ID} channel={PRIVATE_ASSISTANT_CHANNEL_ID}")
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
@@ -7562,6 +7573,19 @@ async def on_message(message):
     # 故事頻道一律不由小夏介入。
     if is_story_channel_or_thread(message.channel):
         return
+
+    # 📇 #架構師專用名片服務必須優先於一般架構師聊天。
+    # 圖片：自動辨識／新增／更新名片。
+    # 文字：LLM 路由後查詢 Google Sheets，包含多輪選號。
+    # 非名片需求才回傳 False，繼續原本小夏流程。
+    try:
+        if await business_card_service.handle_message(message):
+            return
+    except Exception as exc:
+        print(
+            f"⚠️ [BUSINESS_CARD_BRIDGE_ERROR] "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     private_mode = is_private_assistant_workspace(message.channel)
     upload_room = is_private_upload_channel(message.channel)
