@@ -17,11 +17,11 @@ from google.genai import types
 
 
 TZ_TPE = timezone(timedelta(hours=8))
-MODULE_VERSION = "1.5.1"
+MODULE_VERSION = "1.6.0"
 
-MAIN_HEADERS = ['person_id', 'created_at', 'updated_at', 'uploaded_by', 'discord_message_url', 'card_front_image_url', 'card_back_image_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_language', 'ocr_confidence', 'critical_confidence', 'match_status', 'review_status', 'raw_extracted_text', 'notes']
+MAIN_HEADERS = ['person_id', 'created_at', 'updated_at', 'uploaded_by', 'discord_message_url', 'card_front_image_url', 'card_back_image_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_language', 'ocr_confidence', 'critical_confidence', 'match_status', 'review_status', 'personal_note', 'raw_extracted_text', 'notes']
 
-HISTORY_HEADERS = ['history_id', 'person_id', 'archived_at', 'change_reason', 'replaced_by_message_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_front_image_url', 'card_back_image_url', 'ocr_confidence', 'critical_confidence', 'review_status', 'raw_extracted_text', 'notes']
+HISTORY_HEADERS = ['history_id', 'person_id', 'archived_at', 'change_reason', 'replaced_by_message_url', 'name_zh', 'name_en', 'primary_organization', 'primary_department', 'primary_job_title', 'affiliations_json', 'country_code', 'mobile', 'mobile_normalized', 'phone', 'phone_normalized', 'phone_extension', 'fax', 'fax_normalized', 'email', 'postal_code', 'address', 'websites', 'line_id', 'tax_id', 'card_front_image_url', 'card_back_image_url', 'ocr_confidence', 'critical_confidence', 'review_status', 'personal_note', 'raw_extracted_text', 'notes']
 
 
 def _now_str() -> str:
@@ -191,6 +191,7 @@ class GoogleWorkspaceClient:
             "postal_code", "address",
             "line_id", "tax_id", "card_language",
             "match_status", "review_status",
+            "personal_note",
             "raw_extracted_text", "notes",
         }
 
@@ -317,7 +318,7 @@ class GoogleWorkspaceClient:
             },
         ]
 
-        for column_name in ("raw_extracted_text", "notes"):
+        for column_name in ("personal_note", "raw_extracted_text", "notes"):
             column_index = header_index.get(column_name)
             if column_index is None:
                 continue
@@ -355,6 +356,21 @@ class GoogleWorkspaceClient:
                     }
                 },
             ])
+
+        personal_note_index = header_index.get("personal_note")
+        if personal_note_index is not None:
+            requests.append({
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": personal_note_index,
+                        "endIndex": personal_note_index + 1,
+                    },
+                    "properties": {"pixelSize": 220},
+                    "fields": "pixelSize",
+                }
+            })
 
         for column_name in ("card_front_image_url", "card_back_image_url"):
             column_index = header_index.get(column_name)
@@ -715,6 +731,19 @@ class BusinessCardService:
         return GoogleWorkspaceClient._hyperlink_formula(cleaned[0], label)
 
     @staticmethod
+    def _personal_note_from_message(message: discord.Message) -> str:
+        """
+        名片圖片同一則 Discord 訊息中的文字即為使用者個人備註。
+        沒有輸入文字則回傳空字串。
+        """
+        value = str(getattr(message, "content", "") or "").strip()
+        value = re.sub(r"\s+", " ", value)
+        # 避免異常長文字撐大 Sheets；個人備註保留最多 500 字。
+        if len(value) > 500:
+            value = value[:500].rstrip() + "…"
+        return value
+
+    @staticmethod
     def _formula_url(value: Any) -> str:
         """從 =HYPERLINK("url","label") 或一般 URL 取出實際網址。"""
         raw = str(value or "").strip()
@@ -827,13 +856,15 @@ class BusinessCardService:
   "selection_index": null,
   "selected_name": "",
   "search_terms": [],
-  "filters": {{"name":"","organization":"","department":"","job_title":"","phone":"","email":"","address":"","affiliation":""}},
+  "filters": {{"name":"","organization":"","department":"","job_title":"","phone":"","email":"","address":"","affiliation":"","personal_note":""}},
   "wants_card_image": false,
   "wants_full_detail": false,
   "clarifying_question": ""
 }}
 
 action 可用：detail、list、image、contact、select_result。
+使用者也可能依自己的個人備註查詢，例如「找擴散銲接合作對象」；
+此時請將關鍵內容放入 filters.personal_note 或 search_terms。
 selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入數字或序號，必須判定 business_card_select。
 """
         response = await asyncio.to_thread(
@@ -869,6 +900,7 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
             "email": ["email"],
             "address": ["postal_code", "address"],
             "affiliation": ["affiliations_json"],
+            "personal_note": ["personal_note"],
             "general": [
                 "name_zh", "name_en", "primary_organization",
                 "primary_department", "primary_job_title", "affiliations_json",
@@ -876,7 +908,8 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
                 "mobile", "mobile_normalized",
                 "phone", "phone_normalized", "phone_extension",
                 "fax", "fax_normalized", "email",
-                "postal_code", "address", "websites", "tax_id", "notes",
+                "postal_code", "address", "websites", "tax_id",
+                "personal_note", "notes",
             ],
         }
 
@@ -1005,6 +1038,10 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
         lines.append(f"Email：{email}")
         lines.append(f"地址：{address}")
 
+        personal_note = str(row.get("personal_note") or "").strip()
+        if personal_note:
+            lines.append(f"個人備註：{personal_note}")
+
         affiliations = str(row.get("affiliations_json") or "").strip()
         if affiliations:
             try:
@@ -1064,6 +1101,9 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
             email = row.get("email") or ""
             mobile = row.get("mobile") or ""
             line = f"{index}. **{name}**｜{company}｜{role}"
+            personal_note = str(row.get("personal_note") or "").strip()
+            if personal_note:
+                line += f"\n   備註：{personal_note}"
             if query_type == "contact":
                 contact = email or mobile
                 if contact:
@@ -1244,6 +1284,11 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
             ).strip()
 
             card = self._normalize_card(merged_card, analysis)
+
+            # 使用者在上傳名片圖片時，同一則訊息中的文字即為個人備註。
+            # 空白時保持空字串；更新既有資料時 finalize_update 會保留舊值。
+            card["personal_note"] = self._personal_note_from_message(message)
+
             headers, rows = await self.google.read_table(self.main_sheet)
             self._validate_headers(headers, MAIN_HEADERS, self.main_sheet)
             await self.google.ensure_compact_layout(self.main_sheet, headers)
@@ -1773,6 +1818,11 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
             "_critical_confidence",
             0,
         )
+        normalized["personal_note"] = self._single_line(
+            card.get("personal_note", ""),
+            max_chars=500,
+        )
+
         normalized["raw_extracted_text"] = (
             self._single_line(card.get("raw_extracted_text", ""), max_chars=1200)
             if self.store_raw_text
@@ -2047,6 +2097,7 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
         email = row.get("email") or "未提供"
         mobile = row.get("mobile") or "未提供"
         review_status = row.get("review_status") or "NEEDS_REVIEW"
+        personal_note = str(row.get("personal_note") or "").strip()
         title = (
             f"📇 **名片已{action}完成**"
             if review_status == "AUTO_SAVED"
@@ -2059,7 +2110,8 @@ selection_index 使用 1 開始。若上一輪已有候選，而本輪只輸入�
             f"職稱：{role}\n"
             f"手機：{mobile}\n"
             f"Email：{email}\n"
-            f"辨識可信度：{confidence or '未提供'}\n"
+            + (f"個人備註：{personal_note}\n" if personal_note else "")
+            + f"辨識可信度：{confidence or '未提供'}\n"
             f"狀態：`{review_status}`"
         )
 
