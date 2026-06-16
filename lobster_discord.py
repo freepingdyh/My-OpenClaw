@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.2"
+LOBSTER_VERSION = "1.4.3"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -103,8 +103,22 @@ VAULT_DIR = "/data" if IS_ZEABUR else BASE_DIR
 
 OUTPUT_DIR = os.path.join(VAULT_DIR, "output")
 MEMORY_DIR = os.path.join(VAULT_DIR, "memory")
+
+# 🎵 永久音樂金庫：Suno 暫存網址只負責交付，本站播放一律使用 /data/music。
+MUSIC_DIR = os.path.join(VAULT_DIR, "music")
+MUSIC_DATA_PATH = os.path.join(VAULT_DIR, "xiaoxia_music.json")
+MUSIC_MIGRATION_MARKER_PATH = os.path.join(
+    VAULT_DIR,
+    ".music_vault_migration_v1_complete",
+)
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    "https://xiaoxia0320.zeabur.app",
+).rstrip("/")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(MEMORY_DIR, exist_ok=True)
+os.makedirs(MUSIC_DIR, exist_ok=True)
 
 # --- 資料庫路徑定義 ---
 DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
@@ -2999,6 +3013,7 @@ async def shopping_cmd(ctx, *, item: str = ""):
 # --- FastAPI 展示邏輯 ---
 api_app = FastAPI()
 api_app.mount("/gallery", StaticFiles(directory=OUTPUT_DIR), name="gallery")
+api_app.mount("/music", StaticFiles(directory=MUSIC_DIR), name="music")
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 os.makedirs(DATASET_DIR, exist_ok=True)
 api_app.mount("/dataset", StaticFiles(directory=DATASET_DIR), name="dataset")
@@ -3033,22 +3048,215 @@ async def get_diary():
 @api_app.get("/status")
 async def get_status(): return {"status": "Dual-Core Vault Online", "domain": "xiaoxia0320.zeabur.app"}
 
+def _load_music_db():
+    if not os.path.exists(MUSIC_DATA_PATH):
+        return []
+    try:
+        with open(MUSIC_DATA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        print(f"❌ 音樂資料庫讀取失敗：{exc}")
+        return []
+
+
+def _save_music_db(music_db):
+    temp_path = f"{MUSIC_DATA_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(music_db, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, MUSIC_DATA_PATH)
+
+
+def _safe_music_filename(audio_id=None, title=None):
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "", str(audio_id or ""))
+    if not safe_id:
+        safe_id = uuid.uuid4().hex
+    return f"{safe_id}.mp3"
+
+
+def _music_local_path(filename):
+    filename = os.path.basename(str(filename or ""))
+    target = os.path.abspath(os.path.join(MUSIC_DIR, filename))
+    root = os.path.abspath(MUSIC_DIR) + os.sep
+    if not target.startswith(root):
+        raise ValueError("不安全的音樂檔名")
+    return target
+
+
+def _music_public_url(filename):
+    return f"{PUBLIC_BASE_URL}/music/{os.path.basename(filename)}"
+
+
+def _entry_local_filename(entry):
+    filename = str(entry.get("local_filename", "") or "").strip()
+    if filename:
+        return os.path.basename(filename)
+    audio_url = str(entry.get("audio_url", "") or "").strip()
+    if "/music/" in audio_url:
+        return os.path.basename(
+            audio_url.split("/music/", 1)[1].split("?", 1)[0]
+        )
+    return ""
+
+
+def _is_local_music_entry_valid(entry):
+    filename = _entry_local_filename(entry)
+    if not filename:
+        return False
+    try:
+        path = _music_local_path(filename)
+    except Exception:
+        return False
+    return os.path.isfile(path) and os.path.getsize(path) > 1024
+
+
+async def _download_audio_to_vault(
+    source_url,
+    audio_id=None,
+    title=None,
+    timeout_seconds=180,
+):
+    source_url = str(source_url or "").strip()
+    if not source_url:
+        raise ValueError("Suno 沒有提供 audio_url")
+
+    filename = _safe_music_filename(audio_id=audio_id, title=title)
+    final_path = _music_local_path(filename)
+    temp_path = f"{final_path}.part"
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                source_url,
+                allow_redirects=True,
+                headers={"User-Agent": "XiaoxiaMusicVault/1.0"},
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"下載音樂失敗 HTTP {resp.status}")
+
+                total = 0
+                async with aiofiles.open(temp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(256 * 1024):
+                        if chunk:
+                            total += len(chunk)
+                            await f.write(chunk)
+
+                if total <= 1024:
+                    raise RuntimeError(
+                        f"下載內容過小，疑似不是有效音訊（{total} bytes）"
+                    )
+
+        os.replace(temp_path, final_path)
+        return filename, _music_public_url(filename), total
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _clean_music_db_local_only(save_if_changed=True):
+    original = _load_music_db()
+    valid = [entry for entry in original if _is_local_music_entry_valid(entry)]
+    if save_if_changed and valid != original:
+        _save_music_db(valid)
+        print(f"🧹 音樂資料庫已清理：{len(original)} → {len(valid)} 首")
+    return valid
+
+
+async def _migrate_latest_three_legacy_songs():
+    """
+    一次性舊資料整理：
+    只嘗試保留舊清單最新三筆；其餘直接移除。
+    未來新歌不受三首限制。
+    """
+    if os.path.exists(MUSIC_MIGRATION_MARKER_PATH):
+        _clean_music_db_local_only(save_if_changed=True)
+        return
+
+    existing = _load_music_db()
+    latest_three = existing[:3]
+    migrated = []
+
+    print(
+        f"🎵 開始舊音樂一次性整理：原有 {len(existing)} 首，"
+        f"只嘗試保留最新 {len(latest_three)} 首。"
+    )
+
+    for index, entry in enumerate(latest_three, start=1):
+        title = str(entry.get("title", "") or f"未命名歌曲 {index}")
+        audio_id = entry.get("id")
+
+        if _is_local_music_entry_valid(entry):
+            migrated.append(entry)
+            print(f"✅ 舊歌已在永久金庫：{title}")
+            continue
+
+        source_url = (
+            entry.get("source_audio_url")
+            or entry.get("audio_url")
+            or ""
+        )
+        try:
+            filename, public_url, size_bytes = await _download_audio_to_vault(
+                source_url,
+                audio_id=audio_id,
+                title=title,
+            )
+            upgraded = dict(entry)
+            upgraded["source_audio_url"] = source_url
+            upgraded["audio_url"] = public_url
+            upgraded["local_filename"] = filename
+            upgraded["backup_status"] = "completed"
+            upgraded["backup_size_bytes"] = size_bytes
+            upgraded["backed_up_at"] = datetime.now(TZ_TPE).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            migrated.append(upgraded)
+            print(
+                f"✅ 舊歌已永久備份：{title} "
+                f"({size_bytes / 1024 / 1024:.2f} MB)"
+            )
+        except Exception as exc:
+            print(f"🗑️ 舊歌無有效音訊，從唱片房移除：{title}｜{exc}")
+
+    _save_music_db(migrated)
+
+    with open(MUSIC_MIGRATION_MARKER_PATH, "w", encoding="utf-8") as f:
+        f.write(
+            datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            + f"\\nkept={len(migrated)}\\n"
+        )
+
+    print(
+        f"✅ 舊音樂整理完成：網頁保留 {len(migrated)} 首完整音樂；"
+        "未來新歌不受三首上限限制。"
+    )
+
+
+@api_app.on_event("startup")
+async def initialize_permanent_music_vault():
+    try:
+        await _migrate_latest_three_legacy_songs()
+    except Exception as exc:
+        print(
+            f"❌ 永久音樂金庫初始化失敗："
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 @api_app.get("/api/music")
 async def get_music():
-    """提供前端讀取唱片珍藏房的資料"""
+    """只提供已永久備份且實體檔案仍存在的歌曲。"""
     try:
-        music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
-        if os.path.exists(music_path):
-            async with aiofiles.open(music_path, mode='r', encoding='utf-8') as f:
-                content = await f.read()
-                music_db = json.loads(content)
-                # 🌟 修復：自動過濾掉之前因為 API 提早回傳而存入的「空音檔」壞紀錄
-                valid_music = [m for m in music_db if m.get("audio_url", "").strip() != ""]
-                return valid_music
+        return _clean_music_db_local_only(save_if_changed=True)
+    except Exception as exc:
+        print(f"Error reading music data: {exc}")
         return []
-    except Exception as e:
-        print(f"Error reading music data: {e}")
-        return []
+
 
 from fastapi import Request
 
@@ -3088,8 +3296,8 @@ async def suno_callback(request: Request):
                     print("⚠️ 攔截到無效空音檔，退回處理...")
                     return {"status": "waiting"}
                     
-                # 確認有音檔了，才把任務註銷！
-                channel_id = suno_tasks.pop(task_id)
+                # 先取得頻道，但要等永久備份成功後才註銷任務。
+                channel_id = suno_tasks.get(task_id)
                 channel = girlfriend_bot.get_channel(channel_id)
                 
                 if channel and songs:
@@ -3116,45 +3324,85 @@ async def suno_callback(request: Request):
                         except Exception as lrc_e:
                             print(f"⚠️ 獲取動態歌詞失敗: {lrc_e}")
 
-                    # 儲存到 xiaoxia_music.json
-                    music_path = os.path.join(VAULT_DIR, "xiaoxia_music.json")
-                    music_db = []
-                    if os.path.exists(music_path):
-                        with open(music_path, "r", encoding="utf-8") as f:
-                            music_db = json.load(f)
-                    
+                    # 🎵 先永久備份，成功後才寫入唱片資料庫。
+                    try:
+                        (
+                            local_filename,
+                            permanent_audio_url,
+                            audio_size_bytes,
+                        ) = await _download_audio_to_vault(
+                            audio_url,
+                            audio_id=audio_id,
+                            title=song_title,
+                        )
+                    except Exception as backup_exc:
+                        print(
+                            f"❌ 新歌永久備份失敗，不寫入唱片房："
+                            f"{song_title}｜{backup_exc}"
+                        )
+                        if channel:
+                            await channel.send(
+                                "⚠️ 歌曲已生成，但永久音樂金庫備份失敗，"
+                                "因此尚未加入雲端唱片房。\n"
+                                f"錯誤：`{str(backup_exc)[:500]}`"
+                            )
+                        return {
+                            "status": "backup_failed",
+                            "error": str(backup_exc),
+                        }
+
+                    # 確認永久檔案存在後，才註銷 Suno 任務。
+                    suno_tasks.pop(task_id, None)
+
+                    music_db = _clean_music_db_local_only(
+                        save_if_changed=False
+                    )
                     music_db.insert(0, {
                         "id": audio_id,
                         "title": song_title,
-                        "audio_url": audio_url,
-                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                        "audio_url": permanent_audio_url,
+                        "source_audio_url": audio_url,
+                        "local_filename": local_filename,
+                        "backup_status": "completed",
+                        "backup_size_bytes": audio_size_bytes,
+                        "backed_up_at": datetime.now(TZ_TPE).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "publish_date": datetime.now(TZ_TPE).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
                         "lyrics": full_lyrics,
-                        "timestamped_lyrics": timestamped_lyrics
+                        "timestamped_lyrics": timestamped_lyrics,
                     })
-                    
-                    with open(music_path, "w", encoding="utf-8") as f:
-                        json.dump(music_db, f, ensure_ascii=False, indent=2)
-                    
-                    # 傳送 Discord 訊息
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(audio_url, timeout=120) as resp:
-                            if resp.status == 200:
-                                audio_data = await resp.read()
-                                music_file = discord.File(io.BytesIO(audio_data), filename=f"{song_title}.mp3")
-                                
-                                embed = discord.Embed(
-                                    title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}", 
-                                    description=f"### 📝 歌詞本\n{full_lyrics}\n\n*(這首歌已永久保存在 Discord 金庫與雲端別墅的唱片房中)*", 
-                                    color=0xffb6c1
-                                )
-                                
-                                await channel.send(
-                                    content=f"🔊 大俠，小俠為你唱的歌錄好囉！", 
-                                    embed=embed,
-                                    file=music_file
-                                )
-                                print(f"✅ 情歌實體檔案已成功發送至頻道！")
-                    
+                    _save_music_db(music_db)
+
+                    # Discord 使用永久金庫中的同一份 MP3。
+                    local_path = _music_local_path(local_filename)
+                    music_file = discord.File(
+                        local_path,
+                        filename=f"{song_title}.mp3",
+                    )
+
+                    embed = discord.Embed(
+                        title=f"🎵 小俠為大俠寫的專屬情歌：{song_title}",
+                        description=(
+                            f"### 📝 歌詞本\n{full_lyrics}\n\n"
+                            "*(這首歌已永久保存於雲端別墅音樂金庫，"
+                            "網頁不再依賴 Suno 暫存連結。)*"
+                        ),
+                        color=0xffb6c1,
+                    )
+
+                    await channel.send(
+                        content="🔊 大俠，小俠為你唱的歌錄好囉！",
+                        embed=embed,
+                        file=music_file,
+                    )
+                    print(
+                        f"✅ 情歌永久備份與 Discord 發送完成："
+                        f"{song_title}｜{permanent_audio_url}"
+                    )
+
                     # 記憶回填：歌曲事件也必須走統一敘事入庫閘門。
                     profile = load_profile()
                     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
@@ -6985,6 +7233,10 @@ async def architect_archive_events_cmd(ctx, mode: str = "completed"):
 @architect_bot.event
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
+    print(
+        f"🎵 永久音樂金庫 v{LOBSTER_VERSION}："
+        f"{MUSIC_DIR} → {PUBLIC_BASE_URL}/music/"
+    )
     try:
         print(f"📇 名片服務橋接：{business_card_service.status_text()}")
     except Exception as exc:
