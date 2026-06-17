@@ -382,10 +382,17 @@ class GoogleCalendarService:
         self,
         architect_channel_id: int,
         *,
+        additional_channel_ids: Optional[list[int]] = None,
         gemini_client: Optional[genai.Client] = None,
         calendar_id: Optional[str] = None,
     ):
         self.architect_channel_id = int(architect_channel_id)
+        self.allowed_channel_ids = {self.architect_channel_id}
+        for channel_id in additional_channel_ids or []:
+            try:
+                self.allowed_channel_ids.add(int(channel_id))
+            except Exception:
+                pass
         self.client = GoogleCalendarClient(calendar_id=calendar_id)
         self.gemini = gemini_client or genai.Client(
             api_key=os.environ.get("GEMINI_API_KEY")
@@ -409,10 +416,12 @@ class GoogleCalendarService:
         )
 
     def status_text(self) -> str:
+        channels = ",".join(str(value) for value in sorted(self.allowed_channel_ids))
         return (
             self.client.status_text()
             + f" | router={self.model}"
             + f" | confirm={self.session_minutes}m"
+            + f" | channels={channels}"
         )
 
     def _key(self, message) -> tuple[int, int]:
@@ -598,7 +607,7 @@ class GoogleCalendarService:
                 f"時間：{start:%H:%M}–{end:%H:%M}\n"
                 f"地點：{payload.get('location') or '未設定'}\n"
                 f"說明：{payload.get('description') or '無'}\n\n"
-                "請回覆 **確認** 建立；也可直接說「改成九點開始」或「取消」。"
+                + self._format_numeric_controls("create")
             )
 
         event = payload.get("event", {})
@@ -606,8 +615,8 @@ class GoogleCalendarService:
         if action == "delete":
             return (
                 "🗑️ **準備刪除行程**\n"
-                f"{base}\n\n"
-                "請回覆 **確認** 刪除，或回覆「取消」。"
+                f"{base}"
+                + self._format_numeric_controls("delete")
             )
 
         changes = payload.get("changes", {})
@@ -627,8 +636,7 @@ class GoogleCalendarService:
             lines.append(f"新地點：{changes['location']}")
         if changes.get("description"):
             lines.append(f"新說明：{changes['description']}")
-        lines.append("\n請回覆 **確認** 修改；也可繼續補充或回覆「取消」。")
-        return "\n".join(lines)
+        return "\n".join(lines) + self._format_numeric_controls("update")
 
     def _default_search_range(self, route: dict) -> tuple[datetime, datetime]:
         now = datetime.now(TZ)
@@ -691,6 +699,102 @@ class GoogleCalendarService:
         )
         return [event for _, event in scored[:10]]
 
+    @staticmethod
+    def _direct_control_intent(user_text: str, pending: Optional[PendingAction]):
+        """
+        對待確認狀態直接解析，不再把「確認」交給 Gemini 猜。
+        """
+        raw = re.sub(r"\s+", "", str(user_text or "")).lower()
+        if not pending:
+            return None
+
+        if raw in {"0", "取消", "不要", "算了", "取消操作"}:
+            return "cancel"
+
+        if raw in {
+            "1", "確認", "確認建立", "確認修改", "確認刪除",
+            "確定", "好", "執行", "建立", "送出",
+        }:
+            return "confirm"
+
+        if raw in {"2", "修改", "修改內容", "我要修改"}:
+            return "request_revision"
+
+        if re.fullmatch(r"\d+", raw):
+            return ("number", int(raw))
+
+        return None
+
+    def _format_numeric_controls(self, action: str) -> str:
+        verb = {
+            "create": "建立",
+            "update": "修改",
+            "delete": "刪除",
+        }.get(action, "執行")
+        return (
+            f"\n\n請輸入：\n"
+            f"**1**＝確認{verb}\n"
+            f"**2**＝修改內容\n"
+            f"**0**＝取消"
+        )
+
+    async def _handle_candidate_selection(
+        self,
+        message,
+        pending: PendingAction,
+        selected_number: int,
+    ) -> bool:
+        candidates = pending.payload.get("candidates", [])
+        if not isinstance(candidates, list) or not candidates:
+            self.sessions.pop(self._key(message), None)
+            await message.channel.send("⚠️ 候選行程已失效，請重新操作。")
+            return True
+
+        if selected_number < 1 or selected_number > len(candidates):
+            await message.channel.send(
+                f"請輸入 **1～{len(candidates)}** 選擇行程，或輸入 **0** 取消。"
+            )
+            return True
+
+        event = candidates[selected_number - 1]
+        target_action = pending.payload.get("target_action")
+
+        if target_action == "delete":
+            payload = {"event": event}
+        elif target_action == "update":
+            changes = pending.payload.get("changes", {})
+            if not isinstance(changes, dict) or not changes:
+                await message.channel.send(
+                    "已選取行程，但尚未指定修改內容。"
+                    "請直接輸入，例如：「改成上午九點到九點半」。"
+                )
+                pending.payload = {
+                    "event": event,
+                    "changes": {},
+                    "awaiting_update_details": True,
+                }
+                pending.action = "update"
+                pending.expires_at = datetime.now(TZ) + timedelta(
+                    minutes=self.session_minutes
+                )
+                return True
+            payload = {"event": event, "changes": changes}
+        else:
+            self.sessions.pop(self._key(message), None)
+            await message.channel.send("⚠️ 無法判斷要修改或刪除，請重新操作。")
+            return True
+
+        pending.action = target_action
+        pending.payload = payload
+        pending.expires_at = datetime.now(TZ) + timedelta(
+            minutes=self.session_minutes
+        )
+        await message.channel.send(
+            self._format_preview(target_action, payload)
+        )
+        return True
+
+
     async def _execute(self, pending: PendingAction) -> dict:
         if pending.action == "create":
             return await asyncio.to_thread(
@@ -716,7 +820,7 @@ class GoogleCalendarService:
         )
 
     async def handle_message(self, message) -> bool:
-        if int(getattr(message.channel, "id", 0)) != self.architect_channel_id:
+        if int(getattr(message.channel, "id", 0)) not in self.allowed_channel_ids:
             return False
         if getattr(message.author, "bot", False):
             return False
@@ -726,8 +830,35 @@ class GoogleCalendarService:
             return False
 
         pending = self._pending(message)
-        route = await self._route(user_text, pending)
-        intent = str(route.get("intent", "general") or "general")
+
+        # 待確認狀態優先採用確定性指令，不把 0/1/2/確認 交給 LLM。
+        direct_control = self._direct_control_intent(user_text, pending)
+        if direct_control == "cancel":
+            self.sessions.pop(self._key(message), None)
+            await message.channel.send("🗑️ 已取消本次 Calendar 操作。")
+            return True
+
+        if direct_control == "request_revision":
+            await message.channel.send(
+                "✏️ 請直接輸入要修改的內容，例如："
+                "「改成上午九點到九點半」或「地點改成台南大學操場」。"
+            )
+            return True
+
+        if isinstance(direct_control, tuple) and direct_control[0] == "number":
+            if pending and pending.action == "select_candidate":
+                return await self._handle_candidate_selection(
+                    message,
+                    pending,
+                    direct_control[1],
+                )
+
+        if direct_control == "confirm":
+            intent = "confirm"
+            route = {"intent": "confirm"}
+        else:
+            route = await self._route(user_text, pending)
+            intent = str(route.get("intent", "general") or "general")
 
         if intent == "general":
             return False
@@ -762,6 +893,35 @@ class GoogleCalendarService:
                 await message.channel.send(reply)
             except Exception as exc:
                 await message.channel.send(f"❌ Calendar 操作失敗：{exc}")
+            return True
+
+        if (
+            pending
+            and pending.action == "update"
+            and pending.payload.get("awaiting_update_details")
+            and direct_control is None
+        ):
+            try:
+                revised = await self._revise_pending(user_text, pending)
+                question = str(
+                    revised.get("clarifying_question", "") or ""
+                ).strip()
+                if question:
+                    await message.channel.send(f"📅 {question}")
+                    return True
+                payload = revised.get("payload", {})
+                if not payload.get("event"):
+                    payload["event"] = pending.payload.get("event")
+                payload.pop("awaiting_update_details", None)
+                pending.payload = payload
+                pending.expires_at = datetime.now(TZ) + timedelta(
+                    minutes=self.session_minutes
+                )
+                await message.channel.send(
+                    self._format_preview("update", pending.payload)
+                )
+            except Exception as exc:
+                await message.channel.send(f"❌ 行程調整失敗：{exc}")
             return True
 
         if intent == "revise_pending":
@@ -861,11 +1021,31 @@ class GoogleCalendarService:
                     )
                     return True
                 if len(candidates) > 1:
+                    shown = candidates[:8]
+                    changes = route.get("changes", {})
+                    if not isinstance(changes, dict):
+                        changes = {}
+                    changes = {
+                        key: value
+                        for key, value in changes.items()
+                        if value not in ("", None)
+                    }
+                    self._save_pending(
+                        message,
+                        "select_candidate",
+                        {
+                            "target_action": intent,
+                            "candidates": shown,
+                            "changes": changes,
+                        },
+                        user_text,
+                    )
                     lines = [
-                        "🔎 找到多筆可能行程，請重新說明日期或更完整的標題："
+                        f"🔎 找到 {len(shown)} 筆可能行程，請直接輸入編號選擇："
                     ]
-                    for index, event in enumerate(candidates[:8], start=1):
+                    for index, event in enumerate(shown, start=1):
                         lines.append(self._format_event(event, index))
+                    lines.append("\n輸入 **0** 取消。")
                     await message.channel.send("\n".join(lines)[:1900])
                     return True
 
