@@ -74,6 +74,169 @@ def _rfc3339(dt: datetime) -> str:
     return dt.astimezone(TZ).isoformat(timespec="seconds")
 
 
+WEEKDAY_ZH = ("一", "二", "三", "四", "五", "六", "日")
+WEEKDAY_NAME_ZH = (
+    "星期一", "星期二", "星期三", "星期四",
+    "星期五", "星期六", "星期日",
+)
+ZH_WEEKDAY_TO_INDEX = {
+    "一": 0, "二": 1, "三": 2, "四": 3,
+    "五": 4, "六": 5, "日": 6, "天": 6,
+}
+
+
+def _day_start(value: datetime) -> datetime:
+    return value.astimezone(TZ).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _week_monday(value: datetime) -> datetime:
+    day = _day_start(value)
+    return day - timedelta(days=day.weekday())
+
+
+def _format_zh_date(value: datetime) -> str:
+    value = value.astimezone(TZ)
+    return (
+        f"{value.year}年{value.month}月{value.day}日"
+        f"（{WEEKDAY_NAME_ZH[value.weekday()]}）"
+    )
+
+
+def _relative_date_map(now: Optional[datetime] = None) -> dict[str, datetime]:
+    """
+    所有「本週／下週」都以台灣時區、週一到週日為一週。
+    本週五永遠是本週一 + 4 天，不交給 LLM 做日期算術。
+    """
+    now = (now or datetime.now(TZ)).astimezone(TZ)
+    today = _day_start(now)
+    monday = _week_monday(now)
+
+    result: dict[str, datetime] = {
+        "今天": today,
+        "今日": today,
+        "明天": today + timedelta(days=1),
+        "明日": today + timedelta(days=1),
+        "後天": today + timedelta(days=2),
+        "昨天": today - timedelta(days=1),
+        "昨日": today - timedelta(days=1),
+        "前天": today - timedelta(days=2),
+        "本週末": monday + timedelta(days=5),
+        "這週末": monday + timedelta(days=5),
+        "下週末": monday + timedelta(days=12),
+        "上週末": monday - timedelta(days=2),
+    }
+
+    for label, week_offset in (
+        ("本週", 0),
+        ("這週", 0),
+        ("本星期", 0),
+        ("這星期", 0),
+        ("下週", 1),
+        ("下星期", 1),
+        ("上週", -1),
+        ("上星期", -1),
+    ):
+        base = monday + timedelta(days=7 * week_offset)
+        for zh, index in ZH_WEEKDAY_TO_INDEX.items():
+            result[f"{label}{zh}"] = base + timedelta(days=index)
+
+    return result
+
+
+def _matched_relative_dates(
+    text: str,
+    now: Optional[datetime] = None,
+) -> list[tuple[str, datetime]]:
+    raw = str(text or "")
+    mapping = _relative_date_map(now)
+
+    # 長詞優先，避免「本週末」先匹配成其他片段。
+    matches = []
+    for token in sorted(mapping, key=len, reverse=True):
+        if token in raw:
+            matches.append((token, mapping[token]))
+
+    # 去除同一位置語意重疊，例如同一句不應重複顯示「明天／明日」。
+    deduped = []
+    seen_dates = set()
+    for token, value in matches:
+        key = value.date().isoformat()
+        if key in seen_dates:
+            continue
+        seen_dates.add(key)
+        deduped.append((token, value))
+    return deduped
+
+
+def _annotate_relative_dates(
+    text: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """
+    在交給 Gemini 前加入不可誤解的絕對日期。
+    原句仍保留，方便模型理解自然語意。
+    """
+    raw = str(text or "").strip()
+    matches = _matched_relative_dates(raw, now)
+    if not matches:
+        return raw
+
+    annotations = "；".join(
+        f"{token}＝{value:%Y-%m-%d}（{WEEKDAY_NAME_ZH[value.weekday()]}）"
+        for token, value in matches
+    )
+    return f"{raw}\n\n【程式已確定的日期，不可改算】{annotations}"
+
+
+def _date_reference_table(now: Optional[datetime] = None) -> str:
+    now = (now or datetime.now(TZ)).astimezone(TZ)
+    monday = _week_monday(now)
+    next_monday = monday + timedelta(days=7)
+
+    lines = [
+        f"現在台灣時間：{now:%Y-%m-%d %H:%M:%S}（{WEEKDAY_NAME_ZH[now.weekday()]}）",
+        f"今天：{now:%Y-%m-%d}",
+        "本週（週一至週日）："
+        + "、".join(
+            f"週{WEEKDAY_ZH[index]}={monday + timedelta(days=index):%Y-%m-%d}"
+            for index in range(7)
+        ),
+        "下週（週一至週日）："
+        + "、".join(
+            f"週{WEEKDAY_ZH[index]}={next_monday + timedelta(days=index):%Y-%m-%d}"
+            for index in range(7)
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _is_direct_date_question(text: str) -> bool:
+    raw = re.sub(r"\s+", "", str(text or ""))
+    if not _matched_relative_dates(raw):
+        return False
+    question_terms = (
+        "幾號", "日期", "哪一天", "哪天", "星期幾",
+        "是幾月幾日", "是哪一天", "是什麼日子",
+    )
+    return any(term in raw for term in question_terms)
+
+
+def _direct_date_answer(text: str) -> Optional[str]:
+    matches = _matched_relative_dates(text)
+    if not matches:
+        return None
+    lines = [
+        f"📅 **{token}**是 **{_format_zh_date(value)}**。"
+        for token, value in matches
+    ]
+    return "\n".join(lines)
+
+
 def _event_start_dt(event: dict) -> Optional[datetime]:
     start = event.get("start", {}) or {}
     value = start.get("dateTime")
@@ -460,6 +623,8 @@ class GoogleCalendarService:
         pending: Optional[PendingAction],
     ) -> dict:
         now = datetime.now(TZ)
+        deterministic_user_text = _annotate_relative_dates(user_text, now)
+        date_reference = _date_reference_table(now)
         pending_json = (
             json.dumps(
                 {
@@ -472,12 +637,14 @@ class GoogleCalendarService:
             else "無"
         )
         prompt = f"""
-你是 Google Calendar 意圖解析器。現在是：
-{now.isoformat(timespec="seconds")}
+你是 Google Calendar 意圖解析器。
 時區：{TZ_NAME}
 
+【Python 已計算的日期基準，具有最高優先級】
+{date_reference}
+
 使用者訊息：
-{user_text}
+{deterministic_user_text}
 
 待確認操作：
 {pending_json}
@@ -494,8 +661,9 @@ class GoogleCalendarService:
 - clarify：是行事曆需求但缺少必要資訊。
 
 要求：
-1. 將「今天、明天、後天、下週一」轉成絕對日期。
-2. 使用 RFC3339 +08:00。
+1. 日期不得自行心算；凡訊息中已有「程式已確定的日期」，必須逐字採用。
+2. 「本週」固定指目前週一至週日；「下週」固定指下一個週一至週日。
+3. 使用 RFC3339 +08:00。
 3. 建立事件必須有 title、start、end。
 4. 使用者只給單一時間，例如「明早八點開會」，預設 60 分鐘。
 5. 「八點四十到九點，台南大學，走路運動」：
@@ -538,7 +706,71 @@ class GoogleCalendarService:
                 temperature=0.0,
             ),
         )
-        return _extract_json(response.text)
+        route = _extract_json(response.text)
+        return self._enforce_deterministic_route_dates(
+            route,
+            user_text=user_text,
+            now=now,
+        )
+
+    def _enforce_deterministic_route_dates(
+        self,
+        route: dict,
+        *,
+        user_text: str,
+        now: Optional[datetime] = None,
+    ) -> dict:
+        """
+        Gemini 若仍把「本週五」算錯，程式會把 start/end/search range
+        平移到 Python 算出的正確日期，保留原本時間與時長。
+        """
+        matches = _matched_relative_dates(user_text, now)
+        if not matches or not isinstance(route, dict):
+            return route
+
+        # 一句建立／修改指令通常以第一個明確相對日期為事件日期。
+        target_day = matches[0][1].date()
+
+        def move_iso_to_target(value: Any) -> Any:
+            if not value:
+                return value
+            try:
+                original = _parse_iso(value)
+            except Exception:
+                return value
+            corrected = original.replace(
+                year=target_day.year,
+                month=target_day.month,
+                day=target_day.day,
+            )
+            return _rfc3339(corrected)
+
+        intent = str(route.get("intent", "") or "")
+        if intent == "create":
+            route["start"] = move_iso_to_target(route.get("start"))
+            route["end"] = move_iso_to_target(route.get("end"))
+
+        elif intent == "update":
+            changes = route.get("changes")
+            if isinstance(changes, dict):
+                changes["start"] = move_iso_to_target(changes.get("start"))
+                changes["end"] = move_iso_to_target(changes.get("end"))
+                route["changes"] = changes
+
+        if intent in {"list", "update", "delete"}:
+            # 搜尋區間若有相對日期，至少覆蓋該日全天。
+            start_of_day = datetime.combine(
+                target_day,
+                datetime.min.time(),
+                tzinfo=TZ,
+            )
+            route["search_start"] = _rfc3339(start_of_day)
+            route["search_end"] = _rfc3339(
+                start_of_day + timedelta(days=1)
+            )
+
+        return route
+
 
     async def _revise_pending(
         self,
@@ -546,13 +778,17 @@ class GoogleCalendarService:
         pending: PendingAction,
     ) -> dict:
         now = datetime.now(TZ)
+        deterministic_user_text = _annotate_relative_dates(user_text, now)
+        date_reference = _date_reference_table(now)
         prompt = f"""
-現在是 {now.isoformat(timespec="seconds")}，時區 {TZ_NAME}。
+時區：{TZ_NAME}
+【Python 已計算的日期基準，具有最高優先級】
+{date_reference}
 目前待確認操作：
 {json.dumps({"action": pending.action, "payload": pending.payload}, ensure_ascii=False)}
 
 使用者補充：
-{user_text}
+{deterministic_user_text}
 
 請將補充內容合併進 payload，不可刪除未被修改的欄位。
 若只改開始時間且原事件有固定時長，維持原時長並同步更新 end。
@@ -575,6 +811,39 @@ class GoogleCalendarService:
         payload = result.get("payload")
         if not isinstance(payload, dict):
             raise GoogleCalendarError("無法解析修改後的行程內容")
+
+        matches = _matched_relative_dates(user_text, now)
+        if matches:
+            target_day = matches[0][1].date()
+            for key in ("start", "end"):
+                if payload.get(key):
+                    try:
+                        original = _parse_iso(payload[key])
+                        corrected = original.replace(
+                            year=target_day.year,
+                            month=target_day.month,
+                            day=target_day.day,
+                        )
+                        payload[key] = _rfc3339(corrected)
+                    except Exception:
+                        pass
+            changes = payload.get("changes")
+            if isinstance(changes, dict):
+                for key in ("start", "end"):
+                    if changes.get(key):
+                        try:
+                            original = _parse_iso(changes[key])
+                            corrected = original.replace(
+                                year=target_day.year,
+                                month=target_day.month,
+                                day=target_day.day,
+                            )
+                            changes[key] = _rfc3339(corrected)
+                        except Exception:
+                            pass
+                payload["changes"] = changes
+
+        result["payload"] = payload
         return result
 
     def _format_event(self, event: dict, index: Optional[int] = None) -> str:
@@ -830,6 +1099,13 @@ class GoogleCalendarService:
             return False
 
         pending = self._pending(message)
+
+        # 純日期詢問直接由 Python 回答，不讓一般小夏或 Calendar LLM 心算。
+        if not pending and _is_direct_date_question(user_text):
+            answer = _direct_date_answer(user_text)
+            if answer:
+                await message.channel.send(answer)
+                return True
 
         # 待確認狀態優先採用確定性指令，不把 0/1/2/確認 交給 LLM。
         direct_control = self._direct_control_intent(user_text, pending)
