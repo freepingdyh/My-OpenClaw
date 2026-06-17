@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.4"
+LOBSTER_VERSION = "1.4.5"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -1055,7 +1055,6 @@ business_card_service = BusinessCardService(
 # 📅 Google Calendar 自然語言服務
 google_calendar_service = GoogleCalendarService(
     architect_channel_id=ARCHITECT_CHANNEL_ID,
-    gemini_client=gemini_client,
 )
 
 # 舊測試中的故事頻道也封鎖兩個私人 Bot 介入。
