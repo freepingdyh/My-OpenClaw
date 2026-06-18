@@ -600,6 +600,20 @@ class GoogleCalendarService:
             return None
         return item
 
+    def has_pending_for(self, message) -> bool:
+        """
+        給 lobster_discord.py 做跨服務路由仲裁。
+
+        Calendar 已經顯示預覽、等待 0/1/2、等待候選編號，
+        或等待補充修改內容時，下一則訊息必須優先交回 Calendar，
+        不可先被名片服務的數字選項攔截。
+        """
+        if getattr(message.author, "bot", False):
+            return False
+        if int(getattr(message.channel, "id", 0)) not in self.allowed_channel_ids:
+            return False
+        return self._pending(message) is not None
+
     def _save_pending(
         self,
         message,

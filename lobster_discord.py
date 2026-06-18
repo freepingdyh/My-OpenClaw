@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.7"
+LOBSTER_VERSION = "1.4.8"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -7585,10 +7585,30 @@ async def on_message(message):
     if is_story_channel_or_thread(message.channel):
         return
 
-    # 📇 #架構師專用名片服務必須優先於一般架構師聊天。
-    # 圖片：自動辨識／新增／更新名片。
-    # 文字：LLM 路由後查詢 Google Sheets，包含多輪選號。
-    # 非名片需求才回傳 False，繼續原本小夏流程。
+    # 🧭 多輪服務路由仲裁：
+    # Calendar 若正在等待 0/1/2、候選編號或修改內容，必須優先續接，
+    # 避免純數字先被名片服務誤認為名片候選選號。
+    calendar_pending = False
+    try:
+        calendar_pending = google_calendar_service.has_pending_for(message)
+    except Exception as exc:
+        print(
+            f"⚠️ [GOOGLE_CALENDAR_PENDING_CHECK_ERROR] "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    if calendar_pending:
+        try:
+            if await google_calendar_service.handle_message(message):
+                return
+        except Exception as exc:
+            print(
+                f"⚠️ [GOOGLE_CALENDAR_BRIDGE_ERROR] "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    # 📇 無 Calendar 待辦時，名片服務維持優先：
+    # 圖片自動辨識、新增／更新名片、自然語言查詢與名片候選選號。
     try:
         if await business_card_service.handle_message(message):
             return
@@ -7598,16 +7618,16 @@ async def on_message(message):
             f"{type(exc).__name__}: {exc}"
         )
 
-    # 📅 Calendar 路由位於名片服務之後、一般架構師聊天之前。
-    # 查詢可直接執行；新增、修改、刪除一定先預覽，再等使用者回覆「確認」。
-    try:
-        if await google_calendar_service.handle_message(message):
-            return
-    except Exception as exc:
-        print(
-            f"⚠️ [GOOGLE_CALENDAR_BRIDGE_ERROR] "
-            f"{type(exc).__name__}: {exc}"
-        )
+    # 📅 沒有待確認狀態時，再判斷這一則是不是新的 Calendar 需求。
+    if not calendar_pending:
+        try:
+            if await google_calendar_service.handle_message(message):
+                return
+        except Exception as exc:
+            print(
+                f"⚠️ [GOOGLE_CALENDAR_BRIDGE_ERROR] "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     private_mode = is_private_assistant_workspace(message.channel)
     upload_room = is_private_upload_channel(message.channel)
