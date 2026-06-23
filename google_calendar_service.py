@@ -74,6 +74,96 @@ def _rfc3339(dt: datetime) -> str:
     return dt.astimezone(TZ).isoformat(timespec="seconds")
 
 
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 1440) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+        return max(minimum, min(maximum, value))
+    except (TypeError, ValueError):
+        return default
+
+
+DEFAULT_EVENT_MINUTES = _env_int(
+    "GOOGLE_CALENDAR_DEFAULT_EVENT_MINUTES",
+    60,
+)
+REMINDER_EVENT_MINUTES = _env_int(
+    "GOOGLE_CALENDAR_REMINDER_MINUTES",
+    5,
+)
+
+
+def _has_explicit_time_range(text: str) -> bool:
+    """
+    僅判斷「兩個時間點之間」的區間，避免把「8點到公司」誤認為有結束時間。
+    """
+    raw = str(text or "")
+    time_atom = (
+        r"(?:凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)?"
+        r"\s*\d{1,2}"
+        r"(?:\s*(?:[:：]\s*\d{1,2}|點\s*\d{0,2}\s*分?))?"
+    )
+    pattern = rf"{time_atom}\s*(?:到|至|~|～|－|—|-)\s*{time_atom}"
+    return bool(re.search(pattern, raw))
+
+
+def _auto_duration_minutes(payload: dict, source_text: str) -> int:
+    """
+    使用者未提供區間時：
+    - 提醒／通知類：預設 5 分鐘，避免 Calendar 顯示一小時會議。
+    - 其他行程：預設 60 分鐘。
+    可用環境變數調整：
+    GOOGLE_CALENDAR_DEFAULT_EVENT_MINUTES
+    GOOGLE_CALENDAR_REMINDER_MINUTES
+    """
+    combined = " ".join(
+        [
+            str(source_text or ""),
+            str(payload.get("title", "") or ""),
+            str(payload.get("description", "") or ""),
+        ]
+    )
+    if re.search(r"提醒|通知|記得|別忘|remind", combined, flags=re.I):
+        return REMINDER_EVENT_MINUTES
+    return DEFAULT_EVENT_MINUTES
+
+
+def _apply_automatic_end_time(payload: dict, source_text: str) -> dict:
+    """
+    Google Calendar 必須有 end，但使用者不必輸入結束時間。
+    未明確提供時間區間時，一律由程式以固定規則補 end，
+    並留下 auto_duration_minutes 讓預覽清楚揭示。
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    start_raw = str(payload.get("start", "") or "").strip()
+    if not start_raw:
+        return payload
+
+    explicit_range = _has_explicit_time_range(source_text)
+    end_raw = str(payload.get("end", "") or "").strip()
+
+    # 有明確區間且 end 合法時，完全尊重使用者輸入。
+    if explicit_range and end_raw:
+        try:
+            if _parse_iso(end_raw) > _parse_iso(start_raw):
+                payload.pop("auto_duration_minutes", None)
+                return payload
+        except Exception:
+            pass
+
+    # 沒有區間，或模型回傳了不合法 end：統一用程式預設時長。
+    try:
+        start = _parse_iso(start_raw)
+    except Exception:
+        return payload
+
+    minutes = _auto_duration_minutes(payload, source_text)
+    payload["end"] = _rfc3339(start + timedelta(minutes=minutes))
+    payload["auto_duration_minutes"] = minutes
+    return payload
+
+
 WEEKDAY_ZH = ("一", "二", "三", "四", "五", "六", "日")
 WEEKDAY_NAME_ZH = (
     "星期一", "星期二", "星期三", "星期四",
@@ -678,8 +768,9 @@ class GoogleCalendarService:
 1. 日期不得自行心算；凡訊息中已有「程式已確定的日期」，必須逐字採用。
 2. 「本週」固定指目前週一至週日；「下週」固定指下一個週一至週日。
 3. 使用 RFC3339 +08:00。
-3. 建立事件必須有 title、start、end。
-4. 使用者只給單一時間，例如「明早八點開會」，預設 60 分鐘。
+3. 建立事件必須有 title、start；end 可以留空。
+4. 使用者只給單一開始時間，例如「明早八點開會」或「7/2 早上八點提醒同事」時，
+   不要追問結束時間；end 可留空，Python 會自動補上。
 5. 「八點四十到九點，台南大學，走路運動」：
    title=走路運動，location=台南大學。
 6. 不可將一般技術問題誤判成行事曆。
@@ -721,11 +812,14 @@ class GoogleCalendarService:
             ),
         )
         route = _extract_json(response.text)
-        return self._enforce_deterministic_route_dates(
+        route = self._enforce_deterministic_route_dates(
             route,
             user_text=user_text,
             now=now,
         )
+        if str(route.get("intent", "") or "") == "create":
+            route = _apply_automatic_end_time(route, user_text)
+        return route
 
     def _enforce_deterministic_route_dates(
         self,
@@ -887,8 +981,14 @@ class GoogleCalendarService:
                 "📅 **準備新增行程**\n"
                 f"標題：{payload.get('title') or '（無標題）'}\n"
                 f"日期：{start:%Y-%m-%d}\n"
-                f"時間：{start:%H:%M}–{end:%H:%M}\n"
-                f"地點：{payload.get('location') or '未設定'}\n"
+                f"時間：{start:%H:%M}–{end:%H:%M}"
+                + (
+                    f"（未指定結束時間，系統自動保留 {payload['auto_duration_minutes']} 分鐘）"
+                    if payload.get("auto_duration_minutes")
+                    else ""
+                )
+                + "\n"
+                + f"地點：{payload.get('location') or '未設定'}\n"
                 f"說明：{payload.get('description') or '無'}\n\n"
                 + self._format_numeric_controls("create")
             )
@@ -1280,10 +1380,11 @@ class GoogleCalendarService:
                 "start": str(route.get("start", "") or "").strip(),
                 "end": str(route.get("end", "") or "").strip(),
             }
+            payload = _apply_automatic_end_time(payload, user_text)
             if not payload["title"] or not payload["start"] or not payload["end"]:
                 await message.channel.send(
-                    "📅 我還缺少標題或完整時間，請再說一次，例如："
-                    "「明天早上八點四十到九點，台南大學，走路運動」。"
+                    "📅 我還缺少標題或開始時間，請再說一次，例如："
+                    "「明天早上八點四十，台南大學，走路運動」。"
                 )
                 return True
             try:
