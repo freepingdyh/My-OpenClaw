@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.8"
+LOBSTER_VERSION = "1.4.9"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -1050,6 +1050,12 @@ PUBLIC_STORY_CHANNEL_ID = int(os.environ.get("PUBLIC_STORY_CHANNEL_ID", "1509006
 # 完整邏輯位於 business_card_service.py。
 business_card_service = BusinessCardService(
     architect_channel_id=ARCHITECT_CHANNEL_ID,
+)
+
+# 📇 私人 #助手小夏工作室共用同一份名片資料庫。
+# BusinessCardService 的 session 依 service 實例隔離，因此私人與公開候選選號不會互相干擾。
+private_business_card_service = BusinessCardService(
+    architect_channel_id=PRIVATE_ASSISTANT_CHANNEL_ID,
 )
 
 # 📅 Google Calendar 自然語言服務
@@ -6993,7 +6999,8 @@ async def architect_archive_events_cmd(ctx, mode: str = "completed"):
 async def on_ready():
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
     try:
-        print(f"📇 名片服務橋接：{business_card_service.status_text()}")
+        print(f"📇 公開名片服務橋接：{business_card_service.status_text()}")
+        print(f"📇 私人名片服務橋接：{private_business_card_service.status_text()}")
     except Exception as exc:
         print(f"⚠️ 名片服務狀態讀取失敗：{type(exc).__name__}: {exc}")
     try:
@@ -7607,10 +7614,16 @@ async def on_message(message):
                 f"{type(exc).__name__}: {exc}"
             )
 
-    # 📇 無 Calendar 待辦時，名片服務維持優先：
-    # 圖片自動辨識、新增／更新名片、自然語言查詢與名片候選選號。
+    # 📇 無 Calendar 待辦時，名片服務維持優先。
+    # 公開 #架構師專用與私人 #助手小夏工作室使用同一份 Google Sheets，
+    # 但各自持有獨立多輪候選選號 session，避免數字跨頻道誤判。
+    active_business_card_service = (
+        private_business_card_service
+        if is_private_assistant_workspace(message.channel)
+        else business_card_service
+    )
     try:
-        if await business_card_service.handle_message(message):
+        if await active_business_card_service.handle_message(message):
             return
     except Exception as exc:
         print(
