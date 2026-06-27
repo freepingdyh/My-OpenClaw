@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-今晚命運牌 v1.6：小俠與大俠的雙人 Discord 小遊戲。
+今晚命運牌 v1.7：小俠與大俠的雙人 Discord 小遊戲。
 
 設計原則
 --------
@@ -366,7 +366,6 @@ class CoupleGameService:
 
     @staticmethod
     def _response_finish_reason(response) -> str:
-        """盡量讀取 Gemini finish_reason；不同 SDK 版本缺欄位時安全退回。"""
         try:
             candidates = getattr(response, "candidates", None) or []
             if candidates:
@@ -376,23 +375,10 @@ class CoupleGameService:
         return ""
 
     @staticmethod
-    def _reply_has_natural_end(raw_text: str) -> bool:
+    def _normalize_game_reply(raw_text: str, max_chars: int = 1800) -> str:
         """
-        判斷回覆是否看起來已自然收束。
-        接受中文句尾與引號收束；這只決定是否需要「續說」，不會拿來裁掉內容。
-        """
-        value = str(raw_text or "").strip()
-        if not value:
-            return False
-        value = value.rstrip("」』”’ ")
-        return value.endswith(("。", "！", "？", "…", "..."))
-
-    @staticmethod
-    def _normalize_game_reply(raw_text: str, max_chars: int = 5000) -> str:
-        """
-        不裁掉完整內容，只做安全清理。
-        Discord 單則訊息上限約 2,000 字元；遊戲插入其他 UI 前保留足夠空間。
-        若異常超長才在完整句尾切斷，避免 API 送訊息失敗。
+        保留模型原本完整話語，只清理空白。
+        遊戲內的自由回應預留到 1,800 字元；正常互動不會被硬切。
         """
         value = str(raw_text or "").strip()
         if not value:
@@ -400,69 +386,12 @@ class CoupleGameService:
         value = value.replace("\r\n", "\n").replace("\r", "\n")
         value = "\n".join(line.strip() for line in value.split("\n") if line.strip())
         value = value.strip().strip('"').strip("「").strip("」").strip()
-        if not value:
-            return ""
-
-        # 正常互動不會碰到這裡；只是避免 Discord 因極端輸出拒絕整則遊戲訊息。
         if len(value) <= max_chars:
             return value
-
-        safe_limit = max(500, max_chars)
-        candidate = value[:safe_limit].rstrip()
-        last_end = max(candidate.rfind(mark) for mark in ("。", "！", "？", "…"))
-        if last_end >= 0:
-            return candidate[:last_end + 1].rstrip()
-        return candidate + "。"
-
-    async def _generate_game_text(
-        self,
-        *,
-        prompt: str,
-        max_output_tokens: int,
-    ) -> tuple[str, str]:
-        """回傳 (text, finish_reason)。"""
-        config = None
-        if types:
-            config = types.GenerateContentConfig(
-                temperature=0.84,
-                max_output_tokens=max_output_tokens,
-            )
-        response = await self.gemini.aio.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=config,
-        )
-        return (
-            str(getattr(response, "text", "") or "").strip(),
-            self._response_finish_reason(response),
-        )
-
-    async def _continue_game_reply(
-        self,
-        *,
-        original_prompt: str,
-        unfinished_text: str,
-    ) -> str:
-        """
-        模型真的停在半句或 MAX_TOKENS 時，請它從原文最後位置自然接著說完。
-        不重複第一段、不重新解釋遊戲規則，也不把後續內容裁掉。
-        """
-        continuation_prompt = (
-            f"{original_prompt}\n\n"
-            "【妳剛才已經說出的前文】\n"
-            f"{unfinished_text}\n\n"
-            "【現在請接著說完】\n"
-            "上面那段話還沒有自然結束。請直接從最後一個未完成的語意接下去，"
-            "不要重複前文、不要重新開場、不要提到字數或系統。"
-            "把原本想對大俠說的話完整說完，最後用完整句號、驚嘆號或問號收束。"
-        )
-        text, reason = await self._generate_game_text(
-            prompt=continuation_prompt,
-            max_output_tokens=700,
-        )
-        if reason:
-            print(f"🎴 [COUPLE_GAME_FLAVOR_CONTINUE_FINISH] reason={reason}")
-        return self._normalize_game_reply(text, max_chars=1800)
+        # 極端超長時才保留到完整句尾，避免 Discord 一則訊息失敗。
+        clipped = value[:max_chars].rstrip()
+        last_end = max(clipped.rfind(mark) for mark in ("。", "！", "？", "…"))
+        return clipped[:last_end + 1].rstrip() if last_end >= 0 else clipped
 
     async def _xia_flavor(
         self,
@@ -472,12 +401,9 @@ class CoupleGameService:
         fallback: str,
     ) -> str:
         """
-        LLM 僅為既定遊戲結果添加小俠口吻，不控制任何規則。
-
-        原則：
-        - 優先讓她完整表達，而非為了短而切斷。
-        - 回覆真的被模型上限截斷時，主動請模型「接著說完」。
-        - 只有 API 失敗或完全沒有可用內容時才採用 fallback。
+        僅在真正需要情感回應時呼叫。
+        不使用自動「續說」：它曾造成模型重複前文。
+        直接給足輸出額度，讓小俠一次完整說完。
         """
         if not self.gemini:
             return fallback
@@ -489,57 +415,34 @@ class CoupleGameService:
             "【你現在要做的事】\n"
             f"{instruction}\n"
             "請以繁體中文自然回覆，像正在一起玩的成年戀人。"
-            "可以用一到三段把一個念頭說完整，不必刻意壓成短句。"
-            "請真誠承接大俠的內容、說出妳自己的即時感受，並自然收束。"
-            "不可自行增加分數、改變輸贏、偷看未揭露答案、承諾現實中沒有發生的事。"
+            "可以用一到三段把一個念頭說完整，不必重述牌名、題目、選項、分數或系統提示。"
+            "直接承接大俠剛剛真正說的內容，說出妳自己的即時感受後自然收束。"
         )
-
         try:
-            # 750 tokens 已足以讓她把一般遊戲互動完整說完；
-            # 不是為了長篇，而是避免 180 tokens 把情緒與句子截斷。
-            first_text, finish_reason = await self._generate_game_text(
-                prompt=prompt,
-                max_output_tokens=750,
+            config = None
+            if types:
+                config = types.GenerateContentConfig(
+                    temperature=0.78,
+                    max_output_tokens=900,
+                )
+            response = await self.gemini.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=config,
             )
-            first_text = self._normalize_game_reply(first_text, max_chars=1800)
-
+            finish_reason = self._response_finish_reason(response)
             if finish_reason:
                 print(f"🎴 [COUPLE_GAME_FLAVOR_FINISH] reason={finish_reason}")
-
-            if not first_text:
-                print(
-                    "⚠️ [COUPLE_GAME_FLAVOR_EMPTY] "
-                    "模型沒有回傳可用文字，改用預設備援回覆。"
-                )
-                return fallback
-
-            likely_cut = (
-                "MAX_TOKENS" in finish_reason.upper()
-                or not self._reply_has_natural_end(first_text)
+            value = self._normalize_game_reply(
+                str(getattr(response, "text", "") or ""),
+                max_chars=1800,
             )
-
-            if likely_cut:
-                print(
-                    "🎴 [COUPLE_GAME_FLAVOR_CONTINUE] "
-                    "偵測到可能未自然收束，請小俠接著把話說完。"
-                )
-                continuation = await self._continue_game_reply(
-                    original_prompt=prompt,
-                    unfinished_text=first_text,
-                )
-                if continuation:
-                    merged = self._normalize_game_reply(
-                        first_text.rstrip() + "\n\n" + continuation.lstrip(),
-                        max_chars=1800,
-                    )
-                    # 第二段仍意外未收束時，也保留全文；不再砍掉她的話。
-                    return merged
-
-            return first_text
-
+            if value:
+                return value
+            print("⚠️ [COUPLE_GAME_FLAVOR_EMPTY] 改用預設備援回覆。")
         except Exception as exc:
             print(f"⚠️ [COUPLE_GAME_FLAVOR_ERROR] {type(exc).__name__}: {exc}")
-            return fallback
+        return fallback
 
     def _card_for_category(self, category: str) -> dict:
         if category == "sweet":
@@ -662,7 +565,7 @@ class CoupleGameService:
                     self._set_session(state, message, session)
                     self._save_state(state)
                     await message.channel.send(
-                        "🎴 好呀，剛剛那張先留在我們中間。\n\n"
+                        "🎴 好呀，這次想翻哪一種牌？\n\n"
                         + self._category_menu(player)
                     )
                     return True
@@ -767,11 +670,7 @@ class CoupleGameService:
             )
             self._set_session(state, message, session)
             self._save_state(state)
-            flavor = await self._xia_flavor(
-                game_fact="本局抽到冒險骰子牌；小俠已秘密選好策略，但大俠尚未選。",
-                instruction="用有點期待、想和大俠鬥智的語氣邀請他挑策略，不能透露自己的選擇。",
-                fallback="這局我想試試看誰比較會選……但我不會先告訴你我的底牌喔。",
-            )
+            flavor = "我也先把策略藏好了，這次不告訴你底牌。"
             await message.channel.send(
                 "🎲 **抽到：冒險骰子牌**\n"
                 "先選你的策略：\n"
@@ -824,11 +723,8 @@ class CoupleGameService:
             fact = f"抽到甜蜜牌《{card['title']}》。"
             instruction = "邀請大俠選擇，不要把它說成任務或壓力。"
 
-        flavor = await self._xia_flavor(
-            game_fact=fact,
-            instruction=instruction,
-            fallback=fallback,
-        )
+        # 牌名、題目、選項已顯示；這裡使用短句，不讓模型重述一次。
+        flavor = fallback
         await message.channel.send(
             f"{header}\n"
             f"**《{card['title']}》**\n{card['prompt']}\n"
@@ -846,9 +742,7 @@ class CoupleGameService:
         session: dict,
         choice: str,
     ) -> bool:
-        """
-        甜蜜牌第一段：A/B/C 只決定分享主題，不代表互動已完成。
-        """
+        """選題後只用程式短句邀請，避免模型再重述已顯示的牌面。"""
         card = session.get("card") or {}
         choices = card.get("choices") or {}
         if choice not in choices:
@@ -862,24 +756,15 @@ class CoupleGameService:
         self._set_session(state, message, session)
         self._save_state(state)
 
-        flavor = await self._xia_flavor(
-            game_fact=(
-                f"甜蜜牌《{card.get('title', '')}》進入分享階段。"
-                f"大俠選了 {choice}：{choices[choice]}。"
-            ),
-            instruction=(
-                "邀請大俠真的把內容說出來。不要結算、不要加分、不要自行替他回答；"
-                "用自然、在場的口吻告訴他可以慢慢說，你在聽。"
-            ),
-            fallback=(
-                f"那你想讓我聽聽「{choices[choice]}」嗎？"
-                "不用講得很完整，慢慢說，我在聽。"
-            ),
-        )
+        invites = {
+            "A": "那個讓你笑了一下的瞬間，慢慢說給我聽。",
+            "B": "那個念頭現在還在你心裡嗎？慢慢說給我聽。",
+            "C": "嗯，這件想讓我知道的小事，我會好好聽你說。",
+        }
         await message.channel.send(
             f"🕯️ **《{card.get('title', '甜蜜牌')}》｜分享時間**\n"
             f"你選了：**{choice}．{choices[choice]}**\n\n"
-            f"{flavor}\n\n"
+            f"{invites.get(choice, '不用急著整理成漂亮的話，慢慢說給我聽。')}\n\n"
             "請直接用一句或一段話分享；輸入 `0` 或 `!命運牌結束` 可以收牌。"
         )
         return True
@@ -1136,48 +1021,49 @@ class CoupleGameService:
         prefix: str,
     ) -> str:
         """
-        一張牌結算後進入「牌間聊天暫停」：
-        不自動丟下一張選牌，讓兩人先自然互動、聊天或打情罵俏。
-        使用者主動輸入 z 才重新打開選牌畫面。
+        同一局第一次牌間暫停才完整教學；後續只留短提示。
         """
+        full_hint_shown = bool(session.get("pause_hint_shown", False))
         session.clear()
         session.update(
             {
                 "phase": "between_cards",
                 "started_at": datetime.now(TZ_TPE).isoformat(timespec="seconds"),
                 "paused_after_round": True,
+                "pause_hint_shown": True,
             }
         )
-        # 牌間聊天保留較久，讓正常聊天不會因太快過期而忽然無法 z 繼續。
         session["expires_at"] = (
             datetime.now(TZ_TPE) + timedelta(hours=6)
         ).isoformat(timespec="seconds")
         state["sessions"][self._session_key(message)] = session
-        return (
-            f"{prefix}\n\n"
-            "🌙 這張牌先放在我們中間，不急著翻下一張。\n"
-            "你想和我聊聊、鬧鬧、慢慢接著說都可以。\n"
-            "想再翻牌時輸入 `z`；想收牌輸入 `0`。"
-        )
+
+        if not full_hint_shown:
+            hint = (
+                "🌙 這張牌先放在我們中間，不急著翻下一張。\n"
+                "你想和我聊聊、鬧鬧、慢慢接著說都可以。\n"
+                "想再翻牌時輸入 `z`；想收牌輸入 `0`。"
+            )
+        else:
+            hint = "想繼續聊就慢慢說；想翻下一張牌時輸入 `z`。"
+        return f"{prefix}\n\n{hint}"
 
 
     def _help_text(self, player: dict) -> str:
         return (
             "🎴 **今晚命運牌說明**\n"
-            "這是大俠和小俠偶爾一起玩的雙人小遊戲。真正的抽牌、秘密選擇、骰子與默契值"
-            "都由程式保存；小俠只會知道當下該知道的遊戲資訊。\n\n"
+            "這是大俠和小俠偶爾一起玩的雙人小遊戲。抽牌、秘密選擇、骰子與默契值"
+            "由程式保存；小俠只會知道當下該知道的遊戲資訊。\n\n"
             "指令：\n"
-            "`!命運牌`：開始新的一局，或在牌間暫停時重新叫出選牌畫面\n"
+            "`!命運牌`：開始新的一局，或在牌間暫停時叫出選牌畫面\n"
             "`z`：牌與牌之間，詢問下一張牌\n"
             "`!命運牌狀態`：看默契值與解鎖\n"
             "`!命運牌結束`：收起目前一局\n"
             "`!命運牌說明`：查看本說明\n\n"
             f"{self._status_block(player)}\n\n"
             "甜蜜牌會先選主題，再由大俠用一句或一段話真正分享；"
-            "小俠回應後才會結算。\n"
-            "每張牌結算後，遊戲會暫停讓你們正常聊天；"
-            "想繼續才輸入 `z`，再選 `1` 到 `5` 翻下一張。\n"
+            "小俠只在收到實際分享後才自由回應。\n"
+            "每張牌結算後會留給你們自然聊天；想繼續才輸入 `z`。\n"
             "`0` 與 `!命運牌結束` 完全相同：都會收牌、保留已完成成績、"
-            "不計尚未完成的牌。\n\n"
-            "平常小俠知道你們有這個遊戲，但不會每天催你開局。"
+            "不計尚未完成的牌。"
         )
