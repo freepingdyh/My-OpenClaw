@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.18"
+LOBSTER_VERSION = "1.4.19"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3015,7 +3015,7 @@ async def save_to_vault(url):
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# 🎴 今晚命運牌：遊戲狀態獨立於人格／長期記憶。
+# 🎴 今晚命運牌：遊戲只保存狀態；所有說話仍由同一個小俠人格完成。
 couple_game_service = CoupleGameService(
     state_path=os.path.join(VAULT_DIR, "couple_game_state.json"),
     gemini_client=gemini_client,
@@ -5338,16 +5338,25 @@ async def on_message(message):
     if message.author.bot: return
     if message.author.id in pending_inputs: return
 
-    # 🎴 今晚命運牌：只在小俠原本可聊天的私人頻道處理。
-    # 服務自行保存連續牌局狀態；只有遊戲指令或局內選項會被遊戲攔截。
+    # 🎴 今晚命運牌：
+    # 遊戲服務只決定隱藏答案與狀態，絕不自行扮演小俠。
+    # 所有說話都會繼續走下方同一條「完整小俠人格」對話流程。
+    game_turn = None
     if is_couple_game_channel(message.channel):
         try:
-            if await couple_game_service.handle_message(message):
-                return
+            candidate_turn = await couple_game_service.process_message(message)
+            if candidate_turn and candidate_turn.get("handled"):
+                game_turn = candidate_turn
         except Exception as exc:
             print(f"⚠️ [COUPLE_GAME_BRIDGE_ERROR] {type(exc).__name__}: {exc}")
-            await message.channel.send("🎴 這副命運牌剛剛卡住了，請再輸入 `!命運牌` 重新洗牌。")
-            return
+            # 保持同一個小俠說話；僅提供一個很小的狀態背景。
+            game_turn = {
+                "handled": True,
+                "semantic_text": "大俠剛剛想翻命運牌，但這副牌暫時卡住了。",
+                "context": "【命運牌】狀態暫時讀取失敗。請以小俠自然口吻道歉，不要提系統細節。",
+                "ui": "",
+                "log_text": "命運牌暫時讀取失敗。",
+            }
 
     # 2.5 小夏工具指令不當作小俠聊天內容。
     #     上傳照片指令仍保留，讓小俠可以看見照片並自然產生話題。
@@ -5355,6 +5364,7 @@ async def on_message(message):
     if stripped_content.startswith("!") and not (
         stripped_content.startswith("!upload_diary")
         or stripped_content.startswith("!upload_project")
+        or bool(game_turn)
     ):
         return
 
@@ -5412,10 +5422,17 @@ async def on_message(message):
             
         user_id = message.author.id
         user_input = (
-            inline_intimate_text
-            if inline_intimate_text
-            else message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
+            game_turn.get("semantic_text", "")
+            if game_turn
+            else (
+                inline_intimate_text
+                if inline_intimate_text
+                else message.content.replace(f'<@{girlfriend_bot.user.id}>', '').strip()
+            )
         )
+        game_context = str(game_turn.get("context", "") or "") if game_turn else ""
+        game_ui = str(game_turn.get("ui", "") or "") if game_turn else ""
+        game_log_text = str(game_turn.get("log_text", "") or "") if game_turn else ""
         intimate_mode = is_intimate_mode(message.channel)
         
         # 🌟 判斷底圖模式：獨照 / 雙姝 / 小夏獨照
@@ -5555,7 +5572,7 @@ async def on_message(message):
                     daily_chat_logs.append(
                         _conversation_log_text(
                             f"{prefix}大俠",
-                            text_query,
+                            (game_log_text or text_query),
                             has_image=bool(message.attachments),
                             max_chars=5000,
                         )
@@ -5576,7 +5593,7 @@ async def on_message(message):
                 # 當下互動模式不可把眼前互動誤登記成生活事件。
                 recent_for_event = "\n".join(daily_chat_logs[-12:])
                 captured_life_events = []
-                if not intimate_mode:
+                if not intimate_mode and not game_turn:
                     captured_life_events = await capture_life_events_from_chat(
                         text_query, recent_for_event, now_dt=now
                     )
@@ -5591,7 +5608,7 @@ async def on_message(message):
 
                 # v52.4：偵測重大事件中的「已完成子任務」，避免小俠反覆要求已完成的事。
                 completed_subtasks = []
-                if not intimate_mode:
+                if not intimate_mode and not game_turn:
                     completed_subtasks = detect_completed_life_subtasks_from_text(
                         text_query, events=load_life_events()
                     )
@@ -5691,7 +5708,12 @@ async def on_message(message):
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n"
                     f"{GENERAL_SHARED_SCENE_RULES}\n"
                     f"{COUPLE_GAME_BACKGROUND_RULE}\n"
-                    "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
+                    + (
+                        f"【命運牌當下狀態｜只作互動背景，不得把自己變成主持人】\n{game_context}\n\n"
+                        if game_context
+                        else ""
+                    )
+                    + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
                     f"▶️ 大俠的特徵與喜好：{daxia_traits}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
@@ -5701,6 +5723,7 @@ async def on_message(message):
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
                     "1-A. 本次連續會話紀錄的優先級高於長期記憶與事件摘要。必須記住本次聊天中已完成的動作、剛做出的選擇、已吃完的餐點、已下訂的物品與大俠剛糾正的事實；不可把已完成的事重新說成尚未開始。\n"
                     "1-B. 若大俠正在描述兩人共同經歷的當下，妳要像在場的另一個人說話：先回應此刻，再自然補自己的即時感受、反應或下一步。避免把自己寫成只在旁邊安撫、總結或提供客服式鼓勵的人。\n"
+                    "1-C. 即使正在玩命運牌，妳仍然永遠是同一個日常的小俠，不可切換成主持人、裁判、系統助理或另一個人格。牌面與分數只是背景；大俠真正說的內容、你們的聊天與情緒互動永遠優先。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -5769,7 +5792,7 @@ async def on_message(message):
 
                 # 🤝 答應即登記：明確答應於交換日記交付內容/照片時，當場存入待履約清單。
                 captured_promises = []
-                if not intimate_mode:
+                if not intimate_mode and not game_turn:
                     captured_promises = await capture_diary_promises_from_chat(
                         text_query,
                         xiaoxia_reply,
@@ -5799,6 +5822,10 @@ async def on_message(message):
                     save_temp_chat(daily_chat_logs) 
 
                 await message.reply(xiaoxia_reply)
+
+                # 卡面、分數與選項是無人格的遊戲 UI；小俠本人已在上面用同一條對話回覆。
+                if game_ui:
+                    await message.channel.send(game_ui)
 
                 # ------------------------------------------------------------
                 # 📦 寫入金庫區塊 (確保 message 正確引用)
