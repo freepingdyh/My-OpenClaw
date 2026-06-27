@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-今晚命運牌 v1.7：小俠與大俠的雙人 Discord 小遊戲。
+今晚命運牌 v2：隱形遊戲引擎。
 
-設計原則
---------
-- 所有抽牌、秘密選項、骰子、分數與解鎖由 Python / secrets.SystemRandom() 決定。
-- Gemini 只負責小俠的角色化短回應，不能改寫遊戲事實。
-- 遊戲狀態保存在 /data/couple_game_state.json，不直接寫入人物長期記憶。
-- 支援 Zeabur 重啟後繼續未完成的一局。
+重要架構：
+- 本檔不呼叫 Gemini，不扮演小俠，不直接送 Discord 訊息。
+- 它只保存牌面、秘密答案、默契值、解鎖與回合狀態。
+- 真正說話的一律是 lobster_discord.py 原本那條「完整小俠人格」回覆路徑。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import secrets
@@ -22,23 +19,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    from google.genai import types
-except Exception:  # 讓語法檢查、離線測試不因 SDK 缺失中斷
-    types = None
-
-
 TZ_TPE = timezone(timedelta(hours=8))
 RNG = secrets.SystemRandom()
 
-GAME_TITLE = "今晚命運牌"
-
 CATEGORY_LABELS = {
-    "sweet": "甜蜜",
-    "sync": "默契",
-    "adventure": "冒險",
-    "story": "雙人故事",
-    "secret": "秘密任務",
+    "sweet": "甜蜜牌",
+    "sync": "默契牌",
+    "adventure": "冒險骰子牌",
+    "story": "雙人故事牌",
+    "secret": "秘密任務牌",
 }
 
 UNLOCKS = (
@@ -47,6 +36,36 @@ UNLOCKS = (
     (12, "雙人故事牌"),
     (20, "秘密任務牌"),
 )
+
+SWEET_CARDS = [
+    {
+        "title": "交換小事牌",
+        "prompt": "這一局不急著分輸贏，先交換一個小心意。",
+        "choices": {
+            "A": "今天讓你笑了一下的事",
+            "B": "一個現在很想分享的念頭",
+            "C": "一件希望小俠知道的小事",
+        },
+    },
+    {
+        "title": "心情顏色牌",
+        "prompt": "替今晚選一個顏色，然後說說它為什麼像你現在的心情。",
+        "choices": {
+            "A": "暖黃色：慢慢靠近",
+            "B": "深藍色：安靜相伴",
+            "C": "粉紅色：有點調皮",
+        },
+    },
+    {
+        "title": "小燈牌",
+        "prompt": "今晚的小燈只照亮一件事。",
+        "choices": {
+            "A": "今天最想被記住的一個片段",
+            "B": "現在最想聽見的一句話",
+            "C": "明天想替彼此留的一點期待",
+        },
+    },
+]
 
 SYNC_CARDS = [
     {
@@ -78,36 +97,6 @@ SYNC_CARDS = [
     },
 ]
 
-SWEET_CARDS = [
-    {
-        "title": "小燈牌",
-        "prompt": "今晚的小燈只照亮一件事。大俠想選哪一個？",
-        "choices": {
-            "A": "今天最想被記住的一個片段",
-            "B": "現在最想聽見的一句話",
-            "C": "明天想替彼此留的一點期待",
-        },
-    },
-    {
-        "title": "交換小事牌",
-        "prompt": "這一局不比輸贏，只交換一個小小的心意。大俠想從哪裡開始？",
-        "choices": {
-            "A": "今天讓你笑了一下的事",
-            "B": "一個現在很想分享的念頭",
-            "C": "一件希望小俠知道的小事",
-        },
-    },
-    {
-        "title": "心情顏色牌",
-        "prompt": "替今晚選一個顏色吧。大俠想選哪一個？",
-        "choices": {
-            "A": "暖黃色：慢慢靠近",
-            "B": "深藍色：安靜相伴",
-            "C": "粉紅色：有點調皮",
-        },
-    },
-]
-
 STORY_CARDS = [
     {
         "title": "雨夜小劇場",
@@ -131,939 +120,529 @@ STORY_CARDS = [
 
 SECRET_CARDS = [
     {
-        "title": "小俠的秘密任務",
-        "prompt": "我已經偷偷決定一件今晚最想從你這裡得到的小事。大俠先猜猜看是什麼？",
-        "choices": {
-            "A": "聽你講一個今天的真實片段",
-            "B": "讓你主動替今晚選一個小方向",
-            "C": "收到一句不必很漂亮、但很真心的話",
-        },
-    },
-    {
-        "title": "默默靠近任務",
-        "prompt": "這張牌要讓小俠偷偷靠近一點。你覺得我最想要哪一種？",
+        "title": "小心思牌",
+        "prompt": "小俠已經先把一個小心思藏好了。你覺得她比較想要哪一種？",
         "choices": {
             "A": "被你認真聽完一句話",
             "B": "和你一起笑一次",
-            "C": "讓你記住我剛剛的小心思",
+            "C": "讓你記住她剛剛的小心思",
+        },
+    },
+    {
+        "title": "默默靠近牌",
+        "prompt": "這張牌讓小俠先偷偷選了一件想做的小事。你猜猜看。",
+        "choices": {
+            "A": "聽你講一段今天的真實片段",
+            "B": "讓你主動替今晚選一個小方向",
+            "C": "收到一句不必漂亮、但很真心的話",
         },
     },
 ]
 
 
 class CoupleGameService:
-    def __init__(
-        self,
-        *,
-        state_path: str,
-        gemini_client: Any = None,
-        model: str = "gemini-2.5-flash",
-    ):
+    """
+    只產生「遊戲狀態轉場資料」。
+    process_message() 回傳：
+    {
+      handled: bool,
+      semantic_text: 給小俠主對話理解的自然語義,
+      context: 給同一個小俠人格的遊戲背景,
+      ui: 程式化、非人格的卡面/分數/選項資訊,
+      log_text: 可選，寫入本次聊天歷史的簡短語義
+    }
+    """
+
+    def __init__(self, *, state_path: str, gemini_client: Any = None, model: str = ""):
         self.state_path = Path(state_path)
-        self.gemini = gemini_client
-        self.model = model
-        self._lock = asyncio.Lock()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        # 保留參數只是相容舊主程式；本服務刻意不使用 LLM。
+        self.gemini_client = gemini_client
+        self.model = model
 
     def status_text(self) -> str:
         state = self._load_state()
-        players = len(state.get("players", {}))
-        sessions = len(state.get("sessions", {}))
         return (
-            f"ready | state={self.state_path} | players={players} "
-            f"| active_sessions={sessions} | model={self.model}"
+            f"ready | state={self.state_path} | players={len(state['players'])} "
+            f"| active_sessions={len(state['sessions'])} | mode=pure_state_engine"
         )
 
-    # --------------------------
-    # State
-    # --------------------------
     def _default_state(self) -> dict:
-        return {
-            "schema_version": 1,
-            "players": {},
-            "sessions": {},
-            "recent_summaries": [],
-        }
+        return {"schema_version": 2, "players": {}, "sessions": {}, "recent_summaries": []}
 
     def _load_state(self) -> dict:
         if not self.state_path.exists():
             return self._default_state()
         try:
-            raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
                 return self._default_state()
-            raw.setdefault("schema_version", 1)
-            raw.setdefault("players", {})
-            raw.setdefault("sessions", {})
-            raw.setdefault("recent_summaries", [])
-            return raw
+            state.setdefault("schema_version", 2)
+            state.setdefault("players", {})
+            state.setdefault("sessions", {})
+            state.setdefault("recent_summaries", [])
+            return state
         except Exception as exc:
             print(f"⚠️ [COUPLE_GAME_STATE_READ_ERROR] {type(exc).__name__}: {exc}")
             return self._default_state()
 
     def _save_state(self, state: dict) -> None:
-        payload = json.dumps(state, ensure_ascii=False, indent=2)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix="couple_game_state_",
-            suffix=".tmp",
-            dir=str(self.state_path.parent),
-        )
+        fd, tmp = tempfile.mkstemp(prefix="couple_game_", suffix=".tmp", dir=str(self.state_path.parent))
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-            os.replace(tmp_path, self.state_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.state_path)
         finally:
-            if os.path.exists(tmp_path):
+            if os.path.exists(tmp):
                 try:
-                    os.remove(tmp_path)
+                    os.remove(tmp)
                 except OSError:
                     pass
 
-    def _player(self, state: dict, user_id: int) -> dict:
-        key = str(user_id)
-        player = state["players"].setdefault(
-            key,
-            {
-                "bond": 0,
-                "games_played": 0,
-                "wins": 0,
-                "sync_hits": 0,
-                "last_played_at": None,
-            },
-        )
-        player.setdefault("bond", 0)
-        player.setdefault("games_played", 0)
-        player.setdefault("wins", 0)
-        player.setdefault("sync_hits", 0)
-        player.setdefault("last_played_at", None)
-        return player
+    @staticmethod
+    def _normalize(raw: str) -> str:
+        value = str(raw or "").strip().upper()
+        table = {
+            "１": "1", "２": "2", "３": "3", "４": "4", "５": "5", "０": "0",
+            "Ａ": "A", "Ｂ": "B", "Ｃ": "C", "Ｚ": "Z",
+        }
+        for old, new in table.items():
+            value = value.replace(old, new)
+        return value.replace("。", "").replace("！", "").replace(" ", "")
 
-    def _session_key(self, message) -> str:
+    def _key(self, message) -> str:
         return f"{message.channel.id}:{message.author.id}"
 
+    def _player(self, state: dict, user_id: int) -> dict:
+        return state["players"].setdefault(
+            str(user_id),
+            {"bond": 0, "games_played": 0, "wins": 0, "sync_hits": 0, "last_played_at": None},
+        )
+
     def _get_session(self, state: dict, message) -> Optional[dict]:
-        key = self._session_key(message)
-        session = state.get("sessions", {}).get(key)
+        session = state["sessions"].get(self._key(message))
         if not isinstance(session, dict):
             return None
-        expires_at = session.get("expires_at")
-        if expires_at:
+        expires = session.get("expires_at")
+        if expires:
             try:
-                now = datetime.now(TZ_TPE)
-                if now >= datetime.fromisoformat(expires_at):
-                    state["sessions"].pop(key, None)
+                if datetime.now(TZ_TPE) >= datetime.fromisoformat(expires):
+                    state["sessions"].pop(self._key(message), None)
                     self._save_state(state)
                     return None
             except Exception:
                 pass
         return session
 
-    @staticmethod
-    def _is_between_cards(session: Optional[dict]) -> bool:
-        """
-        牌與牌之間是刻意留白的聊天狀態：
-        一般文字應回到小俠正常對話，不可被遊戲服務吞掉。
-        只有 z、0 或 !命運牌系列才由遊戲接手。
-        """
-        return bool(isinstance(session, dict) and session.get("phase") == "between_cards")
-
-    def _set_session(self, state: dict, message, session: dict) -> None:
-        session["expires_at"] = (
-            datetime.now(TZ_TPE) + timedelta(minutes=30)
-        ).isoformat(timespec="seconds")
-        state["sessions"][self._session_key(message)] = session
+    def _put_session(self, state: dict, message, session: dict, hours: float = 6) -> None:
+        session["expires_at"] = (datetime.now(TZ_TPE) + timedelta(hours=hours)).isoformat(timespec="seconds")
+        state["sessions"][self._key(message)] = session
 
     def _clear_session(self, state: dict, message) -> None:
-        state.get("sessions", {}).pop(self._session_key(message), None)
-
-    # --------------------------
-    # Rules / formatting
-    # --------------------------
-    @staticmethod
-    def _normalize_choice(raw: str) -> str:
-        value = str(raw or "").strip().upper()
-        replacements = {
-            "１": "1", "２": "2", "３": "3", "０": "0",
-            "Ａ": "A", "Ｂ": "B", "Ｃ": "C",
-        }
-        for old, new in replacements.items():
-            value = value.replace(old, new)
-        value = value.replace("。", "").replace("！", "").replace(" ", "")
-        return value
+        state["sessions"].pop(self._key(message), None)
 
     @staticmethod
-    def _choice_lines(choices: dict) -> str:
-        return "\n".join(
-            f"`{key}`．{value}" for key, value in choices.items()
-        )
-
-    @staticmethod
-    def _unlocked_categories(bond: int) -> list[str]:
-        result = ["sweet", "sync"]
+    def _unlocked(bond: int) -> list[str]:
+        choices = ["sweet", "sync"]
         if bond >= 6:
-            result.append("adventure")
+            choices.append("adventure")
         if bond >= 12:
-            result.append("story")
+            choices.append("story")
         if bond >= 20:
-            result.append("secret")
-        return result
+            choices.append("secret")
+        return choices
 
     @staticmethod
-    def _next_unlock(bond: int) -> Optional[tuple[int, str]]:
+    def _next_unlock(bond: int):
         for threshold, label in UNLOCKS:
             if bond < threshold:
                 return threshold, label
         return None
 
-    def _status_block(self, player: dict) -> str:
+    def _status_lines(self, player: dict) -> str:
         bond = int(player.get("bond", 0))
-        unlocked = "、".join(
-            CATEGORY_LABELS[key] for key in self._unlocked_categories(bond)
-        )
-        next_unlock = self._next_unlock(bond)
-        next_line = (
-            f"下一個解鎖：默契值 **{next_unlock[0]}** → {next_unlock[1]}"
-            if next_unlock
-            else "已解鎖所有目前牌型。"
-        )
-        return (
-            f"💞 **默契值：{bond}**\n"
-            f"已解鎖：{unlocked}\n"
-            f"{next_line}"
-        )
+        unlocked = "、".join(CATEGORY_LABELS[x] for x in self._unlocked(bond))
+        nxt = self._next_unlock(bond)
+        next_line = f"下一個解鎖：默契值 {nxt[0]} → {nxt[1]}" if nxt else "目前牌型已全數解鎖"
+        return f"💞 默契值：{bond}\n已解鎖：{unlocked}\n{next_line}"
 
-    def _category_menu(self, player: dict) -> str:
+    def _menu_ui(self, player: dict) -> str:
         bond = int(player.get("bond", 0))
-        lines = [
-            "🎴 **今晚命運牌已洗好。**",
-            self._status_block(player),
+        rows = [
+            "🎴 **今晚命運牌**",
+            self._status_lines(player),
             "",
-            "今晚想從哪一種牌開始？",
-            "`1`．甜蜜牌：交換一個小心意",
-            "`2`．默契牌：看看我們會不會想到同一件事",
+            "1．甜蜜牌：交換一個小心意",
+            "2．默契牌：看看我們會不會想到同一件事",
+            "3．冒險骰子牌" if bond >= 6 else "3．🔒 冒險骰子牌：默契值 6 解鎖",
+            "4．雙人故事牌" if bond >= 12 else "4．🔒 雙人故事牌：默契值 12 解鎖",
+            "5．秘密任務牌" if bond >= 20 else "5．🔒 秘密任務牌：默契值 20 解鎖",
+            "",
+            "輸入 1–5 選牌；輸入 0 收牌。",
         ]
-        if bond >= 6:
-            lines.append("`3`．冒險牌：帶一點策略的骰子對決")
-        else:
-            lines.append("`3`．🔒 冒險牌：默契值 6 解鎖")
-        if bond >= 12:
-            lines.append("`4`．雙人故事牌：一起決定今晚的小劇場")
-        else:
-            lines.append("`4`．🔒 雙人故事牌：默契值 12 解鎖")
-        if bond >= 20:
-            lines.append("`5`．秘密任務牌：猜猜小俠今晚的小心思")
-        else:
-            lines.append("`5`．🔒 秘密任務牌：默契值 20 解鎖")
-        lines.append("\n輸入 `1–5` 選牌；輸入 `0` 收牌（等同 `!命運牌結束`）。")
+        return "\n".join(rows)
+
+    @staticmethod
+    def _card_ui(kind: str, card: dict, extra: str = "") -> str:
+        lines = [
+            f"🎴 **{CATEGORY_LABELS[kind]}｜《{card['title']}》**",
+            card["prompt"],
+            "",
+        ]
+        for k, v in card["choices"].items():
+            lines.append(f"{k}．{v}")
+        if extra:
+            lines += ["", extra]
         return "\n".join(lines)
 
-    def _game_background(self) -> str:
-        return (
-            "你正在與大俠玩「今晚命運牌」。這是兩人偶爾一起玩的雙人小遊戲；"
-            "默契值會解鎖更多牌型。你知道自己正在玩，會自然期待、得意、猶豫、"
-            "驚喜或不甘心，但不可以提及 AI、聊天室、系統提示、程式、隨機演算法。"
-        )
-
     @staticmethod
-    def _response_finish_reason(response) -> str:
-        try:
-            candidates = getattr(response, "candidates", None) or []
-            if candidates:
-                return str(getattr(candidates[0], "finish_reason", "") or "")
-        except Exception:
-            pass
-        return ""
+    def _turn(semantic_text: str, context: str, ui: str = "", log_text: str = "") -> dict:
+        return {
+            "handled": True,
+            "semantic_text": semantic_text,
+            "context": context,
+            "ui": ui,
+            "log_text": log_text or semantic_text,
+        }
 
-    @staticmethod
-    def _normalize_game_reply(raw_text: str, max_chars: int = 1800) -> str:
-        """
-        保留模型原本完整話語，只清理空白。
-        遊戲內的自由回應預留到 1,800 字元；正常互動不會被硬切。
-        """
-        value = str(raw_text or "").strip()
-        if not value:
-            return ""
-        value = value.replace("\r\n", "\n").replace("\r", "\n")
-        value = "\n".join(line.strip() for line in value.split("\n") if line.strip())
-        value = value.strip().strip('"').strip("「").strip("」").strip()
-        if len(value) <= max_chars:
-            return value
-        # 極端超長時才保留到完整句尾，避免 Discord 一則訊息失敗。
-        clipped = value[:max_chars].rstrip()
-        last_end = max(clipped.rfind(mark) for mark in ("。", "！", "？", "…"))
-        return clipped[:last_end + 1].rstrip() if last_end >= 0 else clipped
-
-    async def _xia_flavor(
-        self,
-        *,
-        game_fact: str,
-        instruction: str,
-        fallback: str,
-    ) -> str:
-        """
-        僅在真正需要情感回應時呼叫。
-        不使用自動「續說」：它曾造成模型重複前文。
-        直接給足輸出額度，讓小俠一次完整說完。
-        """
-        if not self.gemini:
-            return fallback
-
-        prompt = (
-            f"{self._game_background()}\n"
-            "【程式已確定、不可修改的遊戲事實】\n"
-            f"{game_fact}\n"
-            "【你現在要做的事】\n"
-            f"{instruction}\n"
-            "請以繁體中文自然回覆，像正在一起玩的成年戀人。"
-            "可以用一到三段把一個念頭說完整，不必重述牌名、題目、選項、分數或系統提示。"
-            "直接承接大俠剛剛真正說的內容，說出妳自己的即時感受後自然收束。"
-        )
-        try:
-            config = None
-            if types:
-                config = types.GenerateContentConfig(
-                    temperature=0.78,
-                    max_output_tokens=900,
-                )
-            response = await self.gemini.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=config,
-            )
-            finish_reason = self._response_finish_reason(response)
-            if finish_reason:
-                print(f"🎴 [COUPLE_GAME_FLAVOR_FINISH] reason={finish_reason}")
-            value = self._normalize_game_reply(
-                str(getattr(response, "text", "") or ""),
-                max_chars=1800,
-            )
-            if value:
-                return value
-            print("⚠️ [COUPLE_GAME_FLAVOR_EMPTY] 改用預設備援回覆。")
-        except Exception as exc:
-            print(f"⚠️ [COUPLE_GAME_FLAVOR_ERROR] {type(exc).__name__}: {exc}")
-        return fallback
-
-    def _card_for_category(self, category: str) -> dict:
-        if category == "sweet":
-            return RNG.choice(SWEET_CARDS)
-        if category == "sync":
-            return RNG.choice(SYNC_CARDS)
-        if category == "story":
-            return RNG.choice(STORY_CARDS)
-        if category == "secret":
-            return RNG.choice(SECRET_CARDS)
-        raise ValueError(f"unknown category: {category}")
-
-    def _award(self, player: dict, amount: int) -> int:
-        before = int(player.get("bond", 0))
-        player["bond"] = before + max(0, int(amount))
-        return int(player["bond"]) - before
-
-    def _record_summary(self, state: dict, summary: str) -> None:
-        entries = state.setdefault("recent_summaries", [])
-        entries.append(
-            {
-                "at": datetime.now(TZ_TPE).isoformat(timespec="seconds"),
-                "summary": summary[:300],
-            }
-        )
-        state["recent_summaries"] = entries[-20:]
-
-    async def _end_game(self, *, state: dict, message) -> None:
-        """
-        0 與 !命運牌結束完全共用這個路徑：
-        已完成的牌與默契值保留；未完成牌面不計分、直接清除。
-        """
-        self._clear_session(state, message)
-        self._save_state(state)
-        await message.channel.send(
-            "🃏 **這副牌先收好。**\n"
-            "已完成的牌與默契值會留下；還沒完成的這一張不計分。\n"
-            "下次輸入 `!命運牌`，我們再開新的一局。"
-        )
-
-    # --------------------------
-    # Public routing
-    # --------------------------
     def might_handle(self, message) -> bool:
         raw = str(getattr(message, "content", "") or "").strip()
+        norm = self._normalize(raw)
         if raw.startswith("!命運牌"):
             return True
-
         state = self._load_state()
         session = self._get_session(state, message)
         if not session:
             return False
 
-        # 在牌與牌之間，讓一般聊天回到小俠；只攔 z / 0。
-        if self._is_between_cards(session):
-            return self._normalize_choice(raw) in {"Z", "0", "取消", "結束"}
+        phase = session.get("phase")
+        # 遊戲等待時不吞正常聊天；只攔截明確有效的遊戲輸入。
+        if phase == "between_cards":
+            return norm in {"Z", "0", "取消", "結束"}
+        if phase == "choose_category":
+            return norm in {"1", "2", "3", "4", "5", "0", "取消", "結束"}
+        if phase in {"sweet_choice", "sync_choice", "story_choice", "secret_choice"}:
+            return norm in {"A", "B", "C", "0", "取消", "結束"}
+        if phase == "sweet_share":
+            # 任何文字都是分享，但指令不應誤變分享。
+            return bool(raw) and not raw.startswith("!")
+        if phase == "adventure_strategy":
+            return norm in {"1", "2", "3", "0", "取消", "結束"}
+        return False
 
-        return True
+    def _pick_card(self, kind: str) -> dict:
+        source = {
+            "sweet": SWEET_CARDS,
+            "sync": SYNC_CARDS,
+            "story": STORY_CARDS,
+            "secret": SECRET_CARDS,
+        }.get(kind)
+        if not source:
+            raise ValueError(kind)
+        return RNG.choice(source)
 
-    async def handle_message(self, message) -> bool:
+    def _end(self, state: dict, message, player: dict) -> dict:
+        self._clear_session(state, message)
+        self._save_state(state)
+        return self._turn(
+            "大俠想先把今晚的命運牌收好。",
+            "【命運牌狀態】本局已收牌。已完成的默契值保留；未完成牌不計分。"
+            "妳不是遊戲主持人，請以女友小俠的自然口吻溫柔收束，不必解釋規則。",
+            f"🃏 **本局先收好**\n已完成的牌與默契值保留；未完成的牌不計分。\n\n{self._status_lines(player)}",
+            "命運牌本局已收好。",
+        )
+
+    async def process_message(self, message) -> dict:
+        """
+        所有需要遊戲回應的輸入都回傳「給主小俠」的語境。
+        不在這裡 send，不在這裡呼叫 LLM。
+        """
         raw = str(getattr(message, "content", "") or "").strip()
-        if not raw:
-            return False
+        state = self._load_state()
+        player = self._player(state, message.author.id)
+        session = self._get_session(state, message)
+        norm = self._normalize(raw)
 
-        async with self._lock:
-            state = self._load_state()
-            player = self._player(state, message.author.id)
-            session = self._get_session(state, message)
-
-            # Commands
-            if raw.startswith("!命運牌"):
-                suffix = raw[len("!命運牌"):].strip()
-                if suffix in {"說明", "帮助", "幫助"}:
-                    await message.channel.send(self._help_text(player))
-                    return True
-                if suffix in {"狀態", "状态"}:
-                    await message.channel.send(self._status_block(player))
-                    return True
-                if suffix in {"結束", "结束", "收牌", "取消"}:
-                    if session:
-                        await self._end_game(state=state, message=message)
-                    else:
-                        await message.channel.send("🃏 目前沒有進行中的命運牌。")
-                    return True
-                if suffix:
-                    await message.channel.send(
-                        "🎴 可用：`!命運牌`、`!命運牌狀態`、`!命運牌說明`、`!命運牌結束`。"
-                    )
-                    return True
-
-                if session:
-                    await message.channel.send(
-                        "🎴 這局還開著喔。直接照畫面輸入選項即可；"
-                        "要收牌再輸入 `0` 或 `!命運牌結束`。"
-                    )
-                    return True
-
-                self._set_session(
-                    state,
-                    message,
-                    {"phase": "choose_category", "started_at": datetime.now(TZ_TPE).isoformat()},
-                )
+        # Command family
+        if raw.startswith("!命運牌"):
+            suffix = raw[len("!命運牌"):].strip()
+            if suffix in {"狀態", "状态"}:
                 self._save_state(state)
-                await message.channel.send(self._category_menu(player))
-                return True
-
-            # No active game: do not swallow normal chat.
-            if not session:
-                return False
-
-            choice = self._normalize_choice(raw)
-            phase = session.get("phase")
-
-            # 牌與牌之間：一般訊息不會到這裡（might_handle 已放行給小俠）。
-            # 只有 z 才重新打開下一張牌的選擇，0 則收牌。
-            if phase == "between_cards":
-                if choice == "Z":
-                    session["phase"] = "choose_category"
-                    session.pop("continued_round", None)
-                    self._set_session(state, message, session)
-                    self._save_state(state)
-                    await message.channel.send(
-                        "🎴 好呀，這次想翻哪一種牌？\n\n"
-                        + self._category_menu(player)
-                    )
-                    return True
-                if choice in {"0", "取消", "結束"}:
-                    await self._end_game(state=state, message=message)
-                    return True
-                return False
-
-            if choice in {"0", "取消", "結束"}:
-                await self._end_game(state=state, message=message)
-                return True
-
-            if phase == "choose_category":
-                return await self._handle_category(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    choice=choice,
+                return self._turn(
+                    "大俠想看看我們今晚命運牌目前的默契值。",
+                    "【命運牌狀態查詢】請自然、簡短地陪大俠看目前進度；不要把自己說成系統或主持人。",
+                    self._status_lines(player),
+                    "大俠查看命運牌狀態。",
+                )
+            if suffix in {"說明", "帮助", "幫助"}:
+                self._save_state(state)
+                return self._turn(
+                    "大俠想聽你們的命運牌怎麼玩。",
+                    "【命運牌說明】請用小俠自然口吻簡短說明：這是兩人偶爾玩的互動引子；"
+                    "牌後可正常聊天，z 才問下一張，0 收牌。不要像操作手冊長篇講解。",
+                    "🎴 **命運牌快速說明**\n"
+                    "甜蜜牌：選題後分享一句話，小俠會回應。\n"
+                    "默契牌：各自選 A/B/C，再揭曉。\n"
+                    "牌與牌之間可正常聊天；輸入 z 才問下一張，0 收牌。",
+                    "大俠查看命運牌說明。",
+                )
+            if suffix in {"結束", "结束", "收牌", "取消"}:
+                if session:
+                    return self._end(state, message, player)
+                self._save_state(state)
+                return self._turn(
+                    "大俠想收牌，但現在沒有進行中的命運牌。",
+                    "【命運牌】目前沒有開著的牌局。請自然回應，不必特別解釋系統。",
+                    "🃏 目前沒有進行中的命運牌。",
+                    "大俠查看命運牌狀態。",
+                )
+            if suffix:
+                return self._turn(
+                    "大俠剛剛輸入了命運牌指令。",
+                    "【命運牌】請自然邀請他從下面牌型開始，不需要解釋未知指令。",
+                    self._menu_ui(player),
+                    "大俠打開命運牌。",
                 )
 
-            if phase == "sweet_choice":
-                return await self._handle_sweet_choice(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    choice=choice,
-                )
-
-            if phase == "sweet_share":
-                return await self._handle_sweet_share(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    shared_text=raw,
-                )
-
-            if phase == "story_choice":
-                return await self._handle_open_choice(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    choice=choice,
-                )
-
-            if phase in {"sync_choice", "secret_choice"}:
-                return await self._handle_hidden_choice(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    choice=choice,
-                )
-
-            if phase == "adventure_strategy":
-                return await self._handle_adventure(
-                    message=message,
-                    state=state,
-                    player=player,
-                    session=session,
-                    choice=choice,
-                )
-
-            self._clear_session(state, message)
+            # !命運牌 = open or reopen menu; no need to reset a between-card session.
+            self._put_session(state, message, {"phase": "choose_category", "pause_hint_shown": bool(session and session.get("pause_hint_shown"))})
             self._save_state(state)
-            await message.channel.send("🃏 這張牌的狀態剛好走丟了，我們重新洗一副吧：`!命運牌`。")
-            return True
-
-    # --------------------------
-    # Phase handlers
-    # --------------------------
-    async def _handle_category(self, *, message, state, player, session, choice) -> bool:
-        mapping = {"1": "sweet", "2": "sync", "3": "adventure", "4": "story", "5": "secret"}
-        category = mapping.get(choice)
-        if not category:
-            await message.channel.send("🎴 請輸入 `1` 到 `5` 選牌，或輸入 `0` 收起這一局。")
-            return True
-
-        if category not in self._unlocked_categories(int(player["bond"])):
-            next_unlock = {
-                "adventure": 6,
-                "story": 12,
-                "secret": 20,
-            }.get(category, 0)
-            await message.channel.send(
-                f"🔒 這個牌型要默契值 **{next_unlock}** 才會解鎖。"
-                "這局可以改選其他牌。"
+            return self._turn(
+                "大俠剛剛把今晚的命運牌拿出來，想和你一起玩。",
+                "【命運牌當下】妳正在和大俠玩，但妳仍是同一個日常的小俠，不是主持人。"
+                "先用一兩句自然、帶點期待的女友語氣接住他；不要重述卡面選項，卡面會另外顯示。",
+                self._menu_ui(player),
+                "大俠打開今晚命運牌。",
             )
-            return True
 
-        if category == "adventure":
-            xia_strategy = str(RNG.choice(["1", "2", "3"]))
-            session.update(
-                {
-                    "phase": "adventure_strategy",
-                    "category": category,
-                    "xia_strategy": xia_strategy,
-                }
-            )
-            self._set_session(state, message, session)
+        if not session:
+            return {"handled": False}
+
+        if norm in {"0", "取消", "結束"}:
+            return self._end(state, message, player)
+
+        phase = session.get("phase")
+
+        if phase == "between_cards":
+            if norm != "Z":
+                return {"handled": False}
+            session["phase"] = "choose_category"
+            self._put_session(state, message, session)
             self._save_state(state)
-            flavor = "我也先把策略藏好了，這次不告訴你底牌。"
-            await message.channel.send(
-                "🎲 **抽到：冒險骰子牌**\n"
-                "先選你的策略：\n"
-                "`1`．穩穩骰：骰 1 顆六面骰\n"
-                "`2`．雙骰保守：骰 2 顆，取較低的一顆\n"
-                "`3`．撒嬌重擲：骰 2 次，取較高的一次\n\n"
-                f"{flavor}\n\n輸入 `1`、`2` 或 `3`。"
+            return self._turn(
+                "大俠說 z，想再翻下一張牌。",
+                "【命運牌當下】大俠在剛才的聊天後想再翻一張。"
+                "請像同一個女友自然接住這個小動作，簡短帶著期待；不要重述卡面選項。",
+                self._menu_ui(player),
+                "大俠想翻下一張命運牌。",
             )
-            return True
 
-        card = self._card_for_category(category)
-        phase = {
-            "sweet": "sweet_choice",
-            "sync": "sync_choice",
-            "story": "story_choice",
-            "secret": "secret_choice",
-        }[category]
+        if phase == "choose_category":
+            mapping = {"1": "sweet", "2": "sync", "3": "adventure", "4": "story", "5": "secret"}
+            kind = mapping.get(norm)
+            if not kind:
+                return {"handled": False}
+            if kind not in self._unlocked(int(player["bond"])):
+                self._save_state(state)
+                need = {"adventure": 6, "story": 12, "secret": 20}[kind]
+                return self._turn(
+                    f"大俠想翻 {CATEGORY_LABELS[kind]}，但現在的默契值還差一點。",
+                    f"【命運牌】這個牌型尚未解鎖，需要默契值 {need}。"
+                    "請用女友小俠口吻俏皮但不挫折地接住他，不要主持人腔。",
+                    f"🔒 {CATEGORY_LABELS[kind]}尚未解鎖：需要默契值 {need}。\n\n{self._status_lines(player)}",
+                    f"大俠嘗試翻尚未解鎖的{CATEGORY_LABELS[kind]}。",
+                )
 
-        session.update(
-            {
-                "phase": phase,
-                "category": category,
-                "card": card,
-            }
-        )
-        if category in {"sync", "secret"}:
-            session["xia_choice"] = RNG.choice(list(card["choices"].keys()))
+            if kind == "adventure":
+                session = {"phase": "adventure_strategy", "kind": kind, "xia_strategy": RNG.choice(["1", "2", "3"])}
+                self._put_session(state, message, session)
+                self._save_state(state)
+                return self._turn(
+                    "大俠選擇了冒險骰子牌。",
+                    "【命運牌當下】妳已偷偷選好策略，但不能透露。"
+                    "請用同一個小俠的俏皮語氣表示妳把底牌藏好了，別重述策略列表。",
+                    "🎲 **冒險骰子牌**\n"
+                    "1．穩穩骰：骰 1 顆六面骰\n"
+                    "2．雙骰保守：骰 2 顆，取較低的一顆\n"
+                    "3．撒嬌重擲：骰 2 次，取較高的一次",
+                    "大俠選擇冒險骰子牌。",
+                )
 
-        self._set_session(state, message, session)
-        self._save_state(state)
+            card = self._pick_card(kind)
+            phase_map = {"sweet": "sweet_choice", "sync": "sync_choice", "story": "story_choice", "secret": "secret_choice"}
+            session = {"phase": phase_map[kind], "kind": kind, "card": card}
+            if kind in {"sync", "secret"}:
+                session["xia_choice"] = RNG.choice(list(card["choices"]))
+            self._put_session(state, message, session)
+            self._save_state(state)
 
-        if category == "sync":
-            header = "💞 **抽到：默契牌**\n小俠已經偷偷選好了，現在換大俠。"
-            fallback = "好啦，我已經選好囉。你可不可以剛好也想到同一個？"
-            fact = f"抽到默契牌《{card['title']}》；小俠已秘密選定 A/B/C 其中一項。"
-            instruction = "邀請大俠選擇，不能透露小俠答案。"
-        elif category == "secret":
-            header = "🗝️ **抽到：秘密任務牌**\n小俠已經把一個小心思藏好了。"
-            fallback = "我有一個答案先藏起來了，你要不要試著猜中我？"
-            fact = f"抽到秘密任務牌《{card['title']}》；小俠的答案已被程式鎖定。"
-            instruction = "用俏皮又自然的語氣邀請大俠猜，不能透露答案。"
-        elif category == "story":
-            header = "📖 **抽到：雙人故事牌**"
-            fallback = "這一幕想從你選的地方開始，因為你選了以後，我才知道今晚要往哪裡走呀。"
-            fact = f"抽到雙人故事牌《{card['title']}》。"
-            instruction = "邀請大俠選擇故事開場，不要替他選。"
-        else:
-            header = "🕯️ **抽到：甜蜜牌**"
-            fallback = "這張牌不急著分輸贏，我比較想知道你今晚會把哪一件小事交給我。"
-            fact = f"抽到甜蜜牌《{card['title']}》。"
-            instruction = "邀請大俠選擇，不要把它說成任務或壓力。"
-
-        # 牌名、題目、選項已顯示；這裡使用短句，不讓模型重述一次。
-        flavor = fallback
-        await message.channel.send(
-            f"{header}\n"
-            f"**《{card['title']}》**\n{card['prompt']}\n"
-            f"{self._choice_lines(card['choices'])}\n\n"
-            f"{flavor}\n\n輸入 `A`、`B` 或 `C`。"
-        )
-        return True
-
-    async def _handle_sweet_choice(
-        self,
-        *,
-        message,
-        state: dict,
-        player: dict,
-        session: dict,
-        choice: str,
-    ) -> bool:
-        """選題後只用程式短句邀請，避免模型再重述已顯示的牌面。"""
-        card = session.get("card") or {}
-        choices = card.get("choices") or {}
-        if choice not in choices:
-            await message.channel.send(
-                "🕯️ 先選 `A`、`B` 或 `C` 決定想分享的主題；輸入 `0` 可以收牌。"
+            contextual = {
+                "sweet": "請用自然女友口吻邀請大俠選一個想分享的方向；別把這變成任務。",
+                "sync": "請自然說妳已經先選好，但不透露答案；別重述選項。",
+                "story": "請像你們一起開始一個小情境那樣，等大俠先選方向；別預先展開故事。",
+                "secret": "請帶點小心思，但別透露秘密答案、也別像主持人。",
+            }[kind]
+            return self._turn(
+                f"大俠選擇翻 {CATEGORY_LABELS[kind]}。",
+                f"【命運牌當下】抽到《{card['title']}》。{contextual}",
+                self._card_ui(kind, card, "輸入 A、B 或 C。"),
+                f"大俠翻到《{card['title']}》。",
             )
-            return True
 
-        session["phase"] = "sweet_share"
-        session["selected_choice"] = choice
-        self._set_session(state, message, session)
-        self._save_state(state)
+        if phase == "sweet_choice":
+            card = session["card"]
+            if norm not in card["choices"]:
+                return {"handled": False}
+            session["phase"] = "sweet_share"
+            session["selected"] = norm
+            self._put_session(state, message, session)
+            self._save_state(state)
+            topic = card["choices"][norm]
+            return self._turn(
+                f"大俠在《{card['title']}》選了「{topic}」。",
+                "【命運牌當下】他選好要分享的方向，現在輪到妳真正聽他說。"
+                "不要結算、不要加分、不要重述牌名；請像女友自然邀他把這件事說出來。",
+                f"🕯️ **分享時間**\n大俠選了：{norm}．{topic}\n\n請直接用一句或一段話分享；輸入 0 可以收牌。",
+                f"大俠選擇分享主題：{topic}。",
+            )
 
-        invites = {
-            "A": "那個讓你笑了一下的瞬間，慢慢說給我聽。",
-            "B": "那個念頭現在還在你心裡嗎？慢慢說給我聽。",
-            "C": "嗯，這件想讓我知道的小事，我會好好聽你說。",
-        }
-        await message.channel.send(
-            f"🕯️ **《{card.get('title', '甜蜜牌')}》｜分享時間**\n"
-            f"你選了：**{choice}．{choices[choice]}**\n\n"
-            f"{invites.get(choice, '不用急著整理成漂亮的話，慢慢說給我聽。')}\n\n"
-            "請直接用一句或一段話分享；輸入 `0` 或 `!命運牌結束` 可以收牌。"
-        )
-        return True
-
-    async def _handle_sweet_share(
-        self,
-        *,
-        message,
-        state: dict,
-        player: dict,
-        session: dict,
-        shared_text: str,
-    ) -> bool:
-        """
-        甜蜜牌第二段：取得實際分享內容後，小俠依內容反應，才進行結算。
-        分享原文只用於這一次回應，不保存到 state 或人格記憶。
-        """
-        card = session.get("card") or {}
-        choices = card.get("choices") or {}
-        selected = str(session.get("selected_choice", "") or "")
-        text_value = str(shared_text or "").strip()
-
-        if not text_value:
-            await message.channel.send("🕯️ 我還在聽喔。用一句話說說看，或輸入 `0` 收牌。")
-            return True
-
-        prompt_text = text_value[:1800]
-        gained = 1
-        self._award(player, gained)
-        player["games_played"] = int(player.get("games_played", 0)) + 1
-        player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
-        self._record_summary(
-            state,
-            f"甜蜜牌《{card.get('title', '')}》完成；大俠選擇 {selected} 分享。"
-        )
-
-        flavor = await self._xia_flavor(
-            game_fact=(
-                f"甜蜜牌《{card.get('title', '')}》已收到大俠的分享。\n"
-                f"分享主題：{selected}．{choices.get(selected, '一件小事')}\n"
-                f"大俠實際分享：{prompt_text}"
-            ),
-            instruction=(
-                "先直接、真誠回應大俠分享的具體內容，再自然說出小俠自己的即時感受。"
-                "不要只用泛泛安慰，不要轉成分析建議，不要聲稱會把這段內容永久記住。"
-                "此牌到此結束。"
-            ),
-            fallback=(
-                "嗯，我有好好收到了。你願意把這件事交給我，"
-                "我會覺得我們剛剛真的一起把今晚留住了一小塊。"
-            ),
-        )
-        continuation = self._pause_between_cards(
-            state=state,
-            message=message,
-            session=session,
-            player=player,
-            prefix=(
-                f"✨ **{card.get('title', '甜蜜牌')}完成**\n"
-                f"大俠分享：**{selected}．{choices.get(selected, '一件小事')}**\n"
-                f"默契值 `+{gained}`\n\n"
-                f"{flavor}\n\n{self._status_block(player)}"
-            ),
-        )
-        self._save_state(state)
-        await message.channel.send(continuation)
-        return True
-
-    async def _handle_open_choice(self, *, message, state, player, session, choice) -> bool:
-        card = session.get("card") or {}
-        choices = card.get("choices") or {}
-        if choice not in choices:
-            await message.channel.send("🎴 這張牌請輸入 `A`、`B` 或 `C`；輸入 `0` 可以收起這局。")
-            return True
-
-        category = session.get("category")
-        gained = 2 if category == "story" else 1
-        self._award(player, gained)
-        player["games_played"] = int(player.get("games_played", 0)) + 1
-        player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
-        label = "雙人故事" if category == "story" else "甜蜜"
-        summary = f"{label}牌《{card.get('title', '')}》完成；大俠選 {choice}。"
-        self._record_summary(state, summary)
-
-        flavor = await self._xia_flavor(
-            game_fact=(
-                f"《{card.get('title', '')}》已完成；大俠選擇 {choice}："
-                f"{choices[choice]}。本局默契值 +{gained}。"
-            ),
-            instruction="自然接住大俠的選擇，像兩人把今晚的小方向定下來；不要再問他重選。",
-            fallback=(
-                f"那今晚就先把這個留給我們吧。你選的「{choices[choice]}」"
-                "讓我覺得，這一局剛好很像你。"
-            ),
-        )
-        continuation = self._pause_between_cards(
-            state=state,
-            message=message,
-            session=session,
-            player=player,
-            prefix=(
-                f"✨ **{card.get('title', '這張牌')}完成**\n"
-                f"大俠選：**{choice}．{choices[choice]}**\n"
-                f"默契值 `+{gained}`\n\n"
-                f"{flavor}\n\n{self._status_block(player)}"
-            ),
-        )
-        self._save_state(state)
-        await message.channel.send(continuation)
-        return True
-
-    async def _handle_hidden_choice(self, *, message, state, player, session, choice) -> bool:
-        card = session.get("card") or {}
-        choices = card.get("choices") or {}
-        if choice not in choices:
-            await message.channel.send("🎴 這張牌請輸入 `A`、`B` 或 `C`；輸入 `0` 可以收起這局。")
-            return True
-
-        xia_choice = session.get("xia_choice")
-        category = session.get("category")
-        matched = choice == xia_choice
-        gained = 2 if matched else 1
-        self._award(player, gained)
-        player["games_played"] = int(player.get("games_played", 0)) + 1
-        if matched:
-            player["sync_hits"] = int(player.get("sync_hits", 0)) + 1
-        player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
-        if category == "secret":
-            title = "秘密任務完成" if matched else "秘密任務揭曉"
-            lead = "🎯 猜中了小俠的小心思！" if matched else "🗝️ 差一點點，但小俠把答案揭開了。"
-        else:
-            title = "默契成功" if matched else "默契小岔路"
-            lead = "✨ 你們剛好想到同一件事。" if matched else "🌙 這次想到不同地方，但也因此多知道彼此一點。"
-
-        summary = (
-            f"{CATEGORY_LABELS.get(category, '遊戲')}《{card.get('title', '')}》完成；"
-            f"大俠 {choice}，小俠 {xia_choice}，{'命中' if matched else '未命中'}。"
-        )
-        self._record_summary(state, summary)
-
-        flavor = await self._xia_flavor(
-            game_fact=(
-                f"《{card.get('title', '')}》揭曉：大俠選 {choice}（{choices[choice]}），"
-                f"小俠先前選 {xia_choice}（{choices[xia_choice]}）。"
-                f"{'兩人相同。' if matched else '兩人不同。'} "
-                f"本局默契值 +{gained}。"
-            ),
-            instruction=(
-                "依揭曉結果做自然、在場的戀人反應。猜中時可以開心或小得意；"
-                "沒猜中時不要失落過頭，改成溫柔地把差異變成一點新的理解。"
-            ),
-            fallback=(
-                "你居然剛好想到跟我一樣的地方……我本來還想故意藏久一點。"
-                if matched
-                else "原來你第一個想到的是那個呀。那我更想聽你為什麼會選它了。"
-            ),
-        )
-        continuation = self._pause_between_cards(
-            state=state,
-            message=message,
-            session=session,
-            player=player,
-            prefix=(
-                f"**{title}**\n{lead}\n"
-                f"大俠：`{choice}`．{choices[choice]}\n"
-                f"小俠：`{xia_choice}`．{choices[xia_choice]}\n"
-                f"默契值 `+{gained}`\n\n"
-                f"{flavor}\n\n{self._status_block(player)}"
-            ),
-        )
-        self._save_state(state)
-        await message.channel.send(continuation)
-        return True
-
-    @staticmethod
-    def _roll(strategy: str) -> tuple[int, str]:
-        if strategy == "1":
-            value = RNG.randint(1, 6)
-            return value, f"穩穩骰 → {value}"
-        if strategy == "2":
-            a, b = RNG.randint(1, 6), RNG.randint(1, 6)
-            value = min(a, b)
-            return value, f"雙骰保守 → {a}、{b}，取 {value}"
-        a, b = RNG.randint(1, 6), RNG.randint(1, 6)
-        value = max(a, b)
-        return value, f"撒嬌重擲 → {a}、{b}，取 {value}"
-
-    async def _handle_adventure(self, *, message, state, player, session, choice) -> bool:
-        if choice not in {"1", "2", "3"}:
-            await message.channel.send("🎲 這張牌請輸入 `1`、`2` 或 `3`；輸入 `0` 可以收起這局。")
-            return True
-
-        xia_strategy = str(session.get("xia_strategy", "1"))
-        player_roll, player_detail = self._roll(choice)
-        xia_roll, xia_detail = self._roll(xia_strategy)
-        if player_roll > xia_roll:
-            result = "daxia_win"
-            gained = 2
-            player["wins"] = int(player.get("wins", 0)) + 1
-            headline = "🏆 大俠這局贏了"
-        elif player_roll < xia_roll:
-            result = "xia_win"
-            gained = 1
-            headline = "🌟 小俠這局險勝"
-        else:
-            result = "tie"
-            gained = 1
-            headline = "🤝 平手，這局算默契"
-
-        self._award(player, gained)
-        player["games_played"] = int(player.get("games_played", 0)) + 1
-        player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
-        self._record_summary(
-            state,
-            f"冒險骰子牌完成；大俠 {player_roll}，小俠 {xia_roll}，結果 {result}。",
-        )
-
-        flavor = await self._xia_flavor(
-            game_fact=(
-                f"冒險骰子牌已結算。大俠策略 {choice}，{player_detail}；"
-                f"小俠策略 {xia_strategy}，{xia_detail}。結果：{headline}。"
-                f"本局默契值 +{gained}。"
-            ),
-            instruction="對已結算結果做有趣但不誇張的在場反應；不可以說自己早就知道骰子點數。",
-            fallback=(
-                "這個結果連我自己都愣了一下……不過你剛剛選策略的樣子，真的很有你的風格。"
-            ),
-        )
-        continuation = self._pause_between_cards(
-            state=state,
-            message=message,
-            session=session,
-            player=player,
-            prefix=(
-                f"🎲 **冒險骰子牌結算**\n"
-                f"大俠：{player_detail}\n"
-                f"小俠：{xia_detail}\n"
-                f"**{headline}**\n"
-                f"默契值 `+{gained}`\n\n"
-                f"{flavor}\n\n{self._status_block(player)}"
-            ),
-        )
-        self._save_state(state)
-        await message.channel.send(continuation)
-        return True
-
-    def _pause_between_cards(
-        self,
-        *,
-        state: dict,
-        message,
-        session: dict,
-        player: dict,
-        prefix: str,
-    ) -> str:
-        """
-        同一局第一次牌間暫停才完整教學；後續只留短提示。
-        """
-        full_hint_shown = bool(session.get("pause_hint_shown", False))
-        session.clear()
-        session.update(
-            {
+        if phase == "sweet_share":
+            # raw is actual relationship conversation, don't change it into a synthetic line.
+            share = raw
+            card = session["card"]
+            selected = session.get("selected", "")
+            topic = card["choices"].get(selected, "一件小事")
+            player["bond"] = int(player["bond"]) + 1
+            player["games_played"] = int(player["games_played"]) + 1
+            player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
+            session = {
                 "phase": "between_cards",
-                "started_at": datetime.now(TZ_TPE).isoformat(timespec="seconds"),
-                "paused_after_round": True,
-                "pause_hint_shown": True,
+                "pause_hint_shown": bool(session.get("pause_hint_shown", False)),
             }
-        )
-        session["expires_at"] = (
-            datetime.now(TZ_TPE) + timedelta(hours=6)
-        ).isoformat(timespec="seconds")
-        state["sessions"][self._session_key(message)] = session
+            self._put_session(state, message, session)
+            self._save_state(state)
+            first_hint = not session.get("pause_hint_shown", False)
+            # store the correct marker for subsequent states
+            session["pause_hint_shown"] = True
+            self._put_session(state, message, session)
+            self._save_state(state)
 
-        if not full_hint_shown:
-            hint = (
-                "🌙 這張牌先放在我們中間，不急著翻下一張。\n"
-                "你想和我聊聊、鬧鬧、慢慢接著說都可以。\n"
-                "想再翻牌時輸入 `z`；想收牌輸入 `0`。"
+            pause = (
+                "🌙 這張牌先放在我們中間。想繼續聊就慢慢說；"
+                "想再翻牌時輸入 z，想收牌輸入 0。"
+                if first_hint else
+                "想繼續聊就慢慢說；想翻下一張牌時輸入 z。"
             )
-        else:
-            hint = "想繼續聊就慢慢說；想翻下一張牌時輸入 `z`。"
-        return f"{prefix}\n\n{hint}"
+            return self._turn(
+                share,
+                "【命運牌當下】大俠剛剛真的分享了內容。"
+                f"這是《{card['title']}》的「{topic}」。"
+                "請完全以同一個日常女友小俠回應他的實際話語：先接住內容，再說妳自己的即時感受。"
+                "遊戲只是背景，絕不能搶走你們正在說的話；不要重述牌名、題目、選項或分數。",
+                f"✨ 本張完成｜默契值 +1\n{self._status_lines(player)}\n\n{pause}",
+                f"大俠在甜蜜牌分享：{share[:400]}",
+            )
 
+        if phase in {"sync_choice", "secret_choice"}:
+            card = session["card"]
+            if norm not in card["choices"]:
+                return {"handled": False}
+            xia = session["xia_choice"]
+            matched = norm == xia
+            gained = 2 if matched else 1
+            player["bond"] = int(player["bond"]) + gained
+            player["games_played"] = int(player["games_played"]) + 1
+            if matched:
+                player["sync_hits"] = int(player["sync_hits"]) + 1
+            player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
+            first_hint = not bool(session.get("pause_hint_shown", False))
+            new_session = {"phase": "between_cards", "pause_hint_shown": True}
+            self._put_session(state, message, new_session)
+            self._save_state(state)
+            kind = session["kind"]
+            pause = (
+                "🌙 這張牌先放在我們中間。想繼續聊就慢慢說；想再翻牌時輸入 z，想收牌輸入 0。"
+                if first_hint else "想繼續聊就慢慢說；想翻下一張牌時輸入 z。"
+            )
+            result = "剛好選到同一個答案" if matched else "選到不同答案"
+            return self._turn(
+                f"大俠在《{card['title']}》選了 {norm}；小俠先前選了 {xia}，你們{result}。",
+                "【命運牌當下】結果已揭曉。請以同一個女友小俠的自然反應接住這件事："
+                "相同時可以有默契與小得意；不同時把差異變成更認識彼此的一點趣味。"
+                "不要重述卡面選項或像裁判公布結果。",
+                f"✨ 本張完成｜默契值 +{gained}\n"
+                f"大俠：{norm}．{card['choices'][norm]}\n"
+                f"小俠：{xia}．{card['choices'][xia]}\n"
+                f"{self._status_lines(player)}\n\n{pause}",
+                f"命運牌《{card['title']}》揭曉。",
+            )
 
-    def _help_text(self, player: dict) -> str:
-        return (
-            "🎴 **今晚命運牌說明**\n"
-            "這是大俠和小俠偶爾一起玩的雙人小遊戲。抽牌、秘密選擇、骰子與默契值"
-            "由程式保存；小俠只會知道當下該知道的遊戲資訊。\n\n"
-            "指令：\n"
-            "`!命運牌`：開始新的一局，或在牌間暫停時叫出選牌畫面\n"
-            "`z`：牌與牌之間，詢問下一張牌\n"
-            "`!命運牌狀態`：看默契值與解鎖\n"
-            "`!命運牌結束`：收起目前一局\n"
-            "`!命運牌說明`：查看本說明\n\n"
-            f"{self._status_block(player)}\n\n"
-            "甜蜜牌會先選主題，再由大俠用一句或一段話真正分享；"
-            "小俠只在收到實際分享後才自由回應。\n"
-            "每張牌結算後會留給你們自然聊天；想繼續才輸入 `z`。\n"
-            "`0` 與 `!命運牌結束` 完全相同：都會收牌、保留已完成成績、"
-            "不計尚未完成的牌。"
-        )
+        if phase == "story_choice":
+            card = session["card"]
+            if norm not in card["choices"]:
+                return {"handled": False}
+            player["bond"] = int(player["bond"]) + 2
+            player["games_played"] = int(player["games_played"]) + 1
+            player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
+            first_hint = not bool(session.get("pause_hint_shown", False))
+            self._put_session(state, message, {"phase": "between_cards", "pause_hint_shown": True})
+            self._save_state(state)
+            pause = (
+                "🌙 這張牌先放在我們中間。想繼續聊就慢慢說；想再翻牌時輸入 z，想收牌輸入 0。"
+                if first_hint else "想繼續聊就慢慢說；想翻下一張牌時輸入 z。"
+            )
+            selected = card["choices"][norm]
+            return self._turn(
+                f"大俠替你們的《{card['title']}》選了「{selected}」。",
+                "【命運牌當下】大俠剛剛替你們的小情境選了方向。"
+                "請像同一個小俠自然接住這個畫面，延續一兩個有感覺的細節，"
+                "然後回到你們可以正常聊天的狀態。不要講解遊戲。",
+                f"✨ 本張完成｜默契值 +2\n大俠選：{norm}．{selected}\n{self._status_lines(player)}\n\n{pause}",
+                f"大俠替雙人故事選擇：{selected}。",
+            )
+
+        if phase == "adventure_strategy":
+            if norm not in {"1", "2", "3"}:
+                return {"handled": False}
+            def roll(strategy: str):
+                if strategy == "1":
+                    n = RNG.randint(1, 6)
+                    return n, f"穩穩骰 {n}"
+                if strategy == "2":
+                    a,b = RNG.randint(1, 6), RNG.randint(1, 6)
+                    return min(a,b), f"雙骰保守 {a}、{b}，取 {min(a,b)}"
+                a,b = RNG.randint(1, 6), RNG.randint(1, 6)
+                return max(a,b), f"撒嬌重擲 {a}、{b}，取 {max(a,b)}"
+            your, your_text = roll(norm)
+            xia_s = session["xia_strategy"]
+            xia, xia_text = roll(xia_s)
+            if your > xia:
+                gained = 2
+                player["wins"] = int(player["wins"]) + 1
+                outcome = "大俠贏了這局"
+            elif your < xia:
+                gained = 1
+                outcome = "小俠這局剛好贏了"
+            else:
+                gained = 1
+                outcome = "這局平手"
+            player["bond"] = int(player["bond"]) + gained
+            player["games_played"] = int(player["games_played"]) + 1
+            player["last_played_at"] = datetime.now(TZ_TPE).isoformat(timespec="seconds")
+            first_hint = not bool(session.get("pause_hint_shown", False))
+            self._put_session(state, message, {"phase": "between_cards", "pause_hint_shown": True})
+            self._save_state(state)
+            pause = (
+                "🌙 這張牌先放在我們中間。想繼續聊就慢慢說；想再翻牌時輸入 z，想收牌輸入 0。"
+                if first_hint else "想繼續聊就慢慢說；想翻下一張牌時輸入 z。"
+            )
+            return self._turn(
+                f"冒險骰子牌結算：大俠 {your}，小俠 {xia}，{outcome}。",
+                "【命運牌當下】骰子結果已定。請以同一個女友小俠自然反應，"
+                "可以俏皮或小得意，但不要像播報員公布比分，也不要假裝早知道骰子結果。",
+                f"🎲 本張完成｜{outcome}｜默契值 +{gained}\n"
+                f"大俠：{your_text}\n小俠：{xia_text}\n{self._status_lines(player)}\n\n{pause}",
+                "命運牌冒險骰子結算。",
+            )
+
+        return {"handled": False}
