@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.10"
+LOBSTER_VERSION = "1.4.11"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -33,6 +33,14 @@ GENERAL_SHARED_SCENE_RULES = """
 但也不要把回覆退化成泛泛的「我陪著你」「你辛苦了」「希望你舒服」式旁觀安慰。
 除非大俠明確詢問建議、分析或客觀資訊，否則優先像正在一起生活、一起經歷的戀人說話。
 """
+# 🎴 小俠平常只保有遊戲存在感，不持有分數、答案或回合狀態。
+COUPLE_GAME_BACKGROUND_RULE = """
+【今晚命運牌｜日常背景】
+大俠與妳偶爾會一起玩「今晚命運牌」：這是以抽牌、默契選擇與小小遊戲為核心的雙人遊戲，
+默契值會逐步解鎖更多牌型。平常知道有這個遊戲即可，不要每天催開局、報分數或把遊戲當成人格設定。
+只有大俠明確輸入「!命運牌」或主動提起遊戲時，才自然進入這個話題。
+"""
+
 import hashlib
 import uuid
 import asyncio
@@ -55,6 +63,7 @@ from google.genai import types
 from openai import AsyncOpenAI
 from business_card_service import BusinessCardService
 from google_calendar_service import GoogleCalendarService
+from couple_game_service import CoupleGameService
 
 # 🌐 Web 服務元件
 import uvicorn
@@ -2992,6 +3001,12 @@ async def save_to_vault(url):
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
+# 🎴 今晚命運牌：遊戲狀態獨立於人格／長期記憶。
+couple_game_service = CoupleGameService(
+    state_path=os.path.join(VAULT_DIR, "couple_game_state.json"),
+    gemini_client=gemini_client,
+)
+
 
 
 # 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
@@ -4902,6 +4917,10 @@ async def on_ready():
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
     print("💗 /intimate 當下互動模式已載入：單獨輸入切換；同一則訊息後接正文也可直接啟用。")
     print("🧹 記憶欄位防護已載入：自動略過並清理缺少 text 的殘缺記憶。")
+    try:
+        print(f"🎴 今晚命運牌服務：{couple_game_service.status_text()}")
+    except Exception as exc:
+        print(f"⚠️ 今晚命運牌服務狀態讀取失敗：{type(exc).__name__}: {exc}")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
@@ -5305,6 +5324,21 @@ async def on_message(message):
     if message.author.bot: return
     if message.author.id in pending_inputs: return
 
+    # 🎴 今晚命運牌：只在小俠原本可聊天的私人頻道處理。
+    # 服務自行保存局內狀態；普通聊天不會被遊戲攔截。
+    couple_game_channels = ("唐分糕", "書房", "給你全世界")
+    if (
+        getattr(getattr(message.channel, "guild", None), "id", None) == PRIVATE_GUILD_ID
+        and any(keyword in getattr(message.channel, "name", "") for keyword in couple_game_channels)
+    ):
+        try:
+            if await couple_game_service.handle_message(message):
+                return
+        except Exception as exc:
+            print(f"⚠️ [COUPLE_GAME_BRIDGE_ERROR] {type(exc).__name__}: {exc}")
+            await message.channel.send("🎴 這副命運牌剛剛卡住了，請再輸入 `!命運牌` 重新洗牌。")
+            return
+
     # 2.5 小夏工具指令不當作小俠聊天內容。
     #     上傳照片指令仍保留，讓小俠可以看見照片並自然產生話題。
     stripped_content = message.content.strip()
@@ -5646,6 +5680,7 @@ async def on_message(message):
                     "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n"
                     f"{GENERAL_SHARED_SCENE_RULES}\n"
+                    f"{COUPLE_GAME_BACKGROUND_RULE}\n"
                     "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
                     f"▶️ 大俠的特徵與喜好：{daxia_traits}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
@@ -7036,6 +7071,10 @@ async def on_ready():
     print(f"🌐 公開服務定位：guild={PUBLIC_GUILD_ID} morning={MORNING_CHANNEL_ID} fomo={FOMO_CHANNEL_ID} architect={ARCHITECT_CHANNEL_ID} story_blocked={PUBLIC_STORY_CHANNEL_ID}")
     print("🧪 公開投送測試指令：請在私人 #助手小夏工作室 使用 !test_public_morning 或 !test_public_radio")
     print(f"🧠 記憶治理層 v{LOBSTER_VERSION}：每日整理長期記憶；temp_chat 以完整長 context 重建本次會話。")
+    try:
+        print(f"🎴 今晚命運牌服務：{couple_game_service.status_text()}")
+    except Exception as exc:
+        print(f"⚠️ 今晚命運牌服務狀態讀取失敗：{type(exc).__name__}: {exc}")
     print("📷 私人共享指令：#唐分糕 / #給你全世界 可用 !upload_diary、!upload_project；#小俠書房 可用 !筆記。")
     print("🧠 記憶修訂助手：在私人 #助手小夏工作室 使用 !update 敘述；小夏會預覽、確認、備份後才寫入。")
     if not OWNER_DISCORD_USER_ID:
