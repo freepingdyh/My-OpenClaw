@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.11"
+LOBSTER_VERSION = "1.4.14"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -1170,6 +1170,20 @@ def is_private_note_channel(channel) -> bool:
     return is_private_assistant_workspace(channel) or _is_private_named_or_id_channel(
         channel, PRIVATE_NOTE_CHANNEL_NAMES, PRIVATE_NOTE_CHANNEL_IDS
     )
+
+def is_couple_game_channel(channel) -> bool:
+    """
+    今晚命運牌只屬於小俠的私密聊天場景。
+    小夏在這些頻道對於遊戲指令與局內選項必須保持靜默，
+    避免同一則 !命運牌 被兩個 Bot 同時回覆。
+    """
+    if channel is None:
+        return False
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    if guild_id != PRIVATE_GUILD_ID:
+        return False
+    name = str(getattr(channel, "name", "") or "")
+    return any(token in name for token in ("唐分糕", "書房", "給你全世界"))
 
 def is_owner_or_unlocked(author_id: int) -> bool:
     """OWNER ID 有設定時只允許本人；尚未設定時維持既有私密頻道行為。"""
@@ -5325,12 +5339,8 @@ async def on_message(message):
     if message.author.id in pending_inputs: return
 
     # 🎴 今晚命運牌：只在小俠原本可聊天的私人頻道處理。
-    # 服務自行保存局內狀態；普通聊天不會被遊戲攔截。
-    couple_game_channels = ("唐分糕", "書房", "給你全世界")
-    if (
-        getattr(getattr(message.channel, "guild", None), "id", None) == PRIVATE_GUILD_ID
-        and any(keyword in getattr(message.channel, "name", "") for keyword in couple_game_channels)
-    ):
+    # 服務自行保存連續牌局狀態；只有遊戲指令或局內選項會被遊戲攔截。
+    if is_couple_game_channel(message.channel):
         try:
             if await couple_game_service.handle_message(message):
                 return
@@ -7655,6 +7665,25 @@ async def on_message(message):
     # 故事頻道一律不由小夏介入。
     if is_story_channel_or_thread(message.channel):
         return
+
+    # 🎴 小俠專屬命運牌路由：
+    # 同一則訊息會同時送到兩個 Discord Bot。只要是命運牌指令，
+    # 或這位使用者在此頻道尚有未結束的一局，小夏都必須完全靜默，
+    # 讓小俠的 CoupleGameService 單獨處理開局與 A/B/C、1/2/3、0 等局內輸入。
+    if is_couple_game_channel(message.channel):
+        # 開局指令必須無條件讓給小俠；不可等 session 寫入後才判定，
+        # 否則兩個 Bot 同時收到 !命運牌 時，小夏可能搶先送出頻道封鎖訊息。
+        raw_game_text = str(message.content or "").strip()
+        if raw_game_text.startswith("!命運牌"):
+            return
+        try:
+            if couple_game_service.might_handle(message):
+                return
+        except Exception as exc:
+            print(
+                f"⚠️ [COUPLE_GAME_ARCHITECT_GUARD_ERROR] "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     # 🧭 多輪服務路由仲裁：
     # Calendar 若正在等待 0/1/2、候選編號或修改內容，必須優先續接，
