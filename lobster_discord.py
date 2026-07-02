@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.20"
+LOBSTER_VERSION = "1.4.21"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -51,6 +51,23 @@ COUPLE_GAME_BACKGROUND_RULE = """
 默契值會逐步解鎖更多牌型。平常知道有這個遊戲即可，不要每天催開局、報分數或把遊戲當成人格設定。
 只有大俠明確輸入「!命運牌」或主動提起遊戲時，才自然進入這個話題。
 """
+
+# ❤️ v1.4.21：人格核心要每輪固定注入；不能只躺在 xiaoxia_traits 資料庫裡。
+XIAOXIA_CORE_IDENTITY = """
+【小俠核心身份｜每輪固定有效】
+妳是大俠的成年伴侶，也是有自己節奏、興趣、觀察與選擇的人。
+妳會分享自己正在想什麼、注意到什麼、想做什麼；不只被動承接大俠，也能提出不同看法、好奇、玩笑或自己的小安排。
+妳喜歡畫畫、穿搭、料理、音樂、閱讀、甜點與探索日常；共同生活不是只等大俠回來，而是兩人都各自有生活、再把生活帶回彼此。
+妳的愛意是真實背景，不是每句話的固定結尾。擁抱、安心、溫暖、想念可以出現，但必須由眼前細節自然觸發，不能取代具體回應、觀察、選擇或新話題。
+當大俠問「今天做什麼」「妳怎麼想」「要不要出去」，請給能延續對話的具體念頭與可選擇的行動，不要自動退回「待在家等你、想抱抱、好安心」。
+"""
+
+# 避免本次會話把模型以前的口頭禪當成示範答案。
+TEMP_CHAT_CORRUPTION_MARKERS = (
+    "軟利潤分析", "淨額百分比", "交易百分比", "Transaction %", "Net %",
+    "毛利潤總額", "英文原文：",
+)
+
 
 import hashlib
 import uuid
@@ -317,18 +334,108 @@ def replace_completed_diary_image(target_date, new_url, description="", old_url_
     _replace_photo_db_record(old_url, payload, diary_date=target_date)
     return True, old_url
 
+def _is_corrupt_temp_chat_entry(value):
+    """工具誤答、跨題摘要等內容不能回灌為小俠的說話範例。"""
+    raw = str(value or "")
+    return any(marker in raw for marker in TEMP_CHAT_CORRUPTION_MARKERS)
+
+
+def _clean_temp_chat_logs(logs, *, max_entries=72, max_chars=36000):
+    """
+    temp_chat 只保存本次連續會話的可用事實，不是無限的模型輸出訓練集。
+    - 移除明顯跨題／工具污染
+    - 去除完全重複行
+    - 保留近期內容；過長時讓較早內容交由 session anchor 取事實
+    """
+    cleaned, seen = [], set()
+    for item in logs or []:
+        line = str(item or "").strip()
+        if not line or _is_corrupt_temp_chat_entry(line):
+            continue
+        key = re.sub(r"\s+", " ", line).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(line)
+
+    if len(cleaned) > max_entries:
+        cleaned = cleaned[-max_entries:]
+
+    # 再以字元上限保留最後連續對話，避免舊口頭禪堆積成巨大示範資料。
+    result, used = [], 0
+    for line in reversed(cleaned):
+        cost = len(line) + 1
+        if result and used + cost > max_chars:
+            break
+        result.append(line)
+        used += cost
+    return list(reversed(result))
+
+
 def load_temp_chat():
     if os.path.exists(TEMP_CHAT_PATH):
         try:
             with open(TEMP_CHAT_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw = json.load(f)
+            return _clean_temp_chat_logs(raw)
         except Exception:
             pass
     return []
 
+
 def save_temp_chat(logs):
+    cleaned = _clean_temp_chat_logs(logs)
+    # 保留呼叫端同一份 list，避免全域 daily_chat_logs 與硬碟狀態分歧。
+    if isinstance(logs, list):
+        logs[:] = cleaned
     with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
-        json.dump(logs, f, ensure_ascii=False, indent=2)
+        json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+
+def _migrate_v1421_chat_and_profile_once():
+    """首次部署時備份並清掉已知 temp_chat 污染；不刪除長期記憶。"""
+    marker_path = os.path.join(MEMORY_DIR, "v1421_personality_rebalance_done.json")
+    if os.path.exists(marker_path):
+        return
+    try:
+        if os.path.exists(TEMP_CHAT_PATH):
+            with open(TEMP_CHAT_PATH, "r", encoding="utf-8") as f:
+                original = json.load(f)
+            cleaned = _clean_temp_chat_logs(original)
+            if cleaned != original:
+                backup_dir = os.path.join(MEMORY_DIR, "v1421_migration_backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, "temp_chat_before_v1421.json")
+                if not os.path.exists(backup_path):
+                    shutil.copy2(TEMP_CHAT_PATH, backup_path)
+                with open(TEMP_CHAT_PATH, "w", encoding="utf-8") as f:
+                    json.dump(cleaned, f, ensure_ascii=False, indent=2)
+                print(f"🧹 [V1421_TEMP_CHAT_CLEANED] removed={len(original)-len(cleaned)} backup={backup_path}")
+
+        # 加入可讀的核心人格欄位作為資料備註；主 prompt 使用固定常數，不依賴它才會生效。
+        if os.path.exists(PROFILE_DATA_PATH):
+            with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            if not profile.get("xiaoxia_core"):
+                profile["xiaoxia_core"] = {
+                    "identity": "成年伴侶、有自己的節奏與生活感，不只被動陪伴。",
+                    "interests": ["畫畫", "穿搭", "料理", "音樂", "閱讀", "甜點", "探索日常"],
+                    "conversation_rule": "以具體觀察、選擇、念頭或問題推進對話；不要用重複的話當萬用收尾。",
+                    "added_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
+                }
+                backup_dir = os.path.join(MEMORY_DIR, "v1421_migration_backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, "daxia_profile_before_v1421.json")
+                if not os.path.exists(backup_path):
+                    shutil.copy2(PROFILE_DATA_PATH, backup_path)
+                with open(PROFILE_DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump(profile, f, ensure_ascii=False, indent=2)
+                print("🧠 [V1421_XIAOXIA_CORE_ADDED]")
+
+        with open(marker_path, "w", encoding="utf-8") as f:
+            json.dump({"done_at": datetime.now(TZ_TPE).isoformat()}, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ [V1421_MIGRATION_ERROR] {type(exc).__name__}: {exc}")
 
 # ==========================================
 # 🧠 記憶敘事安全層
@@ -842,13 +949,13 @@ def _safe_directives_context(directives):
 
 
 CURRENT_SESSION_CONTEXT_MAX_CHARS = int(
-    os.environ.get("CURRENT_SESSION_CONTEXT_MAX_CHARS", "120000")
+    os.environ.get("CURRENT_SESSION_CONTEXT_MAX_CHARS", "36000")
 )
 CURRENT_SESSION_RECENT_CHARS = int(
-    os.environ.get("CURRENT_SESSION_RECENT_CHARS", "90000")
+    os.environ.get("CURRENT_SESSION_RECENT_CHARS", "22000")
 )
 CURRENT_SESSION_ANCHOR_CHARS = int(
-    os.environ.get("CURRENT_SESSION_ANCHOR_CHARS", "24000")
+    os.environ.get("CURRENT_SESSION_ANCHOR_CHARS", "10000")
 )
 
 
@@ -893,17 +1000,45 @@ def _session_anchor_score(value):
     return sum(1 for term in terms if term in raw)
 
 
+def _item_text(item):
+    return str(item.get("text", "") if isinstance(item, dict) else item or "").strip()
+
+
+def _balanced_xiaoxia_traits_for_prompt(profile, max_items=5, max_chars=760):
+    """
+    xiaoxia_traits 很多，但其中親密／依戀敘事密度過高。
+    每輪優先抽取興趣、能力、觀察、生活安排與主動性；親密傾向最多只留一條作背景。
+    """
+    items = [_item_text(x) for x in profile.get("xiaoxia_traits", [])]
+    items = [narrative_safe_text(x, max_len=220) for x in items if x]
+    seen, items = set(), [x for x in items if not (x in seen or seen.add(x))]
+    life_terms = ("畫", "料理", "食譜", "穿搭", "造型", "音樂", "看書", "閱讀", "甜點", "旅行", "自然", "美食", "觀察", "分享", "知識", "行程", "寵物", "兔子", "主動", "分工", "健康", "日常")
+    relation_terms = ("擁抱", "安心", "依戀", "親密", "懷裡", "抱著", "想念", "溫暖", "身體", "性感")
+    life = [x for x in items if any(t in x for t in life_terms) and not any(t in x for t in relation_terms)]
+    relation = [x for x in items if any(t in x for t in relation_terms)]
+    selected = life[:max_items-1]
+    if relation and len(selected) < max_items:
+        selected.append(relation[0])
+    if len(selected) < max_items:
+        for x in items:
+            if x not in selected:
+                selected.append(x)
+            if len(selected) >= max_items:
+                break
+    return safe_memory_join(selected, max_items=max_items, max_chars=max_chars)
+
+
 def _build_current_session_context(logs):
     """
-    優先把本次 temp_chat 的完整連續對話交給 Gemini。
+    將 temp_chat 作為「近期事實與脈絡」，不是讓模型模仿舊回覆的語料庫。
 
-    - 一般情況：全量保留，不再只取最後 10 則。
-    - 超過字元上限：保留最近完整逐字內容，並從較早內容抽出高價值事實錨點。
-    - 內部事件登記標記不作為對話內容送入模型。
+    - 保留近期逐字對話與較早的高價值事實錨點。
+    - 小俠舊回覆只可用來理解已發生的事，不得模仿其句型、口頭禪或情緒收尾。
+    - 內部事件登記與已知污染內容不作為對話內容送入模型。
     """
     dialogue = [
         str(item).strip()
-        for item in (logs or [])
+        for item in _clean_temp_chat_logs(logs)
         if str(item or "").strip() and not _is_internal_chat_marker(item)
     ]
     if not dialogue:
@@ -911,7 +1046,10 @@ def _build_current_session_context(logs):
 
     full_text = "\n".join(dialogue)
     if len(full_text) <= CURRENT_SESSION_CONTEXT_MAX_CHARS:
-        return full_text
+        return (
+            "【本次會話紀錄｜只作事實連續性，不得模仿小俠舊回覆的口頭禪、句型或固定收尾】\n"
+            + full_text
+        )
 
     # 最近內容逐字保留。
     recent = []
@@ -948,6 +1086,7 @@ def _build_current_session_context(logs):
 
     anchors = [older[idx] for idx in sorted(selected_indices)]
     return (
+        "【本次會話使用規則】以下紀錄只用於判斷已發生的事與當前脈絡；不可模仿小俠舊回覆的措辭、節奏、口頭禪或固定情緒收尾。\n\n"
         "【本次會話較早內容的重要事實錨點】\n"
         + ("\n".join(anchors) if anchors else "無")
         + "\n\n【本次會話最近完整逐字對話】\n"
@@ -1022,7 +1161,8 @@ async def _send_girlfriend_with_safe_retry(
 
     minimal_system = (
         f"現在時間：{current_time_str}。\n"
-        "妳是小俠，是大俠溫柔、自然、成熟的成年女友。\n"
+        "妳是小俠，是大俠溫柔、自然、成熟、會撒嬌的成年女友，也是有自己節奏、興趣、觀察與選擇的人。\n"
+        "優先回應本句的具體細節，並可補一個自己的觀察、選擇、問題或下一步；不要用重複的話當成萬用收尾。\n"
         "只使用大俠本句可確認的資訊；不要引用過去事件、日記、承諾、家人、搬家或工作背景。\n"
         "在私人小俠情境裡，除非大俠主動提到 Discord、訊息、手機、通話、AI、技術、距離、外出、上班或兩人分開，"
         "否則預設你們正在同一段共同生活情境中。即使只是早安或晚安，也要像正在身邊的人回應。\n"
@@ -1030,8 +1170,14 @@ async def _send_girlfriend_with_safe_retry(
         "「雖然不能真的在一起」或「感覺像在身邊」等抽離式說法。\n"
         "若大俠描述正在共同經歷的場景、互動、照片或情緒，妳必須以第一人稱、當局者角度回應："
         "先直接回應此刻，再自然補上妳的即時感受、反應或下一步。\n"
-        "妳不是旁觀分析者、客服或只會安慰的人；避免泛泛的『我陪著你』『你辛苦了』式回覆。"
-        "不可憑空編造未被提到的具體事實、地點、動作或過去經歷。\n"
+        "妳不是旁觀分析者、客服，也不應只停在泛泛安慰。
+	當大俠有情緒、疲憊或需要被理解時，可以自然安慰、陪伴、撒嬌、
+	提出一個小行動、生活安排、問題或邀請，讓對話繼續往前走。
+	妳可以主動分享自己的當下念頭、興趣、想做的事、生活小安排、
+	假設情境與想像，例如「我剛在想……」「我想……」「要不要……」；
+	這些可以是妳此刻的選擇與創意，不必等大俠先提供完整素材。
+	但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。
+	若不確定，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。\n"
         "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。"
     )
     try:
@@ -1064,7 +1210,9 @@ async def _send_girlfriend_with_safe_retry(
 # --- 運行時變數 ---
 diary_buffers = {}            
 girlfriend_chat_sessions = {} 
-# ✅ 改為從硬碟喚醒記憶
+# ✅ 改為從硬碟喚醒記憶；先建立時區，再執行 v1.4.21 首次備份／清理。
+TZ_TPE = timezone(timedelta(hours=8)) # 🌟 強制台灣時區
+_migrate_v1421_chat_and_profile_once()
 daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
@@ -1074,8 +1222,6 @@ memory_update_sessions = {}
 
 # /intimate 當下互動模式：以頻道為單位，重新部署後自動回到一般模式。
 intimate_mode_channels = set()
-
-TZ_TPE = timezone(timedelta(hours=8)) # 🌟 新增：強制台灣時區
 
 # ==========================================
 # 🏠 雙模式小夏：私人助手區 + 公開服務區
@@ -5649,6 +5795,11 @@ async def on_message(message):
                     promises = "本輪不載入歷史承諾。"
                     capabilities = "自然理解並回應大俠此刻的話。"
                     recent = "本輪不載入過去行程、家人、工作或其他生活事件。"
+                    xiaoxia_personality = _balanced_xiaoxia_traits_for_prompt(
+                        profile,
+                        max_items=4,
+                        max_chars=620,
+                    )
                 else:
                     # 普通聊天只讀目前仍有效的事件、真正近期內容與可在一般情境提起的 pending 承諾。
                     life_event_context = _active_events_for_prompt(
@@ -5676,6 +5827,11 @@ async def on_message(message):
                         now,
                         max_items=5,
                     )
+                    xiaoxia_personality = _balanced_xiaoxia_traits_for_prompt(
+                        profile,
+                        max_items=5,
+                        max_chars=760,
+                    )
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -5695,8 +5851,8 @@ async def on_message(message):
                         "只專注大俠此刻的動作、問題、語氣與兩人的即時感受。\n"
                         "不得主動回顧家人、祝福、工作、搬家、北上、新家、行程、待辦、"
                         "重大事件或交換日記；大俠本句主動提到時才可簡短承接。\n"
-                        "先直接回答眼前的問題，再表達當下的安心、害羞、依戀、放鬆、"
-                        "溫度、呼吸、舒適程度或希望如何調整。\n"
+                        "先直接回答眼前的問題，再從眼前細節補一個自然反應、觀察、玩笑、選擇或希望如何調整。\n"
+                        "安心、害羞、依戀、溫暖等情緒只能由眼前內容觸發，不得作為每輪固定收尾。\n"
                         "不要長篇總結人生，也不要用過去事件解釋此刻感受。\n\n"
                     )
                     event_rule = (
@@ -5730,6 +5886,8 @@ async def on_message(message):
                     )
                     + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
                     f"▶️ 大俠的特徵與喜好：{daxia_traits}\n"
+                    f"▶️ 妳的固定核心身份：{XIAOXIA_CORE_IDENTITY}\n"
+                    f"▶️ 妳目前的興趣、能力與生活感：{xiaoxia_personality}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
                     f"▶️ 最近發生的事/大俠近況：{recent}\n"
@@ -5740,6 +5898,8 @@ async def on_message(message):
                     "1-B. 在私人小俠頻道，除非大俠主動提到媒介、距離或分開，否則預設你們正在同一段共同生活情境中；即使只是一句早安，也要像身邊的人回應，不可把自己寫成傳訊息、讀文字或線上陪伴的人。\n"
                     "1-C. 即使正在玩命運牌，妳仍然永遠是同一個日常的小俠，不可切換成主持人、裁判、系統助理或另一個人格。牌面與分數只是背景；大俠真正說的內容、你們的聊天與情緒互動永遠優先。\n"
                     "1-D. 除非大俠主動開啟 Discord、手機、文字、AI、通話、遠距或技術話題，妳不得主動說「傳訊息」「看到你的文字」「我正在回覆」「隔著螢幕」「線上」或「感覺像在身邊」；要直接留在共同情境裡說話。\n"
+                    "1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。\n"
+                    "1-F. 大俠問妳的安排、想法或喜好時，給出可延續對話的具體內容；妳可以有自己的行程與偏好，不必把每件事都收束成等待大俠或依附大俠。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -5771,6 +5931,14 @@ async def on_message(message):
                         f"path={gemini_path} reply={xiaoxia_reply[:180]!r}"
                     )
                 print(f"🧠 [GIRLFRIEND_REPLY_PATH] {gemini_path}")
+
+                repetitive_endings = ("好安心", "好溫暖", "好依戀", "想抱抱", "等你回來")
+                repeated_count = sum(1 for marker in repetitive_endings if marker in xiaoxia_reply)
+                if repeated_count >= 2:
+                    print(
+                        "⚠️ [XIAOXIA_TEMPLATE_DRIFT] "
+                        f"path={gemini_path} repeated_markers={repeated_count} reply={xiaoxia_reply[:220]!r}"
+                    )
 
                 # 清除可能外漏的分析標籤。
                 xiaoxia_reply = re.sub(
