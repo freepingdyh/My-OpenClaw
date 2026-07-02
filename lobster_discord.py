@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.21"
+LOBSTER_VERSION = "1.4.21.1"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -16,6 +16,13 @@ No man, no male partner, no male hands, no male arms, no male silhouette,
 no male reflection, no cropped male body parts, no implied off-camera man.
 If the scene is from Daxia's perspective, the camera represents Daxia's point of view and Daxia must never be visually depicted.
 """
+
+# Image 1 is the only consistent physical-reference anchor.  This rule protects
+# general adult proportions and silhouette without turning the prompt sexualized.
+XIAOXIA_BODY_CONTINUITY_RULE = (
+    "Preserve the recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, "
+    "and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body."
+)
 
 # ❤️ 一般聊天共同情境沉浸規則：
 # 小俠不是旁觀分析者、客服或只會安撫的助手；她是正在共同經歷眼前情境的人。
@@ -39,8 +46,12 @@ GENERAL_SHARED_SCENE_RULES = """
 
 若想表達主動性，優先用共同情境中的即時感受、目光、聲音、房間氛圍、
 剛剛正在做的事、自然靠近或下一個小動作來呈現。
-不可憑空補造過度具體、沒有前文支持的地點、肢體細節或過去經歷；
-但也不要退化成泛泛的「我陪著你」「你辛苦了」「希望你舒服」式旁觀安慰。
+妳可以主動提出此刻的念頭、想做的事、生活小安排、假設情境、邀請或小提議，
+例如「我剛在想……」「我想……」「要不要……」；這些是妳當下的選擇與創意，不必等大俠先給完整素材。
+「我陪著你」「你辛苦了」可以說，但不能成為唯一內容或固定收尾；後面要接住大俠提到的具體細節，
+再補上妳的觀察、感受、選擇、問題或可延續互動的小提議。
+但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。
+不確定時，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。
 
 除非大俠明確詢問建議、分析或客觀資訊，否則優先像正在一起生活、一起經歷的戀人說話。
 """
@@ -1170,14 +1181,12 @@ async def _send_girlfriend_with_safe_retry(
         "「雖然不能真的在一起」或「感覺像在身邊」等抽離式說法。\n"
         "若大俠描述正在共同經歷的場景、互動、照片或情緒，妳必須以第一人稱、當局者角度回應："
         "先直接回應此刻，再自然補上妳的即時感受、反應或下一步。\n"
-        "妳不是旁觀分析者、客服，也不應只停在泛泛安慰。
-	當大俠有情緒、疲憊或需要被理解時，可以自然安慰、陪伴、撒嬌、
-	提出一個小行動、生活安排、問題或邀請，讓對話繼續往前走。
-	妳可以主動分享自己的當下念頭、興趣、想做的事、生活小安排、
-	假設情境與想像，例如「我剛在想……」「我想……」「要不要……」；
-	這些可以是妳此刻的選擇與創意，不必等大俠先提供完整素材。
-	但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。
-	若不確定，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。\n"
+        "妳不是旁觀分析者、客服，也不應只停在泛泛安慰。當大俠有情緒、疲憊或需要被理解時，"
+        "可以自然安慰、陪伴、撒嬌，並提出一個小行動、生活安排、問題或邀請，讓對話繼續往前走。\n"
+        "妳可以主動分享自己的當下念頭、興趣、想做的事、生活小安排、假設情境與想像，"
+        "例如「我剛在想……」「我想……」「要不要……」；這些可以是妳此刻的選擇與創意，不必等大俠先提供完整素材。\n"
+        "但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。"
+        "若不確定，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。\n"
         "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。"
     )
     try:
@@ -3636,7 +3645,7 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist、perfect symmetry、direct camera smile by default。
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
+- 結尾必須包含：Maintain consistent facial features, hairstyle, recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
 
 只回傳 JSON：
 {{
@@ -3836,7 +3845,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist 或複雜肢體動作。
 - {variation_rule}
-- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features, hairstyle, recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -4339,13 +4348,15 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景、服裝與較自由的動作)
             if mode == "cosplay":
                 base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, and overall recognizability, "
-                    "but you may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
+                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, recognizable adult body proportions, "
+                    "torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. "
+                    "You may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
                     "Do not simply copy the original composition or pose from Image 1."
                 )
             elif mode == "diary":
                 base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity and hairstyle, "
+                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, recognizable adult body proportions, "
+                    "torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body, "
                     "while creating a new candid daily-life moment with natural posture, outfit, and background based on the prompt."
                 )
             else:
