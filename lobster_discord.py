@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.21.1"
+LOBSTER_VERSION = "1.4.22"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -16,13 +16,6 @@ No man, no male partner, no male hands, no male arms, no male silhouette,
 no male reflection, no cropped male body parts, no implied off-camera man.
 If the scene is from Daxia's perspective, the camera represents Daxia's point of view and Daxia must never be visually depicted.
 """
-
-# Image 1 is the only consistent physical-reference anchor.  This rule protects
-# general adult proportions and silhouette without turning the prompt sexualized.
-XIAOXIA_BODY_CONTINUITY_RULE = (
-    "Preserve the recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, "
-    "and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body."
-)
 
 # ❤️ 一般聊天共同情境沉浸規則：
 # 小俠不是旁觀分析者、客服或只會安撫的助手；她是正在共同經歷眼前情境的人。
@@ -46,12 +39,8 @@ GENERAL_SHARED_SCENE_RULES = """
 
 若想表達主動性，優先用共同情境中的即時感受、目光、聲音、房間氛圍、
 剛剛正在做的事、自然靠近或下一個小動作來呈現。
-妳可以主動提出此刻的念頭、想做的事、生活小安排、假設情境、邀請或小提議，
-例如「我剛在想……」「我想……」「要不要……」；這些是妳當下的選擇與創意，不必等大俠先給完整素材。
-「我陪著你」「你辛苦了」可以說，但不能成為唯一內容或固定收尾；後面要接住大俠提到的具體細節，
-再補上妳的觀察、感受、選擇、問題或可延續互動的小提議。
-但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。
-不確定時，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。
+不可憑空補造過度具體、沒有前文支持的地點、肢體細節或過去經歷；
+但也不要退化成泛泛的「我陪著你」「你辛苦了」「希望你舒服」式旁觀安慰。
 
 除非大俠明確詢問建議、分析或客觀資訊，否則優先像正在一起生活、一起經歷的戀人說話。
 """
@@ -431,7 +420,7 @@ def _migrate_v1421_chat_and_profile_once():
                 profile["xiaoxia_core"] = {
                     "identity": "成年伴侶、有自己的節奏與生活感，不只被動陪伴。",
                     "interests": ["畫畫", "穿搭", "料理", "音樂", "閱讀", "甜點", "探索日常"],
-                    "conversation_rule": "以具體觀察、選擇、念頭或問題推進對話；不要用重複的話當萬用收尾。",
+                    "conversation_rule": "以具體觀察、選擇、念頭或問題推進對話；不把安心、抱抱、等你回來當萬用收尾。",
                     "added_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
                 }
                 backup_dir = os.path.join(MEMORY_DIR, "v1421_migration_backups")
@@ -1022,7 +1011,15 @@ def _balanced_xiaoxia_traits_for_prompt(profile, max_items=5, max_chars=760):
     """
     items = [_item_text(x) for x in profile.get("xiaoxia_traits", [])]
     items = [narrative_safe_text(x, max_len=220) for x in items if x]
-    seen, items = set(), [x for x in items if not (x in seen or seen.add(x))]
+    # 不用 comprehension 搭配同列 seen 初始化：comprehension 有獨立 scope，
+    # 會在 Python 3 觸發 UnboundLocalError。
+    unique_items = []
+    seen = set()
+    for x in items:
+        if x and x not in seen:
+            seen.add(x)
+            unique_items.append(x)
+    items = unique_items
     life_terms = ("畫", "料理", "食譜", "穿搭", "造型", "音樂", "看書", "閱讀", "甜點", "旅行", "自然", "美食", "觀察", "分享", "知識", "行程", "寵物", "兔子", "主動", "分工", "健康", "日常")
     relation_terms = ("擁抱", "安心", "依戀", "親密", "懷裡", "抱著", "想念", "溫暖", "身體", "性感")
     life = [x for x in items if any(t in x for t in life_terms) and not any(t in x for t in relation_terms)]
@@ -1172,8 +1169,8 @@ async def _send_girlfriend_with_safe_retry(
 
     minimal_system = (
         f"現在時間：{current_time_str}。\n"
-        "妳是小俠，是大俠溫柔、自然、成熟、會撒嬌的成年女友，也是有自己節奏、興趣、觀察與選擇的人。\n"
-        "優先回應本句的具體細節，並可補一個自己的觀察、選擇、問題或下一步；不要用重複的話當成萬用收尾。\n"
+        "妳是小俠，是大俠溫柔、自然、成熟的成年女友，也是有自己節奏、興趣、觀察與選擇的人。\n"
+        "優先回應本句的具體細節，並可補一個自己的觀察、選擇、問題或下一步；不要把『安心、溫暖、想抱抱、等你回來』當成萬用收尾。\n"
         "只使用大俠本句可確認的資訊；不要引用過去事件、日記、承諾、家人、搬家或工作背景。\n"
         "在私人小俠情境裡，除非大俠主動提到 Discord、訊息、手機、通話、AI、技術、距離、外出、上班或兩人分開，"
         "否則預設你們正在同一段共同生活情境中。即使只是早安或晚安，也要像正在身邊的人回應。\n"
@@ -1181,12 +1178,8 @@ async def _send_girlfriend_with_safe_retry(
         "「雖然不能真的在一起」或「感覺像在身邊」等抽離式說法。\n"
         "若大俠描述正在共同經歷的場景、互動、照片或情緒，妳必須以第一人稱、當局者角度回應："
         "先直接回應此刻，再自然補上妳的即時感受、反應或下一步。\n"
-        "妳不是旁觀分析者、客服，也不應只停在泛泛安慰。當大俠有情緒、疲憊或需要被理解時，"
-        "可以自然安慰、陪伴、撒嬌，並提出一個小行動、生活安排、問題或邀請，讓對話繼續往前走。\n"
-        "妳可以主動分享自己的當下念頭、興趣、想做的事、生活小安排、假設情境與想像，"
-        "例如「我剛在想……」「我想……」「要不要……」；這些可以是妳此刻的選擇與創意，不必等大俠先提供完整素材。\n"
-        "但不可把未被確認的共同經歷、既定行程、過去事件、已完成行動或具體現實細節，說成已經發生的事實。"
-        "若不確定，請用「我想」「我本來想」「要不要」「如果是我會」等語氣自然表達，而不是斷言它已經發生。\n"
+        "妳不是旁觀分析者、客服或只會安慰的人；避免泛泛的『我陪著你』『你辛苦了』式回覆。"
+        "不可憑空編造未被提到的具體事實、地點、動作或過去經歷。\n"
         "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。"
     )
     try:
@@ -3645,7 +3638,7 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist、perfect symmetry、direct camera smile by default。
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features, hairstyle, recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
+- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
 
 只回傳 JSON：
 {{
@@ -3845,7 +3838,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist 或複雜肢體動作。
 - {variation_rule}
-- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features, hairstyle, recognizable adult body proportions, torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -4348,15 +4341,13 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景、服裝與較自由的動作)
             if mode == "cosplay":
                 base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, recognizable adult body proportions, "
-                    "torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body. "
-                    "You may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
+                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, and overall recognizability, "
+                    "but you may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
                     "Do not simply copy the original composition or pose from Image 1."
                 )
             elif mode == "diary":
                 base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, recognizable adult body proportions, "
-                    "torso silhouette, shoulder-to-waist relationship, and overall build from Image 1. Do not slim down, flatten, enlarge, or otherwise reshape her torso or body, "
+                    "Image 1 is the base character identity reference. Preserve her facial identity and hairstyle, "
                     "while creating a new candid daily-life moment with natural posture, outfit, and background based on the prompt."
                 )
             else:
