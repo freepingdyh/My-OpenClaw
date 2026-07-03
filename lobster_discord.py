@@ -366,8 +366,12 @@ MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
 MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
 MEMORY_UPDATE_LAST_MANIFEST = os.path.join(MEMORY_DIR, "memory_update_last_manifest.json")
 MEMORY_DAILY_BACKUP_DIR = os.path.join(MEMORY_DIR, "daily_memory_backups")
+# 公開晨報／FOMO 的 Discord 按鈕在 Zeabur 重啟後仍須知道原訊息對應的內容。
+BROADCAST_BUTTON_STORE_PATH = os.path.join(MEMORY_DIR, "broadcast_button_store.json")
+BROADCAST_AUDIO_DIR = os.path.join(VAULT_DIR, "broadcast_audio")
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
+os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -6650,27 +6654,100 @@ async def optimize_memory_vault(channel=None):
 
 
 # ==========================================
-# 👩‍💻 系統架構師小夏 (維護與監控指令區)
+# 📻 公開廣播按鈕持久化（Zeabur 重啟後仍可用）
 # ==========================================
-from discord.ui import Button, View
+BROADCAST_BUTTON_RETENTION_DAYS = 31
+BROADCAST_BUTTON_MAX_RECORDS = 240
+_persistent_broadcast_views_registered = False
 
-# 🌟 建立一個帶有按鈕的視圖 (全異步高規版)
-class MorningVoiceView(View):
-    def __init__(self, voice_script_base):
-        super().__init__(timeout=86400) # 按鈕有效時間 24 小時
-        self.voice_script_base = voice_script_base
 
-    @discord.ui.button(label="▶️ 播放晨間廣播 (小俠)", style=discord.ButtonStyle.green, emoji="📻")
-    async def play_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 點擊後，先回應使用者 (避免 Discord 超時報錯)
-        await interaction.response.send_message("🎙️ 小俠正在準備今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
-        
-        try:
-            import uuid, os, asyncio, re
-            from google.genai import types
-            
-            # 1. 產生文稿 (使用全域的 async gemini_client)
-            prompt = f"""你是公開晨間廣播的固定主持人「小俠」。請根據以下晨報資料，寫一段約300字、年輕自然且適合大眾收聽的口語化晨報正文。
+def _load_broadcast_button_store():
+    """讀取訊息 ID -> 廣播 payload；壞檔時保守回傳空字典。"""
+    if not os.path.exists(BROADCAST_BUTTON_STORE_PATH):
+        return {}
+    try:
+        with open(BROADCAST_BUTTON_STORE_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        print(f"⚠️ [BROADCAST_STORE_LOAD_ERROR] {type(exc).__name__}: {exc}")
+        return {}
+
+
+def _save_broadcast_button_store(store):
+    """原子寫入，避免服務中斷時留下半截 JSON。"""
+    temp_path = f"{BROADCAST_BUTTON_STORE_PATH}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, BROADCAST_BUTTON_STORE_PATH)
+
+
+def _prune_broadcast_button_store(store, now_dt=None):
+    """只保留最近一個月的公開按鈕資料；順便刪除過期封存音檔。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    keep = {}
+    cutoff = now_dt - timedelta(days=BROADCAST_BUTTON_RETENTION_DAYS)
+    for message_id, item in (store or {}).items():
+        if not isinstance(item, dict):
+            continue
+        created_at = _parse_memory_date(item.get("created_at"))
+        if created_at and created_at < cutoff:
+            audio_path = str(item.get("mp3_path") or "")
+            try:
+                safe_root = os.path.abspath(BROADCAST_AUDIO_DIR) + os.sep
+                target = os.path.abspath(audio_path)
+                if target.startswith(safe_root) and os.path.exists(target):
+                    os.remove(target)
+            except Exception as exc:
+                print(f"⚠️ [BROADCAST_AUDIO_PRUNE_ERROR] {type(exc).__name__}: {exc}")
+            continue
+        keep[str(message_id)] = item
+    if len(keep) > BROADCAST_BUTTON_MAX_RECORDS:
+        def _sort_key(pair):
+            dt = _parse_memory_date(pair[1].get("created_at")) if isinstance(pair[1], dict) else None
+            return dt or datetime.min.replace(tzinfo=TZ_TPE)
+        ordered = sorted(keep.items(), key=_sort_key, reverse=True)
+        keep = dict(ordered[:BROADCAST_BUTTON_MAX_RECORDS])
+    return keep
+
+
+def _save_broadcast_button_payload(message_id, payload):
+    store = _prune_broadcast_button_store(_load_broadcast_button_store())
+    store[str(message_id)] = payload
+    _save_broadcast_button_store(store)
+    print(f"💾 [BROADCAST_BUTTON_SAVED] message_id={message_id} type={payload.get('type')}")
+
+
+def _get_broadcast_button_payload(message_id):
+    store = _load_broadcast_button_store()
+    payload = store.get(str(message_id))
+    return payload if isinstance(payload, dict) else None
+
+
+def _persist_fomo_audio(source_path):
+    """把 fomo 腳本產生的音檔複製到 /data；不能只依賴 /tmp。"""
+    source_path = str(source_path or "")
+    if not source_path or not os.path.exists(source_path):
+        return source_path
+    try:
+        suffix = Path(source_path).suffix or ".mp3"
+        stamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S")
+        destination = os.path.join(BROADCAST_AUDIO_DIR, f"fomo_{stamp}_{uuid.uuid4().hex[:8]}{suffix}")
+        shutil.copy2(source_path, destination)
+        print(f"🎵 [FOMO_AUDIO_PERSISTED] {destination}")
+        return destination
+    except Exception as exc:
+        print(f"⚠️ [FOMO_AUDIO_PERSIST_ERROR] {type(exc).__name__}: {exc}")
+        return source_path
+
+
+async def _send_morning_voice_for_interaction(interaction, voice_script_base):
+    """依已保存的晨報資料，當場生成 TTS；interaction 先 ACK 再進長工。"""
+    await interaction.response.send_message("🎙️ 小俠正在準備今日晨間語音廣播，請稍候約 15 秒。", ephemeral=False)
+    try:
+        import uuid, os, asyncio, re
+        from google.genai import types
+        prompt = f"""你是公開晨間廣播的固定主持人「小俠」。請根據以下晨報資料，寫一段約300字、年輕自然且適合大眾收聽的口語化晨報正文。
 
 【必要規則】
 1. 主持人固定是「小俠」，但不要寫問安或自我介紹；程式會在最前面統一加入一次。
@@ -6680,87 +6757,77 @@ class MorningVoiceView(View):
 5. 請只回傳播報正文，不要加標題、角色名稱或額外說明。
 
 【晨報資料】
-{self.voice_script_base}
+{voice_script_base}
 """
-            
-            text_resp = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
-            )
-            body_text = text_resp.text.strip().strip('"').strip("「」").strip()
-
-            # 開場由程式固定加入一次；模型若違規自行問安／自介，先清除，避免重複。
-            for _ in range(3):
-                before = body_text
-                body_text = re.sub(
-                    r"^\s*(?:(?:大家|各位(?:聽眾|朋友)?|朋友們)?\s*[，,]?\s*)?"
-                    r"早安[！!，,。:：\s]*",
-                    "",
-                    body_text,
-                    count=1,
-                ).strip()
-                body_text = re.sub(
-                    r"^\s*(?:我是|這裡是|由)\s*(?:晨間廣播主持人\s*)?[「『]?"
-                    r"小[俠夏][」』]?[^。！？!?]*[。！？!?]\s*",
-                    "",
-                    body_text,
-                    count=1,
-                ).strip()
-                if body_text == before:
-                    break
-
-            body_text = body_text.replace("大俠學長", "各位朋友").replace("大俠", "大家")
-            raw_text = "大家早安，我是小俠。" + ("\n" + body_text if body_text else "")
-
-            # TTS 只朗讀台詞，並固定為年輕、清亮、自然的主持語氣。
-            tts_prompt = (
-                "請以二十多歲台灣女生晨間主持人的聲音朗讀下方【台詞】。"
-                "聲線清亮、年輕、自然帶著微笑，語速輕快但咬字清楚；"
-                "不要成熟沉重，不要傳統新聞播報腔，也不要自行增加、刪除或重複任何台詞。"
-                "\n【台詞】\n" + raw_text
-            )
-
-            # 2. 轉成語音 (TTS)
-            tts_config = types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Sulafat"))
-                )
-            )
-            
-            audio_resp = await gemini_client.aio.models.generate_content(
-                model="gemini-2.5-flash-preview-tts",
-                contents=[tts_prompt],
-                config=tts_config
-            )
-            
-            pcm_data = audio_resp.candidates[0].content.parts[0].inline_data.data
-            
-            # 3. 處理音檔存檔與轉檔
-            raw_path = f"/tmp/voice_{uuid.uuid4().hex[:8]}.raw"
-            mp3_path = raw_path.replace(".raw", ".mp3")
-            
-            with open(raw_path, "wb") as f: 
-                f.write(pcm_data)
-                
-            # 非阻塞呼叫 ffmpeg
-            process = await asyncio.create_subprocess_exec(
-                "/home/node/.openclaw/workspace/ffmpeg_bin/ffmpeg",
-                "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", raw_path, "-b:a", "128k", mp3_path,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-            )
-            await process.communicate()
+        text_resp = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        body_text = text_resp.text.strip().strip('"').strip("「」").strip()
+        for _ in range(3):
+            before = body_text
+            body_text = re.sub(r"^\s*(?:(?:大家|各位(?:聽眾|朋友)?|朋友們)?\s*[，,]?\s*)?早安[！!，,。:：\s]*", "", body_text, count=1).strip()
+            body_text = re.sub(r"^\s*(?:我是|這裡是|由)\s*(?:晨間廣播主持人\s*)?[「『]?小[俠夏][」』]?[^。！？!?]*[。！？!?]\s*", "", body_text, count=1).strip()
+            if body_text == before:
+                break
+        body_text = body_text.replace("大俠學長", "各位朋友").replace("大俠", "大家")
+        raw_text = "大家早安，我是小俠。" + ("\n" + body_text if body_text else "")
+        tts_prompt = (
+            "請以二十多歲台灣女生晨間主持人的聲音朗讀下方【台詞】。"
+            "聲線清亮、年輕、自然帶著微笑，語速輕快但咬字清楚；"
+            "不要成熟沉重，不要傳統新聞播報腔，也不要自行增加、刪除或重複任何台詞。"
+            "\n【台詞】\n" + raw_text
+        )
+        tts_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Sulafat")))
+        )
+        audio_resp = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash-preview-tts", contents=[tts_prompt], config=tts_config)
+        pcm_data = audio_resp.candidates[0].content.parts[0].inline_data.data
+        raw_path = f"/tmp/voice_{uuid.uuid4().hex[:8]}.raw"
+        mp3_path = raw_path.replace(".raw", ".mp3")
+        with open(raw_path, "wb") as f:
+            f.write(pcm_data)
+        process = await asyncio.create_subprocess_exec(
+            "/home/node/.openclaw/workspace/ffmpeg_bin/ffmpeg", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", raw_path, "-b:a", "128k", mp3_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await process.communicate()
+        if os.path.exists(raw_path):
             os.remove(raw_path)
-            
-            # 發送語音檔
-            if os.path.exists(mp3_path):
-                await interaction.followup.send(content="🔊 **小俠的今日晨間廣播已完成。**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
-                os.remove(mp3_path)
-            else:
-                await interaction.followup.send("⚠️ 轉檔失敗，無法生成廣播。")
-                
-        except Exception as e:
-            await interaction.followup.send(f"❌ 語音生成發生錯誤: {e}")
+        if os.path.exists(mp3_path):
+            await interaction.followup.send(content="🔊 **小俠的今日晨間廣播已完成。**", file=discord.File(mp3_path, filename="Morning_Broadcast.mp3"))
+            os.remove(mp3_path)
+        else:
+            await interaction.followup.send("⚠️ 轉檔失敗，無法生成廣播。")
+    except Exception as exc:
+        print(f"❌ [MORNING_VOICE_INTERACTION_ERROR] {type(exc).__name__}: {exc}")
+        await interaction.followup.send(f"❌ 語音生成發生錯誤：{type(exc).__name__}: {str(exc)[:300]}")
+
+
+# ==========================================
+# 👩‍💻 系統架構師小夏 (維護與監控指令區)
+# ==========================================
+from discord.ui import Button, View
+
+# 🌟 建立一個帶有按鈕的視圖 (全異步高規版)
+class MorningVoiceView(View):
+    """Persistent View：不持有單則晨報資料，按下時以 message.id 回查 JSON。"""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="▶️ 播放晨間廣播 (小俠)",
+        style=discord.ButtonStyle.green,
+        emoji="📻",
+        custom_id="xiaoxia:morning_voice:play:v1",
+    )
+    async def play_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
+        payload = _get_broadcast_button_payload(interaction.message.id)
+        if not payload or payload.get("type") != "morning" or not payload.get("voice_script_base"):
+            await interaction.response.send_message(
+                "⚠️ 這則晨報的播放資料已過期或尚未完成保存，請使用最新一則晨報按鈕。",
+                ephemeral=True,
+            )
+            return
+        await _send_morning_voice_for_interaction(interaction, payload["voice_script_base"])
 
 async def _run_legacy_morning(target_channel=None):
     # 自動晨報固定送至新的公開 Server；手動私測仍可傳入私人 ctx.channel。
@@ -6813,8 +6880,15 @@ async def _run_legacy_morning(target_channel=None):
                         await channel.send(chunks[i])
                         
                     # 🌟 最後一個文字段落附加上「語音按鈕」
-                    view = MorningVoiceView(voice_script_base=voice_base)
-                    await channel.send(chunks[-1], view=view)
+                    sent_message = await channel.send(chunks[-1], view=MorningVoiceView())
+                    _save_broadcast_button_payload(
+                        sent_message.id,
+                        {
+                            "type": "morning",
+                            "voice_script_base": voice_base,
+                            "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                        },
+                    )
             else:
                 # 錯誤防呆：程式成功但沒印出 JSON
                 fallback_log = out_str[-1500:] if out_str else "無輸出"
@@ -7520,8 +7594,20 @@ async def architect_archive_events_cmd(ctx, mode: str = "completed"):
     except Exception as exc:
         await ctx.send(f"❌ 重大事件封存失敗：{exc}")
 
+def _register_persistent_broadcast_views():
+    """每次冷啟動只註冊一次；Discord 會以 custom_id 把舊按鈕路由回這些 callback。"""
+    global _persistent_broadcast_views_registered
+    if _persistent_broadcast_views_registered:
+        return
+    architect_bot.add_view(MorningVoiceView())
+    architect_bot.add_view(FomoRadioView())
+    _persistent_broadcast_views_registered = True
+    print("✅ [PERSISTENT_BROADCAST_VIEWS_REGISTERED] morning + fomo")
+
+
 @architect_bot.event
 async def on_ready():
+    _register_persistent_broadcast_views()
     print(f'👩‍💻 小夏 {architect_bot.user} 已上線！雙模式服務啟動：私人助手 + 公開架構師。')
     try:
         print(f"📇 公開名片服務橋接：{business_card_service.status_text()}")
@@ -7842,28 +7928,46 @@ async def sync_lyrics(ctx):
 # ==========================================
 # 🌟 建立茶水間專屬播放器 (帶有劇本閱讀功能)
 class FomoRadioView(discord.ui.View):
-    def __init__(self, mp3_path, full_script):
-        super().__init__(timeout=86400)
-        self.mp3_path = mp3_path
-        self.full_script = full_script
+    """Persistent View：payload 由 Discord 訊息 ID 對應 JSON，而非記憶體 View。"""
+    def __init__(self):
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="▶️ 播放廣播音檔", style=discord.ButtonStyle.primary, emoji="📻")
+    @discord.ui.button(
+        label="▶️ 播放廣播音檔",
+        style=discord.ButtonStyle.primary,
+        emoji="📻",
+        custom_id="xiaoxia:fomo_radio:play:v1",
+    )
     async def play_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if os.path.exists(self.mp3_path):
+        payload = _get_broadcast_button_payload(interaction.message.id)
+        mp3_path = str((payload or {}).get("mp3_path") or "")
+        if not payload or payload.get("type") != "fomo":
+            await interaction.response.send_message("⚠️ 這則廣播的播放資料已過期或尚未完成保存，請使用最新一則廣播按鈕。", ephemeral=True)
+            return
+        if os.path.exists(mp3_path):
             await interaction.response.send_message("🎧 正在準備廣播音檔。", ephemeral=True)
-            await interaction.followup.send(file=discord.File(self.mp3_path, filename="Fomo_Radio.mp3"))
+            await interaction.followup.send(file=discord.File(mp3_path, filename="Fomo_Radio.mp3"))
         else:
-            await interaction.response.send_message("❌ 找不到音檔，可能已經被系統回收了。", ephemeral=True)
+            print(f"⚠️ [FOMO_AUDIO_MISSING] message_id={interaction.message.id} path={mp3_path}")
+            await interaction.response.send_message("❌ 找不到音檔，可能已超過保存期限或檔案未能持久化。", ephemeral=True)
 
-    @discord.ui.button(label="📝 閱讀完整劇本", style=discord.ButtonStyle.secondary, emoji="📜")
+    @discord.ui.button(
+        label="📝 閱讀完整劇本",
+        style=discord.ButtonStyle.secondary,
+        emoji="📜",
+        custom_id="xiaoxia:fomo_radio:script:v1",
+    )
     async def read_script(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 劇本太長的話分段發送
-        script_msg = f"📜 **本日廣播劇本全文：**\n\n{self.full_script}"
-        if len(script_msg) > 2000:
-            await interaction.response.send_message(script_msg[:1900] + "...", ephemeral=True)
-            await interaction.followup.send("...(續)\n" + script_msg[1900:], ephemeral=True)
-        else:
-            await interaction.response.send_message(script_msg, ephemeral=True)
+        payload = _get_broadcast_button_payload(interaction.message.id)
+        full_script = str((payload or {}).get("full_script") or "").strip()
+        if not payload or payload.get("type") != "fomo" or not full_script:
+            await interaction.response.send_message("⚠️ 這則廣播的劇本資料已過期或尚未完成保存，請使用最新一則廣播按鈕。", ephemeral=True)
+            return
+        script_msg = f"📜 **本日廣播劇本全文：**\n\n{full_script}"
+        chunks = [script_msg[i:i + 1900] for i in range(0, len(script_msg), 1900)]
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send("...(續)\n" + chunk, ephemeral=True)
 
 # 🚀 更新後的執行函式 (具備完整除錯與參數傳遞能力)
 async def _run_fomo_radio(target_channel=None, additional_args=None):
@@ -7899,14 +8003,24 @@ async def _run_fomo_radio(target_channel=None, additional_args=None):
                 break
 
         if json_data:
-            view = FomoRadioView(mp3_path=json_data['mp3_path'], full_script=json_data['script'])
+            persisted_mp3_path = _persist_fomo_audio(json_data.get('mp3_path', ''))
             embed = discord.Embed(
                 title=f"🎙️ 茶水間廣播：{json_data['topic']}", 
                 description=f"**🔥 迷因評級：{json_data['grade']}**\n**🎲 通告咖：{json_data['guests']}**\n\n*(點擊下方按鈕收聽語音或查看劇本)*",
                 color=0x1abc9c
             )
             embed.set_footer(text="🦞 龍蝦電台 2.0 | 每日中午 11:30 準時發車")
-            await channel.send(embed=embed, view=view)
+            sent_message = await channel.send(embed=embed, view=FomoRadioView())
+            _save_broadcast_button_payload(
+                sent_message.id,
+                {
+                    "type": "fomo",
+                    "mp3_path": persisted_mp3_path,
+                    "full_script": json_data.get('script', ''),
+                    "topic": json_data.get('topic', ''),
+                    "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
         else:
             # 🌟 把這塊遮羞布掀開！如果失敗，直接印出真實 Log，抓出真兇！
             fallback_log = err_str[-1500:] if err_str else out_str[-1500:]
