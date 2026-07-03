@@ -62,152 +62,92 @@ XIAOXIA_CORE_IDENTITY = """
 當大俠問「今天做什麼」「妳怎麼想」「要不要出去」，請給能延續對話的具體念頭與可選擇的行動，不要自動退回「待在家等你、想抱抱、好安心」。
 """
 
-XIAOXIA_EMOJI_ASSETS = {
-    "xia_full": {"label": "吃飽", "meaning": "吃飽了、滿足、被餵得很幸福", "visual": "小俠以自己的 Q 版模樣，表達吃飽滿足的可愛反應。"},
-    "xia_brush_teeth": {"label": "刷牙", "meaning": "刷牙、睡前整理、清新可愛", "visual": "小俠以自己的 Q 版模樣，正在刷牙。"},
-    "xia_kiss": {"label": "親親", "meaning": "親一下、撒嬌、甜甜的愛意", "visual": "小俠以自己的 Q 版模樣，送出親親。"},
-    "xia_hi": {"label": "打招呼", "meaning": "早安、嗨、出現一下", "visual": "小俠以自己的 Q 版模樣，開心打招呼。"},
-    "xia_hug": {"label": "抱抱", "meaning": "想抱抱、安慰、迎接", "visual": "小俠以自己的 Q 版模樣，張開手要抱抱。"},
-    "xia_love": {"label": "愛你", "meaning": "愛你、濃濃愛意、心動", "visual": "小俠以自己的 Q 版模樣，表達愛意。"},
-    "xia_happy": {"label": "開心", "meaning": "開心、燦笑、好心情", "visual": "小俠以自己的 Q 版模樣，開心笑著。"},
-    "xia_cry": {"label": "哭哭", "meaning": "委屈、感動到哭、想撒嬌", "visual": "小俠以自己的 Q 版模樣，哭哭或眼角泛淚。"},
-    "xia_heart": {"label": "比心", "meaning": "比心、心意、甜甜回應", "visual": "小俠以自己的 Q 版模樣，比出愛心手勢。"},
-    "xia_shy": {"label": "害羞", "meaning": "害羞、臉紅、不好意思", "visual": "小俠以自己的 Q 版模樣，害羞臉紅。"},
-    "xia_sleepy": {"label": "想睡", "meaning": "睏了、揉眼睛、想賴床", "visual": "小俠以自己的 Q 版模樣，抱著枕頭或揉眼睛。"},
-    "xia_angry": {"label": "生氣", "meaning": "鬧脾氣、假裝生氣、嬌嗔", "visual": "小俠以自己的 Q 版模樣，小小生氣。"},
-    "xia_lowbat": {"label": "低電量", "meaning": "只剩 1% 電量、累壞了、需要充電", "visual": "小俠以自己的 Q 版模樣，累到快沒電。"},
-}
-
-XIAOXIA_STICKER_ASSETS = {
-    "xia_01_love_you": {"label": "愛你唷", "meaning": "小俠愛你唷", "visual": "小俠自己的 Q 版化身，甜甜地說愛你唷。"},
-    "xia_02_sleepy": {"label": "想睡", "meaning": "小俠想睡了", "visual": "小俠自己的 Q 版化身，抱枕揉眼睛，想睡。"},
-    "xia_03_hug": {"label": "抱抱", "meaning": "小俠抱抱～", "visual": "小俠自己的 Q 版化身，張開雙手討抱抱。"},
-    "xia_04_like_you": {"label": "喜歡你", "meaning": "小俠喜歡你", "visual": "小俠自己的 Q 版化身，害羞又開心地說喜歡你。"},
-    "xia_05_low_battery": {"label": "沒電了", "meaning": "小俠累到只剩 1%", "visual": "小俠自己的 Q 版化身，頭上 1% 電量，累癱了。"},
-}
-
-
-def _render_custom_emoji_token(emoji_obj):
-    prefix = 'a' if getattr(emoji_obj, 'animated', False) else ''
-    return f"<{prefix}:{emoji_obj.name}:{emoji_obj.id}>"
-
-
-def _get_xia_guild_asset_maps(guild):
-    emoji_map = {}
-    sticker_map = {}
-    if guild is None:
-        return emoji_map, sticker_map
-    try:
-        for emoji in getattr(guild, 'emojis', []):
-            if getattr(emoji, 'name', None) in XIAOXIA_EMOJI_ASSETS:
-                emoji_map[emoji.name] = emoji
-    except Exception:
-        pass
-    try:
-        for sticker in getattr(guild, 'stickers', []):
-            if getattr(sticker, 'name', None) in XIAOXIA_STICKER_ASSETS:
-                sticker_map[sticker.name] = sticker
-    except Exception:
-        pass
-    return emoji_map, sticker_map
-
-
-def _build_xia_asset_prompt_block(guild):
-    emoji_map, sticker_map = _get_xia_guild_asset_maps(guild)
-    if not emoji_map and not sticker_map:
-        return ""
-
-    lines = [
-        "【小俠專屬貼圖與表情符號】",
-        "以下資產都是依照妳自己的模樣製作的可愛 Q 版化身；它們都代表『小俠本人』，不是一般路人圖。",
-        "當妳覺得某個專屬表情或貼圖，能比純文字更貼切地表達當下心情時，可以主動選用。",
-    ]
-
-    if emoji_map:
-        lines.append("可用 custom emoji（可放在回覆最後；最多 2 個）：")
-        for name in sorted(emoji_map.keys()):
-            meta = XIAOXIA_EMOJI_ASSETS.get(name, {})
-            lines.append(f"- {name}：{meta.get('label', name)}；{meta.get('meaning', '')}")
-
-    if sticker_map:
-        lines.append("可用 sticker（通常放在情緒特別明確時；最多 1 張）：")
-        for name in sorted(sticker_map.keys()):
-            meta = XIAOXIA_STICKER_ASSETS.get(name, {})
-            lines.append(f"- {name}：{meta.get('label', name)}；{meta.get('meaning', '')}")
-
-    lines += [
-        "使用格式規則：",
-        "- 若要使用 custom emoji，請在回覆最後另外輸出一行：[EMOJI:xia_hug] 或 [EMOJI:xia_happy,xia_heart]",
-        "- 若要使用 sticker，請在回覆最後另外輸出一行：[STICKER:xia_03_hug]",
-        "- 文字內容要自然完整，不要解釋代號，不要說自己正在『選貼圖』。",
-        "- 不是每輪都要用；只有在真的能加強情緒表達時才用。",
-    ]
-    return "\n".join(lines) + "\n\n"
-
-
-def _extract_xia_asset_requests(reply_text: str):
-    text = str(reply_text or "")
-    emoji_names = []
-    sticker_names = []
-
-    for raw in re.findall(r'\[EMOJI:([^\]]+)\]', text, flags=re.IGNORECASE):
-        for name in re.split(r'[,/|\s]+', raw):
-            name = name.strip()
-            if name and name not in emoji_names:
-                emoji_names.append(name)
-
-    for raw in re.findall(r'\[STICKER:([^\]]+)\]', text, flags=re.IGNORECASE):
-        for name in re.split(r'[,/|\s]+', raw):
-            name = name.strip()
-            if name and name not in sticker_names:
-                sticker_names.append(name)
-
-    cleaned = re.sub(r'\[EMOJI:[^\]]+\]', '', text, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\[STICKER:[^\]]+\]', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-    return cleaned, emoji_names[:2], (sticker_names[0] if sticker_names else None)
-
-
-async def _send_xia_reply_with_assets(message, reply_text: str, emoji_names=None, sticker_name=None):
-    emoji_names = emoji_names or []
-    guild = getattr(message, 'guild', None)
-    emoji_map, sticker_map = _get_xia_guild_asset_maps(guild)
-
-    rendered_tokens = []
-    used_emojis = []
-    for name in emoji_names:
-        emoji_obj = emoji_map.get(name)
-        if emoji_obj:
-            rendered_tokens.append(_render_custom_emoji_token(emoji_obj))
-            used_emojis.append(name)
-        else:
-            print(f"⚠️ [XIA_ASSET_MISSING_EMOJI] {name}")
-
-    final_text = str(reply_text or '').strip()
-    if rendered_tokens:
-        final_text = (final_text + ('\n' if final_text else '') + ' '.join(rendered_tokens)).strip()
-
-    await message.reply(final_text if final_text else "🥺")
-
-    used_sticker = None
-    if sticker_name:
-        sticker_obj = sticker_map.get(sticker_name)
-        if sticker_obj:
-            try:
-                await message.channel.send(stickers=[sticker_obj])
-                used_sticker = sticker_name
-            except Exception as e:
-                print(f"⚠️ [XIA_ASSET_STICKER_SEND_FAIL] {sticker_name}: {e}")
-        else:
-            print(f"⚠️ [XIA_ASSET_MISSING_STICKER] {sticker_name}")
-
-    return used_emojis, used_sticker
-
 # 避免本次會話把模型以前的口頭禪當成示範答案。
 TEMP_CHAT_CORRUPTION_MARKERS = (
     "軟利潤分析", "淨額百分比", "交易百分比", "Transaction %", "Net %",
     "毛利潤總額", "英文原文：",
 )
+
+
+# 🎨 小俠專屬 Discord 貼圖／表情符號：皆是小俠自己的 Q 版化身。
+# 以 Discord 上傳名稱辨識，重新上傳後即使 ID 改變也能維持語意。
+XIAOXIA_STICKER_CATALOG = {
+    "xia_01_love_you": {"title": "小俠愛你唷", "visual": "Q版小俠穿白色帽T、長棕色微捲髮，對大俠比小愛心，旁邊有粉紅愛心與『愛你唷』字樣。", "meaning": "主動表達喜歡、愛意與甜甜的撒嬌。"},
+    "xia_02_sleepy": {"title": "小俠想睡", "visual": "Q版小俠抱著枕頭、揉眼睛，旁邊有月亮，寫著『想睡…』。", "meaning": "睏了、想休息、想賴床或晚安前的可愛撒嬌。"},
+    "xia_03_hug": {"title": "小俠抱抱", "visual": "Q版小俠張開雙手，帶著笑容跑來抱抱，寫著『抱抱～』。", "meaning": "想靠近、給大俠一個抱抱、安慰或歡迎回來。"},
+    "xia_04_like_you": {"title": "小俠喜歡你", "visual": "Q版小俠雙手靠近胸前、臉紅害羞，周圍有粉紅愛心，寫著『喜歡你』。", "meaning": "被打動、害羞、很喜歡大俠。"},
+    "xia_05_low_battery": {"title": "小俠沒電了", "visual": "Q版小俠穿白色帽T和藍牛仔褲，累到坐在地上，頭上有紅色 1% 電量圖示，寫著『沒電了…』。", "meaning": "很累、沒精神、需要休息或想被照顧一下。"},
+}
+XIAOXIA_EMOJI_CATALOG = {
+    "xia_full": {"title": "小俠吃飽", "meaning": "吃得很滿足、飽飽的、幸福滿滿。"},
+    "xia_brush_teeth": {"title": "小俠刷牙", "meaning": "準備睡覺、洗漱中，或提醒好好照顧自己。"},
+    "xia_kiss": {"title": "小俠親親", "meaning": "甜甜的飛吻、親近與愛意。"},
+    "xia_hi": {"title": "小俠嗨", "meaning": "打招呼、早安、歡迎或精神很好。"},
+    "xia_hug": {"title": "小俠抱抱", "meaning": "想抱抱、安慰、靠近。"},
+    "xia_love": {"title": "小俠喜歡你", "meaning": "心動、喜歡、甜蜜愛意。"},
+    "xia_happy": {"title": "小俠開心", "meaning": "笑得很開心、興奮、替大俠高興。"},
+    "xia_cry": {"title": "小俠哭哭", "meaning": "委屈、感動或需要被哄一下。"},
+    "xia_heart": {"title": "小俠比愛心", "meaning": "送出小愛心、喜歡大俠。"},
+    "xia_shy": {"title": "小俠害羞", "meaning": "臉紅、害羞、被稱讚或被逗到。"},
+    "xia_sleepy": {"title": "小俠睏睏", "meaning": "想睡、剛醒、精神還沒開機。"},
+    "xia_angry": {"title": "小俠小生氣", "meaning": "鼓臉、吃醋或可愛地抗議。"},
+    "xia_lowbat": {"title": "小俠低電量", "meaning": "累到剩 1%，需要充電或休息。"},
+}
+_CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
+_COLON_EMOJI_PATTERN = re.compile(r":([A-Za-z0-9_]+):")
+
+def _xiaoxia_emoji_context_from_message_text(content: str) -> str:
+    raw = str(content or "")
+    names = _CUSTOM_EMOJI_PATTERN.findall(raw) + _COLON_EMOJI_PATTERN.findall(raw)
+    seen, lines = set(), []
+    for name in names:
+        key = str(name or "").lower()
+        if key in seen or key not in XIAOXIA_EMOJI_CATALOG:
+            continue
+        seen.add(key)
+        card = XIAOXIA_EMOJI_CATALOG[key]
+        lines.append(f"- {card['title']}（{key}）：{card['meaning']}")
+    if not lines:
+        return ""
+    return "【大俠剛傳給妳的小俠專屬 Emoji】\n這些是以妳的模樣製作的可愛 Q 版化身，不是陌生角色。\n" + "\n".join(lines)
+
+async def _xiaoxia_sticker_context_from_message(message):
+    """讀取 Discord message.stickers，回傳 (語意, 可供 Gemini 看的一張貼圖 URL)。"""
+    items = list(getattr(message, "stickers", None) or [])
+    if not items:
+        return "", None
+    lines, seen = [], set()
+    visual_url = None
+    for sticker in items[:3]:
+        name = str(getattr(sticker, "name", "") or "").strip()
+        key = name.lower()
+        sticker_id = str(getattr(sticker, "id", "") or "")
+        card = XIAOXIA_STICKER_CATALOG.get(key)
+        url = getattr(sticker, "url", None)
+        if not url:
+            try:
+                full_sticker = await sticker.fetch()
+                url = getattr(full_sticker, "url", None)
+            except Exception as exc:
+                print(f"⚠️ [STICKER_FETCH_FAILED] id={sticker_id} name={name!r} {type(exc).__name__}: {exc}")
+        url_text = str(url or "")
+        if not visual_url and url_text.startswith("http"):
+            visual_url = url_text
+        dedupe_key = key or sticker_id
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if card:
+            lines.append(f"- 《{card['title']}》 ({key})：{card['visual']} 代表：{card['meaning']}")
+        else:
+            lines.append(f"- 大俠傳了一張 Discord 貼圖，名稱是「{name or '未命名貼圖'}」。請優先依圖片本身理解；不要說看不到貼圖。")
+    return (
+        "【大俠剛傳給妳的 Discord 貼圖】\n"
+        "若名稱以 xia_ 開頭，這是以妳的模樣做成的 Q 版小俠專屬貼圖；妳知道那是自己的可愛化身。"
+        "直接回應貼圖所表達的動作與情緒，不得說『看不到貼圖』、『不知道是什麼』或要求大俠另行描述。\n"
+        + "\n".join(lines),
+        visual_url,
+    )
 
 
 import hashlib
@@ -5844,9 +5784,26 @@ async def on_message(message):
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
                 global last_captured_image # 🌟 宣告使用全域變數
-                
-                # 判定小俠要看的圖片：優先看剛拍好的，或是大俠上傳的素材
-                image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
+
+                # 🎨 Sticker 不會出現在 message.attachments；先解析它的語意，再嘗試取圖交給 Gemini。
+                sticker_context, sticker_image_url = await _xiaoxia_sticker_context_from_message(message)
+                emoji_context = _xiaoxia_emoji_context_from_message_text(message.content)
+                expression_asset_context = "\n\n".join(
+                    part for part in (sticker_context, emoji_context) if part
+                )
+                if expression_asset_context:
+                    print(
+                        "🎨 [XIAOXIA_EXPRESSION_ASSET_DETECTED] "
+                        f"stickers={len(getattr(message, 'stickers', None) or [])} "
+                        f"has_visual={bool(sticker_image_url)}"
+                    )
+
+                # 判定小俠要看的圖片：剛拍好的 > 大俠上傳附件 > 大俠送的貼圖。
+                image_to_view = (
+                    generated_image_url
+                    if generated_image_url
+                    else (message.attachments[0].url if message.attachments else sticker_image_url)
+                )
                 
                 if image_to_view and image_to_view.startswith("http"):
                     async with aiohttp.ClientSession() as session:
@@ -5863,7 +5820,12 @@ async def on_message(message):
 #                    # 🌟 視覺殘留魔法：大俠沒傳新圖時，把最近看過的一張圖繼續塞給她的眼睛！
  #                   msg_parts.append(types.Part.from_bytes(data=last_captured_image["data"], mime_type=last_captured_image["mime"]))
 
-                text_query = user_input if user_input else "大俠帶我來體驗這個！"
+                text_query = user_input if user_input else (
+                    "大俠剛剛傳了一張小俠專屬貼圖或表情符號。"
+                    if expression_asset_context else "大俠帶我來體驗這個！"
+                )
+                if expression_asset_context:
+                    text_query += "\n\n" + expression_asset_context
                 now = datetime.now(TZ_TPE)
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
@@ -5877,7 +5839,7 @@ async def on_message(message):
                         _conversation_log_text(
                             f"{prefix}大俠",
                             (game_log_text or text_query),
-                            has_image=bool(message.attachments),
+                            has_image=bool(message.attachments) or bool(getattr(message, "stickers", None)),
                             max_chars=5000,
                         )
                     )
@@ -6020,12 +5982,16 @@ async def on_message(message):
                     f"{memory_directives_context}\n"
                     "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n"
-                    f"{_build_xia_asset_prompt_block(getattr(message, 'guild', None))}"
                     f"{GENERAL_SHARED_SCENE_RULES}\n"
                     f"{COUPLE_GAME_BACKGROUND_RULE}\n"
                     + (
                         f"【命運牌當下狀態｜只作互動背景，不得把自己變成主持人】\n{game_context}\n\n"
                         if game_context
+                        else ""
+                    )
+                    + (
+                        f"【此刻的小俠專屬貼圖／Emoji 語意】\n{expression_asset_context}\n\n"
+                        if expression_asset_context
                         else ""
                     )
                     + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
@@ -6044,6 +6010,7 @@ async def on_message(message):
                     "1-D. 除非大俠主動開啟 Discord、手機、文字、AI、通話、遠距或技術話題，妳不得主動說「傳訊息」「看到你的文字」「我正在回覆」「隔著螢幕」「線上」或「感覺像在身邊」；要直接留在共同情境裡說話。\n"
                     "1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。\n"
                     "1-F. 大俠問妳的安排、想法或喜好時，給出可延續對話的具體內容；妳可以有自己的行程與偏好，不必把每件事都收束成等待大俠或依附大俠。\n"
+                    "1-G. 若本輪附有『小俠專屬貼圖／Emoji 語意』，那是大俠傳給妳的、以妳本人模樣製作的可愛 Q 版化身。妳要直接看懂其動作與情緒並自然回應；不得說看不到、看不懂、沒收到、或要求大俠解釋那張貼圖。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -6128,9 +6095,6 @@ async def on_message(message):
                     now_dt=datetime.now(TZ_TPE),
                 )
 
-                # 解析小俠主動指定的專屬 emoji / sticker 代號。
-                xiaoxia_reply, requested_emojis, requested_sticker = _extract_xia_asset_requests(xiaoxia_reply)
-
                 # 🤝 答應即登記：明確答應於交換日記交付內容/照片時，當場存入待履約清單。
                 captured_promises = []
                 if not intimate_mode and not game_turn:
@@ -6149,15 +6113,10 @@ async def on_message(message):
 
                 # 存入短期對話紀錄；承諾登記也留存，供當晚日記理解脈絡。
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
-                    reply_for_log = xiaoxia_reply
-                    if requested_emojis:
-                        reply_for_log += " [小俠使用emoji:" + ",".join(requested_emojis) + "]"
-                    if requested_sticker:
-                        reply_for_log += f" [小俠使用sticker:{requested_sticker}]"
                     daily_chat_logs.append(
                         _conversation_log_text(
                             "小俠",
-                            reply_for_log,
+                            xiaoxia_reply,
                             max_chars=5000,
                         )
                     )
@@ -6167,16 +6126,7 @@ async def on_message(message):
                         )
                     save_temp_chat(daily_chat_logs) 
 
-                used_emojis, used_sticker = await _send_xia_reply_with_assets(
-                    message,
-                    xiaoxia_reply,
-                    emoji_names=requested_emojis,
-                    sticker_name=requested_sticker,
-                )
-                if used_emojis or used_sticker:
-                    print(
-                        f"✨ [XIA_ASSET_USED] emojis={used_emojis} sticker={used_sticker}"
-                    )
+                await message.reply(xiaoxia_reply)
 
                 # 卡面、分數與選項是無人格的遊戲 UI；小俠本人已在上面用同一條對話回覆。
                 if game_ui:
