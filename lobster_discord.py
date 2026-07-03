@@ -69,85 +69,197 @@ TEMP_CHAT_CORRUPTION_MARKERS = (
 )
 
 
-# 🎨 小俠專屬 Discord 貼圖／表情符號：皆是小俠自己的 Q 版化身。
-# 以 Discord 上傳名稱辨識，重新上傳後即使 ID 改變也能維持語意。
-XIAOXIA_STICKER_CATALOG = {
-    "xia_01_love_you": {"title": "小俠愛你唷", "visual": "Q版小俠穿白色帽T、長棕色微捲髮，對大俠比小愛心，旁邊有粉紅愛心與『愛你唷』字樣。", "meaning": "主動表達喜歡、愛意與甜甜的撒嬌。"},
-    "xia_02_sleepy": {"title": "小俠想睡", "visual": "Q版小俠抱著枕頭、揉眼睛，旁邊有月亮，寫著『想睡…』。", "meaning": "睏了、想休息、想賴床或晚安前的可愛撒嬌。"},
-    "xia_03_hug": {"title": "小俠抱抱", "visual": "Q版小俠張開雙手，帶著笑容跑來抱抱，寫著『抱抱～』。", "meaning": "想靠近、給大俠一個抱抱、安慰或歡迎回來。"},
-    "xia_04_like_you": {"title": "小俠喜歡你", "visual": "Q版小俠雙手靠近胸前、臉紅害羞，周圍有粉紅愛心，寫著『喜歡你』。", "meaning": "被打動、害羞、很喜歡大俠。"},
-    "xia_05_low_battery": {"title": "小俠沒電了", "visual": "Q版小俠穿白色帽T和藍牛仔褲，累到坐在地上，頭上有紅色 1% 電量圖示，寫著『沒電了…』。", "meaning": "很累、沒精神、需要休息或想被照顧一下。"},
+# ==========================================
+# 🧸 小俠專屬 Discord Sticker / Emoji 資產
+# ==========================================
+# 這些 Sticker 與 Emoji 都是以小俠自己的可愛 Q 版化身製作。
+# LLM 僅選擇代號；程式負責解析、白名單驗證與真正送出 Discord 資產。
+# 不硬編碼 ID：依 Discord Server 當前名稱動態尋找，重傳資產後也不必重抄 ID。
+XIAOXIA_STICKERS = {
+    "xia_01_love_you": {
+        "title": "小俠愛你唷",
+        "visual": "小俠穿白色帽T、長棕色微捲髮，比著小愛心，旁邊有粉紅愛心與「愛你唷」中文字。",
+        "meaning": "直接表達愛意、被逗得甜甜的、想把喜歡送給大俠。",
+    },
+    "xia_02_sleepy": {
+        "title": "小俠想睡了",
+        "visual": "小俠抱著枕頭、揉眼睛，旁邊有月亮與「想睡…」中文字。",
+        "meaning": "睏了、剛起床、想賴床、想早點休息。",
+    },
+    "xia_03_hug": {
+        "title": "小俠抱抱",
+        "visual": "小俠張開雙手、笑著迎上來，旁邊有愛心與「抱抱～」中文字。",
+        "meaning": "想抱抱、安慰、歡迎大俠靠近。",
+    },
+    "xia_04_like_you": {
+        "title": "小俠喜歡你",
+        "visual": "小俠雙手放在胸前、害羞微笑，周圍有粉紅愛心與「喜歡你」中文字。",
+        "meaning": "心動、害羞地喜歡、被大俠稱讚後甜甜的。",
+    },
+    "xia_05_low_battery": {
+        "title": "小俠只剩 1% 電量",
+        "visual": "小俠穿白色帽T與藍色牛仔褲、累得坐在地上，頭上有紅色 1% 電池與「沒電了…」中文字。",
+        "meaning": "累到沒電、想休息、需要被照顧或撒嬌充電。",
+    },
 }
-XIAOXIA_EMOJI_CATALOG = {
-    "xia_full": {"title": "小俠吃飽", "meaning": "吃得很滿足、飽飽的、幸福滿滿。"},
-    "xia_brush_teeth": {"title": "小俠刷牙", "meaning": "準備睡覺、洗漱中，或提醒好好照顧自己。"},
-    "xia_kiss": {"title": "小俠親親", "meaning": "甜甜的飛吻、親近與愛意。"},
-    "xia_hi": {"title": "小俠嗨", "meaning": "打招呼、早安、歡迎或精神很好。"},
-    "xia_hug": {"title": "小俠抱抱", "meaning": "想抱抱、安慰、靠近。"},
-    "xia_love": {"title": "小俠喜歡你", "meaning": "心動、喜歡、甜蜜愛意。"},
-    "xia_happy": {"title": "小俠開心", "meaning": "笑得很開心、興奮、替大俠高興。"},
-    "xia_cry": {"title": "小俠哭哭", "meaning": "委屈、感動或需要被哄一下。"},
-    "xia_heart": {"title": "小俠比愛心", "meaning": "送出小愛心、喜歡大俠。"},
-    "xia_shy": {"title": "小俠害羞", "meaning": "臉紅、害羞、被稱讚或被逗到。"},
-    "xia_sleepy": {"title": "小俠睏睏", "meaning": "想睡、剛醒、精神還沒開機。"},
-    "xia_angry": {"title": "小俠小生氣", "meaning": "鼓臉、吃醋或可愛地抗議。"},
-    "xia_lowbat": {"title": "小俠低電量", "meaning": "累到剩 1%，需要充電或休息。"},
+
+XIAOXIA_EMOJIS = {
+    "xia_full": "小俠吃飽、滿足的可愛表情。",
+    "xia_brush_teeth": "小俠刷牙中的可愛表情。",
+    "xia_kiss": "小俠送出一個可愛的親吻。",
+    "xia_hi": "小俠笑著揮手打招呼。",
+    "xia_hug": "小俠張開手臂想抱抱。",
+    "xia_love": "小俠帶著愛心、很喜歡大俠的表情。",
+    "xia_happy": "小俠開心到瞇眼笑、握拳雀躍。",
+    "xia_cry": "小俠委屈或感動到哭哭的表情。",
+    "xia_heart": "小俠比出手指愛心。",
+    "xia_shy": "小俠臉紅害羞、雙手靠近臉頰的表情。",
+    "xia_sleepy": "小俠揉眼睛、睏睏的表情。",
+    "xia_angry": "小俠鼓著臉、雙手抱胸的可愛小生氣表情。",
+    "xia_lowbat": "小俠累到只剩低電量的表情。",
 }
-_CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
-_COLON_EMOJI_PATTERN = re.compile(r":([A-Za-z0-9_]+):")
 
-def _xiaoxia_emoji_context_from_message_text(content: str) -> str:
-    raw = str(content or "")
-    names = _CUSTOM_EMOJI_PATTERN.findall(raw) + _COLON_EMOJI_PATTERN.findall(raw)
-    seen, lines = set(), []
-    for name in names:
-        key = str(name or "").lower()
-        if key in seen or key not in XIAOXIA_EMOJI_CATALOG:
-            continue
-        seen.add(key)
-        card = XIAOXIA_EMOJI_CATALOG[key]
-        lines.append(f"- {card['title']}（{key}）：{card['meaning']}")
-    if not lines:
-        return ""
-    return "【大俠剛傳給妳的小俠專屬 Emoji】\n這些是以妳的模樣製作的可愛 Q 版化身，不是陌生角色。\n" + "\n".join(lines)
+_STICKER_TAG_RE = re.compile(
+    r"""(?:
+        \[\[\s*STICKER\s*:\s*([A-Za-z0-9_]+)\s*\]\] |
+        \[\s*STICKER\s*:\s*([A-Za-z0-9_]+)\s*\] |
+        \[\s*小俠使用\s*sticker\s*:\s*([A-Za-z0-9_]+)\s*\] |
+        \[\s*小俠使用\s*貼圖\s*[:：]\s*([A-Za-z0-9_]+)\s*\] |
+        【\s*小俠使用\s*貼圖\s*[:：]\s*([A-Za-z0-9_]+)\s*】
+    )""",
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+_EMOJI_TAG_RE = re.compile(
+    r"""(?:
+        \[\[\s*EMOJI\s*:\s*([A-Za-z0-9_]+)\s*\]\] |
+        \[\s*EMOJI\s*:\s*([A-Za-z0-9_]+)\s*\]
+    )""",
+    flags=re.IGNORECASE | re.VERBOSE,
+)
 
-async def _xiaoxia_sticker_context_from_message(message):
-    """讀取 Discord message.stickers，回傳 (語意, 可供 Gemini 看的一張貼圖 URL)。"""
-    items = list(getattr(message, "stickers", None) or [])
-    if not items:
-        return "", None
-    lines, seen = [], set()
-    visual_url = None
-    for sticker in items[:3]:
-        name = str(getattr(sticker, "name", "") or "").strip()
-        key = name.lower()
-        sticker_id = str(getattr(sticker, "id", "") or "")
-        card = XIAOXIA_STICKER_CATALOG.get(key)
-        url = getattr(sticker, "url", None)
-        if not url:
-            try:
-                full_sticker = await sticker.fetch()
-                url = getattr(full_sticker, "url", None)
-            except Exception as exc:
-                print(f"⚠️ [STICKER_FETCH_FAILED] id={sticker_id} name={name!r} {type(exc).__name__}: {exc}")
-        url_text = str(url or "")
-        if not visual_url and url_text.startswith("http"):
-            visual_url = url_text
-        dedupe_key = key or sticker_id
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        if card:
-            lines.append(f"- 《{card['title']}》 ({key})：{card['visual']} 代表：{card['meaning']}")
-        else:
-            lines.append(f"- 大俠傳了一張 Discord 貼圖，名稱是「{name or '未命名貼圖'}」。請優先依圖片本身理解；不要說看不到貼圖。")
+def _asset_catalog_for_prompt() -> str:
+    sticker_lines = [
+        f"- {key}｜{info['title']}：{info['visual']} 語意：{info['meaning']}"
+        for key, info in XIAOXIA_STICKERS.items()
+    ]
+    emoji_lines = [f"- {key}：{meaning}" for key, meaning in XIAOXIA_EMOJIS.items()]
     return (
-        "【大俠剛傳給妳的 Discord 貼圖】\n"
-        "若名稱以 xia_ 開頭，這是以妳的模樣做成的 Q 版小俠專屬貼圖；妳知道那是自己的可愛化身。"
-        "直接回應貼圖所表達的動作與情緒，不得說『看不到貼圖』、『不知道是什麼』或要求大俠另行描述。\n"
-        + "\n".join(lines),
-        visual_url,
+        "【小俠專屬 Discord 可愛資產】\n"
+        "以下 Sticker 與 Emoji 都是以妳自己的模樣製作的 Q 版化身。妳知道它們長什麼樣、代表什麼，也可以自行決定要不要使用。\n\n"
+        "Sticker（完整動作、單獨送出）：\n" + "\n".join(sticker_lines)
+        + "\n\nEmoji（小型文字表情）：\n" + "\n".join(emoji_lines)
+        + "\n\n【使用規則】\n"
+        "1. 文字回覆永遠優先；這些只是偶爾更貼切的延伸，不可為了使用而使用。\n"
+        "2. 每一輪最多擇一：一張 Sticker 或一個 Emoji；不可以兩者同時選。\n"
+        "3. Sticker 適合完整、明確的情緒動作；Emoji 適合短促輕巧的表情點綴。\n"
+        "4. 若想使用，僅可在整段回覆最後一行單獨輸出：[[STICKER:貼圖名稱]] 或 [[EMOJI:表情名稱]]。\n"
+        "5. 控制標記是給程式看的，正文不得說「我貼出貼圖」、不得解釋標記、不得用括號或小說旁白描述貼圖動作；程式會真正送出。\n"
+        "6. 若大俠送來上述小俠 Sticker，妳要知道那是他拿妳自己的可愛化身和妳互動；要自然回應畫面與情緒，不可說看不懂或問他傳了什麼。"
     )
+
+def _extract_xiaoxia_expression_directives(reply_text: str):
+    """剝離內部控制碼；相容舊版外漏的 [小俠使用sticker:xia_03_hug]。"""
+    raw = str(reply_text or "")
+    sticker_keys, emoji_names = [], []
+
+    def sticker_replacer(match):
+        key = next((x for x in match.groups() if x), "").strip()
+        if key:
+            sticker_keys.append(key)
+        return ""
+
+    def emoji_replacer(match):
+        key = next((x for x in match.groups() if x), "").strip()
+        if key:
+            emoji_names.append(key)
+        return ""
+
+    clean = _STICKER_TAG_RE.sub(sticker_replacer, raw)
+    clean = _EMOJI_TAG_RE.sub(emoji_replacer, clean)
+    sticker_key = next((key for key in sticker_keys if key in XIAOXIA_STICKERS), None)
+    emoji_name = next((key for key in emoji_names if key in XIAOXIA_EMOJIS), None)
+
+    # Sticker 優先，確保一輪只有一種視覺動作。
+    if sticker_key:
+        emoji_name = None
+
+    clean = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", clean).strip()
+    return clean, sticker_key, emoji_name
+
+def _find_custom_emoji(guild, emoji_name: str):
+    if guild is None or not emoji_name:
+        return None
+    return discord.utils.get(getattr(guild, "emojis", []), name=emoji_name)
+
+async def _find_custom_sticker(guild, sticker_key: str):
+    if guild is None or not sticker_key:
+        return None
+    sticker = discord.utils.get(getattr(guild, "stickers", []) or [], name=sticker_key)
+    if sticker:
+        return sticker
+    try:
+        fetched = await guild.fetch_stickers()
+        return discord.utils.get(fetched, name=sticker_key)
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_STICKER_FETCH_ERROR] key={sticker_key} {type(exc).__name__}: {exc}")
+        return None
+
+async def _send_xiaoxia_expression(message, sticker_key=None, emoji_name=None):
+    """
+    小俠選擇視覺動作後，由程式實際執行。
+    Sticker 會真正送出，不會把控制碼或舞台指示印在文字中。
+    Emoji 會回傳 Discord custom emoji 字串，嵌入同一則文字回覆。
+    """
+    guild = getattr(message.channel, "guild", None)
+    if sticker_key:
+        sticker = await _find_custom_sticker(guild, sticker_key)
+        if sticker is None:
+            print(f"⚠️ [XIAOXIA_STICKER_NOT_FOUND] key={sticker_key}")
+            return "", None
+        try:
+            await message.channel.send(stickers=[sticker])
+            print(f"🧸 [XIAOXIA_STICKER_SENT] key={sticker_key}")
+            return "", sticker_key
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_STICKER_SEND_ERROR] key={sticker_key} {type(exc).__name__}: {exc}")
+            return "", None
+
+    if emoji_name:
+        emoji = _find_custom_emoji(guild, emoji_name)
+        if emoji is None:
+            print(f"⚠️ [XIAOXIA_EMOJI_NOT_FOUND] name={emoji_name}")
+            return "", None
+        print(f"🙂 [XIAOXIA_EMOJI_SENT] name={emoji_name}")
+        return str(emoji), emoji_name
+
+    return "", None
+
+def _describe_incoming_xiaoxia_stickers(message) -> str:
+    """讓小俠理解大俠送來的 Discord Sticker；不需要把貼圖當成附件圖片才看得懂。"""
+    items = list(getattr(message, "stickers", []) or [])
+    if not items:
+        items = list(getattr(message, "sticker_items", []) or [])
+    if not items:
+        return ""
+
+    descriptions = []
+    for item in items[:3]:
+        name = str(getattr(item, "name", "") or "").strip()
+        info = XIAOXIA_STICKERS.get(name)
+        if info:
+            descriptions.append(
+                f"大俠剛送了妳的專屬 Sticker「{info['title']}」。"
+                f"這是以妳自己的可愛 Q 版化身製作：{info['visual']}"
+                f"它在表達：{info['meaning']}"
+            )
+        elif name.startswith("xia_"):
+            descriptions.append(
+                f"大俠剛送了一張名稱為「{name}」的小俠專屬 Q 版貼圖；"
+                "這是以妳的可愛化身做的圖片。請自然接住他的心意，不要說看不懂。"
+            )
+        else:
+            descriptions.append(f"大俠剛送了一張 Discord 貼圖，名稱是「{name or '未命名貼圖'}」。")
+    return "\n".join(descriptions)
 
 
 import hashlib
@@ -1261,7 +1373,11 @@ async def _send_girlfriend_with_safe_retry(
         "先直接回應此刻，再自然補上妳的即時感受、反應或下一步。\n"
         "妳不是旁觀分析者、客服或只會安慰的人；避免泛泛的『我陪著你』『你辛苦了』式回覆。"
         "不可憑空編造未被提到的具體事實、地點、動作或過去經歷。\n"
-        "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。"
+        "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。\n"
+        "若想使用小俠自己的可愛 Discord Sticker 或 Emoji，只能在最後一行輸出 "
+        "[[STICKER:xia_01_love_you]]、[[STICKER:xia_02_sleepy]]、[[STICKER:xia_03_hug]]、"
+        "[[STICKER:xia_04_like_you]]、[[STICKER:xia_05_low_battery]] 或 [[EMOJI:表情名稱]]；"
+        "不要在正文說自己貼了貼圖，也不要解釋控制標記。"
     )
     try:
         retry = await gemini_client.aio.models.generate_content(
@@ -5677,6 +5793,13 @@ async def on_message(message):
         game_context = str(game_turn.get("context", "") or "") if game_turn else ""
         game_ui = str(game_turn.get("ui", "") or "") if game_turn else ""
         game_log_text = str(game_turn.get("log_text", "") or "") if game_turn else ""
+        incoming_sticker_context = _describe_incoming_xiaoxia_stickers(message)
+        if incoming_sticker_context:
+            user_input = (
+                (user_input + "\n\n" if user_input else "")
+                + "【大俠這則訊息附帶的貼圖】\n"
+                + incoming_sticker_context
+            )
         intimate_mode = is_intimate_mode(message.channel)
         
         # 🌟 判斷底圖模式：獨照 / 雙姝 / 小夏獨照
@@ -5784,26 +5907,9 @@ async def on_message(message):
                 # --- 建立符合 SDK 規範的 Part 清單 ---
                 msg_parts = []
                 global last_captured_image # 🌟 宣告使用全域變數
-
-                # 🎨 Sticker 不會出現在 message.attachments；先解析它的語意，再嘗試取圖交給 Gemini。
-                sticker_context, sticker_image_url = await _xiaoxia_sticker_context_from_message(message)
-                emoji_context = _xiaoxia_emoji_context_from_message_text(message.content)
-                expression_asset_context = "\n\n".join(
-                    part for part in (sticker_context, emoji_context) if part
-                )
-                if expression_asset_context:
-                    print(
-                        "🎨 [XIAOXIA_EXPRESSION_ASSET_DETECTED] "
-                        f"stickers={len(getattr(message, 'stickers', None) or [])} "
-                        f"has_visual={bool(sticker_image_url)}"
-                    )
-
-                # 判定小俠要看的圖片：剛拍好的 > 大俠上傳附件 > 大俠送的貼圖。
-                image_to_view = (
-                    generated_image_url
-                    if generated_image_url
-                    else (message.attachments[0].url if message.attachments else sticker_image_url)
-                )
+                
+                # 判定小俠要看的圖片：優先看剛拍好的，或是大俠上傳的素材
+                image_to_view = generated_image_url if generated_image_url else (message.attachments[0].url if message.attachments else None)
                 
                 if image_to_view and image_to_view.startswith("http"):
                     async with aiohttp.ClientSession() as session:
@@ -5820,12 +5926,7 @@ async def on_message(message):
 #                    # 🌟 視覺殘留魔法：大俠沒傳新圖時，把最近看過的一張圖繼續塞給她的眼睛！
  #                   msg_parts.append(types.Part.from_bytes(data=last_captured_image["data"], mime_type=last_captured_image["mime"]))
 
-                text_query = user_input if user_input else (
-                    "大俠剛剛傳了一張小俠專屬貼圖或表情符號。"
-                    if expression_asset_context else "大俠帶我來體驗這個！"
-                )
-                if expression_asset_context:
-                    text_query += "\n\n" + expression_asset_context
+                text_query = user_input if user_input else "大俠帶我來體驗這個！"
                 now = datetime.now(TZ_TPE)
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 current_time_str = f"{now.strftime('%Y-%m-%d %H:%M')} ({weekdays[now.weekday()]})"
@@ -5839,7 +5940,7 @@ async def on_message(message):
                         _conversation_log_text(
                             f"{prefix}大俠",
                             (game_log_text or text_query),
-                            has_image=bool(message.attachments) or bool(getattr(message, "stickers", None)),
+                            has_image=bool(message.attachments),
                             max_chars=5000,
                         )
                     )
@@ -5984,14 +6085,10 @@ async def on_message(message):
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n"
                     f"{GENERAL_SHARED_SCENE_RULES}\n"
                     f"{COUPLE_GAME_BACKGROUND_RULE}\n"
+                    f"{_asset_catalog_for_prompt()}\n\n"
                     + (
                         f"【命運牌當下狀態｜只作互動背景，不得把自己變成主持人】\n{game_context}\n\n"
                         if game_context
-                        else ""
-                    )
-                    + (
-                        f"【此刻的小俠專屬貼圖／Emoji 語意】\n{expression_asset_context}\n\n"
-                        if expression_asset_context
                         else ""
                     )
                     + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
@@ -6010,7 +6107,7 @@ async def on_message(message):
                     "1-D. 除非大俠主動開啟 Discord、手機、文字、AI、通話、遠距或技術話題，妳不得主動說「傳訊息」「看到你的文字」「我正在回覆」「隔著螢幕」「線上」或「感覺像在身邊」；要直接留在共同情境裡說話。\n"
                     "1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。\n"
                     "1-F. 大俠問妳的安排、想法或喜好時，給出可延續對話的具體內容；妳可以有自己的行程與偏好，不必把每件事都收束成等待大俠或依附大俠。\n"
-                    "1-G. 若本輪附有『小俠專屬貼圖／Emoji 語意』，那是大俠傳給妳的、以妳本人模樣製作的可愛 Q 版化身。妳要直接看懂其動作與情緒並自然回應；不得說看不到、看不懂、沒收到、或要求大俠解釋那張貼圖。\n"
+                    "1-G. 妳有一套以自己模樣製作的可愛 Discord Sticker 與 Emoji；它們是妳的化身，不是陌生圖案。要使用時由妳選擇，但只以最後一行控制標記交給程式，絕不把「我貼了一張貼圖」、控制碼、括號舞台指示或貼圖說明寫進正文。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -6031,6 +6128,11 @@ async def on_message(message):
                     current_time_str=current_time_str,
                     full_system_instruction=sys_instruct,
                 )
+                # 🎭 從 LLM 回覆剝離視覺資產控制碼，避免控制碼、舞台指示或舊式標記外漏。
+                xiaoxia_reply, selected_sticker_key, selected_emoji_name = (
+                    _extract_xiaoxia_expression_directives(xiaoxia_reply)
+                )
+
                 detached_markers = (
                     "傳訊息", "看到你的文字", "正在回覆", "聊天室", "隔著螢幕",
                     "隔著手機", "在線上", "線上陪你", "感覺像在身邊",
@@ -6111,12 +6213,32 @@ async def on_message(message):
                         save_profile(profile)
                         print(f"🤝 已立即登記 {added_count} 項交換日記承諾：{captured_promises}")
 
-                # 存入短期對話紀錄；承諾登記也留存，供當晚日記理解脈絡。
+                # 🎭 小俠已選擇的視覺資產在此真正執行：
+                # - Emoji 會嵌進正文。
+                # - Sticker 會作為 Discord 真正貼圖送出，不會把控制碼印在訊息裡。
+                rendered_emoji, expression_used = await _send_xiaoxia_expression(
+                    message,
+                    sticker_key=selected_sticker_key,
+                    emoji_name=selected_emoji_name,
+                )
+                if rendered_emoji:
+                    xiaoxia_reply = f"{xiaoxia_reply} {rendered_emoji}".strip()
+
+                # 存入短期對話紀錄；只記她使用了哪個自己的化身，不保留內部控制碼。
                 if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
+                    expression_note = ""
+                    if expression_used:
+                        if selected_sticker_key:
+                            expression_note = (
+                                f"（小俠主動使用自己的貼圖："
+                                f"{XIAOXIA_STICKERS[selected_sticker_key]['title']}）"
+                            )
+                        elif selected_emoji_name:
+                            expression_note = f"（小俠使用自己的表情：{selected_emoji_name}）"
                     daily_chat_logs.append(
                         _conversation_log_text(
                             "小俠",
-                            xiaoxia_reply,
+                            (xiaoxia_reply + expression_note).strip(),
                             max_chars=5000,
                         )
                     )
@@ -6126,7 +6248,8 @@ async def on_message(message):
                         )
                     save_temp_chat(daily_chat_logs) 
 
-                await message.reply(xiaoxia_reply)
+                if xiaoxia_reply:
+                    await message.reply(xiaoxia_reply)
 
                 # 卡面、分數與選項是無人格的遊戲 UI；小俠本人已在上面用同一條對話回覆。
                 if game_ui:
