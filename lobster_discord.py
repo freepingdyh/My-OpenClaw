@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.23"
+LOBSTER_VERSION = "1.4.24"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -96,10 +96,10 @@ XIAOXIA_STICKERS = {
         "visual": "小俠雙手放在胸前、害羞微笑，周圍有粉紅愛心與「喜歡你」中文字。",
         "meaning": "心動、害羞地喜歡、被大俠稱讚後甜甜的。",
     },
-    "xia_05_low_battery": {
-        "title": "小俠只剩 1% 電量",
-        "visual": "小俠穿白色帽T與藍色牛仔褲、累得坐在地上，頭上有紅色 1% 電池與「沒電了…」中文字。",
-        "meaning": "累到沒電、想休息、需要被照顧或撒嬌充電。",
+    "xia_05_kiss": {
+        "title": "小俠親親",
+        "visual": "小俠閉著雙眼、嘴巴嘟嘟送出親親，旁邊有粉紅愛心與「親親~」中文字。",
+        "meaning": "送上一個甜甜的親吻、撒嬌、回應大俠的愛意或想更靠近。",
     },
 }
 
@@ -117,6 +117,16 @@ XIAOXIA_EMOJIS = {
     "xia_sleepy": "小俠揉眼睛、睏睏的表情。",
     "xia_angry": "小俠鼓著臉、雙手抱胸的可愛小生氣表情。",
     "xia_lowbat": "小俠累到只剩低電量的表情。",
+    "xia_dizzy": "小俠暈了、眼神發直或轉圈圈的可愛表情。",
+    "xia_cheer": "小俠化身啦啦隊，熱情替大俠加油打氣。",
+    "xia_in_love": "小俠看到喜歡的東西，雙眼變成愛心的心動表情。",
+    "xia_celebrate": "小俠替大俠開心慶祝、灑下歡樂氣氛。",
+    "xia_peek": "小俠雙手遮住眼睛又從指縫偷偷看，俏皮又害羞。",
+    "xia_question": "小俠歪著頭、帶著疑問與好奇的表情。",
+    "xia_detective": "小俠化身偵探，仔細觀察、認真找線索。",
+    "xia_awkward": "小俠開心又有點尷尬，頭上掛著一顆汗滴。",
+    "xia_paint": "小俠拿著畫筆專心畫畫、正在創作。",
+    "xia_notes": "小俠認真寫筆記、記下重要事情。",
 }
 
 _STICKER_TAG_RE = re.compile(
@@ -1380,7 +1390,7 @@ async def _send_girlfriend_with_safe_retry(
         "普通問候就直接自然回答；不要提及系統、安全規則或記憶處理。\n"
         "若想使用小俠自己的可愛 Discord Sticker 或 Emoji，只能在最後一行輸出 "
         "[[STICKER:xia_01_love_you]]、[[STICKER:xia_02_sleepy]]、[[STICKER:xia_03_hug]]、"
-        "[[STICKER:xia_04_like_you]]、[[STICKER:xia_05_low_battery]] 或 [[EMOJI:表情名稱]]；"
+        "[[STICKER:xia_04_like_you]]、[[STICKER:xia_05_kiss]] 或 [[EMOJI:表情名稱]]；"
         "不要在正文說自己貼了貼圖，也不要解釋控制標記。"
     )
     try:
