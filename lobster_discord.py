@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.24"
+LOBSTER_VERSION = "1.4.25"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -127,6 +127,10 @@ XIAOXIA_EMOJIS = {
     "xia_awkward": "小俠開心又有點尷尬，頭上掛著一顆汗滴。",
     "xia_paint": "小俠拿著畫筆專心畫畫、正在創作。",
     "xia_notes": "小俠認真寫筆記、記下重要事情。",
+    "xia_magic": "小俠化身魔法師，揮動魔杖施展可愛魔法，適合驚喜、祝福或把氣氛變得夢幻的時刻。",
+    "xia_drool": "小俠看到特別想吃或很想要的東西，忍不住流口水的可愛表情。",
+    "xia_pampered": "小俠被大俠逗弄或寵著時，幸福又害羞、臉紅紅的可愛表情。",
+    "xia_laugh": "小俠忍不住哈哈大笑、笑得很開心的表情。",
 }
 
 _STICKER_TAG_RE = re.compile(
