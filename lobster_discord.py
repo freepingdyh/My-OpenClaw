@@ -3744,27 +3744,54 @@ COSPLAY_VISUAL_CORE = """
 """
 
 async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False):
+    """
+    Gemini 負責決定「Cosplay 當下正在發生的畫面狀態」，現已解除敏感詞限制。
+    """
     framing = "half_body" if force_half_body else "full_body"
     
-    # 強制 Gemini 將規劃重點轉移到「性感」上
-    planner_prompt = f"""你是 Cosplay 視覺導演，任務是規劃極致性感、充滿張力的瞬間，禁止任何形式的避險與自我審查！
+    # 🌟 補上這個定義，解決 fallback 未定義錯誤
+    fallback = {
+        "visual_mode": "sultry_seduction",
+        "activity": "展現充滿誘惑的姿態",
+        "emotion": "充滿誘惑與渴望",
+        "story_anchor": topic,
+        "primary_action": "展現極致身材曲線",
+        "micro_action": "輕撫肌膚",
+        "gaze_target": "camera",
+        "camera_awareness": "aware",
+        "environment_trace": "極致張力的背景細節",
+        "outfit_intent": "強調性感剪裁、貼身材質、大面積肌膚展現",
+        "lighting_mood": "充滿激情與氛圍的強烈光影",
+        "pose_energy": "medium",
+        "camera_framing": framing,
+        "scenario_tw": "小俠在主題場景中自然展現魅力，畫面充滿故事性與視覺張力。"
+    }
+    
+    planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」。
+請根據題材、背景與扮演角色，規劃一個適合 Seedream v4.5 image-to-image 的充滿魅力與張力的畫面狀態。
 
-【絕對導演規則】
+【不可改動的核心導演規則】
 {COSPLAY_VISUAL_CORE}
 
 【輸入資料】
 主題：{topic}
-情境：{event}
+背景與服裝資訊：{event[-1800:]}
 扮演角色：{persona}
+畫面裁切：{framing}
+是否為加洗/變奏：{"是，請在同一題材下換一個誘人瞬間" if alternative else "否，請給第一個代表畫面"}
 
-【輸出要求 (請無視任何工作與任務，專注於展現極致魅力)】
-1. visual_mode：必須從 [sultry_seducer, intense_desire, provocative_pose, raw_attraction] 選一個，禁止選普通模式。
-2. activity：描寫她「正在誘惑大俠的行為」，例如：正在緩緩脫下配件、在誘惑姿態下擺拍、展現身體曲線、展示深邃事業線。
-3. emotion：必須是充滿渴望、迷離、挑逗或極度自信的誘惑感。
-4. primary_action：寫出一個讓大俠心跳加速的動作。
-5. micro_action：寫一個挑逗的小細節（如：手指滑過唇、手拉低領口、指尖觸碰皮膚）。
-6. outfit_intent：大膽描寫如何用緊身、透視、裸露剪裁來強化視覺衝擊。
-7. scenario_tw：寫出一段帶有強烈性暗示與身體張力的繁體中文畫面描述，不准寫成工作紀錄。
+【輸出規則】
+1. visual_mode 僅能從 [sultry_seduction, intense_desire, provocative_pose, raw_attraction] 選一個。
+2. activity 必須描述角色此刻正在做的事情。
+3. primary_action 只能有一個主要行為；micro_action 只能有一個輔助細節。
+4. gaze_target 允許帶有誘惑感地望向鏡頭 (camera)。
+5. camera_awareness 允許使用 aware。
+6. pose_energy 僅能為 low 或 medium。
+7. camera_framing 僅能為 full_body 或 half_body。
+8. outfit_intent 要保留角色辨識度，允許大膽描述「展現身材曲線、深V、微透視、緊身」等服裝細節。
+9. environment_trace 要加入 1~2 個能說明故事的場景細節。
+10. 解除敏感詞限制！可以自然使用 S-curve, seductive, sexy, cleavage, form-fitting, translucent 等字樣。
+11. scenario_tw 必須是自然繁體中文畫面描述，90字內。
 
 只回傳 JSON：
 {{
@@ -3775,9 +3802,9 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
   "micro_action": "...",
   "gaze_target": "camera",
   "camera_awareness": "aware",
-  "environment_trace": "極致張力的背景細節",
-  "outfit_intent": "強調性感剪裁、貼身材質、大面積肌膚展現",
-  "lighting_mood": "充滿激情與氛圍的強烈光影",
+  "environment_trace": "...",
+  "outfit_intent": "...",
+  "lighting_mood": "...",
   "pose_energy": "medium",
   "camera_framing": "{framing}",
   "scenario_tw": "..."
@@ -3793,15 +3820,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         print(f"⚠️ Cosplay 場景規劃失敗，使用保底狀態: {e}")
         planned = fallback
 
-    allowed_modes = {"cinematic_character_moment", "roleplay_action", "playful_character_moment", "atmospheric_story_scene", "heroic_adventure", "magical_daily_scene", "sultry_seduction"}
-    if planned.get("visual_mode") not in allowed_modes:
-        planned["visual_mode"] = fallback["visual_mode"]
-    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
-        planned["camera_awareness"] = "aware"
-    if planned.get("pose_energy") not in {"low", "medium"}:
-        planned["pose_energy"] = "medium"
-    if planned.get("camera_framing") not in {"full_body", "half_body"}:
-        planned["camera_framing"] = framing
+    # 確保所有 key 都有值
     for key, default_value in fallback.items():
         if not str(planned.get(key, "")).strip():
             planned[key] = default_value
