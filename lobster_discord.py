@@ -3732,41 +3732,39 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
 
 
 # ==========================================
-# 🎬 Cosplay 專屬導演層：避免香水廣告模板與底圖鎖姿勢
+# 🎬 Cosplay 專屬導演層：全面解除優雅枷鎖，擁抱高級性感！
 # ==========================================
 COSPLAY_VISUAL_CORE = """
-這是「Cosplay 作品照」，不是香水廣告，也不是伸展台型錄。
-小俠是成年虛擬角色。畫面應保有角色神韻、故事性與視覺吸引力；風格可以是英氣、可愛、魔法感、冒險感、運動感、華麗、復古、未來感或高級質感，不必侷限優雅。
-人物必須像正在做一件事，而不是只負責擺姿勢。魅力來自服裝材質、氣氛、角色狀態、道具互動與自然肢體語言，
-不是來自裸露、身體部位特寫、完美 S 曲線、直球誘惑或固定看鏡頭微笑。
-每張圖必須只有一個主行為、一個微小輔助動作、一個明確視線目標。
-動作保持自然穩定，可有微側身、倚靠、邁出一步前的停頓、整理道具、準備施法、檢查裝備等「小動作」，
-但禁止誇張扭腰、回眸扭脖、雙手都在表演、手插腰模特兒 pose、伸展台站姿、對鏡頭邀請式微笑。
+這是「Cosplay 作品照」。小俠是成年虛擬角色。
+畫面應保有角色神韻、故事性與極致的視覺張力；風格極度多元，可以是英氣、魔法感、未來感，更可以大膽展現「高級性感、純慾、誘惑、貼身曲線」等成熟魅力！完全解除只能優雅的限制。
+人物必須與場景或大俠有連結。魅力可以來自服裝材質的透視感(translucent)、緊緻剪裁、大膽的光影設計（若隱若現），以及充滿吸引力的肢體語言與眼神。
+動作可以展現完美的身材曲線（S-curve），可以有微側身、倚靠、慵懶姿態、或是帶有誘惑感的「小動作」。
+每張圖維持一個主行為與微動作，讓性感自然流露於故事瞬間。
 """
 
 async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False):
     """
-    Gemini 只負責決定「Cosplay 當下正在發生的畫面狀態」，不負責寫商攝文案。
+    Gemini 負責決定「Cosplay 當下正在發生的畫面狀態」，現已解除敏感詞限制。
     """
     framing = "half_body" if force_half_body else "full_body"
     fallback = {
         "visual_mode": "cinematic_character_moment",
         "activity": "在與主題相符的場景中，專注處理一個與角色身份有關的物件或任務",
-        "emotion": "自然、自信、帶著角色當下的情緒",
+        "emotion": "自然、自信、帶著角色當下的情緒與魅力",
         "story_anchor": topic,
         "primary_action": "自然地處理手邊的道具或場景任務",
         "micro_action": "另一隻手輕輕調整衣料、配件或紙頁",
         "gaze_target": "手中的道具或眼前的場景物件",
         "camera_awareness": "briefly_noticing",
         "environment_trace": "畫面中保留能說明角色身分的場景細節與道具",
-        "outfit_intent": "保留角色辨識度的服裝再詮釋，可英氣、俏皮、魔法感、冒險感、華麗或清爽，重視材質、剪裁與道具",
-        "lighting_mood": "電影感環境光與柔和景深",
+        "outfit_intent": "保留角色辨識度，且可以大膽展現身材曲線、微透視或性感剪裁",
+        "lighting_mood": "電影感環境光與戲劇性光影",
         "pose_energy": "medium",
         "camera_framing": framing,
-        "scenario_tw": "小俠在主題場景中自然處理道具，視線落在手邊任務上，像被安靜捕捉的一瞬間。"
+        "scenario_tw": "小俠在主題場景中自然展現魅力，畫面充滿故事性與視覺張力。"
     }
-    planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」，不是香水廣告文案，也不是模特兒老師。
-請根據題材、背景與扮演角色，規劃一個適合 Seedream v4.5 image-to-image 的自然畫面狀態。
+    planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」。
+請根據題材、背景與扮演角色，規劃一個適合 Seedream v4.5 image-to-image 的充滿魅力與張力的畫面狀態。
 
 【不可改動的核心導演規則】
 {COSPLAY_VISUAL_CORE}
@@ -3776,19 +3774,19 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 背景與服裝資訊：{event[-1800:]}
 扮演角色：{persona}
 畫面裁切：{framing}
-是否為加洗/變奏：{"是，請在同一題材下換一個自然瞬間" if alternative else "否，請給第一個代表畫面"}
+是否為加洗/變奏：{"是，請在同一題材下換一個誘人瞬間" if alternative else "否，請給第一個代表畫面"}
 
 【輸出規則】
-1. visual_mode 僅能從 cinematic_character_moment, roleplay_action, playful_character_moment, atmospheric_story_scene, heroic_adventure, magical_daily_scene 選一個。
-2. activity 必須描述角色此刻正在做的事情，不能只是站著展示衣服。
+1. visual_mode 僅能從 cinematic_character_moment, roleplay_action, playful_character_moment, atmospheric_story_scene, heroic_adventure, magical_daily_scene, sultry_seduction 選一個。
+2. activity 必須描述角色此刻正在做的事情。
 3. primary_action 只能有一個主要行為；micro_action 只能有一個輔助細節。
-4. gaze_target 必須是場景中的物件、任務或遠方目標；除非題材強烈需要，預設不要直視鏡頭。
-5. camera_awareness 僅能為 unaware, briefly_noticing, aware。一般建議 briefly_noticing 或 unaware。
-6. pose_energy 僅能為 low 或 medium；禁止 high。
-7. camera_framing 僅能為 full_body 或 half_body，必須與輸入一致。
-8. outfit_intent 要保留角色辨識度與適合該題材的造型氣質，可英氣、俏皮、魔法感、冒險感、運動感、華麗或清爽，但不得描述裸露或身體部位強調。
-9. environment_trace 要加入 1~2 個能讓畫面不像棚拍型錄的場景細節。
-10. 禁止使用 perfume advertisement, Vogue, runway, model pose, S-curve, seductive, sexy, voluptuous, cleavage 等字樣。
+4. gaze_target 可以是場景物件，也允許帶有誘惑感地望向鏡頭 (camera)。
+5. camera_awareness 允許使用 aware，展現自信與魅力對視。
+6. pose_energy 僅能為 low 或 medium。
+7. camera_framing 僅能為 full_body 或 half_body。
+8. outfit_intent 要保留角色辨識度，允許大膽描述「展現身材曲線、深V、微透視、緊身」等服裝細節，解除身體部位強調的限制。
+9. environment_trace 要加入 1~2 個能說明故事的場景細節。
+10. 解除敏感詞限制！可以自然使用 S-curve, seductive, sexy, cleavage, form-fitting, translucent 等字樣來增添性感張力。
 11. scenario_tw 必須是自然繁體中文畫面描述，90字內。
 
 只回傳 JSON：
@@ -3819,11 +3817,11 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         print(f"⚠️ Cosplay 場景規劃失敗，使用保底狀態: {e}")
         planned = fallback
 
-    allowed_modes = {"cinematic_character_moment", "roleplay_action", "playful_character_moment", "atmospheric_story_scene", "heroic_adventure", "magical_daily_scene"}
+    allowed_modes = {"cinematic_character_moment", "roleplay_action", "playful_character_moment", "atmospheric_story_scene", "heroic_adventure", "magical_daily_scene", "sultry_seduction"}
     if planned.get("visual_mode") not in allowed_modes:
         planned["visual_mode"] = fallback["visual_mode"]
     if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
-        planned["camera_awareness"] = "briefly_noticing"
+        planned["camera_awareness"] = "aware"
     if planned.get("pose_energy") not in {"low", "medium"}:
         planned["pose_energy"] = "medium"
     if planned.get("camera_framing") not in {"full_body", "half_body"}:
@@ -3835,15 +3833,15 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 
 async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
     """
-    GPT-5-mini 只把結構化 Cosplay 狀態轉成 Seedream v4.5 image-to-image 能執行的提示詞。
+    GPT-5-mini 轉譯器：完全解除性感詞彙封印！
     """
     variation_rule = (
         "Create a fresh variation of the same theme by changing the hand action, exact body orientation, or framing, while keeping the same story world and outfit intent."
         if alternative else
-        "Create the first signature image of this theme without turning it into a model pose."
+        "Create the first signature image of this theme, maximizing visual and cinematic appeal."
     )
     prompt = f"""你是 Cosplay image-to-image 攝影文字轉譯員。把下方結構化狀態轉成一段 110 至 160 字的英文 Seedream v4.5 edit 圖片描述。
-這是角色作品照：有電影感、有服裝質感、有角色神韻，風格可以英氣、俏皮、魔法感、冒險感、華麗或清爽，不必侷限優雅；但不是香水廣告，也不是模特兒海報。
+這是有電影感、有服裝質感、有角色神韻的作品照，風格極度多元，允許高級性感與誘惑張力。
 
 【固定導演規則】
 {COSPLAY_VISUAL_CORE}
@@ -3852,16 +3850,16 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
 {json.dumps(cosplay_state, ensure_ascii=False)}
 
 【轉譯限制】
-- 第一個句子先描述她正在做的事情，不要先描寫美貌或身材。
+- 第一個句子先描述她正在做的事情。
 - 僅保留 1 個主行為與 1 個微小輔助動作。
-- 視線必須落在 gaze_target；若 camera_awareness=aware，也只能是自然注意到鏡頭，不可變成邀請式擺拍。
+- 視線必須落在 gaze_target；若 camera_awareness=aware，允許使用充滿魅力與誘惑的對視 (seductive eye contact)。
 - 保留 environment_trace，讓場景像故事世界中的真實片刻。
-- 可描述 heroic, cute, magical, adventurous, playful, dramatic, elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等多樣角色質感。
-- 禁止 perfume advertisement, runway, Vogue, campaign, model pose, S-curve pose, hand-on-hip glamour pose。
-- 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
-- 禁止 looking over her shoulder、dramatic twist、perfect symmetry、direct camera smile by default。
+- 可描述 heroic, cute, magical, adventurous, playful, dramatic, elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等質感。
+- 完全解除性感詞彙限制！請大膽使用 sexy, seductive, alluring, curvy, deep cleavage, bodycon, form-fitting, translucent 等詞彙來增強畫面張力。
+- 允許使用 looking over her shoulder, sultry gaze, biting lower lip, confident seductive smile 等帶有強烈誘惑感的眼神與表情。
+- 允許描繪完美的身材曲線 (hourglass silhouette, S-curve)。
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image.
+- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet.
 
 只回傳 JSON：
 {{
@@ -3872,14 +3870,14 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
 }}"""
     fallback_visual = {
         "image_prompt": (
-            "She is quietly engaged with a character-related object in a richly detailed scene, pausing in a natural moment rather than posing for a campaign. "
-            "One hand handles the object while the other lightly adjusts a small detail of her outfit or accessory, and her gaze stays on the task instead of performing for the camera. "
-            "The setting carries lived-in story details, expressive costume textures, and soft cinematic depth. Maintain consistent facial features and hairstyle from the reference images. "
-            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image."
+            "She is engaged with a character-related object in a richly detailed scene, showcasing an alluring and confident presence. "
+            "One hand handles the object while the other lightly adjusts a small detail of her form-fitting outfit, her sultry gaze adding cinematic tension to the moment. "
+            "The setting carries lived-in story details, expressive costume textures, and dramatic lighting. Maintain consistent facial features and hairstyle from the reference images. "
+            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet."
         ),
-        "composition": cosplay_state.get("scenario_tw", "小俠在主題場景中自然處理道具，動作有故事感，不是站樁擺拍。"),
-        "mood": cosplay_state.get("emotion", "自信而自然"),
-        "message": "大俠，這次我真的走進角色故事裡了。"
+        "composition": cosplay_state.get("scenario_tw", "小俠在主題場景中展現極致魅力與視覺張力。"),
+        "mood": cosplay_state.get("emotion", "自信、性感與充滿魅力"),
+        "message": "大俠，這次的風格，有讓你心跳加速嗎？"
     }
     try:
         response = await openai_client.chat.completions.create(
