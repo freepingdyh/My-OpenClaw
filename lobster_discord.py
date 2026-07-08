@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.27"
+LOBSTER_VERSION = "1.4.28"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -360,7 +360,6 @@ GIRLFRIEND_TOKEN = os.environ.get("GIRLFRIEND_TOKEN")
 ARCHITECT_TOKEN = os.environ.get("ARCHITECT_TOKEN")
 
 FAL_KEY = os.environ.get("FAL_KEY")
-XIAOXIA_LORA_URL = os.environ.get("XIAOXIA_LORA_URL")
 
 # --- Zeabur 硬碟路徑重導向 ---
 IS_ZEABUR = os.environ.get("ZEABUR") == "true"
@@ -394,6 +393,8 @@ os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
 os.makedirs(SEEDREAM_V45_REF_DIR, exist_ok=True)
+PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
+os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -1441,6 +1442,8 @@ _migrate_v1421_chat_and_profile_once()
 daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
+photo_generation_contexts = {}
+PHOTO_USER_REF_DIR = None  # initialized after Zeabur paths are ready
 
 # !update 記憶修訂案，只存在私人助手工作室；每位管理者同時一案。
 memory_update_sessions = {}
@@ -3683,7 +3686,7 @@ async def generate_story(mode):
     return json.loads(response.text)
 
 # ==========================================
-# 🧠 高級時尚攝影大師 (取代原本的 Flux 標籤產生器)
+# 🧠 高級時尚攝影大師
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
@@ -4293,7 +4296,7 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
-    seedream_modes = {"cosplay", "diary"}
+    seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference"}
     engine_name = "Seedream v4.5" if mode in seedream_modes else "gpt-image-2"
 
     for level in range(5):
@@ -4459,61 +4462,6 @@ async def generate_suno_music(lyrics, title, custom_style=None):
             else:
                 raise Exception(f"Suno Error: {data.get('msg')}")
 
-async def generate_image_fal(prompt):
-    """
-    🚀 攔截器模式：加入「寫實防護罩」與「狐狸眼眼妝」
-    確保不管什麼歷史題材，出來的絕對是真人照片！
-    """
-    # 📸 寫實防護罩 + 💄 大俠專屬眼妝
-    # 加入 RAW photo, DSLR, lifelike skin 等極端寫實詞彙來對抗歷史插畫感
-    style_and_face_enhancers = (
-        ", RAW photo, ultra-realistic, photorealistic, 8k resolution, DSLR, "
-        "highly detailed lifelike skin texture, perfectly detailed face, "
-        "fox-eye makeup, long eyelashes, mascara, consistent identity"
-    )
-    
-    # 將 Gemini 想好的咒語，強制綁上寫實與眼妝
-    enhanced_prompt = prompt + style_and_face_enhancers
-    
-    print(f"🔄 [/cosplay 攔截器] 導向 PuLID 引擎中... 附加寫實防護與眼妝完成！")
-    
-    # 呼叫 PuLID 引擎 (維持 0.85 的身分權重)
-    return await generate_image_pulid(prompt=enhanced_prompt, id_weight=0.85)
-
-async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85):
-    """
-    🧪 PuLID (FaceID) 引擎本體
-    """
-    url = "https://fal.run/fal-ai/flux-pulid"
-    headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
-    
-    # 抓取 Zeabur 金庫裡的完美臉部特寫底圖
-    if not reference_image_url:
-        base_image_path = os.path.join(MEMORY_DIR, "base_close_core.png")
-        if os.path.exists(base_image_path):
-            with open(base_image_path, "rb") as f:
-                reference_image_url = "data:image/png;base64," + base64.b64encode(f.read()).decode('utf-8')
-        else:
-            raise Exception("金庫裡找不到 base_close_core.png，請確認檔案是否在 /data/memory/ 目錄下！")
-
-    payload = {
-        "prompt": prompt,
-        "reference_image_url": reference_image_url,
-        "image_size": "portrait_16_9",  # 🌟 修正：讓 /cosplay 產出的圖維持 16:9 的高挑唯美比例
-        "num_inference_steps": 20,
-        "guidance_scale": 4,
-        "id_weight": id_weight,
-        "enable_safety_checker": False # 徹底無碼解放
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data['images'][0]['url']
-            else: 
-                raise Exception(f"Fal.ai PuLID Error: {await resp.text()}")
-            
 # ==========================================
 # 🌱 Seedream v4.5 Cosplay image-to-image 引擎
 # ==========================================
@@ -4713,16 +4661,522 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
         return first["url"]
     return f"Seedream v4.5 交換日記圖片欄位格式異常：{result}"
 
-async def upscale_image_fal(image_url):
-    url = "https://fal.run/fal-ai/esrgan"
-    headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
-    payload = {"image_url": image_url, "scale": 2}
-    async with aiohttp.ClientSession() as session:
-        # 加上 60 秒等待保護
-        async with session.post(url, headers=headers, json=payload, timeout=120) as resp:
-            if resp.status == 200: return (await resp.json())['image']['url']
-            return image_url
-        
+
+# ==========================================
+# 📸 Seedream v4.5 /photo 統一照片工作台
+# ==========================================
+def _is_girlfriend_xiaoxia_channel(channel) -> bool:
+    """女友小俠可互動頻道；排除說故事小俠姊姊與公開服務頻道。"""
+    if is_story_channel_or_thread(channel) or is_public_service_channel(channel):
+        return False
+    if channel is None:
+        return False
+    channel_name = getattr(channel, "name", "") or ""
+    girlfriend_names = set(PRIVATE_UPLOAD_CHANNEL_NAMES) | set(PRIVATE_NOTE_CHANNEL_NAMES) | {"書房"}
+    return (
+        getattr(getattr(channel, "guild", None), "id", None) == PRIVATE_GUILD_ID
+        and (
+            getattr(channel, "id", None) in PRIVATE_UPLOAD_CHANNEL_IDS
+            or getattr(channel, "id", None) in PRIVATE_NOTE_CHANNEL_IDS
+            or any(name in channel_name for name in girlfriend_names)
+        )
+    )
+
+
+def _supported_photo_attachment(attachment) -> bool:
+    content_type = (getattr(attachment, "content_type", "") or "").lower()
+    filename = (getattr(attachment, "filename", "") or "").lower()
+    return (
+        content_type in {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+        or filename.endswith((".png", ".jpg", ".jpeg", ".webp"))
+    )
+
+
+async def _get_photo_reference_attachment(message):
+    """回傳 (attachment, error_message)。先看本訊息，再看 reply 訊息。"""
+    attachments = [a for a in list(getattr(message, "attachments", []) or []) if _supported_photo_attachment(a)]
+    raw_attachments = list(getattr(message, "attachments", []) or [])
+    if len(raw_attachments) > 1:
+        return None, "大俠，這次先讓我一次只看一張衣服或一張飾品圖片，好嗎？\n你先選一張給我，我就幫你拍一張看看。"
+    if len(raw_attachments) == 1 and not attachments:
+        return None, "大俠，這個檔案我沒辦法當作參考圖耶。\n你給我一張 PNG、JPG 或 WebP 圖片就可以了。"
+    if attachments:
+        return attachments[0], None
+
+    ref = getattr(message, "reference", None)
+    if ref:
+        ref_msg = getattr(ref, "resolved", None)
+        if ref_msg is None and getattr(ref, "message_id", None):
+            try:
+                ref_msg = await message.channel.fetch_message(ref.message_id)
+            except Exception as exc:
+                print(f"⚠️ [PHOTO_REPLY_FETCH_FAILED] {type(exc).__name__}: {exc}")
+                ref_msg = None
+        if ref_msg:
+            ref_raw = list(getattr(ref_msg, "attachments", []) or [])
+            ref_images = [a for a in ref_raw if _supported_photo_attachment(a)]
+            if len(ref_raw) > 1:
+                return None, "大俠，被回覆的訊息裡有多張圖片；第一版 /photo 先一次只支援一張參考圖。"
+            if len(ref_raw) == 1 and not ref_images:
+                return None, "大俠，被回覆的附件不是我能使用的圖片格式。請給我 PNG、JPG 或 WebP。"
+            if ref_images:
+                return ref_images[0], None
+    return None, None
+
+
+async def _download_photo_reference_attachment(attachment):
+    os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
+    ext = Path(getattr(attachment, "filename", "") or "").suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        content_type = (getattr(attachment, "content_type", "") or "").lower()
+        ext = ".png" if "png" in content_type else (".webp" if "webp" in content_type else ".jpg")
+    filename = f"photo_ref_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+    path = os.path.join(PHOTO_USER_REF_DIR, filename)
+    data = await attachment.read()
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+async def _seedream_upload_single_file(path):
+    fal_client = _get_fal_client()
+    return await asyncio.to_thread(fal_client.upload_file, path)
+
+
+def _seedream_photo_prompt(custom_prompt, has_reference=False):
+    base = (
+        "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
+        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
+        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
+        "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. "
+    )
+    if has_reference:
+        base += (
+            "Image 10 is a clothing or accessory reference provided by Daxia. "
+            "If Image 10 is clothing, make Xiaoxia wear it naturally. "
+            "If Image 10 is an accessory, make Xiaoxia naturally carry, wear, or style it in a clearly visible way. "
+            "Preserve the reference item's overall color, silhouette, material feeling, pattern, and key decorative details as much as possible, while keeping Xiaoxia's identity consistent. "
+        )
+    else:
+        base += (
+            "No external clothing reference is provided; infer a natural outfit from the scene and the latest explicit outfit description in the request. "
+            "The outfit should fit the scene and feel like a candid daily-life moment, not a fashion advertisement. "
+        )
+    return base + "\n\nPHOTO REQUEST:\n" + str(custom_prompt or "").strip()
+
+
+async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True):
+    """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
+    fal_client = _get_fal_client()
+    image_urls = await _seedream_upload_reference_images()
+    if reference_image_path:
+        if str(reference_image_path).startswith("http"):
+            # 理論上 /photo 會先下載成本機檔；此處保留 URL 相容。
+            image_urls.append(str(reference_image_path))
+        else:
+            image_urls.append(await _seedream_upload_single_file(reference_image_path))
+    image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
+    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path))
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"📸 [SEEDREAM_PHOTO_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V45_MODEL_ID,
+            arguments={
+                "prompt": final_prompt,
+                "image_urls": image_urls,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "max_images": 1,
+                "enable_safety_checker": bool(enable_safety_checker),
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images:
+        return f"Seedream v4.5 沒有回傳 /photo 圖片：{result}"
+    first = images[0]
+    if isinstance(first, dict) and first.get("url"):
+        return first["url"]
+    return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
+
+
+async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference):
+    """將指定文字或最近 20 句對話整理成 /photo 可用的結構化場景。"""
+    recent_context = "\n".join(daily_chat_logs[-20:])
+    default_scene = "溫馨自然的家中居家場景" if has_reference else "依照最近對話中的當下生活情境"
+    prompt = f"""
+你是小俠照片導演。請根據大俠的 /photo 指令與最近對話，整理一張小俠照片的生成需求。
+
+【/photo 模式】：{source_mode}
+【大俠指定內容】：{raw_scene_text or '無'}
+【最近 20 則對話】：
+{recent_context or '無'}
+
+請只回傳 JSON：
+{{
+  "scene_summary": "照片場景，若大俠有指定內容則優先；若無且也無明確對話，使用 {default_scene}",
+  "outfit_summary": "最近一則明確服裝描述；若沒有，依場景給完整、安全、自然的穿搭",
+  "action_summary": "小俠正在做的自然動作",
+  "mood_summary": "氣氛與光線",
+  "camera_framing": "half_body 或 full_body",
+  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；嚴格單人小俠，不出現男人或其他人；完整衣著、生活感、非露骨"
+}}
+
+規則：
+1. 若大俠指定內容不為無，scene_summary 必須以指定內容為主。
+2. 服裝只使用最近 20 則內明確出現的最近一套；沒有就依場景補自然穿搭。
+3. 不要從很久以前的日記或長期記憶抓衣服。
+4. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考。
+5. 不可加入大俠沒有要求的第二人物。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        )
+        data = _extract_json_object(resp.text)
+        if isinstance(data, dict) and data.get("photo_prompt"):
+            return data
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
+
+    fallback_scene = raw_scene_text.strip() if raw_scene_text else default_scene
+    return {
+        "scene_summary": fallback_scene,
+        "outfit_summary": "自然、完整、安全且符合場景的日常穿搭",
+        "action_summary": "小俠自然地待在場景中，像被大俠拍下的生活片刻",
+        "mood_summary": "溫暖自然光、生活感、真實照片氛圍",
+        "camera_framing": "half_body",
+        "photo_prompt": (
+            f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
+            "She is wearing a natural, fully clothed, tasteful outfit suitable for the scene, with a warm everyday mood. "
+            "Solo Xiaoxia only, no man, no other people, no external hands, realistic anatomy."
+        ),
+    }
+
+
+def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None):
+    scene_summary = str(scene_data.get("scene_summary", "小俠的生活照片")).strip()
+    outfit_summary = str(scene_data.get("outfit_summary", "自然日常穿搭")).strip()
+    action_summary = str(scene_data.get("action_summary", "自然生活動作")).strip()
+    mood_summary = str(scene_data.get("mood_summary", "溫暖生活感")).strip()
+    return {
+        "composition": scene_summary,
+        "mood": mood_summary,
+        "message": f"大俠按下 /photo 留住這一刻。{action_summary}",
+        "source_mode": source_mode,
+        "reference_item_path": reference_item_path,
+        "reference_item_url": reference_item_url,
+        "__anchor_state": {
+            "activity": action_summary,
+            "primary_action": action_summary,
+            "micro_action": "a natural small gesture fitting the scene",
+            "gaze_target": "Daxia's camera or the task in front of her",
+            "camera_awareness": "briefly_noticing",
+            "environment_trace": scene_summary,
+            "outfit_intent": outfit_summary,
+            "lighting_mood": mood_summary,
+            "setting_anchor": scene_summary,
+            "time_anchor": "",
+            "camera_framing": scene_data.get("camera_framing", "half_body"),
+            "scenario_tw": scene_summary,
+        },
+    }
+
+
+def _photo_db_payload(context, name=None, type_override="photo"):
+    title = name or context.get("photo_name") or context.get("scene_text") or "小俠照片"
+    return {
+        "id": str(uuid.uuid4()),
+        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": f"【Photo】{title}",
+        "event": "大俠使用 /photo 主動生成的小俠照片",
+        "composition": context.get("scene_summary", ""),
+        "mood": context.get("mood_summary", ""),
+        "message": context.get("message", ""),
+        "image_url": context.get("image_url", ""),
+        "local_url": context.get("local_url", context.get("image_url", "")),
+        "type": type_override,
+        "source_mode": context.get("source_mode", "photo_scene"),
+        "reference_item_path": context.get("reference_item_path"),
+        "reference_item_url": context.get("reference_item_url"),
+    }
+
+
+def _build_photo_embed(context, title_prefix="📸 小俠照片"):
+    embed = discord.Embed(
+        title=f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}",
+        description=context.get("message", "大俠按下 /photo 留住這一刻。"),
+        color=0xffb6c1,
+    )
+    embed.set_image(url=context.get("local_url") or context.get("image_url"))
+    if context.get("scene_summary"):
+        embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
+    if context.get("outfit_summary"):
+        embed.add_field(name="服裝／搭配", value=str(context.get("outfit_summary"))[:900], inline=False)
+    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | Seedream v4.5")
+    return embed
+
+
+async def _generate_photo_from_context(context, msg=None):
+    visual = _photo_visual_dict(
+        {
+            "scene_summary": context.get("scene_summary", ""),
+            "outfit_summary": context.get("outfit_summary", ""),
+            "action_summary": context.get("action_summary", ""),
+            "mood_summary": context.get("mood_summary", ""),
+            "camera_framing": context.get("camera_framing", "half_body"),
+        },
+        context.get("source_mode", "photo_scene"),
+        reference_item_path=context.get("reference_item_path"),
+        reference_item_url=context.get("reference_item_url"),
+    )
+    generated_image_url, visual = await execute_safe_generation(
+        discord_image_url=context.get("reference_item_path"),
+        base_filename="base_xiaoxia.jpg",
+        mode=context.get("source_mode", "photo_scene"),
+        initial_prompt=context.get("prompt_base", ""),
+        visual_dict=visual,
+        msg=msg,
+    )
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    context = dict(context)
+    context.update({
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "composition": visual.get("composition", context.get("scene_summary", "")),
+        "mood_summary": visual.get("mood", context.get("mood_summary", "")),
+        "message": visual.get("message", context.get("message", "")),
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return context
+
+
+async def handle_unified_photo_command(message, user_input):
+    """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/photo` 先只開放在女友小俠的私人頻道使用喔。")
+        return None
+
+    raw_input = str(user_input or "").strip()
+    raw_scene_text = re.sub(r"^/photo\b", "", raw_input, flags=re.IGNORECASE).strip()
+    attachment, attachment_error = await _get_photo_reference_attachment(message)
+    if attachment_error:
+        await message.channel.send(attachment_error)
+        return None
+
+    source_mode = "photo_reference" if attachment else "photo_scene"
+    reference_item_path = None
+    reference_item_url = None
+    if attachment:
+        reference_item_path = await _download_photo_reference_attachment(attachment)
+        reference_item_url = getattr(attachment, "url", None)
+
+    status = await message.channel.send(
+        "📸 小俠正在整理這一刻的畫面，準備用 Seedream v4.5 拍一張照片..."
+    )
+    scene_data = await _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference=bool(attachment))
+    prompt_base = scene_data.get("photo_prompt") or raw_scene_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
+    context = {
+        "mode": source_mode,
+        "source_mode": source_mode,
+        "scene_text": raw_scene_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
+        "scene_summary": scene_data.get("scene_summary", ""),
+        "outfit_summary": scene_data.get("outfit_summary", ""),
+        "action_summary": scene_data.get("action_summary", ""),
+        "mood_summary": scene_data.get("mood_summary", ""),
+        "camera_framing": scene_data.get("camera_framing", "half_body"),
+        "prompt_base": prompt_base,
+        "reference_item_path": reference_item_path,
+        "reference_item_url": reference_item_url,
+    }
+
+    try:
+        context = await _generate_photo_from_context(context, msg=status)
+        db = load_memory()
+        db.insert(0, _photo_db_payload(context))
+        save_memory(db)
+
+        await status.delete()
+        embed = _build_photo_embed(context)
+        view = PhotoResultView(context)
+        sent = await message.channel.send(embed=embed, view=view)
+        context["message_id"] = sent.id
+        photo_generation_contexts[sent.id] = context
+        view.context = context
+        return context.get("local_url") or context.get("image_url")
+    except Exception as exc:
+        await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{str(exc)[:1500]}`")
+        return None
+
+
+def _today_diary_has_image(target_date):
+    if not os.path.exists(DIARY_DATA_PATH):
+        return False
+    try:
+        with open(DIARY_DATA_PATH, "r", encoding="utf-8") as f:
+            diary_db = json.load(f)
+        for entry in diary_db:
+            if entry.get("date") == target_date and entry.get("is_replied", False):
+                return bool(_extract_diary_image_url_from_html(entry.get("content", "")))
+    except Exception:
+        pass
+    return False
+
+
+def _apply_photo_to_diary(context, photo_name, overwrite=False):
+    target_date = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    local_url = context.get("local_url") or context.get("image_url")
+    if not local_url:
+        raise RuntimeError("這張照片沒有可用的圖片 URL。")
+    if _today_diary_has_image(target_date) and not overwrite:
+        return "needs_confirm", target_date, None
+
+    replaced, old_url = replace_completed_diary_image(target_date, local_url, description=photo_name)
+    if replaced:
+        _safe_delete_vault_image(old_url)
+        return "replaced", target_date, old_url
+
+    overrides = load_diary_override()
+    overrides[target_date] = {
+        "image_url": local_url,
+        "composition": photo_name,
+        "uploaded_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "photo_unified",
+    }
+    save_diary_override(overrides)
+    return "override", target_date, None
+
+
+class PhotoNameModal(discord.ui.Modal):
+    def __init__(self, context, target_type):
+        super().__init__(title="照片名稱")
+        self.context = dict(context)
+        self.target_type = target_type
+        self.photo_name = discord.ui.TextInput(
+            label="照片名稱",
+            placeholder="例如：書房陪伴照、咖啡廳新穿搭",
+            max_length=80,
+            required=True,
+        )
+        self.add_item(self.photo_name)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.photo_name.value or "").strip()
+        if not name:
+            await interaction.response.send_message("照片名稱不能是空白喔。", ephemeral=True)
+            return
+
+        if self.target_type == "project":
+            db = load_memory()
+            payload = _photo_db_payload(self.context, name=name, type_override="project")
+            payload["topic"] = f"【Project】{name}"
+            db.insert(0, payload)
+            save_memory(db)
+            await interaction.response.send_message(f"✅ 已上傳成為 Project：**{name}**", ephemeral=True)
+            return
+
+        if self.target_type == "diary":
+            status, target_date, _old_url = _apply_photo_to_diary(self.context, name, overwrite=False)
+            if status == "needs_confirm":
+                view = DiaryOverwriteConfirmView(self.context, name)
+                await interaction.response.send_message(
+                    f"⚠️ **{target_date}** 的 Diary 已經有一張圖片了，要用這張新照片覆蓋原本的圖片嗎？",
+                    view=view,
+                    ephemeral=True,
+                )
+            elif status == "replaced":
+                await interaction.response.send_message(f"✅ 已覆蓋 **{target_date}** 的 Diary 圖片：**{name}**", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"✅ 已指定為 **{target_date}** 的 Diary 圖片：**{name}**", ephemeral=True)
+
+
+class DiaryOverwriteConfirmView(discord.ui.View):
+    def __init__(self, context, photo_name):
+        super().__init__(timeout=300)
+        self.context = dict(context)
+        self.photo_name = photo_name
+
+    @discord.ui.button(label="覆蓋", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        status, target_date, _old_url = _apply_photo_to_diary(self.context, self.photo_name, overwrite=True)
+        await interaction.response.edit_message(
+            content=f"✅ 已覆蓋 **{target_date}** 的 Diary 圖片：**{self.photo_name}**",
+            view=None,
+        )
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="已取消，沒有覆蓋 Diary 圖片。", view=None)
+
+
+class PhotoResultView(discord.ui.View):
+    def __init__(self, context):
+        super().__init__(timeout=86400)
+        self.context = dict(context)
+
+    @discord.ui.button(label="More", style=discord.ButtonStyle.primary)
+    async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        context = dict(self.context)
+        context["prompt_base"] = (
+            context.get("prompt_base", "")
+            + "\nCreate a new variation of the same moment: same scene, same outfit/accessory reference, same mood, but with a different natural pose, camera angle, facial expression, and composition."
+        )
+        try:
+            new_context = await _generate_photo_from_context(context)
+            db = load_memory()
+            db.insert(0, _photo_db_payload(new_context))
+            save_memory(db)
+            view = PhotoResultView(new_context)
+            sent = await interaction.followup.send(embed=_build_photo_embed(new_context, title_prefix="📸 More"), view=view)
+            new_context["message_id"] = sent.id
+            photo_generation_contexts[sent.id] = new_context
+            view.context = new_context
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ More 生成失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="🎲 骰子取代", style=discord.ButtonStyle.secondary)
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        context = dict(self.context)
+        context["prompt_base"] = (
+            context.get("prompt_base", "")
+            + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
+        )
+        try:
+            new_context = await _generate_photo_from_context(context)
+            db = load_memory()
+            db.insert(0, _photo_db_payload(new_context))
+            save_memory(db)
+            self.context = new_context
+            if interaction.message:
+                photo_generation_contexts[interaction.message.id] = new_context
+                await interaction.message.edit(embed=_build_photo_embed(new_context, title_prefix="📸 骰子取代"), view=self)
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 骰子取代失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="上傳成為 Project", style=discord.ButtonStyle.success)
+    async def upload_project(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PhotoNameModal(self.context, "project"))
+
+    @discord.ui.button(label="上傳成為 Diary", style=discord.ButtonStyle.success)
+    async def upload_diary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PhotoNameModal(self.context, "diary"))
+
 # 🌟 [究極穩定版] 萬能攝影機：支援「有圖融合」與「無圖變裝」+ Base64 自動解碼
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
     files_to_close = []
@@ -4731,6 +5185,10 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
         if mode == "diary":
             return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
+        if mode == "photo_scene":
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True)
+        if mode == "photo_reference":
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True)
 
         # 1. 定位人物底圖 (Image 1)
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
@@ -5596,36 +6054,6 @@ async def more(ctx):
     except Exception as e: 
         await msg.edit(content=f"⚠️ 失敗：{e}")
 
-@girlfriend_bot.command(name='test_pulid')
-async def test_pulid(ctx, *, prompt: str):
-    """
-    🔬 大俠專用的 PuLID 秘密實驗室指令
-    用法: 
-    1. 直接輸入 `/test_pulid [英文咒語]` (會自動抓 base_xiaoxia.jpg 當臉)
-    2. 或在上傳一張大頭照時，在留言處輸入 `/test_pulid [英文咒語]` (會用您上傳的臉)
-    """
-    msg = await ctx.send("🔬 **[PuLID 秘密實驗室]** 啟動！引擎全開，無安全限制生成中，請稍候...")
-    try:
-        ref_url = None
-        # 判斷大俠有沒有夾帶「臉部特寫」照片
-        if ctx.message.attachments:
-            ref_url = ctx.message.attachments[0].url
-            await ctx.channel.send("👀 偵測到大俠上傳了新特寫，將以此臉孔進行 FaceID 鎖定！")
-        
-        # 呼叫我們剛剛寫好的 PuLID 引擎
-        img_url = await generate_image_pulid(prompt, reference_image_url=ref_url, id_weight=0.75)
-        
-        # 🌟 純測試展示，不寫入任何 JSON 資料庫，不進雲端別墅
-        embed = discord.Embed(title="🧪 PuLID 測試成果", description=f"**咒語：**\n{prompt}", color=0x9b59b6)
-        embed.set_image(url=img_url)
-        embed.set_footer(text="沙盒測試模式 | enable_safety_checker: False (無碼解放)")
-        
-        await msg.delete()
-        await ctx.send(embed=embed)
-        
-    except Exception as e:
-        await msg.edit(content=f"⚠️ 測試失敗：`{str(e)}`")
-
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
     db = load_memory()
@@ -6052,79 +6480,18 @@ async def on_message(message):
                 local_url = None
                 scene_prompt = ""
                 
-                # 📸 萬能攝影機 2.5：三階段安檢與自動重寫 (拒絕等待五分鐘)
-                if "給你全世界" in message.channel.name and message.content.startswith('/photo'):
-                    is_ref_track = message.content.startswith('/photo ref')
-                    raw_input = user_input.replace('/photo ref', '').replace('/photo', '').strip()
-                    target_base = "base_xiaoxia.jpg" 
-                    
-                    # 1. 🔍 第一階段：1秒快速安檢 (Moderation API)
-                    await message.channel.send("🛡️ 啟動前置快速安檢...")
-                    mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=raw_input)
-                    
-                    if mod_resp.results[0].flagged:
-                        await message.channel.send("⚠️ 偵測到原始指令含有敏感風險，正在交由 GPT-5-mini 強制脫敏重構...")
-
-                   # 2. 🧠 第二階段：GPT-5-mini 脫敏與美化
-                    await message.channel.send("🔍 小夏正在進行電影感提示詞美化與改寫...")
-                    
-                    safety_prompt = f"""
-                    你現在是頂尖的時尚攝影指導與 OpenAI 影像審查專家。請將大俠的要求：『{raw_input}』改寫為符合安全規範，但同時保留「高級時尚性感」的英文指令。
-
-                    【關鍵翻譯守則】：
-                    1. 絕對不可以直接刪除大俠要求的服裝特徵！必須將其「翻譯」成安全的高級時尚詞彙：
-                       - 若有「深V、爆乳」，請翻譯為：curvy figure, voluptuous silhouette, deep V-neck evening dress
-                       - 若有「開衩、美腿、短裙」，請翻譯為：high-slit gown, elegant feminine curves, form-fitting outfit
-                       - 若有「露骨、色情、挑逗」，請翻譯為：alluring gaze, cinematic sensuality, confident and glamorous pose
-                    2. 嚴禁使用會觸發封鎖的字眼 (如: bare, porn, explicit, exposed, huge breasts)。
-                    3. 開頭必須明確定義人物以策安全："A 24-year-old beautiful mature Asian woman..."
-                    4. 結尾必須包含："Preserve the identity and face from Image 1. Photorealistic, 8k, cinematic lighting."
-
-                    回傳 JSON：{{"safe_prompt": "一段約 50-80 字的高級時尚英文攝影描述"}}
-                    """
-                    resp = await openai_client.chat.completions.create(
-                        model="gpt-5-mini",
-                        response_format={"type": "json_object"},
-                        messages=[{"role": "user", "content": safety_prompt}]
-                    )
-                    scene_prompt = json.loads(resp.choices[0].message.content).get("safe_prompt", f"Preserve Image 1 identity. {raw_input}")
-                    print(f"🛡️ 洗白後的提示詞: {scene_prompt}")
-
-                    # 3. 🔍 第三階段：改寫後再複檢
-                    re_check = await openai_client.moderations.create(model="omni-moderation-latest", input=scene_prompt)
-                    if re_check.results[0].flagged:
-                        await message.channel.send("🚨 警告：經過兩次改寫後仍無法通過安檢，為保護 Token，本次生圖已攔截。")
+                # 📸 /photo 統一照片工作台：女友小俠頻道皆可用；說故事小俠姊姊頻道已在上方排除。
+                if message.content.startswith('/photo'):
+                    generated_image_url = await handle_unified_photo_command(message, user_input)
+                    if generated_image_url:
+                        # 讓後續小俠聊天大腦真的「看見」剛剛生成的照片，才能自然延伸互動。
+                        user_input = (
+                            "大俠剛剛使用 /photo 生成了一張小俠照片。"
+                            "請妳先看這張照片，再用小俠自己的口吻自然回應這個畫面與此刻情境；"
+                            "可以提到妳看見的服裝、場景、光線或動作，但不要說自己是 AI，也不要提及生成流程。"
+                        )
+                    else:
                         return
-
-                    # 4. 🚀 決定底圖與正式發送
-                    discord_image_url = message.attachments[0].url if (is_ref_track and message.attachments) else None
-                    
-                    if is_ref_track:
-                        # 讓 Gemini 挑選底圖 (確保只從安全名單挑選)
-                        catalog_path = os.path.join(MEMORY_DIR, "base_catalog.json")
-                        if os.path.exists(catalog_path):
-                            with open(catalog_path, "r", encoding="utf-8") as f: catalog = json.load(f)
-                            selector_prompt = f"請從以下清單選出一個最適合『{raw_input}』的 filename：\n" + ", ".join([i['filename'] for i in catalog]) + "\n【限制】：只回傳檔名。"
-                            sel_resp = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=selector_prompt)
-                            selected_name = sel_resp.text.strip().replace('"', '').replace('`', '')
-                            if any(item["filename"] == selected_name for item in catalog): target_base = selected_name
-                        
-                        await message.channel.send(f"📸 **[軌道 2：素材融合]** 啟動！套用底圖：`{target_base}`")
-                    else:
-                        await message.channel.send(f"📸 **[軌道 1：自由發揮]** 啟動！準備入戲：**{current_target}**...")
-
-                    generated_image_url = await generate_world_composite(discord_image_url, target_base, current_mode, scene_prompt)
-                    
-                    if generated_image_url and generated_image_url.startswith("http"):
-                        local_filename = await save_to_vault(generated_image_url)
-                        local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
-                        
-                        embed = discord.Embed(title=f"💖 {current_target if current_target else '快門瞬間'}", color=0xffb6c1)
-                        embed.set_image(url=local_url)
-                        embed.set_footer(text=f"模式：{'精準選圖(軌道2)' if is_ref_track else '自由發揮(軌道1)'} | 已通過 GPT-5 安全美化")
-                        await message.channel.send(embed=embed)
-                    else:
-                        await message.channel.send(f"⚠️ 攝影機沒反應：{generated_image_url}")
 
                 # ------------------------------------------------------------
                 # 🧠 聊天大腦區塊：感性與記憶融合
