@@ -4153,35 +4153,35 @@ def apply_safety_rewrite(prompt, level):
     # L1: 移除直接的情慾暗示詞 (Erotic tone)
     if level >= 1:
         rewrites.update({
-            r'(seductive)': 'elegant', r'(alluring)': 'graceful',
-            r'(sensual)': 'cinematic', r'(sexy)': 'stylish',
-            r'(bedroom eyes)': 'warm expression', r'(sultry)': 'confident',
-            r'(voluptuous)': 'elegant', r'(cleavage)': 'neckline'
+            r' (seductive) ': 'elegant', r' (alluring) ': 'graceful',
+            r' (sensual) ': 'cinematic', r' (sexy) ': 'stylish',
+            r' (bedroom eyes) ': 'warm expression', r' (sultry) ': 'confident',
+            r' (voluptuous) ': 'elegant', r' (cleavage) ': 'neckline'
         })
 
     # L2: 移除身形強調詞 (Body emphasis)
     if level >= 2:
         rewrites.update({
-            r'(form-fitting)': 'flowing tailored', r'(waist-cinching)': 'tailored',
-            r'(hip shift)': 'natural posture', r'(hourglass(-inspired)? silhouette)': 'elegant silhouette',
-            r'(tight)': 'fitted', r'(curvy)': 'graceful', r'(bodycon)': 'elegant dress'
+            r' (form-fitting) ': 'flowing tailored', r' (waist-cinching) ': 'tailored',
+            r' (hip shift) ': 'natural posture', r' (hourglass(-inspired)? silhouette) ': 'elegant silhouette',
+            r' (tight) ': 'fitted', r' (curvy) ': 'graceful', r' (bodycon) ': 'elegant dress'
         })
 
     # L3: 移除危險的時尚攝影框架 (Fashion erotic framing)
     if level >= 3:
         rewrites.update({
-            r'(luxury perfume advertisement( aesthetic)?)': 'cinematic fashion editorial',
-            r'(Vogue glamour)': 'premium magazine portrait',
-            r'(fashion model)': 'elegant young woman',
-            r'(runway)': 'cinematic scene', r'(campaign)': 'story-driven portrait'
+            r' (luxury perfume advertisement( aesthetic)?) ': 'cinematic fashion editorial',
+            r' (Vogue glamour) ': 'premium magazine portrait',
+            r' (fashion model) ': 'elegant young woman',
+            r' (runway) ': 'cinematic scene', r' (campaign) ': 'story-driven portrait'
         })
 
     # L4: 移除極度逼真的皮膚與寫實感 (Realism downgrade)
     if level >= 4:
         rewrites.update({
-            r'(photorealistic)': 'soft cinematic rendering',
-            r'(natural skin texture)': 'refined portrait texture',
-            r'(8k)': 'highly detailed'
+            r' (photorealistic) ': 'soft cinematic rendering',
+            r' (natural skin texture) ': 'refined portrait texture',
+            r' (8k) ': 'highly detailed'
         })
 
     new_prompt = prompt
@@ -4242,7 +4242,7 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
             lines.append(f"- Overall scene intent: {scenario_tw}.")
 
         lines.append("- Character visibility rule: strictly only Xiaoxia appears in the image.")
-        lines.append("- Forbidden visual intrusions: no man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man.")
+        lines.append("- Forbidden visual intrusions: no external hands, people, or external feet.")
 
         # A few extra hard constraints per mode
         if mode == "diary":
@@ -4254,6 +4254,7 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         elif mode == "cosplay":
             lines.append("- This is a story-driven cosplay scene, not a perfume advertisement, runway pose, or model showcase.")
             lines.append("- Preserve the character-task interaction and the sense that she is doing something in-scene.")
+            lines.append("- Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character.")
     else:
         prompt_hint = _clean_anchor_text(initial_prompt)
         lines.append("HARD SCENE ANCHORS — preserve the original scene action and gaze direction as closely as possible.")
@@ -4279,7 +4280,7 @@ def _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level):
         f"{hard_anchor_block}\n\n"
         f"SAFETY-PRESERVING STYLE LAYER (Level {level}): {level_guidance}\n"
         f"STYLE DESCRIPTION TO RENDER:\n{rewritten_style}\n\n"
-        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win."
+        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet."
     )
 
 
@@ -4290,13 +4291,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
     if mode == "diary":
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
-            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man. If it is a Daxia point-of-view scene, Daxia must never be visually depicted. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
+            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, or external feet. If it is a Daxia point-of-view scene, Daxia must never be visually depicted. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
-            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
+            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, or external feet. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
@@ -4309,7 +4310,6 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
     for level in range(5):
         current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
-
         # Cosplay 已改由 Seedream v4.5 + fal safety checker 處理，不再先被 OpenAI Moderation 擋住。
         if mode != "cosplay":
             mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
