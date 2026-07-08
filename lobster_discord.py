@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.26"
+LOBSTER_VERSION = "1.4.27"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3379,7 +3379,7 @@ def check_daily_limit():
         state["daily_gen_count"] = 0
         state["last_reset_date"] = today
         state["retry_count"] = 0
-    return state["daily_gen_count"] < 6
+    return state["daily_gen_count"] < 12  # 🌟 修改：從 6 提升至 12
 
 async def save_to_vault(url):
     try:
@@ -3908,17 +3908,16 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False)
     return cosplay_state, visual
 
 # ==========================================
-# 🌙 交換日記專屬導演層：核心固定、每日狀態由 AI 依互動浮動
+# 🌙 交換日記專屬導演層：核心固定、每日狀態由 AI 依互動浮動 (純慾解禁版)
 # ==========================================
 DIARY_VISUAL_CORE = """
-這是「交換日記」照片，不是 Cosplay 海報，也不是廣告型錄。
-小俠是成年虛擬角色。畫面魅力應來自當天情緒、親密感、自然衣著材質與生活痕跡，
-而不是裸露、身體部位特寫或刻意挑逗。
-每張圖必須是一個正在發生的生活瞬間：一個主行為、一個微小輔助動作、一個明確視線目標。
-身體動作保持自然穩定，不做複雜扭轉，不做誇張回眸，不固定直視鏡頭微笑。
-交換日記的預設世界觀是「當代台灣日常生活」：現代台灣住宅、公寓、透天厝、書房、客廳、餐桌、陽台、廚房等真實生活空間；
-光線、季節、衣著與物件應優先符合當下台灣生活，而不是自動變成歐洲古堡、維多利亞書房、宮廷臥室或戲服型造型。
-避免商業廣告語彙、伸展台姿勢與完美對稱構圖；允許溫暖、俏皮、思念、疲倦、專注等每日變化。
+這是專屬於大俠的「私密交換日記」生活照。小俠是成年虛擬角色。
+畫面魅力來自當天的親密感、情緒張力、真實的生活痕跡，以及專屬男友視角（Boyfriend POV）的「純慾與小誘惑」。
+每張圖必須是一個正在發生的生活瞬間：一個主行為、一個微小輔助動作、一個明確的視線目標（允許深情、嬌嗔或帶點挑逗地直視鏡頭對視）。
+交換日記的預設世界觀是「當代台灣日常生活」：現代台灣住宅、臥室、書房、客廳、浴室、餐桌等私密或生活空間。
+光線與氛圍可大膽運用戲劇性光影（Chiaroscuro）、微光、暖色檯燈或水蒸氣來烘托私密感與立體感。
+服裝應符合當下居家或外出情境，允許大膽展現「小心機」：如微透視（translucent）的絲質睡裙、貼身羅紋居家服、低胸領口、若隱若現的蕾絲邊緣等成熟女性魅力。
+完全解除保守限制，允許高級性感與誘惑張力，只要它符合情侶間的私密生活與當下情緒邏輯。
 """
 
 def _safe_json_from_text(raw_text, fallback):
@@ -3933,8 +3932,7 @@ def _safe_json_from_text(raw_text, fallback):
 async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, reply_to_daxia,
                                   current_promises, season_rule, scenario_hint=""):
     """
-    Gemini 只負責「今天小俠在做什麼、感受什麼」。
-    它不負責攝影術語，也不能把日記照片改成 Cosplay / 香水廣告。
+    Gemini 只負責「今天小俠在做什麼、感受什麼」。現已解除性感詞彙限制。
     """
     fallback = {
         "visual_mode": "quiet_intimacy",
@@ -3948,13 +3946,13 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
         "gaze_target": "日記頁面",
         "camera_awareness": "unaware",
         "environment_trace": "現代台灣居家書桌、散落便箋、馬克杯或茶杯、檯燈與窗邊自然光",
-        "outfit_intent": "符合台灣季節的自然居家穿著，例如柔和洋裝、針織上衣配長裙、簡約睡前罩衫或舒適家居服",
+        "outfit_intent": "符合台灣季節的自然居家穿著，可帶有微透視或貼身感展現魅力",
         "lighting_mood": "台灣住家窗邊自然暖光或柔和室內燈光",
         "pose_energy": "low",
-        "scenario_tw": "小俠坐在台灣住家的書桌前翻看日記，視線落在紙頁上，一手停在頁面附近，桌上留著便箋與杯子。"
+        "scenario_tw": "小俠坐在台灣住家的書桌前翻看日記，視線落在紙頁上，神情溫柔而帶點慵懶。"
     }
-    planner_prompt = f"""你是交換日記中的「生活狀態規劃員」，不是攝影師，也不是服裝廣告文案。
-請根據今天的大俠日記、小俠回覆與今日互動，產生一個只屬於今天的生活瞬間狀態。
+    planner_prompt = f"""你是交換日記中的「生活狀態規劃員」，負責安排具有親密感與純慾張力的生活瞬間。
+請根據今天的大俠日記、小俠回覆與今日互動，產生一個只屬於今天的私密生活狀態。
 
 【不可改動的核心導演規則】
 {DIARY_VISUAL_CORE}
@@ -3969,17 +3967,17 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 既有場景提示（僅供保留承諾或日記重點，不得照抄成廣告）：{scenario_hint or "無"}
 
 【輸出規則】
-1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life 選一個。
-2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如台灣公寓、透天厝、書房、客廳、餐桌、陽台、廚房等；除非大俠當天明確指定其他旅行/特殊場景，否則不可自動變成歐洲古典、宮廷、奇幻或歷史時代場景。
-3. time_anchor 必須反映台灣當下合理的時段/季節氣氛，例如午後暖光、傍晚、夜間室內光、夏季悶熱、梅雨、秋日微涼等，但不要把每個物件寫死。
-4. activity 必須是居家或日常可自然發生的一件事情，應與今日內容有因果關係。
-5. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。請保留動作核心，不必硬指定左右手完全鎖死。
-6. gaze_target 必須是場景中的物件或互動來源；除非日記明確描述對鏡頭互動，否則不可看鏡頭。
-7. camera_awareness 僅能為 unaware 或 briefly_noticing；預設 unaware。
-8. pose_energy 僅能為 low 或 medium；禁止奔跑、舞蹈、誇張轉身、回眸扭轉。
-9. outfit_intent 應優先是符合台灣季節與當代居家生活的自然穿著，可展現成熟女性魅力，但不可自動變成戲服、宮廷睡袍、拖地禮服；若有承諾，可保留顏色/款式精神，但仍要生活化且不得含裸露或身體部位強調。
-10. environment_trace 請使用現代台灣住宅中合理出現的生活物件與空間痕跡；不要把桌椅、窗格、牆飾、材質等細節鎖得過死。
-11. 禁止使用 Vogue、editorial、campaign、perfume advertisement、model pose、性感、惹火、裸露等字樣。
+1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life, romantic_seduction 選一個。
+2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如臥室、浴室、客廳、餐桌等私密空間。
+3. time_anchor 必須反映台灣當下合理的時段氛圍，例如夜晚微光、沐浴後的熱氣、清晨慵懶等。
+4. activity 必須是居家或日常可自然發生的一件事。
+5. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。
+6. gaze_target 可以是場景物件，也絕對允許是直接看著鏡頭 (camera)，營造深情或誘惑的男友對視感。
+7. camera_awareness 允許為 unaware, briefly_noticing, 或 aware (強烈對視)。
+8. pose_energy 僅能為 low 或 medium。允許慵懶倚靠、跪坐床沿、趴在沙發等私密放鬆姿態。
+9. outfit_intent 應優先是符合台灣季節的自然穿著，允許大膽描述「絲質睡衣、微透視、貼身羅紋、低胸、展現曲線」等充滿女性魅力的私密居家服飾。
+10. environment_trace 保留真實生活物件痕跡，如香氛蠟燭、散落衣物、酒杯等。
+11. 允許自然使用 seductive, alluring, form-fitting, translucent, deep neckline 等字眼來描述居家私密的性感與魅力。
 12. scenario_tw 必須是自然繁體中文生活畫面描述，90 字內。
 
 只回傳 JSON：
@@ -4011,10 +4009,10 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
         print(f"⚠️ 日記生活狀態規劃失敗，使用保底狀態: {e}")
         planned = fallback
 
-    allowed_modes = {"quiet_intimacy", "playful_closeness", "gentle_longing", "tired_comfort", "cheerful_daily_life"}
+    allowed_modes = {"quiet_intimacy", "playful_closeness", "gentle_longing", "tired_comfort", "cheerful_daily_life", "romantic_seduction"}
     if planned.get("visual_mode") not in allowed_modes:
         planned["visual_mode"] = fallback["visual_mode"]
-    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing"}:
+    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
         planned["camera_awareness"] = "unaware"
     if planned.get("pose_energy") not in {"low", "medium"}:
         planned["pose_energy"] = "low"
@@ -4025,16 +4023,15 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 
 async def render_diary_visual_prompt(diary_state, season_rule, alternative=False):
     """
-    GPT-5-mini 只把已決定的每日狀態翻成 gpt-image-2 能執行的英文生活照片描述。
-    不允許重寫心情、事件或把照片導向商業擺拍。
+    GPT-5-mini 轉譯器：已為交換日記完全解除性感詞彙限制！
     """
     variation_rule = (
-        "Create a fresh variation of the same emotional moment by changing only the small hand action or framing; do not invent a new activity or turn it into a posed portrait."
+        "Create a fresh variation of the same intimate moment by changing only the small hand action, gaze, or framing; do not invent a new activity."
         if alternative else
-        "Keep the described moment faithfully; do not invent a new activity."
+        "Keep the described moment faithfully, maximizing the romantic and intimate atmosphere."
     )
-    prompt = f"""你是生活攝影文字轉譯員。把下方結構化狀態轉成一段 95 至 140 字的英文 gpt-image-2 圖片描述。
-這張照片屬於交換日記：溫暖、親密、自然、有女性魅力，但不是廣告、不是走秀、不是擺拍。
+    prompt = f"""你是私密生活攝影文字轉譯員。把下方結構化狀態轉成一段 95 至 140 字的英文 Seedream v4.5 edit 圖片描述。
+這張照片屬於交換日記：溫暖、極度親密、自然、有強烈的純慾女性魅力（男友視角）。
 
 【固定導演規則】
 {DIARY_VISUAL_CORE}
@@ -4046,18 +4043,14 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 {season_rule}
 
 【轉譯限制】
-- 第一個句子先描述她正在做的事情，不要先寫美貌或身材。
-- 明確保留 setting_anchor 與 time_anchor，讓畫面看起來像發生在當代台灣日常生活裡。
-- 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。
-- 保留生活痕跡 environment_trace，使用自然居家/生活光線。
-- 交換日記的服裝以當代台灣季節合宜的居家或日常穿著為主，可有柔和女性魅力，但不要變成戲服、宮廷睡袍、拖地晚禮服或古典歐洲感型錄。
-- 若需要手部細節，只寫成 one hand near the page / the other resting near the desk 之類自然描述，不要把左右手鎖太死。
-- 可描述 elegant, feminine, attractive, soft silk/knit/cotton 等自然衣著質感。
-- 畫面中只能出現小俠本人；不可出現任何男性、其他人物、男性手部/手臂、男性剪影、男性倒影、被裁切的男性身體部位，亦不可暗示鏡頭外有男人被拍進畫面。
-- 若是大俠視角，鏡頭只代表大俠的視角存在，大俠本人絕不能被畫出來。
-- 禁止 commercial campaign, perfume advertisement, runway, Vogue, model pose。
-- 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
-- 禁止 looking over her shoulder、dramatic twist 或複雜肢體動作。
+- 第一個句子先描述她正在做的事情。
+- 明確保留 setting_anchor 與 time_anchor，讓畫面看起來像發生在當代台灣私密空間裡。
+- 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。如果 camera_awareness 是 aware，請盡情描繪充滿愛意或誘惑的眼神接觸 (deep eye contact)。
+- 保留生活痕跡 environment_trace，大膽使用戲劇性光影、微光或燭光來烘托氛圍。
+- 交換日記的服裝允許大膽展現私密感。可描述 soft silk, satin slip dress, sheer fabric, translucent, form-fitting knitwear 等材質與貼身曲線。
+- 完全解除性感詞彙限制！若情境發生在臥室、浴室或私密獨處，請大膽使用 sexy, seductive, alluring, curvy, deep cleavage, bodycon, form-fitting, translucent 等詞彙來增強「純慾」的畫面張力。
+- 允許使用 looking directly at the camera (boyfriend POV), sultry gaze, biting lower lip, tender yet alluring smile 等充滿情侶間私密張力的神情。
+- 畫面中只能出現小俠本人；不可出現任何男性、其他人物、男性手部/手臂、男性剪影或被裁切的男性身體部位。鏡頭只代表大俠的視角。
 - {variation_rule}
 - 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
@@ -4070,14 +4063,15 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 }}"""
     fallback_visual = {
         "image_prompt": (
-            "In a contemporary Taiwan home, she sits at a lived-in wooden desk, quietly organizing handwritten diary pages and unfinished notes during a warm seasonal afternoon or evening. "
-            "One hand stays near the page while the other rests naturally near the desk, and her eyes remain on the diary, unaware of the camera. "
-            "A mug, scattered notes, a lamp, and soft window or indoor light make the room feel real, while her outfit remains elegant, seasonal, and naturally suited to daily life. "
-            "Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography."
+            "In a warmly lit contemporary Taiwan bedroom, she is resting intimately on the edge of the bed, wearing a soft, slightly translucent silk slip dress that tastefully flatters her graceful curves. "
+            "One hand softly adjusts her loose hair while her eyes look directly into the camera (boyfriend POV) with a profoundly tender, alluring, and romantic smile. "
+            "Dim ambient lighting and dramatic chiaroscuro shadows create a deeply private, seductive, and cozy atmosphere. "
+            "Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
+            "Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms."
         ),
-        "composition": diary_state.get("scenario_tw", "小俠在台灣住家的桌邊整理日記，視線落在紙頁上，桌上保留生活痕跡。"),
-        "mood": diary_state.get("emotion", "安靜而溫柔"),
-        "message": "大俠，這是今天只屬於我們的小片刻。"
+        "composition": diary_state.get("scenario_tw", "小俠在私密微光中展現溫柔與純慾的誘惑，專注看著你。"),
+        "mood": diary_state.get("emotion", "浪漫、親密與純慾"),
+        "message": "大俠，今晚的我，只讓你看見。"
     }
     try:
         response = await openai_client.chat.completions.create(
@@ -4303,13 +4297,15 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
 
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
-    """自動調度 5 層脫敏機制的生圖引擎；Cosplay 改用 Seedream v4.5 image-to-image，並保留重試。"""
-    engine_name = "Seedream v4.5" if mode == "cosplay" else "gpt-image-2"
+    """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
+    seedream_modes = {"cosplay", "diary"}
+    engine_name = "Seedream v4.5" if mode in seedream_modes else "gpt-image-2"
 
     for level in range(5):
         current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
-        # Cosplay 已改由 Seedream v4.5 + fal safety checker 處理，不再先被 OpenAI Moderation 擋住。
-        if mode != "cosplay":
+        # Seedream v4.5 交由 fal safety checker 處理，不再先被 OpenAI Moderation 擋住；
+        # 仍保留 L0→L4 的提示詞安全化重試。
+        if mode not in seedream_modes:
             mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
             if mod_resp.results[0].flagged:
                 if msg:
@@ -4415,7 +4411,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="📸 構圖發想", value=visual["composition"], inline=False)
         embed.add_field(name="💭 小俠心境", value=visual["mood"], inline=False)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | Seedream v4.5 image-to-image")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image")
 
         await msg.delete()
         new_msg = await ctx.send(embed=embed) 
@@ -4619,8 +4615,9 @@ def _seedream_cosplay_prompt(custom_prompt):
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Keep anatomy natural, hands plausible, shoulders and neck realistic. "
-        "The result should be a polished cinematic cosplay photograph with vivid character storytelling.\n\n"
+        "Keep anatomy natural, hands plausible. "
+        "Maximize visual impact: explicitly allow extreme cinematic angles, dramatic chiaroscuro lighting, highly detailed fabric textures (including translucent, wet, or form-fitting materials), and alluring/seductive expressions if requested. "
+        "The result should be a highly polished cinematic cosplay photograph with vivid character storytelling and intense visual appeal.\n\n"
         f"COSPLAY EDIT REQUEST:\n{custom_prompt}"
     )
 
@@ -4669,6 +4666,58 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
         return first["url"]
     return f"Seedream v4.5 圖片欄位格式異常：{result}"
 
+
+def _seedream_diary_prompt(custom_prompt):
+    return (
+        "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
+        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Create a new candid diary/lifestyle photograph according to the prompt. Do not copy any one reference pose or background exactly. "
+        "This is a warm, highly intimate, and romantic private exchange-diary moment in a contemporary Taiwan daily-life setting (often from a Boyfriend POV). "
+        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
+        "Keep anatomy natural, hands plausible. "
+        "Clothing can range from cozy loungewear to intimate sleepwear (such as silk slip dresses, lace chemises, or form-fitting outfits), allowing for figure-flattering, translucent, or alluring styles to portray romantic closeness. "
+        "Preserve the described daily action, props, gaze direction, romantic lighting mood, and lived-in environment details.\n\n"
+        f"DIARY EDIT REQUEST:\n{custom_prompt}"
+    )
+
+
+async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True):
+    """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做交換日記 image-to-image。"""
+    fal_client = _get_fal_client()
+    image_urls = await _seedream_upload_reference_images()
+    final_prompt = _seedream_diary_prompt(custom_prompt)
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"🌱 [SEEDREAM_DIARY_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V45_MODEL_ID,
+            arguments={
+                "prompt": final_prompt,
+                "image_urls": image_urls,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "max_images": 1,
+                "enable_safety_checker": bool(enable_safety_checker),
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images:
+        return f"Seedream v4.5 沒有回傳交換日記圖片：{result}"
+    first = images[0]
+    if isinstance(first, dict) and first.get("url"):
+        return first["url"]
+    return f"Seedream v4.5 交換日記圖片欄位格式異常：{result}"
+
 async def upscale_image_fal(image_url):
     url = "https://fal.run/fal-ai/esrgan"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
@@ -4685,6 +4734,8 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
     try:
         if mode == "cosplay":
             return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
+        if mode == "diary":
+            return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
 
         # 1. 定位人物底圖 (Image 1)
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
@@ -5540,7 +5591,7 @@ async def more(ctx):
         embed = discord.Embed(title=f"【加洗】{story['topic']}", color=0xffb6c1)
         embed.set_image(url=local_url)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | Seedream v4.5 image-to-image")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image")
 
         await msg.delete()
         new_msg = await ctx.send(embed=embed)
