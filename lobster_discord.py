@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.25"
+LOBSTER_VERSION = "1.4.26"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -318,14 +318,17 @@ import subprocess
 import sys
 
 def auto_heal_environment():
-    required_packages = ["pydub"]
-    for pkg in required_packages:
+    required_packages = {
+        "pydub": "pydub",
+        "fal_client": "fal-client",
+    }
+    for import_name, package_name in required_packages.items():
         try:
-            __import__(pkg)
+            __import__(import_name)
         except ImportError:
-            print(f"⚠️ 警告：系統缺少 {pkg}，小夏正在強行啟動安裝程序...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-            print(f"✅ {pkg} 強制安裝完成！")
+            print(f"⚠️ 警告：系統缺少 {package_name}，小夏正在強行啟動安裝程序...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            print(f"✅ {package_name} 強制安裝完成！")
 
 # 👇 學長，請在這裡加上這段！把 ffmpeg 的資料夾加入系統 PATH
 ffmpeg_dir = "/home/node/.openclaw/workspace/ffmpeg_bin"
@@ -383,9 +386,14 @@ MEMORY_DAILY_BACKUP_DIR = os.path.join(MEMORY_DIR, "daily_memory_backups")
 # 公開晨報／FOMO 的 Discord 按鈕在 Zeabur 重啟後仍須知道原訊息對應的內容。
 BROADCAST_BUTTON_STORE_PATH = os.path.join(MEMORY_DIR, "broadcast_button_store.json")
 BROADCAST_AUDIO_DIR = os.path.join(VAULT_DIR, "broadcast_audio")
+SEEDREAM_V45_REF_DIR = os.path.join(MEMORY_DIR, "seedream_v45")
+SEEDREAM_V45_UPLOAD_CACHE_PATH = os.path.join(SEEDREAM_V45_REF_DIR, "fal_upload_cache.json")
+SEEDREAM_V45_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
+SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
+os.makedirs(SEEDREAM_V45_REF_DIR, exist_ok=True)
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -3619,18 +3627,18 @@ async def generate_story(mode):
 
     if weekday == 5:
         style_desc = (
-            "【選角限制】：請挑選『陽光、唯美、或正向設定』的知名動漫/電玩角色！\n"
-            "【服裝與場景限制】：請以高級時尚再詮釋的方式設計服裝，魅力來自材質、色彩、角色神韻與情境，而不是裸露或身體部位強調。\n"
-            "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具。絕對不要用伸展台模特兒站姿、S 曲線擺拍、刻意看鏡頭邀請式微笑。"
+            "【選角限制】：請挑選『陽光、唯美、正向、熱血、奇幻、俏皮或有辨識度』的知名動漫/電玩/電影角色！\n"
+            "【服裝與場景限制】：請以角色世界觀再詮釋服裝，可是英氣、可愛、魔法感、冒險感、未來感、運動感、戲劇感或高級質感；魅力來自角色神韻、故事動作、道具與材質，而不是裸露或身體部位強調。\n"
+            "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具、準備施法、檢查裝備。絕對不要用伸展台模特兒站姿、S 曲線擺拍、刻意看鏡頭邀請式微笑。"
         )
-        system_mod = "妳要規劃兼具角色氣質與高級視覺質感的 Cosplay 題材。重點是人物正在做某件事，而不是站著擺拍。"
+        system_mod = "妳要規劃兼具角色氣質、故事性與視覺吸引力的 Cosplay 題材。風格可以多變，不必侷限優雅；重點是人物正在做某件事，而不是站著擺拍。"
     else:
         style_desc = (
-            "【服裝與場景限制】：請設計成熟優雅、有魅力但不低俗的服裝與場景，魅力應來自材質、剪裁、氣氛與情緒。\n"
-            "【行為限制】：必須給出一個主行為與一個微小輔助動作，讓人物像在生活或劇情之中，例如比較香氣、整理手套、翻看筆記、準備出門。\n"
+            "【服裝與場景限制】：請設計有角色感與故事感的服裝與場景，風格可為英氣、俏皮、魔法感、冒險感、運動感、復古感、未來感、華麗或清爽，不必侷限成熟優雅；魅力應來自材質、剪裁、角色狀態、道具互動與情緒。\n"
+            "【行為限制】：必須給出一個主行為與一個微小輔助動作，讓人物像在生活或劇情之中，例如整理裝備、翻看筆記、準備出門、檢查道具、練習姿勢、回頭確認場景。\n"
             "【禁止事項】：拒絕香水廣告文案、模特兒走秀站姿、完美 S 曲線、過度直視鏡頭、刻意誘惑姿勢。"
         )
-        system_mod = "妳要展現高級、電影感與女性魅力，但人物必須像在故事裡自然行動，而不是廣告模特兒。"
+        system_mod = "妳要展現電影感、角色感與女性魅力，風格可以多變，不必侷限優雅；人物必須像在故事裡自然行動，而不是廣告模特兒。"
 
     if mode == "職業":
         prompt = (
@@ -3728,11 +3736,11 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
 # ==========================================
 COSPLAY_VISUAL_CORE = """
 這是「Cosplay 作品照」，不是香水廣告，也不是伸展台型錄。
-小俠是成年虛擬角色。畫面應保有高級時尚感、角色神韻與故事性，但人物必須像正在做一件事，
-而不是只負責擺姿勢。魅力來自服裝材質、氣氛、角色狀態、道具互動與自然肢體語言，
+小俠是成年虛擬角色。畫面應保有角色神韻、故事性與視覺吸引力；風格可以是英氣、可愛、魔法感、冒險感、運動感、華麗、復古、未來感或高級質感，不必侷限優雅。
+人物必須像正在做一件事，而不是只負責擺姿勢。魅力來自服裝材質、氣氛、角色狀態、道具互動與自然肢體語言，
 不是來自裸露、身體部位特寫、完美 S 曲線、直球誘惑或固定看鏡頭微笑。
 每張圖必須只有一個主行為、一個微小輔助動作、一個明確視線目標。
-動作保持自然穩定，可有微側身、倚靠、邁出一步前的停頓、整理道具等「小動作」，
+動作保持自然穩定，可有微側身、倚靠、邁出一步前的停頓、整理道具、準備施法、檢查裝備等「小動作」，
 但禁止誇張扭腰、回眸扭脖、雙手都在表演、手插腰模特兒 pose、伸展台站姿、對鏡頭邀請式微笑。
 """
 
@@ -3744,21 +3752,21 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
     fallback = {
         "visual_mode": "cinematic_character_moment",
         "activity": "在與主題相符的場景中，專注處理一個與角色身份有關的物件或任務",
-        "emotion": "安靜、自信、帶著角色當下的情緒",
+        "emotion": "自然、自信、帶著角色當下的情緒",
         "story_anchor": topic,
         "primary_action": "自然地處理手邊的道具或場景任務",
         "micro_action": "另一隻手輕輕調整衣料、配件或紙頁",
         "gaze_target": "手中的道具或眼前的場景物件",
         "camera_awareness": "briefly_noticing",
         "environment_trace": "畫面中保留能說明角色身分的場景細節與道具",
-        "outfit_intent": "高級時尚再詮釋的角色服裝，重視材質、剪裁與角色辨識度",
+        "outfit_intent": "保留角色辨識度的服裝再詮釋，可英氣、俏皮、魔法感、冒險感、華麗或清爽，重視材質、剪裁與道具",
         "lighting_mood": "電影感環境光與柔和景深",
         "pose_energy": "medium",
         "camera_framing": framing,
         "scenario_tw": "小俠在主題場景中自然處理道具，視線落在手邊任務上，像被安靜捕捉的一瞬間。"
     }
     planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」，不是香水廣告文案，也不是模特兒老師。
-請根據題材、背景與扮演角色，規劃一個適合 gpt-image-2 的自然畫面狀態。
+請根據題材、背景與扮演角色，規劃一個適合 Seedream v4.5 image-to-image 的自然畫面狀態。
 
 【不可改動的核心導演規則】
 {COSPLAY_VISUAL_CORE}
@@ -3771,14 +3779,14 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 是否為加洗/變奏：{"是，請在同一題材下換一個自然瞬間" if alternative else "否，請給第一個代表畫面"}
 
 【輸出規則】
-1. visual_mode 僅能從 cinematic_character_moment, elegant_roleplay, poised_action, atmospheric_story_scene 選一個。
+1. visual_mode 僅能從 cinematic_character_moment, roleplay_action, playful_character_moment, atmospheric_story_scene, heroic_adventure, magical_daily_scene 選一個。
 2. activity 必須描述角色此刻正在做的事情，不能只是站著展示衣服。
 3. primary_action 只能有一個主要行為；micro_action 只能有一個輔助細節。
 4. gaze_target 必須是場景中的物件、任務或遠方目標；除非題材強烈需要，預設不要直視鏡頭。
 5. camera_awareness 僅能為 unaware, briefly_noticing, aware。一般建議 briefly_noticing 或 unaware。
 6. pose_energy 僅能為 low 或 medium；禁止 high。
 7. camera_framing 僅能為 full_body 或 half_body，必須與輸入一致。
-8. outfit_intent 要保留角色辨識度與高級時尚感，但不得描述裸露或身體部位強調。
+8. outfit_intent 要保留角色辨識度與適合該題材的造型氣質，可英氣、俏皮、魔法感、冒險感、運動感、華麗或清爽，但不得描述裸露或身體部位強調。
 9. environment_trace 要加入 1~2 個能讓畫面不像棚拍型錄的場景細節。
 10. 禁止使用 perfume advertisement, Vogue, runway, model pose, S-curve, seductive, sexy, voluptuous, cleavage 等字樣。
 11. scenario_tw 必須是自然繁體中文畫面描述，90字內。
@@ -3811,7 +3819,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         print(f"⚠️ Cosplay 場景規劃失敗，使用保底狀態: {e}")
         planned = fallback
 
-    allowed_modes = {"cinematic_character_moment", "elegant_roleplay", "poised_action", "atmospheric_story_scene"}
+    allowed_modes = {"cinematic_character_moment", "roleplay_action", "playful_character_moment", "atmospheric_story_scene", "heroic_adventure", "magical_daily_scene"}
     if planned.get("visual_mode") not in allowed_modes:
         planned["visual_mode"] = fallback["visual_mode"]
     if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
@@ -3827,15 +3835,15 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 
 async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
     """
-    GPT-5-mini 只把結構化 Cosplay 狀態轉成 gpt-image-2 能執行的提示詞。
+    GPT-5-mini 只把結構化 Cosplay 狀態轉成 Seedream v4.5 image-to-image 能執行的提示詞。
     """
     variation_rule = (
         "Create a fresh variation of the same theme by changing the hand action, exact body orientation, or framing, while keeping the same story world and outfit intent."
         if alternative else
         "Create the first signature image of this theme without turning it into a model pose."
     )
-    prompt = f"""你是高級 Cosplay 攝影文字轉譯員。把下方結構化狀態轉成一段 100 至 140 字的英文 gpt-image-2 圖片描述。
-這是高級 Cosplay 作品照：有電影感、有服裝質感、有角色神韻，但不是香水廣告，也不是模特兒海報。
+    prompt = f"""你是 Cosplay image-to-image 攝影文字轉譯員。把下方結構化狀態轉成一段 110 至 160 字的英文 Seedream v4.5 edit 圖片描述。
+這是角色作品照：有電影感、有服裝質感、有角色神韻，風格可以英氣、俏皮、魔法感、冒險感、華麗或清爽，不必侷限優雅；但不是香水廣告，也不是模特兒海報。
 
 【固定導演規則】
 {COSPLAY_VISUAL_CORE}
@@ -3848,12 +3856,12 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
 - 僅保留 1 個主行為與 1 個微小輔助動作。
 - 視線必須落在 gaze_target；若 camera_awareness=aware，也只能是自然注意到鏡頭，不可變成邀請式擺拍。
 - 保留 environment_trace，讓場景像故事世界中的真實片刻。
-- 可描述 elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等高級質感。
+- 可描述 heroic, cute, magical, adventurous, playful, dramatic, elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等多樣角色質感。
 - 禁止 perfume advertisement, runway, Vogue, campaign, model pose, S-curve pose, hand-on-hip glamour pose。
 - 禁止 sexy, seductive, alluring, curvy, voluptuous, cleavage, breasts, bodycon, revealing。
 - 禁止 looking over her shoulder、dramatic twist、perfect symmetry、direct camera smile by default。
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait.
+- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image.
 
 只回傳 JSON：
 {{
@@ -3866,12 +3874,12 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
         "image_prompt": (
             "She is quietly engaged with a character-related object in a richly detailed scene, pausing in a natural moment rather than posing for a campaign. "
             "One hand handles the object while the other lightly adjusts a small detail of her outfit or accessory, and her gaze stays on the task instead of performing for the camera. "
-            "The setting carries lived-in story details, elegant costume textures, and soft cinematic depth. Maintain consistent facial features and hairstyle from Image 1. "
-            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic fashion portrait."
+            "The setting carries lived-in story details, expressive costume textures, and soft cinematic depth. Maintain consistent facial features and hairstyle from the reference images. "
+            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image."
         ),
         "composition": cosplay_state.get("scenario_tw", "小俠在主題場景中自然處理道具，動作有故事感，不是站樁擺拍。"),
         "mood": cosplay_state.get("emotion", "自信而自然"),
-        "message": "大俠，這次我不只是擺拍，而是真的走進故事裡。"
+        "message": "大俠，這次我真的走進角色故事裡了。"
     }
     try:
         response = await openai_client.chat.completions.create(
@@ -4131,7 +4139,7 @@ async def reroll_diary_visual_from_composition(composition_tw):
 
 
 # ==========================================
-# 👗 終極進化版 /cosplay 指令 (gpt-image-2 核心)
+# 👗 終極進化版 /cosplay 指令 (Seedream v4.5 核心)
 # ==========================================
 import re
 
@@ -4287,7 +4295,7 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
         )
     else:
         safe_style = (
-            "Create a very safe, elegant, story-driven cosplay image of an adult fictional Asian woman in a refined, character-appropriate outfit. "
+            "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
             "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, and no implied off-camera man. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
@@ -4296,52 +4304,58 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
 
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
-    """自動調度 5 層脫敏機制的生圖引擎；所有層級都保留硬場景錨點。"""
+    """自動調度 5 層脫敏機制的生圖引擎；Cosplay 改用 Seedream v4.5 image-to-image，並保留重試。"""
+    engine_name = "Seedream v4.5" if mode == "cosplay" else "gpt-image-2"
+
     for level in range(5):
         current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
 
-        # 1. 快速文字安檢 (Moderation API)
-        mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
-        if mod_resp.results[0].flagged:
-            if msg:
-                await msg.edit(content=f"⚠️ [L{level}] 文字安檢未過，保留場景骨架並啟動 L{level+1} 深層脫敏...")
-            if isinstance(visual_dict, dict):
-                visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡，已保留場景骨架)*"
-            continue
-
-        # 2. 正式送入 gpt-image-2 引擎
-        if msg:
-            await msg.edit(content=f"📸 gpt-image-2 攝影機啟動 (當前防護等級：L{level}，保留場景骨架中)...")
-        generated_image_url = await generate_world_composite(
-            discord_image_url=discord_image_url, base_filename=base_filename,
-            mode=mode, custom_prompt=current_prompt
-        )
-
-        # 3. 檢查是否被影像底層攔截
-        if not generated_image_url or not generated_image_url.startswith("http"):
-            error_str = str(generated_image_url).lower()
-            if "moderation" in error_str or "sexual" in error_str or "safety_violations" in error_str:
+        # Cosplay 已改由 Seedream v4.5 + fal safety checker 處理，不再先被 OpenAI Moderation 擋住。
+        if mode != "cosplay":
+            mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
+            if mod_resp.results[0].flagged:
                 if msg:
-                    await msg.edit(content=f"⚠️ [L{level}] 遭底層影像安檢攔截！保留場景骨架並啟動 L{level+1} 材質與姿態柔化...")
+                    await msg.edit(content=f"⚠️ [L{level}] 文字安檢未過，保留場景骨架並啟動 L{level+1} 深層脫敏...")
                 if isinstance(visual_dict, dict):
                     visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡，已保留場景骨架)*"
                 continue
-            else:
-                raise Exception(f"攝影機異常：{generated_image_url}")
 
+        if msg:
+            await msg.edit(content=f"📸 {engine_name} 攝影機啟動 (當前防護等級：L{level}，保留場景骨架中)...")
+
+        generated_image_url = await generate_world_composite(
+            discord_image_url=discord_image_url,
+            base_filename=base_filename,
+            mode=mode,
+            custom_prompt=current_prompt,
+        )
+
+        if not generated_image_url or not str(generated_image_url).startswith("http"):
+            error_str = str(generated_image_url).lower()
+            if _seedream_error_is_retryable(error_str) or any(token in error_str for token in ("moderation", "sexual", "safety_violations")):
+                if msg:
+                    await msg.edit(content=f"⚠️ [L{level}] 遭 {engine_name} 安全/內容檢查攔截！保留場景骨架並啟動 L{level+1} 材質與姿態柔化...")
+                if isinstance(visual_dict, dict):
+                    visual_dict["composition"] += f"\n*(自動觸發 L{level} 級安全濾鏡，已保留場景骨架)*"
+                continue
+            raise Exception(f"攝影機異常：{generated_image_url}")
+
+        if isinstance(visual_dict, dict):
+            visual_dict["engine"] = engine_name
         return generated_image_url, visual_dict
 
-    # 4. 連續五級失敗的終極保底（仍保留硬場景錨點）
     if msg:
-        await msg.edit(content="🚨 警告：連續五級脫敏皆遭攔截，啟動最終【保留場景骨架的絕對安全保底】...")
+        await msg.edit(content=f"🚨 警告：連續五級脫敏皆遭攔截，啟動最終【保留場景骨架的絕對安全保底】...")
     ultimate_safe_prompt = _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt)
     if isinstance(visual_dict, dict):
-        visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全的優雅造型，但仍盡力保留場景骨架)*"
+        visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全造型，但仍盡力保留場景骨架)*"
 
     final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt)
-    if not final_url or not final_url.startswith("http"):
+    if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
+    if isinstance(visual_dict, dict):
+        visual_dict["engine"] = engine_name
     return final_url, visual_dict
 
 @girlfriend_bot.command(name='cosplay')
@@ -4356,14 +4370,14 @@ async def cosplay(ctx, *, mode: str = "auto"):
         elif weekday == 5: mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
         else: mode = random.choice(["職業", "旅遊景點"])
 
-    msg = await ctx.send(f"✨ 正在為【{mode}】企劃撰寫劇本，並準備啟動高級時尚攝影引擎...")
+    msg = await ctx.send(f"✨ 正在為【{mode}】企劃撰寫劇本，並準備啟動 Seedream v4.5 image-to-image 攝影引擎...")
     try:
         # 1. 產生故事與人設
         story = await generate_story(mode)
         state["current_topic_data"] = story 
         
-        # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 gpt-image-2 可執行的提示詞
-        await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言...")
+        # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
+        await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
         _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False)
         scene_prompt = visual['image_prompt']
 
@@ -4403,7 +4417,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="📸 構圖發想", value=visual["composition"], inline=False)
         embed.add_field(name="💭 小俠心境", value=visual["mood"], inline=False)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | gpt-image-2 高級時尚攝影")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | Seedream v4.5 image-to-image")
 
         await msg.delete()
         new_msg = await ctx.send(embed=embed) 
@@ -4511,6 +4525,152 @@ async def generate_image_pulid(prompt, reference_image_url=None, id_weight=0.85)
             else: 
                 raise Exception(f"Fal.ai PuLID Error: {await resp.text()}")
             
+# ==========================================
+# 🌱 Seedream v4.5 Cosplay image-to-image 引擎
+# ==========================================
+def _load_json_file_safe(path, fallback):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as exc:
+        print(f"⚠️ JSON 讀取失敗 {path}: {exc}")
+    return fallback
+
+
+def _save_json_file_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _seedream_reference_paths():
+    """讀取 /data/memory/seedream_v45 內的 Seedream_01~09 參考底稿。"""
+    manifest_path = os.path.join(SEEDREAM_V45_REF_DIR, "manifest.txt")
+    paths = []
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                value = line.strip()
+                if value:
+                    paths.append(value if os.path.isabs(value) else os.path.join(SEEDREAM_V45_REF_DIR, value))
+    if not paths:
+        for index in range(1, 10):
+            paths.append(os.path.join(SEEDREAM_V45_REF_DIR, f"Seedream_{index:02d}.png"))
+
+    existing = [p for p in paths if os.path.exists(p)]
+    if len(existing) < 1:
+        raise FileNotFoundError(
+            f"找不到 Seedream v4.5 參考底稿，請確認已上傳至 {SEEDREAM_V45_REF_DIR}/Seedream_01.png~Seedream_09.png"
+        )
+    # Seedream v4.5 edit 最多 10 張輸入圖；此處固定最多 9 張人物底稿。
+    return existing[:9]
+
+
+def _get_fal_client():
+    try:
+        import fal_client
+        return fal_client
+    except ImportError:
+        print("⚠️ fal_client 未安裝，嘗試即時安裝 fal-client...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "fal-client"])
+        import fal_client
+        return fal_client
+
+
+async def _seedream_upload_reference_images():
+    """將本機 /data/memory/seedream_v45 參考圖上傳到 fal 檔案服務並快取 URL。"""
+    fal_client = _get_fal_client()
+    cache = _load_json_file_safe(SEEDREAM_V45_UPLOAD_CACHE_PATH, {})
+    changed = False
+    urls = []
+    for path in _seedream_reference_paths():
+        stat = os.stat(path)
+        key = os.path.basename(path)
+        cached = cache.get(key, {}) if isinstance(cache, dict) else {}
+        valid = (
+            cached.get("path") == path
+            and cached.get("mtime") == stat.st_mtime
+            and cached.get("size") == stat.st_size
+            and str(cached.get("url", "")).startswith("http")
+        )
+        if valid:
+            url = cached["url"]
+        else:
+            print(f"🌱 [SEEDREAM_UPLOAD] uploading {path}")
+            url = await asyncio.to_thread(fal_client.upload_file, path)
+            cache[key] = {
+                "path": path,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "url": url,
+                "uploaded_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            changed = True
+        urls.append(url)
+    if changed:
+        _save_json_file_atomic(SEEDREAM_V45_UPLOAD_CACHE_PATH, cache)
+    return urls
+
+
+def _seedream_cosplay_prompt(custom_prompt):
+    return (
+        "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
+        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
+        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
+        "Keep anatomy natural, hands plausible, shoulders and neck realistic. "
+        "The result should be a polished cinematic cosplay photograph with vivid character storytelling.\n\n"
+        f"COSPLAY EDIT REQUEST:\n{custom_prompt}"
+    )
+
+
+def _seedream_error_is_retryable(value):
+    raw = str(value or "").lower()
+    return any(token in raw for token in (
+        "moderation", "safety", "safe", "policy", "blocked", "violation", "sexual", "nsfw", "not allowed", "content"
+    ))
+
+
+async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True):
+    """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
+    fal_client = _get_fal_client()
+    image_urls = await _seedream_upload_reference_images()
+    final_prompt = _seedream_cosplay_prompt(custom_prompt)
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"🌱 [SEEDREAM_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V45_MODEL_ID,
+            arguments={
+                "prompt": final_prompt,
+                "image_urls": image_urls,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "max_images": 1,
+                "enable_safety_checker": bool(enable_safety_checker),
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images:
+        return f"Seedream v4.5 沒有回傳圖片：{result}"
+    first = images[0]
+    if isinstance(first, dict) and first.get("url"):
+        return first["url"]
+    return f"Seedream v4.5 圖片欄位格式異常：{result}"
+
 async def upscale_image_fal(image_url):
     url = "https://fal.run/fal-ai/esrgan"
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
@@ -4525,6 +4685,9 @@ async def upscale_image_fal(image_url):
 async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
     files_to_close = []
     try:
+        if mode == "cosplay":
+            return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
+
         # 1. 定位人物底圖 (Image 1)
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
         b_file = open(base_image_path, "rb")
@@ -5379,7 +5542,7 @@ async def more(ctx):
         embed = discord.Embed(title=f"【加洗】{story['topic']}", color=0xffb6c1)
         embed.set_image(url=local_url)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | gpt-image-2 高級時尚攝影")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/6 | Seedream v4.5 image-to-image")
 
         await msg.delete()
         new_msg = await ctx.send(embed=embed)
@@ -6498,7 +6661,7 @@ async def on_raw_reaction_add(payload):
                     inline=False,
                 )
                 embed.set_footer(
-                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2"
+                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | Seedream v4.5"
                 )
 
                 if is_reroll:
