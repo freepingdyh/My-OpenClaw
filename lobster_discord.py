@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.29"
+LOBSTER_VERSION = "1.4.31"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -389,10 +389,15 @@ SEEDREAM_V45_REF_DIR = os.path.join(MEMORY_DIR, "seedream_v45")
 SEEDREAM_V45_UPLOAD_CACHE_PATH = os.path.join(SEEDREAM_V45_REF_DIR, "fal_upload_cache.json")
 SEEDREAM_V45_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
+WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
+WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
+WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
 os.makedirs(SEEDREAM_V45_REF_DIR, exist_ok=True)
+os.makedirs(WARDROBE_DIR, exist_ok=True)
+os.makedirs(WARDROBE_IMPORT_DIR, exist_ok=True)
 PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
 os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
 
@@ -1602,15 +1607,52 @@ def save_memory(db):
     with open(DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
 
+def _today_str_tpe():
+    return datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+
+
+def _default_app_state():
+    return {
+        "affection_score": 80,
+        "current_outfit": None,
+        "current_outfit_date": _today_str_tpe(),
+        "photo_pending_wardrobe": None,
+    }
+
+
 def load_state():
+    data = {}
     if os.path.exists(STATE_DATA_PATH):
         with open(STATE_DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"affection_score": 80} # 基礎愛意值
+            data = json.load(f)
+    base = _default_app_state()
+    if isinstance(data, dict):
+        base.update(data)
+    return base
+
 
 def save_state(data):
+    merged = _default_app_state()
+    if isinstance(data, dict):
+        merged.update(data)
     with open(STATE_DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+
+def load_wardrobe():
+    if not os.path.exists(WARDROBE_DATA_PATH):
+        return []
+    try:
+        with open(WARDROBE_DATA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_wardrobe(items):
+    with open(WARDROBE_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
 
 def _clean_profile_memory_items(items):
     """
@@ -4294,7 +4336,7 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
 
 
 
-async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None):
+async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
     seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference"}
     engine_name = "Seedream v4.5" if mode in seedream_modes else "gpt-image-2"
@@ -4320,6 +4362,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             base_filename=base_filename,
             mode=mode,
             custom_prompt=current_prompt,
+            current_outfit=current_outfit,
         )
 
         if not generated_image_url or not str(generated_image_url).startswith("http"):
@@ -4342,7 +4385,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     if isinstance(visual_dict, dict):
         visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全造型，但仍盡力保留場景骨架)*"
 
-    final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt)
+    final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt, current_outfit=current_outfit)
     if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
@@ -4662,6 +4705,579 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
     return f"Seedream v4.5 交換日記圖片欄位格式異常：{result}"
 
 
+
+# ==========================================
+# 👗 衣櫃 / 當日衣著連貫性
+# ==========================================
+WARDROBE_MAIN_CATEGORIES = [
+    "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
+]
+
+
+def _clean_text_compact(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _today_outfit_reset_if_needed(state_data):
+    today = _today_str_tpe()
+    if state_data.get("current_outfit_date") != today:
+        state_data["current_outfit_date"] = today
+        state_data["current_outfit"] = None
+    return state_data
+
+
+def _get_current_outfit_state():
+    state_data = load_state()
+    state_data = _today_outfit_reset_if_needed(state_data)
+    save_state(state_data)
+    return state_data.get("current_outfit")
+
+
+def _set_current_outfit_state(outfit_payload):
+    state_data = load_state()
+    state_data = _today_outfit_reset_if_needed(state_data)
+    state_data["current_outfit"] = outfit_payload
+    state_data["current_outfit_date"] = _today_str_tpe()
+    save_state(state_data)
+
+
+def _clear_current_outfit_state():
+    state_data = load_state()
+    state_data["current_outfit"] = None
+    state_data["current_outfit_date"] = _today_str_tpe()
+    save_state(state_data)
+
+
+def _get_pending_wardrobe_state():
+    state_data = load_state()
+    return state_data.get("photo_pending_wardrobe")
+
+
+def _set_pending_wardrobe_state(item):
+    state_data = load_state()
+    state_data["photo_pending_wardrobe"] = item
+    save_state(state_data)
+
+
+def _clear_pending_wardrobe_state():
+    state_data = load_state()
+    state_data["photo_pending_wardrobe"] = None
+    save_state(state_data)
+
+
+def _photo_requests_outfit_change(raw_scene_text):
+    text_value = str(raw_scene_text or "")
+    patterns = [
+        r"換成", r"換上", r"改穿", r"穿上", r"改成.*(?:衣|裙|褲|外套|睡衣|泳裝|內衣)",
+        r"今天穿", r"想讓她穿", r"套用衣櫃", r"穿這件", r"穿那件"
+    ]
+    return any(re.search(pattern, text_value) for pattern in patterns)
+
+
+def _build_outfit_state_from_context(context):
+    if not context:
+        return None
+    return {
+        "date": _today_str_tpe(),
+        "description": _clean_text_compact(context.get("outfit_summary") or "自然日常穿搭"),
+        "source": context.get("source_mode", "photo_scene"),
+        "scene_summary": _clean_text_compact(context.get("scene_summary") or ""),
+        "reference_item_path": context.get("reference_item_path"),
+        "reference_item_url": context.get("reference_item_url") or context.get("local_url") or context.get("image_url"),
+        "wardrobe_id": context.get("wardrobe_id"),
+        "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _wardrobe_item_short(item):
+    return f"{item.get('id')}｜{item.get('name')}｜{item.get('main_category')}/{item.get('sub_category')}"
+
+
+def _next_wardrobe_id(items):
+    max_num = 0
+    for item in items:
+        m = re.match(r"W(\d+)", str(item.get("id", "")))
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"W{max_num + 1:03d}"
+
+
+def _find_wardrobe_item(item_id):
+    target = str(item_id or "").strip().upper()
+    for item in load_wardrobe():
+        if str(item.get("id", "")).upper() == target:
+            return item
+    return None
+
+
+def _wardrobe_matches(item, query):
+    q = str(query or "").strip().lower()
+    if not q:
+        return True
+    hay = " ".join([
+        str(item.get("id", "")), str(item.get("name", "")), str(item.get("main_category", "")),
+        str(item.get("sub_category", "")), " ".join(item.get("tags", []) or []), str(item.get("style_summary", "")),
+    ]).lower()
+    return q in hay
+
+
+def _parse_wardrobe_command(command_text):
+    raw = re.sub(r"^/衣櫃\b", "", str(command_text or "").strip(), flags=re.IGNORECASE).strip()
+    if not raw:
+        return "browse", ""
+    first, _, rest = raw.partition(" ")
+    action = first.strip()
+    rest = rest.strip()
+    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠"}:
+        return action, rest
+    return "search", raw
+
+
+def _wardrobe_category_counts(items):
+    counts = {k: 0 for k in WARDROBE_MAIN_CATEGORIES}
+    for item in items:
+        cat = str(item.get("main_category", "") or "")
+        counts[cat] = counts.get(cat, 0) + 1
+    return counts
+
+
+async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
+    try:
+        with open(local_path, "rb") as f:
+            data = f.read()
+        prompt = f"""
+你是小俠衣櫃整理員。請根據這張服飾/配件參考圖，整理成結構化衣櫃資料。
+若使用者有提供名稱，優先保留該名稱，不要任意改得太遠。
+
+使用者名稱提示：{name_hint or '無'}
+可用主分類只能從以下挑一個：{', '.join(WARDROBE_MAIN_CATEGORIES)}
+
+只回傳 JSON：
+{{
+  "name": "",
+  "main_category": "",
+  "sub_category": "",
+  "tags": ["", ""],
+  "style_summary": "一句中文說明這件服飾/配件的特色與適用場景"
+}}
+"""
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=data, mime_type="image/jpeg"),
+                prompt,
+            ],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        )
+        data = _extract_json_object(resp.text)
+        if isinstance(data, dict):
+            name = _clean_text_compact(name_hint or data.get("name") or "未命名服飾")
+            main_category = data.get("main_category") if data.get("main_category") in WARDROBE_MAIN_CATEGORIES else "配件"
+            sub_category = _clean_text_compact(data.get("sub_category") or main_category)
+            tags = [ _clean_text_compact(x) for x in (data.get("tags") or []) if _clean_text_compact(x) ]
+            return {
+                "name": name,
+                "main_category": main_category,
+                "sub_category": sub_category,
+                "tags": tags[:8],
+                "style_summary": _clean_text_compact(data.get("style_summary") or name),
+            }
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_CLASSIFY_FAILED] {type(exc).__name__}: {exc}")
+    fallback_name = _clean_text_compact(name_hint or Path(local_path).stem or "未命名服飾")
+    return {
+        "name": fallback_name,
+        "main_category": "配件",
+        "sub_category": "未分類",
+        "tags": [],
+        "style_summary": fallback_name,
+    }
+
+
+async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_prompt=""):
+    fal_client = _get_fal_client()
+    image_urls = [await _seedream_upload_single_file(reference_image_path)]
+    prompt = (
+        "Image 1 is a clothing or accessory reference photo and may contain a human model. "
+        "Remove the human completely and preserve only the clothing or accessory itself as a clean reference image. "
+        "Keep the item's color, silhouette, material feel, pattern, trims, lace, straps, sleeves, hem length, buttons, and key design details. "
+        "Show only the item on a simple neutral background like a clean catalog/product reference. "
+        "No person, no face, no hair, no skin, no body, no mannequin, no hands, no extra props. "
+        "If the item is a bag, shoes, hat, or accessory, preserve only that item cleanly."
+    )
+    if custom_prompt:
+        prompt += "\n\nAdditional user preference:\n" + str(custom_prompt).strip()
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"👗 [SEEDREAM_WARDROBE_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V45_MODEL_ID,
+            arguments={
+                "prompt": prompt,
+                "image_urls": image_urls,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "max_images": 1,
+                "enable_safety_checker": True,
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images:
+        return f"Seedream v4.5 沒有回傳衣櫃去人化圖片：{result}"
+    first = images[0]
+    if isinstance(first, dict) and first.get("url"):
+        return first["url"]
+    return f"Seedream v4.5 衣櫃去人化圖片格式異常：{result}"
+
+
+async def _prepare_wardrobe_image_from_attachment(attachment, remove_person=False, extra_hint=""):
+    source_path = await _download_photo_reference_attachment(attachment)
+    final_path = source_path
+    final_url = getattr(attachment, "url", None)
+    if remove_person:
+        generated_url = await generate_seedream_v45_wardrobe_cleanup(source_path, custom_prompt=extra_hint)
+        if isinstance(generated_url, str) and generated_url.startswith("http"):
+            local_filename = await save_to_vault(generated_url)
+            if local_filename:
+                final_path = os.path.join(OUTPUT_DIR, local_filename)
+                final_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            else:
+                final_url = generated_url
+                final_path = None
+        else:
+            raise RuntimeError(str(generated_url))
+    else:
+        # 直接收藏時，仍轉存到 output 方便之後公開瀏覽。
+        filename = f"wardrobe_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{Path(source_path).suffix.lower() or '.jpg'}"
+        target_path = os.path.join(OUTPUT_DIR, filename)
+        shutil.copy2(source_path, target_path)
+        final_path = target_path
+        final_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+    return source_path, final_path, final_url
+
+
+def _build_wardrobe_item_payload(meta, reference_path, reference_url):
+    items = load_wardrobe()
+    item_id = _next_wardrobe_id(items)
+    return {
+        "id": item_id,
+        "name": meta.get("name") or item_id,
+        "main_category": meta.get("main_category") or "配件",
+        "sub_category": meta.get("sub_category") or "未分類",
+        "tags": meta.get("tags") or [],
+        "style_summary": meta.get("style_summary") or meta.get("name") or item_id,
+        "reference_image_path": reference_path,
+        "local_url": reference_url,
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _save_new_wardrobe_item(item):
+    items = load_wardrobe()
+    items.insert(0, item)
+    save_wardrobe(items)
+    return item
+
+
+def _wardrobe_embed_for_item(item, title_prefix="👗 小俠衣櫃"):
+    embed = discord.Embed(
+        title=f"{title_prefix}｜{item.get('id')} {item.get('name')}",
+        description=item.get("style_summary") or item.get("name") or "",
+        color=0xcfa7ff,
+    )
+    if item.get("local_url"):
+        embed.set_image(url=item.get("local_url"))
+    embed.add_field(name="分類", value=f"{item.get('main_category')} / {item.get('sub_category')}", inline=False)
+    embed.add_field(name="標籤", value="、".join(item.get("tags") or ["無"])[:1000], inline=False)
+    embed.set_footer(text=f"建立時間：{item.get('created_at', '')}")
+    return embed
+
+
+def _wardrobe_browse_embed(query=""):
+    items = load_wardrobe()
+    matched = [item for item in items if _wardrobe_matches(item, query)]
+    counts = _wardrobe_category_counts(items)
+    summary = "｜".join([f"{k}:{v}" for k, v in counts.items() if v]) or "目前還沒有收藏"
+    title = "👗 小俠衣櫃總覽" if not query else f"👗 小俠衣櫃搜尋｜{query}"
+    embed = discord.Embed(title=title, description=summary, color=0xcfa7ff)
+    lines = []
+    for item in matched[:12]:
+        tag_text = "、".join((item.get("tags") or [])[:4])
+        lines.append(f"`{item.get('id')}` **{item.get('name')}**｜{item.get('main_category')}/{item.get('sub_category')}" + (f"｜{tag_text}" if tag_text else ""))
+    embed.add_field(name="最近／符合項目", value="\n".join(lines) if lines else "查無符合項目。", inline=False)
+    if matched:
+        preview = matched[0]
+        if preview.get("local_url"):
+            embed.set_image(url=preview.get("local_url"))
+        embed.set_footer(text=f"共 {len(matched)} 件｜可用 /衣櫃看 {preview.get('id')} 查看單件大圖，或 /衣櫃穿 {preview.get('id')} 套用到下一張 /photo")
+    return embed
+
+
+
+class WardrobeApplyView(discord.ui.View):
+    def __init__(self, item):
+        super().__init__(timeout=86400)
+        self.item = dict(item)
+
+    @discord.ui.button(label="套用到下一張 /photo", style=discord.ButtonStyle.primary)
+    async def apply_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _set_pending_wardrobe_state(self.item)
+        await interaction.response.send_message(
+            f"✅ 已選定 **{self.item.get('id')} {self.item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。",
+            ephemeral=True,
+        )
+
+
+class WardrobeAdviceApplyView(discord.ui.View):
+    def __init__(self, items):
+        super().__init__(timeout=86400)
+        self.items = [dict(item) for item in (items or [])[:4]]
+        for item in self.items:
+            button = discord.ui.Button(
+                label=f"套用 {item.get('id')}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"wardrobe_advice_apply_{item.get('id')}",
+            )
+
+            async def _callback(interaction: discord.Interaction, selected=item):
+                _set_pending_wardrobe_state(selected)
+                await interaction.response.send_message(
+                    f"✅ 已選定 **{selected.get('id')} {selected.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。",
+                    ephemeral=True,
+                )
+
+            button.callback = _callback
+            self.add_item(button)
+
+
+def _parse_wardrobe_advice_payload(payload):
+    tokens = str(payload or "").strip().split()
+    item_ids = []
+    rest_tokens = []
+    for token in tokens:
+        clean = token.strip().upper().strip("，,。；;")
+        if re.fullmatch(r"W\d{3,}", clean):
+            item_ids.append(clean)
+        else:
+            rest_tokens.append(token)
+    return item_ids[:4], " ".join(rest_tokens).strip()
+
+
+async def _ask_xiaoxia_about_wardrobe(ctx, payload):
+    item_ids, scene_question = _parse_wardrobe_advice_payload(payload)
+    if not item_ids:
+        await ctx.send("大俠，請在 `問小俠` 後面放 1～4 個衣櫃編號，例如：`/衣櫃 問小俠 W001 W003 北海岸散步穿哪件？`")
+        return
+
+    items = []
+    missing = []
+    for item_id in item_ids:
+        item = _find_wardrobe_item(item_id)
+        if item:
+            items.append(item)
+        else:
+            missing.append(item_id)
+
+    if missing:
+        await ctx.send(f"找不到這些衣櫃編號：{', '.join(missing)}")
+        return
+    if not items:
+        await ctx.send("沒有找到可給小俠看的衣櫃項目。")
+        return
+
+    parts = []
+    item_summaries = []
+    for item in items[:4]:
+        path_value = item.get("reference_image_path")
+        if path_value and os.path.exists(path_value):
+            try:
+                with open(path_value, "rb") as f:
+                    image_bytes = f.read()
+                ext = Path(path_value).suffix.lower()
+                mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
+                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime))
+            except Exception as exc:
+                print(f"⚠️ [WARDROBE_ADVICE_IMAGE_READ_FAILED] {item.get('id')} {type(exc).__name__}: {exc}")
+        item_summaries.append({
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "main_category": item.get("main_category"),
+            "sub_category": item.get("sub_category"),
+            "tags": item.get("tags") or [],
+            "style_summary": item.get("style_summary") or "",
+        })
+
+    prompt = f"""
+妳是小俠。大俠打開衣櫃，請妳臨時看幾件衣服/配件，給他穿搭意見。
+這不是妳平常會自動參考的衣櫃，只有大俠這次請妳看，妳才看。
+
+【大俠想問的場景或問題】
+{scene_question or '請看這幾件，給我適合的穿搭意見。'}
+
+【衣櫃項目資料】
+{json.dumps(item_summaries, ensure_ascii=False, indent=2)}
+
+請用小俠自然口吻回答：
+1. 先說妳最推薦哪一件，明確寫出編號與名稱。
+2. 簡短說原因：場景、顏色、氛圍、可愛/清爽/居家/約會感等。
+3. 如果有第二選擇，也可以補一句。
+4. 不要說自己是 AI，不要提模型或 token。
+5. 回覆控制在 3～6 句。
+"""
+
+    msg = await ctx.send("👗 小俠正在看這幾件衣服，想一下哪件最適合...")
+    try:
+        parts.append(prompt)
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=parts,
+            config=types.GenerateContentConfig(temperature=0.75),
+        )
+        reply = str(getattr(resp, "text", "") or "").strip()
+        if not reply:
+            reply = "大俠，這幾件我看到了，但我剛剛沒有想出夠清楚的建議。你可以再給我一個更明確的場景，我再幫你挑。"
+        await msg.edit(content=reply, view=WardrobeAdviceApplyView(items))
+    except Exception as exc:
+        await msg.edit(content=f"⚠️ 小俠看衣櫃失敗：`{str(exc)[:1500]}`")
+
+
+class WardrobeSaveModal(discord.ui.Modal):
+    def __init__(self, context):
+        super().__init__(title="收藏到衣櫃")
+        self.context = dict(context)
+        default_name = str(self.context.get("outfit_summary") or self.context.get("scene_text") or "").strip()[:80]
+        self.item_name = discord.ui.TextInput(
+            label="衣櫃名稱",
+            placeholder="例如：白底藍花小碎花洋裝",
+            default=default_name,
+            max_length=80,
+            required=True,
+        )
+        self.category_hint = discord.ui.TextInput(
+            label="分類提示（可空白）",
+            placeholder="例如：洋裝 / 睡衣／居家服 / 包包",
+            required=False,
+            max_length=60,
+        )
+        self.add_item(self.item_name)
+        self.add_item(self.category_hint)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        local_path = _photo_local_path_from_context(self.context)
+        local_url = self.context.get("local_url") or self.context.get("image_url")
+        if not local_path or not os.path.exists(local_path):
+            await interaction.response.send_message("⚠️ 這張照片目前找不到本機檔，暫時無法收藏到衣櫃。", ephemeral=True)
+            return
+        meta = {
+            "name": _clean_text_compact(self.item_name.value),
+            "main_category": _clean_text_compact(self.category_hint.value) or "未分類",
+            "sub_category": "由照片收藏",
+            "tags": ["photo收藏"],
+            "style_summary": _clean_text_compact(self.context.get("outfit_summary") or self.item_name.value),
+        }
+        if meta["main_category"] not in WARDROBE_MAIN_CATEGORIES:
+            meta["main_category"] = "套裝" if "套" in meta["style_summary"] else "洋裝" if "洋裝" in meta["style_summary"] else "上衣"
+        item = _build_wardrobe_item_payload(meta, local_path, local_url)
+        _save_new_wardrobe_item(item)
+        await interaction.response.send_message(f"✅ 已收藏到衣櫃：**{item.get('id')} {item.get('name')}**", embed=_wardrobe_embed_for_item(item), ephemeral=True)
+
+
+class WardrobePendingConfirmView(discord.ui.View):
+    def __init__(self, pending_payload):
+        super().__init__(timeout=600)
+        self.pending_payload = dict(pending_payload)
+
+    async def _finalize(self, interaction):
+        item = _build_wardrobe_item_payload(self.pending_payload["meta"], self.pending_payload["reference_path"], self.pending_payload["reference_url"])
+        _save_new_wardrobe_item(item)
+        await interaction.response.edit_message(content=f"✅ 已收藏到衣櫃：**{item.get('id')} {item.get('name')}**", embed=_wardrobe_embed_for_item(item), view=WardrobeApplyView(item))
+
+    @discord.ui.button(label="確認收藏", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finalize(interaction)
+
+    @discord.ui.button(label="重做一次", style=discord.ButtonStyle.primary)
+    async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.pending_payload.get("remove_person"):
+            await interaction.response.send_message("這張目前是直接收藏模式，不需要重做。若要去人化，請改用 `/衣櫃 去人 名稱`。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        attachment_url = self.pending_payload.get("source_attachment_url")
+        source_path = self.pending_payload.get("source_path")
+        try:
+            generated_url = await generate_seedream_v45_wardrobe_cleanup(source_path, custom_prompt=self.pending_payload.get("extra_hint", ""))
+            if not isinstance(generated_url, str) or not generated_url.startswith("http"):
+                raise RuntimeError(str(generated_url))
+            local_filename = await save_to_vault(generated_url)
+            local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+            local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_url
+            self.pending_payload["reference_path"] = local_path
+            self.pending_payload["reference_url"] = local_url
+            preview_embed = _wardrobe_embed_for_item({
+                "id": "預覽",
+                "name": self.pending_payload["meta"].get("name"),
+                "main_category": self.pending_payload["meta"].get("main_category"),
+                "sub_category": self.pending_payload["meta"].get("sub_category"),
+                "tags": self.pending_payload["meta"].get("tags"),
+                "style_summary": self.pending_payload["meta"].get("style_summary"),
+                "local_url": local_url,
+                "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            }, title_prefix="👗 去人化預覽")
+            await interaction.edit_original_response(content="這是重做後的衣櫃預覽，要收藏嗎？", embed=preview_embed, view=self)
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 重做失敗：`{str(exc)[:1200]}`", ephemeral=True)
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="已取消，沒有收藏進衣櫃。", embed=None, view=None)
+
+
+async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
+    attachment, attachment_error = await _get_photo_reference_attachment(ctx.message)
+    if attachment_error:
+        await ctx.send(attachment_error)
+        return
+    if not attachment:
+        await ctx.send("大俠，要新增到衣櫃時，請附上一張衣服、飾品或回覆含有單張圖片的訊息喔。")
+        return
+    name_hint = _clean_text_compact(args)
+    status = await ctx.send("👗 小俠正在整理這件收藏，請稍等一下..." if not remove_person else "👗 小俠正在先幫你把人物去掉，再整理這件收藏...")
+    try:
+        source_path, final_path, final_url = await _prepare_wardrobe_image_from_attachment(attachment, remove_person=remove_person, extra_hint=name_hint)
+        if not final_path:
+            raise RuntimeError("處理後沒有拿到可用圖片檔。")
+        meta = await _classify_wardrobe_item_from_image(final_path, name_hint=name_hint)
+        pending_payload = {
+            "source_path": source_path,
+            "source_attachment_url": getattr(attachment, "url", None),
+            "reference_path": final_path,
+            "reference_url": final_url,
+            "meta": meta,
+            "remove_person": remove_person,
+            "extra_hint": name_hint,
+        }
+        preview_item = {
+            "id": "預覽",
+            **meta,
+            "local_url": final_url,
+            "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        await status.delete()
+        await ctx.send("這是整理後的衣櫃預覽，要收藏嗎？", embed=_wardrobe_embed_for_item(preview_item, title_prefix="👗 衣櫃預覽"), view=WardrobePendingConfirmView(pending_payload))
+    except Exception as exc:
+        await status.edit(content=f"⚠️ 衣櫃整理失敗：`{str(exc)[:1500]}`")
+
+
 # ==========================================
 # 📸 Seedream v4.5 /photo 統一照片工作台
 # ==========================================
@@ -4743,7 +5359,7 @@ async def _seedream_upload_single_file(path):
     return await asyncio.to_thread(fal_client.upload_file, path)
 
 
-def _seedream_photo_prompt(custom_prompt, has_reference=False):
+def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
     base = (
         "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
@@ -4753,7 +5369,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False):
     )
     if has_reference:
         base += (
-            "Image 10 is a clothing or accessory reference provided by Daxia. "
+            "Image 10 is a clothing or accessory reference provided by Daxia or selected from Xiaoxia's wardrobe. "
             "If Image 10 is clothing, make Xiaoxia wear it naturally. "
             "If Image 10 is an accessory, make Xiaoxia naturally carry, wear, or style it in a clearly visible way. "
             "Preserve the reference item's overall color, silhouette, material feeling, pattern, and key decorative details as much as possible, while keeping Xiaoxia's identity consistent. "
@@ -4763,10 +5379,15 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False):
             "No external clothing reference is provided; infer a natural outfit from the scene and the latest explicit outfit description in the request. "
             "The outfit should fit the scene and feel like a candid daily-life moment, not a fashion advertisement. "
         )
+    if current_outfit:
+        base += (
+            f" Today's continuity outfit is: {str(current_outfit).strip()}. "
+            "If the request does not explicitly change the outfit, keep this same outfit continuity. "
+        )
     return base + "\n\nPHOTO REQUEST:\n" + str(custom_prompt or "").strip()
 
 
-async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True):
+async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     fal_client = _get_fal_client()
     image_urls = await _seedream_upload_reference_images()
@@ -4777,7 +5398,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         else:
             image_urls.append(await _seedream_upload_single_file(reference_image_path))
     image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
-    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path))
+    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit)
 
     def _subscribe():
         def on_queue_update(update):
@@ -4811,7 +5432,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
 
 
-async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference):
+async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference, current_outfit=None, keep_today_outfit=False, pending_wardrobe_name=""):
     """將指定文字或最近 20 句對話整理成 /photo 可用的結構化場景。"""
     recent_context = "\n".join(daily_chat_logs[-20:])
     default_scene = "溫馨自然的家中居家場景" if has_reference else "依照最近對話中的當下生活情境"
@@ -4822,11 +5443,14 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference)
 【大俠指定內容】：{raw_scene_text or '無'}
 【最近 20 則對話】：
 {recent_context or '無'}
+【今日既有衣著連貫】：{current_outfit or '無'}
+【是否優先延續今日衣著】：{'是' if keep_today_outfit else '否'}
+【若有預選衣櫃項目】：{pending_wardrobe_name or '無'}
 
 請只回傳 JSON：
 {{
   "scene_summary": "照片場景，若大俠有指定內容則優先；若無且也無明確對話，使用 {default_scene}",
-  "outfit_summary": "最近一則明確服裝描述；若沒有，依場景給完整、安全、自然的穿搭",
+  "outfit_summary": "最近一則明確服裝描述；若要延續今日衣著，就直接延續目前衣著；若有參考圖則描述該衣服/飾品",
   "action_summary": "小俠正在做的自然動作",
   "mood_summary": "氣氛與光線",
   "camera_framing": "half_body 或 full_body",
@@ -4835,9 +5459,9 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference)
 
 規則：
 1. 若大俠指定內容不為無，scene_summary 必須以指定內容為主。
-2. 服裝只使用最近 20 則內明確出現的最近一套；沒有就依場景補自然穿搭。
-3. 不要從很久以前的日記或長期記憶抓衣服。
-4. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考。
+2. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
+3. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
+4. 不要從很久以前的日記或長期記憶抓衣服。
 5. 不可加入大俠沒有要求的第二人物。
 """
     try:
@@ -4853,15 +5477,16 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference)
         print(f"⚠️ [PHOTO_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
 
     fallback_scene = raw_scene_text.strip() if raw_scene_text else default_scene
+    fallback_outfit = current_outfit if (keep_today_outfit and current_outfit) else "自然、完整、安全且符合場景的日常穿搭"
     return {
         "scene_summary": fallback_scene,
-        "outfit_summary": "自然、完整、安全且符合場景的日常穿搭",
+        "outfit_summary": fallback_outfit,
         "action_summary": "小俠自然地待在場景中，像被大俠拍下的生活片刻",
         "mood_summary": "溫暖自然光、生活感、真實照片氛圍",
         "camera_framing": "half_body",
         "photo_prompt": (
             f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
-            "She is wearing a natural, fully clothed, tasteful outfit suitable for the scene, with a warm everyday mood. "
+            f"She is wearing {fallback_outfit}, with a warm everyday mood. "
             "Solo Xiaoxia only, no man, no other people, no external hands, realistic anatomy."
         ),
     }
@@ -5028,6 +5653,7 @@ async def _generate_photo_from_context(context, msg=None):
         initial_prompt=context.get("prompt_base", ""),
         visual_dict=visual,
         msg=msg,
+        current_outfit=context.get("current_outfit_for_seedream"),
     )
     print(f"🌱 [PHOTO_SEEDREAM_RESULT_URL] {generated_image_url}")
     local_filename = await save_to_vault(generated_image_url)
@@ -5065,18 +5691,36 @@ async def handle_unified_photo_command(message, user_input):
         await message.channel.send(attachment_error)
         return None
 
-    source_mode = "photo_reference" if attachment else "photo_scene"
-    print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(attachment)}")
+    pending_wardrobe = _get_pending_wardrobe_state()
+    current_outfit_state = _get_current_outfit_state()
+    explicit_outfit_change = _photo_requests_outfit_change(raw_scene_text)
+
+    source_mode = "photo_reference" if (attachment or pending_wardrobe) else "photo_scene"
+    print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(attachment)} pending_wardrobe={bool(pending_wardrobe)} explicit_change={explicit_outfit_change}")
     reference_item_path = None
     reference_item_url = None
+    wardrobe_id = None
     if attachment:
         reference_item_path = await _download_photo_reference_attachment(attachment)
         reference_item_url = getattr(attachment, "url", None)
+    elif pending_wardrobe:
+        reference_item_path = pending_wardrobe.get("reference_image_path")
+        reference_item_url = pending_wardrobe.get("local_url")
+        wardrobe_id = pending_wardrobe.get("id")
+
+    keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change)
 
     status = await message.channel.send(
         "📸 小俠正在整理這一刻的畫面，準備用 Seedream v4.5 拍一張照片..."
     )
-    scene_data = await _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference=bool(attachment))
+    scene_data = await _summarize_scene_for_photo(
+        raw_scene_text,
+        source_mode,
+        has_reference=bool(attachment or pending_wardrobe),
+        current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
+        keep_today_outfit=keep_today_outfit,
+        pending_wardrobe_name=(pending_wardrobe or {}).get("name", "") if pending_wardrobe else "",
+    )
     prompt_base = scene_data.get("photo_prompt") or raw_scene_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
     context = {
         "mode": source_mode,
@@ -5090,6 +5734,9 @@ async def handle_unified_photo_command(message, user_input):
         "prompt_base": prompt_base,
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
+        "wardrobe_id": wardrobe_id,
+        "current_outfit_for_seedream": (current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
+        "used_pending_wardrobe": bool(pending_wardrobe),
     }
 
     try:
@@ -5097,6 +5744,9 @@ async def handle_unified_photo_command(message, user_input):
         db = load_memory()
         db.insert(0, _photo_db_payload(context))
         save_memory(db)
+        _set_current_outfit_state(_build_outfit_state_from_context(context))
+        if pending_wardrobe:
+            _clear_pending_wardrobe_state()
 
         await status.delete()
         view = PhotoResultView(context)
@@ -5228,6 +5878,7 @@ class PhotoResultView(discord.ui.View):
             db = load_memory()
             db.insert(0, _photo_db_payload(new_context))
             save_memory(db)
+            _set_current_outfit_state(_build_outfit_state_from_context(new_context))
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
             embed = _build_photo_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
@@ -5256,12 +5907,17 @@ class PhotoResultView(discord.ui.View):
             db = load_memory()
             db.insert(0, _photo_db_payload(new_context))
             save_memory(db)
+            _set_current_outfit_state(_build_outfit_state_from_context(new_context))
             self.context = new_context
             if interaction.message:
                 photo_generation_contexts[interaction.message.id] = new_context
                 await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="📸 骰子取代")
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 骰子取代失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="收藏到衣櫃", style=discord.ButtonStyle.success)
+    async def save_wardrobe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WardrobeSaveModal(self.context))
 
     @discord.ui.button(label="上傳成為 Project", style=discord.ButtonStyle.success)
     async def upload_project(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5272,7 +5928,7 @@ class PhotoResultView(discord.ui.View):
         await interaction.response.send_modal(PhotoNameModal(self.context, "diary"))
 
 # 🌟 [究極穩定版] 萬能攝影機：支援「有圖融合」與「無圖變裝」+ Base64 自動解碼
-async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt=""):
+async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt="", current_outfit=None):
     files_to_close = []
     try:
         if mode == "cosplay":
@@ -5280,9 +5936,9 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
         if mode == "diary":
             return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
         if mode == "photo_scene":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit)
         if mode == "photo_reference":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True, current_outfit=current_outfit)
 
         # 1. 定位人物底圖 (Image 1)
         base_image_path = os.path.join(MEMORY_DIR, base_filename)
@@ -6147,6 +6803,79 @@ async def more(ctx):
         await new_msg.add_reaction("🗑️") 
     except Exception as e: 
         await msg.edit(content=f"⚠️ 失敗：{e}")
+
+@girlfriend_bot.command(name='衣櫃')
+async def wardrobe_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel):
+        await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠的私人頻道使用喔。")
+        return
+
+    action, payload = _parse_wardrobe_command(ctx.message.content)
+    if action == "browse":
+        await ctx.send(embed=_wardrobe_browse_embed())
+        return
+    if action == "search":
+        await ctx.send(embed=_wardrobe_browse_embed(payload))
+        return
+    if action == "新增":
+        await _handle_wardrobe_add_command(ctx, payload, remove_person=False)
+        return
+    if action == "去人":
+        await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
+        return
+    if action == "問小俠":
+        await _ask_xiaoxia_about_wardrobe(ctx, payload)
+        return
+    if action == "看":
+        item = _find_wardrobe_item(payload)
+        if not item:
+            await ctx.send("找不到這個衣櫃編號喔。請先 `/衣櫃` 看看目前有哪些收藏。")
+            return
+        await ctx.send(embed=_wardrobe_embed_for_item(item), view=WardrobeApplyView(item))
+        return
+    if action == "穿":
+        item = _find_wardrobe_item(payload)
+        if not item:
+            await ctx.send("找不到這個衣櫃編號喔。")
+            return
+        _set_pending_wardrobe_state(item)
+        await ctx.send(f"✅ 已選定 **{item.get('id')} {item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。")
+        return
+    if action == "刪除":
+        target = _find_wardrobe_item(payload)
+        if not target:
+            await ctx.send("找不到要刪除的衣櫃編號。")
+            return
+        items = [item for item in load_wardrobe() if str(item.get('id')) != str(target.get('id'))]
+        save_wardrobe(items)
+        await ctx.send(f"🗑️ 已刪除衣櫃項目：**{target.get('id')} {target.get('name')}**")
+        return
+
+
+@girlfriend_bot.command(name='今日衣著')
+async def today_outfit_command(ctx):
+    outfit = _get_current_outfit_state()
+    pending = _get_pending_wardrobe_state()
+    if not outfit and not pending:
+        await ctx.send("今天目前還沒有記錄到小俠的連貫穿搭，也沒有預選衣櫃項目。")
+        return
+    lines = []
+    if outfit:
+        lines.append(f"👗 今日連貫穿搭：{outfit.get('description')}")
+        if outfit.get('wardrobe_id'):
+            lines.append(f"🔖 來源衣櫃：{outfit.get('wardrobe_id')}")
+    if pending:
+        lines.append(f"🧥 下一張 /photo 預選：{pending.get('id')} {pending.get('name')}")
+    await ctx.send("\n".join(lines))
+
+
+
+@girlfriend_bot.command(name='清空今日衣著')
+async def clear_today_outfit_command(ctx):
+    _clear_current_outfit_state()
+    _clear_pending_wardrobe_state()
+    await ctx.send("🌙 已清空今天的小俠連貫穿搭與預選衣櫃。下一張 /photo 將重新開始。")
+
 
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
@@ -7222,6 +7951,10 @@ async def midnight_feedback_task():
 # 🌟 新增凌晨 0 點大腦巡邏
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
 async def auto_defrag_task():
+    # 每日換日後，清空小俠當日連貫穿搭與預選衣櫃。
+    _clear_current_outfit_state()
+    _clear_pending_wardrobe_state()
+    print("🌙 [PHOTO_OUTFIT_RESET] 已清空當日連貫穿搭與預選衣櫃")
     # 私人記憶維護結果只回報至「助手小夏工作室」，不送往公開架構師頻道。
     channel = get_architect_channel(PRIVATE_ASSISTANT_CHANNEL_ID)
     if channel:
