@@ -7,14 +7,32 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.36"
+LOBSTER_VERSION = "1.4.38"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
 Strictly only Xiaoxia appears in the image.
-No man, no male partner, no male hands, no male arms, no male silhouette,
-no male reflection, no cropped male body parts, no implied off-camera man.
-If the scene is from Daxia's perspective, the camera represents Daxia's point of view and Daxia must never be visually depicted.
+No man, no male partner, no male hands, no male arms, no male shoulder, no male back,
+no male torso, no male silhouette, no male reflection, no cropped male body parts,
+no visible viewer body parts, no foreground hands, no foreground arms, no implied off-camera man.
+If the scene is from Daxia's perspective, the camera represents Daxia's point of view only;
+Daxia must never be visually depicted. The boyfriend POV must be implied only by framing.
+Xiaoxia's anatomy, hands, fingers, limbs, joints, posture, and movement must be natural,
+physically plausible, and normal. No extra limbs, twisted joints, broken fingers, awkward
+body mechanics, impossible hand poses, or malformed anatomy.
+"""
+
+
+
+STRICT_SOLO_AND_ANATOMY_PROMPT = """
+STRICT UNIVERSAL VISUAL RULES:
+- Strictly solo Xiaoxia only. Only Xiaoxia appears.
+- Do not show Daxia, the camera holder, or any visible body part of the viewer.
+- No man, no male figure, no male hands, no male arms, no male shoulder, no male back, no male torso,
+  no male silhouette, no male reflection, no cropped male body parts, and no foreground viewer hand/arm/shoulder.
+- Boyfriend POV must be implied only through camera framing; never draw the boyfriend or substitute him with another man.
+- Xiaoxia's anatomy must be normal and natural: plausible posture, plausible hand actions, correct fingers,
+  no extra limbs, no twisted joints, no broken fingers, no awkward body mechanics, and no impossible poses.
 """
 
 # ❤️ 一般聊天共同情境沉浸規則：
@@ -494,6 +512,14 @@ def _replace_photo_db_record(old_url, new_payload, diary_date=None):
             db[index] = updated
             matched = True
             break
+    if matched and old_url:
+        db = [
+            item for item in db
+            if not (
+                item is not updated
+                and old_url in {str(item.get("local_url", "")), str(item.get("image_url", ""))}
+            )
+        ]
     if not matched:
         db.insert(0, new_payload)
     save_memory(db)
@@ -4274,7 +4300,10 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
             lines.append(f"- Overall scene intent: {scenario_tw}.")
 
         lines.append("- Character visibility rule: strictly only Xiaoxia appears in the image.")
-        lines.append("- Forbidden visual intrusions: no external hands, people, or external feet.")
+        lines.append("- Forbidden visual intrusions: no external hands, people, external feet, or any visible body part of the viewer.")
+        lines.append("- No-male rule: do not show Daxia, any man, male hands, male arms, male shoulder, male back, male torso, male silhouette, male reflection, cropped male body parts, or foreground viewer hands/arms/shoulders.")
+        lines.append("- POV rule: if this is Daxia's or boyfriend POV, imply it only through camera framing; never depict the boyfriend or substitute him with another male figure.")
+        lines.append("- Anatomy rule: Xiaoxia's posture, hands, fingers, limbs, joints, and movement must be natural, physically plausible, and normal; no extra limbs, twisted joints, broken fingers, impossible hand poses, or awkward body mechanics.")
 
         # A few extra hard constraints per mode
         if mode == "diary":
@@ -4292,6 +4321,9 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         lines.append("HARD SCENE ANCHORS — preserve the original scene action and gaze direction as closely as possible.")
         if prompt_hint:
             lines.append(f"- Keep this scene action and context recognizable: {prompt_hint[:500]}.")
+        lines.append("- Strictly solo Xiaoxia only; no man, no other people, no visible viewer body parts, no foreground hands/arms/shoulders, no male silhouette or reflection.")
+        lines.append("- Boyfriend POV must be implied only through framing; never draw the boyfriend or any substitute male figure.")
+        lines.append("- Xiaoxia's anatomy and movement must be natural and physically plausible; no malformed hands, extra limbs, twisted joints, or awkward body mechanics.")
         lines.append("- Do not collapse the image into a generic glamour portrait.")
 
     return "\n".join(lines)
@@ -4312,7 +4344,7 @@ def _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level):
         f"{hard_anchor_block}\n\n"
         f"SAFETY-PRESERVING STYLE LAYER (Level {level}): {level_guidance}\n"
         f"STYLE DESCRIPTION TO RENDER:\n{rewritten_style}\n\n"
-        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet."
+        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. Xiaoxia's anatomy and movement must remain natural and physically plausible."
     )
 
 
@@ -4323,13 +4355,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
     if mode == "diary":
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
-            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, or external feet. If it is a Daxia point-of-view scene, Daxia must never be visually depicted. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
+            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. If it is a Daxia point-of-view scene, Daxia must never be visually depicted and POV must be implied only through framing. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
-            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, or external feet. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
+            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
@@ -4601,7 +4633,8 @@ def _seedream_cosplay_prompt(custom_prompt):
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Keep anatomy natural, hands plausible. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male shoulder, back, torso, silhouette, reflection, or foreground viewer hand/arm. The POV must be implied only through framing. "
+        "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
         "Maximize visual impact: explicitly allow extreme cinematic angles, dramatic chiaroscuro lighting, highly detailed fabric textures (including translucent, wet, or form-fitting materials), and alluring/seductive expressions if requested. "
         "The result should be a highly polished cinematic cosplay photograph with vivid character storytelling and intense visual appeal.\n\n"
         f"COSPLAY EDIT REQUEST:\n{custom_prompt}"
@@ -4660,7 +4693,8 @@ def _seedream_diary_prompt(custom_prompt):
         "Create a new candid diary/lifestyle photograph according to the prompt. Do not copy any one reference pose or background exactly. "
         "This is a warm, highly intimate, and romantic private exchange-diary moment in a contemporary Taiwan daily-life setting (often from a Boyfriend POV). "
         "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Keep anatomy natural, hands plausible. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male shoulder, back, torso, silhouette, reflection, or foreground viewer hand/arm. The POV must be implied only through framing. "
+        "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
         "Clothing can range from cozy loungewear to intimate sleepwear (such as silk slip dresses, lace chemises, or form-fitting outfits), allowing for figure-flattering, translucent, or alluring styles to portray romantic closeness. "
         "Preserve the described daily action, props, gaze direction, romantic lighting mood, and lived-in environment details.\n\n"
         f"DIARY EDIT REQUEST:\n{custom_prompt}"
@@ -5118,10 +5152,55 @@ class WardrobeApplyView(discord.ui.View):
         )
 
 
+def _remember_wardrobe_advice_event(question, item_summaries, reply_text="", selected_item=None):
+    """
+    讓「看衣櫃的小俠」與「聊天的小俠」共用同一段短期脈絡。
+    /衣櫃 問小俠 是工具指令，不會自然進入一般聊天流程，所以這裡手動寫入 temp_chat。
+    """
+    try:
+        item_text = "；".join(
+            [
+                f"{item.get('id')} {item.get('name')}（{item.get('main_category')}/{item.get('sub_category')}）"
+                for item in (item_summaries or [])
+            ]
+        )
+        if question:
+            daily_chat_logs.append(
+                _conversation_log_text(
+                    "大俠",
+                    f"請小俠看衣櫃並給意見：{question}。候選有：{item_text}",
+                    max_chars=2000,
+                )
+            )
+        if reply_text:
+            daily_chat_logs.append(
+                _conversation_log_text(
+                    "小俠",
+                    f"我剛剛看了衣櫃候選：{item_text}。我的穿搭意見是：{reply_text}",
+                    max_chars=4000,
+                )
+            )
+        if selected_item:
+            daily_chat_logs.append(
+                _conversation_log_text(
+                    "小俠",
+                    f"剛剛大俠從我看過的衣櫃候選中，選定下一張 /photo 要穿：{selected_item.get('id')} {selected_item.get('name')}。這是我知道並承接的當前選衣結果。",
+                    max_chars=2000,
+                )
+            )
+        save_temp_chat(daily_chat_logs)
+        print("🧠 [WARDROBE_ADVICE_CONTEXT_SAVED]")
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_ADVICE_CONTEXT_SAVE_FAILED] {type(exc).__name__}: {exc}")
+
+
 class WardrobeAdviceApplyView(discord.ui.View):
-    def __init__(self, items):
+    def __init__(self, items, item_summaries=None, scene_question="", reply_text=""):
         super().__init__(timeout=86400)
         self.items = [dict(item) for item in (items or [])[:4]]
+        self.item_summaries = list(item_summaries or [])
+        self.scene_question = scene_question or ""
+        self.reply_text = reply_text or ""
         for item in self.items:
             button = discord.ui.Button(
                 label=f"套用 {item.get('id')}",
@@ -5131,6 +5210,12 @@ class WardrobeAdviceApplyView(discord.ui.View):
 
             async def _callback(interaction: discord.Interaction, selected=item):
                 _set_pending_wardrobe_state(selected)
+                _remember_wardrobe_advice_event(
+                    self.scene_question,
+                    self.item_summaries,
+                    self.reply_text,
+                    selected_item=selected,
+                )
                 await interaction.response.send_message(
                     f"✅ 已選定 **{selected.get('id')} {selected.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。",
                     ephemeral=True,
@@ -5226,7 +5311,8 @@ async def _ask_xiaoxia_about_wardrobe(ctx, payload):
         reply = str(getattr(resp, "text", "") or "").strip()
         if not reply:
             reply = "大俠，這幾件我看到了，但我剛剛沒有想出夠清楚的建議。你可以再給我一個更明確的場景，我再幫你挑。"
-        await msg.edit(content=reply, view=WardrobeAdviceApplyView(items))
+        _remember_wardrobe_advice_event(scene_question, item_summaries, reply_text=reply)
+        await msg.edit(content=reply, view=WardrobeAdviceApplyView(items, item_summaries=item_summaries, scene_question=scene_question, reply_text=reply))
     except Exception as exc:
         await msg.edit(content=f"⚠️ 小俠看衣櫃失敗：`{str(exc)[:1500]}`")
 
@@ -5814,19 +5900,22 @@ async def _send_photo_message(destination, context, view=None, title_prefix="�
 
 
 async def _edit_photo_message_with_file(message, context, view=None, title_prefix="📸 小俠照片"):
-    """重擲取代時盡量用 attachment:// 更新原訊息；失敗時退回 URL embed。"""
-    file, filename = _photo_discord_file(context)
-    embed = _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=filename if file else None)
-    if file:
-        try:
-            print(f"📤 [PHOTO_DISCORD_EDIT_WITH_FILE] filename={filename}")
-            await message.edit(embed=embed, view=view, attachments=[file])
-            print(f"✅ [PHOTO_DISCORD_EDIT_DONE] message_id={getattr(message, 'id', None)}")
-            return
-        except Exception as exc:
-            print(f"⚠️ [PHOTO_DISCORD_EDIT_WITH_FILE_FAILED] {type(exc).__name__}: {exc}")
-    print("📤 [PHOTO_DISCORD_EDIT_URL_FALLBACK]")
-    await message.edit(embed=_build_photo_embed(context, title_prefix=title_prefix), view=view)
+    """
+    /photo 骰子取代必須真取代原訊息，不新增一張圖。
+    這裡不用 attachment:// 重新掛圖，改用 gallery URL 編輯同一則 embed，
+    並嘗試清空原訊息附件，避免 Discord 把重骰結果顯示成「+1」。
+    """
+    embed = _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=None)
+    try:
+        print(f"📤 [PHOTO_DISCORD_EDIT_REPLACE_URL] message_id={getattr(message, 'id', None)} url={context.get('local_url') or context.get('image_url')}")
+        await message.edit(embed=embed, view=view, attachments=[])
+        print(f"✅ [PHOTO_DISCORD_EDIT_REPLACED] message_id={getattr(message, 'id', None)}")
+        return
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DISCORD_EDIT_REPLACE_URL_FAILED] {type(exc).__name__}: {exc}")
+        # 舊版 discord.py 可能不支援 attachments=[]；至少仍編輯同一則訊息，不送新訊息。
+        await message.edit(embed=embed, view=view)
+        print(f"✅ [PHOTO_DISCORD_EDIT_REPLACED_FALLBACK] message_id={getattr(message, 'id', None)}")
 
 
 async def _generate_photo_from_context(context, msg=None):
@@ -6119,13 +6208,14 @@ class PhotoResultView(discord.ui.View):
             + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
         )
         try:
+            old_url = context.get("local_url") or context.get("image_url")
             new_context = await _generate_photo_from_context(context)
-            db = load_memory()
-            db.insert(0, _photo_db_payload(new_context))
-            save_memory(db)
+            _replace_photo_db_record(old_url, _photo_db_payload(new_context))
+            _safe_delete_vault_image(old_url)
             _set_current_outfit_state(_build_outfit_state_from_context(new_context))
             self.context = new_context
             if interaction.message:
+                new_context["message_id"] = interaction.message.id
                 photo_generation_contexts[interaction.message.id] = new_context
                 await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="📸 骰子取代")
         except Exception as exc:
@@ -6199,7 +6289,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
             else:
                 base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
 
-        final_prompt = f"{base_p}\n[大俠要求]: {custom_prompt}"
+        final_prompt = f"{base_p}\n{STRICT_SOLO_AND_ANATOMY_PROMPT}\n[大俠要求]: {custom_prompt}"
 
         # 4. 呼叫 API (移除 moderation, quality 改 auto, 尺寸 1024x1024 最穩)
         result = await openai_client.images.edit(
