@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.31"
+LOBSTER_VERSION = "1.4.33"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4753,6 +4753,19 @@ def _get_pending_wardrobe_state():
     return state_data.get("photo_pending_wardrobe")
 
 
+def _pending_wardrobe_has_usable_reference(item):
+    """預選衣櫃必須真的有可用圖片；否則清掉，避免 /photo 被切到 photo_reference 但拿到 None。"""
+    if not isinstance(item, dict):
+        return False
+    ref_path = str(item.get("reference_image_path") or "").strip()
+    ref_url = str(item.get("local_url") or item.get("reference_item_url") or "").strip()
+    if ref_path and os.path.exists(ref_path):
+        return True
+    if ref_url.startswith("http"):
+        return True
+    return False
+
+
 def _set_pending_wardrobe_state(item):
     state_data = load_state()
     state_data["photo_pending_wardrobe"] = item
@@ -4822,7 +4835,8 @@ def _wardrobe_matches(item, query):
 
 
 def _parse_wardrobe_command(command_text):
-    raw = re.sub(r"^/衣櫃\b", "", str(command_text or "").strip(), flags=re.IGNORECASE).strip()
+    raw_text = str(command_text or "").strip()
+    raw = re.sub(r"^/衣櫃(?:\s+|$)", "", raw_text, flags=re.IGNORECASE).strip()
     if not raw:
         return "browse", ""
     first, _, rest = raw.partition(" ")
@@ -4831,6 +4845,7 @@ def _parse_wardrobe_command(command_text):
     if action in {"新增", "去人", "看", "穿", "刪除", "問小俠"}:
         return action, rest
     return "search", raw
+
 
 
 def _wardrobe_category_counts(items):
@@ -4843,6 +4858,8 @@ def _wardrobe_category_counts(items):
 
 async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
     try:
+        if not local_path or not os.path.exists(str(local_path)):
+            raise RuntimeError(f"分類用圖片不存在：{local_path}")
         with open(local_path, "rb") as f:
             data = f.read()
         prompt = f"""
@@ -4864,7 +4881,7 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
         resp = await gemini_client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                types.Part.from_bytes(data=data, mime_type="image/jpeg"),
+                types.Part.from_bytes(data=data, mime_type="image/png" if str(local_path).lower().endswith(".png") else ("image/webp" if str(local_path).lower().endswith(".webp") else "image/jpeg")),
                 prompt,
             ],
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
@@ -4942,8 +4959,12 @@ async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_pr
 
 async def _prepare_wardrobe_image_from_attachment(attachment, remove_person=False, extra_hint=""):
     source_path = await _download_photo_reference_attachment(attachment)
+    if not source_path or not os.path.exists(source_path):
+        raise RuntimeError(f"衣櫃原始圖片下載失敗：path={source_path}")
+
     final_path = source_path
     final_url = getattr(attachment, "url", None)
+
     if remove_person:
         generated_url = await generate_seedream_v45_wardrobe_cleanup(source_path, custom_prompt=extra_hint)
         if isinstance(generated_url, str) and generated_url.startswith("http"):
@@ -4952,18 +4973,27 @@ async def _prepare_wardrobe_image_from_attachment(attachment, remove_person=Fals
                 final_path = os.path.join(OUTPUT_DIR, local_filename)
                 final_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
             else:
-                final_url = generated_url
-                final_path = None
+                # 保底：save_to_vault 若失敗，不要把 final_path 設成 None，改為自行下載。
+                final_path, final_url = await _download_url_to_output(generated_url, prefix="wardrobe_clean")
         else:
             raise RuntimeError(str(generated_url))
     else:
-        # 直接收藏時，仍轉存到 output 方便之後公開瀏覽。
-        filename = f"wardrobe_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{Path(source_path).suffix.lower() or '.jpg'}"
+        # 直接收藏時，轉存到 output，讓後續衣櫃瀏覽與 /photo 都可引用。
+        ext = Path(source_path).suffix.lower() or ".jpg"
+        filename = f"wardrobe_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
         target_path = os.path.join(OUTPUT_DIR, filename)
         shutil.copy2(source_path, target_path)
         final_path = target_path
         final_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+
+    if not final_path or not os.path.exists(str(final_path)):
+        raise RuntimeError(f"衣櫃整理後沒有可用圖片檔：path={final_path}")
+    if os.path.getsize(str(final_path)) <= 0:
+        raise RuntimeError(f"衣櫃整理後圖片檔為空：path={final_path}")
+
+    print(f"✅ [WARDROBE_IMAGE_READY] remove_person={remove_person} path={final_path} size={os.path.getsize(str(final_path))}")
     return source_path, final_path, final_url
+
 
 
 def _build_wardrobe_item_payload(meta, reference_path, reference_url):
@@ -5342,6 +5372,8 @@ async def _get_photo_reference_attachment(message):
 
 async def _download_photo_reference_attachment(attachment):
     os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
+    if attachment is None:
+        raise RuntimeError("沒有取得可下載的圖片附件。")
     ext = Path(getattr(attachment, "filename", "") or "").suffix.lower()
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         content_type = (getattr(attachment, "content_type", "") or "").lower()
@@ -5349,9 +5381,46 @@ async def _download_photo_reference_attachment(attachment):
     filename = f"photo_ref_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
     path = os.path.join(PHOTO_USER_REF_DIR, filename)
     data = await attachment.read()
+    if not data:
+        # Discord attachment.read() 偶爾可能取不到內容；改用 URL 再抓一次。
+        url = getattr(attachment, "url", None)
+        if url:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+    if not data:
+        raise RuntimeError("圖片附件下載後沒有內容。")
     with open(path, "wb") as f:
         f.write(data)
+    if not os.path.exists(path) or os.path.getsize(path) <= 0:
+        raise RuntimeError(f"圖片附件保存失敗：{path}")
+    print(f"✅ [PHOTO_REF_ATTACHMENT_SAVED] path={path} size={os.path.getsize(path)}")
     return path
+
+
+async def _download_url_to_output(image_url, prefix="wardrobe"):
+    """把外部圖片 URL 下載到 OUTPUT_DIR，避免 save_to_vault 失敗時拿到 None path。"""
+    if not image_url or not str(image_url).startswith("http"):
+        return None, None
+    ext = ".jpg"
+    clean = str(image_url).split("?", 1)[0].split("#", 1)[0].lower()
+    for candidate in (".png", ".jpg", ".jpeg", ".webp"):
+        if clean.endswith(candidate):
+            ext = candidate
+            break
+    filename = f"{prefix}_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+    path = os.path.join(OUTPUT_DIR, filename)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(image_url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"下載圖片失敗 HTTP {resp.status}")
+            data = await resp.read()
+    if not data:
+        raise RuntimeError("下載圖片後沒有內容。")
+    with open(path, "wb") as f:
+        f.write(data)
+    return path, f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
 
 
 async def _seedream_upload_single_file(path):
@@ -5692,6 +5761,11 @@ async def handle_unified_photo_command(message, user_input):
         return None
 
     pending_wardrobe = _get_pending_wardrobe_state()
+    if pending_wardrobe and not _pending_wardrobe_has_usable_reference(pending_wardrobe):
+        print(f"⚠️ [PHOTO_PENDING_WARDROBE_INVALID] item={pending_wardrobe}")
+        _clear_pending_wardrobe_state()
+        pending_wardrobe = None
+
     current_outfit_state = _get_current_outfit_state()
     explicit_outfit_change = _photo_requests_outfit_change(raw_scene_text)
 
@@ -5703,10 +5777,21 @@ async def handle_unified_photo_command(message, user_input):
     if attachment:
         reference_item_path = await _download_photo_reference_attachment(attachment)
         reference_item_url = getattr(attachment, "url", None)
+        if not reference_item_path or not os.path.exists(str(reference_item_path)):
+            raise RuntimeError(f"/photo 參考圖下載失敗：path={reference_item_path}")
+        print(f"✅ [PHOTO_REFERENCE_DOWNLOADED] path={reference_item_path} size={os.path.getsize(reference_item_path)}")
     elif pending_wardrobe:
         reference_item_path = pending_wardrobe.get("reference_image_path")
         reference_item_url = pending_wardrobe.get("local_url")
+        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
+            reference_item_path = reference_item_url
         wardrobe_id = pending_wardrobe.get("id")
+
+    if source_mode == "photo_reference" and not reference_item_path:
+        print("⚠️ [PHOTO_REFERENCE_MISSING_PATH] fallback_to_photo_scene")
+        source_mode = "photo_scene"
+        reference_item_url = None
+        wardrobe_id = None
 
     keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change)
 
@@ -7332,7 +7417,13 @@ async def on_message(message):
                             if resp.status == 200:
                                 new_img_data = await resp.read()
                                 # 🌟 防呆：動態抓取 mime_type，防止 API 產生圖片時因沒有 attachments 而當機
-                                content_type = message.attachments[0].content_type if message.attachments else resp.headers.get('Content-Type', 'image/jpeg')
+                                content_type = (
+                                    (message.attachments[0].content_type if message.attachments else None)
+                                    or resp.headers.get('Content-Type')
+                                    or 'image/jpeg'
+                                )
+                                if ';' in content_type:
+                                    content_type = content_type.split(';', 1)[0].strip()
                                 msg_parts.append(types.Part.from_bytes(data=new_img_data, mime_type=content_type))
                                 
                                 # 🌟 更新視覺殘留：聊天時若傳了新圖，就覆蓋舊記憶
