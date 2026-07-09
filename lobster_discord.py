@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.28"
+LOBSTER_VERSION = "1.4.29"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4915,19 +4915,96 @@ def _photo_db_payload(context, name=None, type_override="photo"):
     }
 
 
-def _build_photo_embed(context, title_prefix="📸 小俠照片"):
+def _photo_local_path_from_context(context):
+    """把 /photo 的 gallery URL 反查成本機檔案，供 Discord attachment 顯示用。"""
+    local_path = str((context or {}).get("local_path") or "").strip()
+    if local_path and os.path.exists(local_path):
+        return local_path
+
+    local_filename = str((context or {}).get("local_filename") or "").strip()
+    if local_filename:
+        candidate = os.path.abspath(os.path.join(OUTPUT_DIR, os.path.basename(local_filename)))
+        if os.path.exists(candidate):
+            return candidate
+
+    for key in ("local_url", "image_url"):
+        url = str((context or {}).get(key) or "")
+        marker = "/gallery/"
+        if marker in url:
+            filename = os.path.basename(url.split(marker, 1)[1].split("?", 1)[0].split("#", 1)[0])
+            if filename:
+                candidate = os.path.abspath(os.path.join(OUTPUT_DIR, filename))
+                output_root = os.path.abspath(OUTPUT_DIR) + os.sep
+                if candidate.startswith(output_root) and os.path.exists(candidate):
+                    return candidate
+    return None
+
+
+def _photo_discord_file(context):
+    """回傳 (discord.File, filename)。若沒有可用本機檔，回傳 (None, None)。"""
+    local_path = _photo_local_path_from_context(context)
+    if not local_path:
+        print("⚠️ [PHOTO_DISCORD_FILE_MISSING] local_path not found")
+        return None, None
+    try:
+        size = os.path.getsize(local_path)
+        if size <= 0:
+            print(f"⚠️ [PHOTO_DISCORD_FILE_EMPTY] path={local_path}")
+            return None, None
+        filename = os.path.basename(local_path)
+        print(f"🖼️ [PHOTO_DISCORD_FILE_READY] path={local_path} size={size}")
+        return discord.File(local_path, filename=filename), filename
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DISCORD_FILE_ERROR] {type(exc).__name__}: {exc}")
+        return None, None
+
+
+def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
     embed = discord.Embed(
         title=f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}",
         description=context.get("message", "大俠按下 /photo 留住這一刻。"),
         color=0xffb6c1,
     )
-    embed.set_image(url=context.get("local_url") or context.get("image_url"))
+    if attachment_filename:
+        embed.set_image(url=f"attachment://{attachment_filename}")
+    else:
+        embed.set_image(url=context.get("local_url") or context.get("image_url"))
     if context.get("scene_summary"):
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
         embed.add_field(name="服裝／搭配", value=str(context.get("outfit_summary"))[:900], inline=False)
     embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | Seedream v4.5")
     return embed
+
+
+async def _send_photo_message(destination, context, view=None, title_prefix="📸 小俠照片"):
+    """用 Discord attachment 顯示 /photo 圖片；gallery URL 只作資料庫/網頁使用。"""
+    file, filename = _photo_discord_file(context)
+    embed = _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=filename if file else None)
+    if file:
+        print(f"📤 [PHOTO_DISCORD_SEND_WITH_FILE] filename={filename}")
+        sent = await destination.send(embed=embed, file=file, view=view)
+    else:
+        print("📤 [PHOTO_DISCORD_SEND_URL_FALLBACK]")
+        sent = await destination.send(embed=embed, view=view)
+    print(f"✅ [PHOTO_DISCORD_SEND_DONE] message_id={getattr(sent, 'id', None)}")
+    return sent
+
+
+async def _edit_photo_message_with_file(message, context, view=None, title_prefix="📸 小俠照片"):
+    """重擲取代時盡量用 attachment:// 更新原訊息；失敗時退回 URL embed。"""
+    file, filename = _photo_discord_file(context)
+    embed = _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=filename if file else None)
+    if file:
+        try:
+            print(f"📤 [PHOTO_DISCORD_EDIT_WITH_FILE] filename={filename}")
+            await message.edit(embed=embed, view=view, attachments=[file])
+            print(f"✅ [PHOTO_DISCORD_EDIT_DONE] message_id={getattr(message, 'id', None)}")
+            return
+        except Exception as exc:
+            print(f"⚠️ [PHOTO_DISCORD_EDIT_WITH_FILE_FAILED] {type(exc).__name__}: {exc}")
+    print("📤 [PHOTO_DISCORD_EDIT_URL_FALLBACK]")
+    await message.edit(embed=_build_photo_embed(context, title_prefix=title_prefix), view=view)
 
 
 async def _generate_photo_from_context(context, msg=None):
@@ -4943,6 +5020,7 @@ async def _generate_photo_from_context(context, msg=None):
         reference_item_path=context.get("reference_item_path"),
         reference_item_url=context.get("reference_item_url"),
     )
+    print(f"🎬 [PHOTO_SEEDREAM_START] mode={context.get('source_mode', 'photo_scene')}")
     generated_image_url, visual = await execute_safe_generation(
         discord_image_url=context.get("reference_item_path"),
         base_filename="base_xiaoxia.jpg",
@@ -4951,12 +5029,20 @@ async def _generate_photo_from_context(context, msg=None):
         visual_dict=visual,
         msg=msg,
     )
+    print(f"🌱 [PHOTO_SEEDREAM_RESULT_URL] {generated_image_url}")
     local_filename = await save_to_vault(generated_image_url)
     local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+    if local_path and os.path.exists(local_path):
+        print(f"✅ [PHOTO_IMAGE_DOWNLOADED] local_path={local_path} size={os.path.getsize(local_path)}")
+    else:
+        print(f"⚠️ [PHOTO_IMAGE_NOT_LOCAL] local_filename={local_filename} local_path={local_path}")
     context = dict(context)
     context.update({
         "image_url": generated_image_url,
         "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
         "composition": visual.get("composition", context.get("scene_summary", "")),
         "mood_summary": visual.get("mood", context.get("mood_summary", "")),
         "message": visual.get("message", context.get("message", "")),
@@ -4973,12 +5059,14 @@ async def handle_unified_photo_command(message, user_input):
 
     raw_input = str(user_input or "").strip()
     raw_scene_text = re.sub(r"^/photo\b", "", raw_input, flags=re.IGNORECASE).strip()
+    print(f"📸 [PHOTO_UNIFIED_START] channel={getattr(message.channel, 'name', '')} user={getattr(message.author, 'id', '')} raw_scene={raw_scene_text[:120]}")
     attachment, attachment_error = await _get_photo_reference_attachment(message)
     if attachment_error:
         await message.channel.send(attachment_error)
         return None
 
     source_mode = "photo_reference" if attachment else "photo_scene"
+    print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(attachment)}")
     reference_item_path = None
     reference_item_url = None
     if attachment:
@@ -5011,9 +5099,8 @@ async def handle_unified_photo_command(message, user_input):
         save_memory(db)
 
         await status.delete()
-        embed = _build_photo_embed(context)
         view = PhotoResultView(context)
-        sent = await message.channel.send(embed=embed, view=view)
+        sent = await _send_photo_message(message.channel, context, view=view)
         context["message_id"] = sent.id
         photo_generation_contexts[sent.id] = context
         view.context = context
@@ -5142,7 +5229,14 @@ class PhotoResultView(discord.ui.View):
             db.insert(0, _photo_db_payload(new_context))
             save_memory(db)
             view = PhotoResultView(new_context)
-            sent = await interaction.followup.send(embed=_build_photo_embed(new_context, title_prefix="📸 More"), view=view)
+            file, filename = _photo_discord_file(new_context)
+            embed = _build_photo_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
+            if file:
+                print(f"📤 [PHOTO_MORE_SEND_WITH_FILE] filename={filename}")
+                sent = await interaction.followup.send(embed=embed, file=file, view=view)
+            else:
+                print("📤 [PHOTO_MORE_SEND_URL_FALLBACK]")
+                sent = await interaction.followup.send(embed=embed, view=view)
             new_context["message_id"] = sent.id
             photo_generation_contexts[sent.id] = new_context
             view.context = new_context
@@ -5165,7 +5259,7 @@ class PhotoResultView(discord.ui.View):
             self.context = new_context
             if interaction.message:
                 photo_generation_contexts[interaction.message.id] = new_context
-                await interaction.message.edit(embed=_build_photo_embed(new_context, title_prefix="📸 骰子取代"), view=self)
+                await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="📸 骰子取代")
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 骰子取代失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
