@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.39"
+LOBSTER_VERSION = "1.4.40"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4840,6 +4840,80 @@ def _wardrobe_item_short(item):
     return f"{item.get('id')}｜{item.get('name')}｜{item.get('main_category')}/{item.get('sub_category')}"
 
 
+def _extract_category_prefixed_name(name_hint):
+    """
+    支援：
+    /衣櫃 新增 內衣 米白色珍珠結構款套裝
+    /衣櫃 新增 泳裝 黑色...
+    第一個詞若是主分類，就當分類提示，不把它留在名稱裡。
+    """
+    raw = _clean_text_compact(name_hint)
+    if not raw:
+        return "", ""
+    for cat in sorted(WARDROBE_MAIN_CATEGORIES, key=len, reverse=True):
+        if raw == cat:
+            return cat, raw
+        if raw.startswith(cat + " "):
+            return cat, raw[len(cat):].strip()
+    return "", raw
+
+
+def _wardrobe_item_generation_hint(item):
+    """把衣櫃資料轉成 /photo 的硬提示，避免「套裝」被誤解成西裝/長袖套裝。"""
+    if not isinstance(item, dict):
+        return ""
+    item_id = item.get("id", "")
+    name = _clean_text_compact(item.get("name", ""))
+    main = _clean_text_compact(item.get("main_category", ""))
+    sub = _clean_text_compact(item.get("sub_category", ""))
+    summary = _clean_text_compact(item.get("style_summary", ""))
+    tags = "、".join(item.get("tags") or [])
+    hint = (
+        f"Selected wardrobe item {item_id}: {name}. "
+        f"Category: {main}/{sub}. Tags: {tags}. Summary: {summary}. "
+        "Image 10 is the exact visual reference and must dominate the text label. "
+        "Preserve the actual garment type shown in Image 10; do not reinterpret the Chinese word '套裝' as a blazer, jacket, suit, formal set, dress suit, or long-sleeve outerwear. "
+        "'套裝' here means a matching clothing set unless the image clearly shows a blazer/suit. "
+    )
+    if main in {"內衣", "泳裝", "睡衣／居家服"} or any(k in (name + summary + tags) for k in ("內衣", "胸罩", "bra", "lingerie", "泳裝", "泳衣", "睡衣")):
+        hint += (
+            "This wardrobe category may be underwear/lingerie, swimwear, or sleepwear. "
+            "If Image 10 shows a bra-and-bottom, lingerie set, swimwear, or sleepwear, keep that exact category and do not convert it into a jacket, blouse, blazer, long sleeves, or ordinary outerwear. "
+            "Style it tastefully and safely in a fitting private or appropriate scene. "
+        )
+    return hint.strip()
+
+
+def _update_wardrobe_item_from_command(payload):
+    """
+    /衣櫃 修正 W003 內衣 米白色珍珠結構款內衣套裝
+    /衣櫃 修正 W003 套裝 新名稱...
+    """
+    tokens = str(payload or "").strip().split(maxsplit=2)
+    if len(tokens) < 2:
+        return False, "用法：`/衣櫃 修正 W003 內衣 米白色珍珠結構款內衣套裝`"
+    item_id = tokens[0].upper().strip("，,。；;")
+    category = tokens[1].strip()
+    new_name = tokens[2].strip() if len(tokens) >= 3 else ""
+    if category not in WARDROBE_MAIN_CATEGORIES:
+        return False, f"分類 `{category}` 不在可用分類內。可用：{'、'.join(WARDROBE_MAIN_CATEGORIES)}"
+
+    items = load_wardrobe()
+    for item in items:
+        if str(item.get("id", "")).upper() == item_id:
+            if new_name:
+                item["name"] = new_name
+            item["main_category"] = category
+            item["sub_category"] = category
+            base_name = item.get("name") or item_id
+            item["tags"] = [x for x in re.split(r"[\s,，、/／「」]+", str(base_name)) if x][:8]
+            item["style_summary"] = f"{base_name}（{category}）"
+            item["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            save_wardrobe(items)
+            return True, item
+    return False, f"找不到衣櫃項目：{item_id}"
+
+
 def _next_wardrobe_id(items):
     max_num = 0
     for item in items:
@@ -4913,7 +4987,7 @@ def _parse_wardrobe_command(command_text):
     first, _, rest = raw.partition(" ")
     action = first.strip()
     rest = rest.strip()
-    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠"}:
+    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠", "修正"}:
         return action, rest
     return "search", raw
 
@@ -5694,6 +5768,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             "If Image 10 is clothing, make Xiaoxia wear it naturally. "
             "If Image 10 is an accessory, make Xiaoxia naturally carry, wear, or style it in a clearly visible way. "
             "Preserve the reference item's overall color, silhouette, material feeling, pattern, and key decorative details as much as possible, while keeping Xiaoxia's identity consistent. "
+            "The visual reference image must dominate ambiguous text labels. Do not reinterpret a matching set as a blazer, jacket, formal suit, long-sleeve set, or ordinary outerwear unless Image 10 clearly shows that. If Image 10 shows underwear, lingerie, swimwear, or sleepwear, keep that exact garment category and style it tastefully in an appropriate private or contextual scene. "
         )
     else:
         base += (
@@ -6044,6 +6119,7 @@ async def handle_unified_photo_command(message, user_input):
         if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
             reference_item_path = reference_item_url
         wardrobe_id = pending_wardrobe.get("id")
+        print(f"👗 [PHOTO_WARDROBE_SELECTED] {wardrobe_id} {pending_wardrobe.get('name')} category={pending_wardrobe.get('main_category')}")
 
     if source_mode == "photo_reference" and not reference_item_path:
         print("⚠️ [PHOTO_REFERENCE_MISSING_PATH] fallback_to_photo_scene")
@@ -6062,9 +6138,24 @@ async def handle_unified_photo_command(message, user_input):
         has_reference=bool(attachment or pending_wardrobe),
         current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
         keep_today_outfit=keep_today_outfit,
-        pending_wardrobe_name=(pending_wardrobe or {}).get("name", "") if pending_wardrobe else "",
+        pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe) if pending_wardrobe else "",
     )
+    if pending_wardrobe:
+        wardrobe_hint = _wardrobe_item_generation_hint(pending_wardrobe)
+        scene_data["outfit_summary"] = (
+            pending_wardrobe.get("style_summary")
+            or f"{pending_wardrobe.get('name')}（{pending_wardrobe.get('main_category')}/{pending_wardrobe.get('sub_category')}）"
+        )
+    else:
+        wardrobe_hint = ""
     prompt_base = scene_data.get("photo_prompt") or raw_scene_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
+    if wardrobe_hint:
+        prompt_base = (
+            str(prompt_base).strip()
+            + "\n\nWARDROBE REFERENCE OVERRIDE:\n"
+            + wardrobe_hint
+            + "\nDo not let a text label override the garment category shown in Image 10."
+        )
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
@@ -7186,6 +7277,13 @@ async def wardrobe_command(ctx, *, args: str = ""):
             return
         _set_pending_wardrobe_state(item)
         await ctx.send(f"✅ 已選定 **{item.get('id')} {item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。")
+        return
+    if action == "修正":
+        ok, result = _update_wardrobe_item_from_command(payload)
+        if not ok:
+            await ctx.send(f"⚠️ {result}")
+            return
+        await ctx.send(f"✅ 已修正衣櫃項目：**{result.get('id')} {result.get('name')}** → {result.get('main_category')}/{result.get('sub_category')}", embed=_wardrobe_embed_for_item(result))
         return
     if action == "刪除":
         target = _find_wardrobe_item(payload)
