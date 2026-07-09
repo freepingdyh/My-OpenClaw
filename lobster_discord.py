@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.35"
+LOBSTER_VERSION = "1.4.36"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -5559,7 +5559,8 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
         "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male figure, no male shoulder, no male back, no male torso, no male silhouette, no male reflection, and no foreground arm or hand from the viewer. The boyfriend POV must be implied only through framing, never by showing another person. "
+        "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. Xiaoxia's pose and limb positions must be anatomically normal and natural, with no extra limbs, twisted joints, broken fingers, or awkward body mechanics. "
     )
     if has_reference:
         base += (
@@ -5648,7 +5649,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
   "action_summary": "小俠正在做的自然動作",
   "mood_summary": "氣氛與光線",
   "camera_framing": "half_body 或 full_body",
-  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；嚴格單人小俠，不出現男人或其他人；完整衣著、生活感、非露骨"
+  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；嚴格單人小俠，不出現男人、其他人、任何男性身體部位、或鏡頭持有者的手／肩／背影；動作與肢體必須自然正常；完整衣著、生活感、非露骨"
 }}
 
 規則：
@@ -5657,6 +5658,8 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 3. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
 4. 不要從很久以前的日記或長期記憶抓衣服。
 5. 不可加入大俠沒有要求的第二人物。
+6. 即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
+7. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -5681,7 +5684,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
         "photo_prompt": (
             f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
             f"She is wearing {fallback_outfit}, with a warm everyday mood. "
-            "Solo Xiaoxia only, no man, no other people, no external hands, realistic anatomy."
+            "Solo Xiaoxia only. Do not show any man, any other person, or any visible body part of the viewer, including foreground hands, shoulders, back, torso, silhouette, or reflections. The POV should be implied only through framing. Realistic anatomy only, with natural body movement, natural limb positions, and no awkward pose or malformed hands."
         ),
     }
 
