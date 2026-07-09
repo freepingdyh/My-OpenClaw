@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.34"
+LOBSTER_VERSION = "1.4.35"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4834,6 +4834,43 @@ def _wardrobe_matches(item, query):
     return q in hay
 
 
+def _infer_wardrobe_meta_from_name(name_hint="", category_hint=""):
+    name = _clean_text_compact(name_hint or "未命名服飾")
+    hay = name + " " + str(category_hint or "")
+    if any(k in hay for k in ("洋裝", "連身裙", "小洋裝")):
+        main = "洋裝"
+    elif any(k in hay for k in ("睡衣", "居家", "睡袍")):
+        main = "睡衣／居家服"
+    elif any(k in hay for k in ("內衣", "胸罩", "bra", "貼身")):
+        main = "內衣"
+    elif any(k in hay for k in ("泳裝", "泳衣", "比基尼")):
+        main = "泳裝"
+    elif any(k in hay for k in ("鞋", "靴", "拖鞋")):
+        main = "鞋子"
+    elif any(k in hay for k in ("包", "背包", "手提")):
+        main = "包包"
+    elif any(k in hay for k in ("外套", "罩衫", "大衣")):
+        main = "外套"
+    elif any(k in hay for k in ("短褲", "長褲", "裙", "下身")):
+        main = "下身"
+    elif any(k in hay for k in ("套裝", "整套", "組合")):
+        main = "套裝"
+    elif any(k in hay for k in ("項鍊", "耳環", "帽", "配件", "飾品")):
+        main = "配件"
+    elif any(k in hay for k in ("cosplay", "角色", "特殊")):
+        main = "Cosplay／特殊服裝"
+    else:
+        main = "上衣"
+    tags = [x for x in re.split(r"[\s,，、/／「」]+", name) if x][:8]
+    return {
+        "name": name,
+        "main_category": main,
+        "sub_category": main,
+        "tags": tags,
+        "style_summary": name,
+    }
+
+
 def _parse_wardrobe_command(command_text):
     raw_text = str(command_text or "").strip()
     raw = re.sub(r"^/衣櫃(?:\s+|$)", "", raw_text, flags=re.IGNORECASE).strip()
@@ -4921,7 +4958,12 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
 
 async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_prompt=""):
     fal_client = _get_fal_client()
-    image_urls = [await _seedream_upload_single_file(reference_image_path)]
+    if not reference_image_path:
+        raise RuntimeError("WARDROBE_CLEANUP_REFERENCE_NONE")
+    if str(reference_image_path).startswith("http"):
+        image_urls = [str(reference_image_path)]
+    else:
+        image_urls = [await _seedream_upload_single_file(reference_image_path)]
     prompt = (
         "Image 1 is a clothing or accessory reference photo and may contain a human model. "
         "Remove the human completely and preserve only the clothing or accessory itself as a clean reference image. "
@@ -5288,26 +5330,64 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
     if not attachment:
         await ctx.send("大俠，要新增到衣櫃時，請附上一張衣服、飾品或回覆含有單張圖片的訊息喔。")
         return
+
     name_hint = _clean_text_compact(args)
     status = await ctx.send("👗 小俠正在整理這件收藏，請稍等一下..." if not remove_person else "👗 小俠正在先幫你把人物去掉，再整理這件收藏...")
+
     try:
-        source_path, final_path, final_url = await _prepare_wardrobe_image_from_attachment(attachment, remove_person=remove_person, extra_hint=name_hint)
-        if not final_path:
-            raise RuntimeError("處理後沒有拿到可用圖片檔。")
-        meta = await _classify_wardrobe_item_from_image(final_path, name_hint=name_hint)
+        source_url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
+        if not source_url:
+            raise RuntimeError("WARDROBE_ATTACHMENT_URL_NONE：Discord 沒有提供可用的附件網址。")
+
+        if not remove_person:
+            # 直接新增：不再下載、不再 Gemini 看圖分類，避免 Discord 手機附件 metadata 造成 NoneType path。
+            meta = _infer_wardrobe_meta_from_name(name_hint or getattr(attachment, "filename", "") or "未命名服飾")
+            pending_payload = {
+                "source_path": None,
+                "source_attachment_url": source_url,
+                "reference_path": source_url,
+                "reference_url": source_url,
+                "meta": meta,
+                "remove_person": False,
+                "extra_hint": name_hint,
+            }
+            preview_item = {
+                "id": "預覽",
+                **meta,
+                "local_url": source_url,
+                "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            await status.delete()
+            await ctx.send("這是整理後的衣櫃預覽，要收藏嗎？", embed=_wardrobe_embed_for_item(preview_item, title_prefix="👗 衣櫃預覽"), view=WardrobePendingConfirmView(pending_payload))
+            return
+
+        # 去人化：優先直接把 Discord CDN URL 丟給 Seedream；若 save_to_vault 失敗，仍保留生成 URL。
+        generated_url = await generate_seedream_v45_wardrobe_cleanup(source_url, custom_prompt=name_hint)
+        if not isinstance(generated_url, str) or not generated_url.startswith("http"):
+            raise RuntimeError(str(generated_url))
+
+        local_filename = await save_to_vault(generated_url)
+        if local_filename:
+            reference_path = os.path.join(OUTPUT_DIR, local_filename)
+            reference_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+        else:
+            reference_path = generated_url
+            reference_url = generated_url
+
+        meta = _infer_wardrobe_meta_from_name(name_hint or "去人化服飾")
         pending_payload = {
-            "source_path": source_path,
-            "source_attachment_url": getattr(attachment, "url", None),
-            "reference_path": final_path,
-            "reference_url": final_url,
+            "source_path": source_url,
+            "source_attachment_url": source_url,
+            "reference_path": reference_path,
+            "reference_url": reference_url,
             "meta": meta,
-            "remove_person": remove_person,
+            "remove_person": True,
             "extra_hint": name_hint,
         }
         preview_item = {
             "id": "預覽",
             **meta,
-            "local_url": final_url,
+            "local_url": reference_url,
             "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         }
         await status.delete()
@@ -5316,6 +5396,8 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
         print(f"⚠️ [WARDROBE_ADD_FAILED] {type(exc).__name__}: {exc}")
         traceback.print_exc()
         await status.edit(content=f"⚠️ 衣櫃整理失敗：`{str(exc)[:1500]}`")
+
+
 
 
 # ==========================================
@@ -5818,11 +5900,12 @@ async def handle_unified_photo_command(message, user_input):
     reference_item_url = None
     wardrobe_id = None
     if attachment:
-        reference_item_path = await _download_photo_reference_attachment(attachment)
-        reference_item_url = getattr(attachment, "url", None)
-        if not reference_item_path or not os.path.exists(str(reference_item_path)):
-            raise RuntimeError(f"/photo 參考圖下載失敗：path={reference_item_path}")
-        print(f"✅ [PHOTO_REFERENCE_DOWNLOADED] path={reference_item_path} size={os.path.getsize(reference_item_path)}")
+        reference_item_url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
+        if not reference_item_url:
+            raise RuntimeError("PHOTO_ATTACHMENT_URL_NONE：Discord 沒有提供可用的附件網址。")
+        # 直接使用 Discord CDN URL 給 Seedream，避免 attachment.read()/本機路徑 NoneType 問題。
+        reference_item_path = reference_item_url
+        print(f"✅ [PHOTO_REFERENCE_URL_READY] url={reference_item_url}")
     elif pending_wardrobe:
         reference_item_path = pending_wardrobe.get("reference_image_path")
         reference_item_url = pending_wardrobe.get("local_url")
