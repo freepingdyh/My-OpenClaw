@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.38"
+LOBSTER_VERSION = "1.4.39"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -5117,24 +5117,64 @@ def _wardrobe_embed_for_item(item, title_prefix="👗 小俠衣櫃"):
     return embed
 
 
-def _wardrobe_browse_embed(query=""):
+def _wardrobe_browse_embeds(query=""):
+    """
+    Discord 一個 embed 只能有一張主圖；衣櫃總覽改成「總覽 embed + 多張縮圖 embed」。
+    這樣 /衣櫃 可一次看到多件小圖，而不是只看到最後/第一張預覽圖。
+    """
     items = load_wardrobe()
     matched = [item for item in items if _wardrobe_matches(item, query)]
     counts = _wardrobe_category_counts(items)
     summary = "｜".join([f"{k}:{v}" for k, v in counts.items() if v]) or "目前還沒有收藏"
     title = "👗 小俠衣櫃總覽" if not query else f"👗 小俠衣櫃搜尋｜{query}"
-    embed = discord.Embed(title=title, description=summary, color=0xcfa7ff)
+
     lines = []
     for item in matched[:12]:
         tag_text = "、".join((item.get("tags") or [])[:4])
-        lines.append(f"`{item.get('id')}` **{item.get('name')}**｜{item.get('main_category')}/{item.get('sub_category')}" + (f"｜{tag_text}" if tag_text else ""))
-    embed.add_field(name="最近／符合項目", value="\n".join(lines) if lines else "查無符合項目。", inline=False)
-    if matched:
-        preview = matched[0]
-        if preview.get("local_url"):
-            embed.set_image(url=preview.get("local_url"))
-        embed.set_footer(text=f"共 {len(matched)} 件｜可用 /衣櫃看 {preview.get('id')} 查看單件大圖，或 /衣櫃穿 {preview.get('id')} 套用到下一張 /photo")
-    return embed
+        lines.append(
+            f"`{item.get('id')}` **{item.get('name')}**｜{item.get('main_category')}/{item.get('sub_category')}"
+            + (f"｜{tag_text}" if tag_text else "")
+        )
+
+    summary_embed = discord.Embed(
+        title=title,
+        description=summary,
+        color=0xcfa7ff,
+    )
+    summary_embed.add_field(
+        name="最近／符合項目",
+        value="\n".join(lines) if lines else "查無符合項目。",
+        inline=False,
+    )
+    summary_embed.set_footer(
+        text=f"共 {len(matched)} 件｜下方顯示最多 8 件縮圖；可用 /衣櫃看 Wxxx 查看大圖，或 /衣櫃穿 Wxxx 套用到下一張 /photo"
+    )
+
+    embeds = [summary_embed]
+    for item in matched[:8]:
+        tag_text = "、".join((item.get("tags") or [])[:4]) or "無"
+        item_embed = discord.Embed(
+            title=f"{item.get('id')}｜{item.get('name')}",
+            description=(item.get("style_summary") or item.get("name") or "")[:300],
+            color=0xcfa7ff,
+        )
+        item_embed.add_field(
+            name="分類",
+            value=f"{item.get('main_category')} / {item.get('sub_category')}",
+            inline=True,
+        )
+        item_embed.add_field(name="標籤", value=tag_text[:300], inline=True)
+        if item.get("local_url"):
+            # 用 thumbnail 顯示成小圖；/衣櫃看 Wxxx 仍保留大圖。
+            item_embed.set_thumbnail(url=item.get("local_url"))
+        embeds.append(item_embed)
+
+    return embeds[:10]
+
+
+def _wardrobe_browse_embed(query=""):
+    """相容舊呼叫；只回傳總覽 embed。"""
+    return _wardrobe_browse_embeds(query)[0]
 
 
 
@@ -7118,10 +7158,10 @@ async def wardrobe_command(ctx, *, args: str = ""):
 
     action, payload = _parse_wardrobe_command(ctx.message.content)
     if action == "browse":
-        await ctx.send(embed=_wardrobe_browse_embed())
+        await ctx.send(embeds=_wardrobe_browse_embeds())
         return
     if action == "search":
-        await ctx.send(embed=_wardrobe_browse_embed(payload))
+        await ctx.send(embeds=_wardrobe_browse_embeds(payload))
         return
     if action == "新增":
         await _handle_wardrobe_add_command(ctx, payload, remove_person=False)
