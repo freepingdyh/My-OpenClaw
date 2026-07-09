@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.33"
+LOBSTER_VERSION = "1.4.34"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4857,10 +4857,18 @@ def _wardrobe_category_counts(items):
 
 
 async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
+    fallback_name = _clean_text_compact(name_hint or "未命名服飾")
+    if not local_path or not os.path.exists(str(local_path)):
+        print(f"⚠️ [WARDROBE_CLASSIFY_NO_IMAGE] path={local_path}")
+        return {
+            "name": fallback_name,
+            "main_category": "配件",
+            "sub_category": "未分類",
+            "tags": [],
+            "style_summary": fallback_name,
+        }
     try:
-        if not local_path or not os.path.exists(str(local_path)):
-            raise RuntimeError(f"分類用圖片不存在：{local_path}")
-        with open(local_path, "rb") as f:
+        with open(str(local_path), "rb") as f:
             data = f.read()
         prompt = f"""
 你是小俠衣櫃整理員。請根據這張服飾/配件參考圖，整理成結構化衣櫃資料。
@@ -4901,7 +4909,7 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
             }
     except Exception as exc:
         print(f"⚠️ [WARDROBE_CLASSIFY_FAILED] {type(exc).__name__}: {exc}")
-    fallback_name = _clean_text_compact(name_hint or Path(local_path).stem or "未命名服飾")
+    fallback_name = _clean_text_compact(name_hint or (Path(str(local_path)).stem if local_path else "未命名服飾") or "未命名服飾")
     return {
         "name": fallback_name,
         "main_category": "配件",
@@ -5305,6 +5313,8 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
         await status.delete()
         await ctx.send("這是整理後的衣櫃預覽，要收藏嗎？", embed=_wardrobe_embed_for_item(preview_item, title_prefix="👗 衣櫃預覽"), view=WardrobePendingConfirmView(pending_payload))
     except Exception as exc:
+        print(f"⚠️ [WARDROBE_ADD_FAILED] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         await status.edit(content=f"⚠️ 衣櫃整理失敗：`{str(exc)[:1500]}`")
 
 
@@ -5371,31 +5381,60 @@ async def _get_photo_reference_attachment(message):
 
 
 async def _download_photo_reference_attachment(attachment):
+    """
+    Discord 附圖保底下載。
+    不再優先用 attachment.read()；改用 attachment.url / proxy_url 下載，
+    避免某些手機端或編輯附件情境下 read() 取不到內容或內部拋 NoneType path。
+    """
     os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
     if attachment is None:
-        raise RuntimeError("沒有取得可下載的圖片附件。")
-    ext = Path(getattr(attachment, "filename", "") or "").suffix.lower()
+        raise RuntimeError("PHOTO_REF_ATTACHMENT_NONE：沒有取得可下載的圖片附件。")
+
+    filename_raw = str(getattr(attachment, "filename", "") or "")
+    content_type = str(getattr(attachment, "content_type", "") or "").lower()
+    ext = Path(filename_raw).suffix.lower() if filename_raw else ""
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
-        content_type = (getattr(attachment, "content_type", "") or "").lower()
         ext = ".png" if "png" in content_type else (".webp" if "webp" in content_type else ".jpg")
+
     filename = f"photo_ref_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
     path = os.path.join(PHOTO_USER_REF_DIR, filename)
-    data = await attachment.read()
-    if not data:
-        # Discord attachment.read() 偶爾可能取不到內容；改用 URL 再抓一次。
-        url = getattr(attachment, "url", None)
-        if url:
+
+    url_candidates = [
+        getattr(attachment, "url", None),
+        getattr(attachment, "proxy_url", None),
+    ]
+    data = None
+    last_error = None
+
+    for url in [u for u in url_candidates if u]:
+        try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.read()
+                        if data:
+                            break
+                    last_error = f"HTTP {resp.status} from {url}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+
     if not data:
-        raise RuntimeError("圖片附件下載後沒有內容。")
+        # 最後才退回 attachment.read()
+        try:
+            data = await attachment.read()
+        except Exception as exc:
+            last_error = f"attachment.read failed: {type(exc).__name__}: {exc}"
+
+    if not data:
+        raise RuntimeError(f"PHOTO_REF_DOWNLOAD_EMPTY：圖片附件下載後沒有內容。last_error={last_error}")
+
     with open(path, "wb") as f:
         f.write(data)
+
     if not os.path.exists(path) or os.path.getsize(path) <= 0:
-        raise RuntimeError(f"圖片附件保存失敗：{path}")
-    print(f"✅ [PHOTO_REF_ATTACHMENT_SAVED] path={path} size={os.path.getsize(path)}")
+        raise RuntimeError(f"PHOTO_REF_SAVE_FAILED：圖片附件保存失敗 path={path}")
+
+    print(f"✅ [PHOTO_REF_ATTACHMENT_SAVED] path={path} size={os.path.getsize(path)} filename={filename_raw} content_type={content_type}")
     return path
 
 
@@ -5424,8 +5463,12 @@ async def _download_url_to_output(image_url, prefix="wardrobe"):
 
 
 async def _seedream_upload_single_file(path):
+    if not path:
+        raise RuntimeError("SEEDREAM_UPLOAD_PATH_NONE：要上傳給 Seedream 的圖片路徑是 None。")
+    if not str(path).startswith("http") and not os.path.exists(str(path)):
+        raise RuntimeError(f"SEEDREAM_UPLOAD_PATH_MISSING：找不到要上傳給 Seedream 的圖片：{path}")
     fal_client = _get_fal_client()
-    return await asyncio.to_thread(fal_client.upload_file, path)
+    return await asyncio.to_thread(fal_client.upload_file, str(path))
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
@@ -5841,6 +5884,8 @@ async def handle_unified_photo_command(message, user_input):
         view.context = context
         return context.get("local_url") or context.get("image_url")
     except Exception as exc:
+        print(f"⚠️ [PHOTO_UNIFIED_FAILED] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{str(exc)[:1500]}`")
         return None
 
