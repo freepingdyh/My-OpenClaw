@@ -3846,10 +3846,13 @@ class FateCardDrawView(discord.ui.View):
 
         sent_message = None
         try:
+            # 某些 discord.py / py-cord 版本不接受 view=None；沒有按鈕時必須完全省略 view 參數。
+            followup_kwargs = {"embed": embed, "wait": True}
             if os.path.exists(file_path):
-                sent_message = await interaction.followup.send(embed=embed, file=discord.File(file_path, filename=filename), view=result_view, wait=True)
-            else:
-                sent_message = await interaction.followup.send(embed=embed, view=result_view, wait=True)
+                followup_kwargs["file"] = discord.File(file_path, filename=filename)
+            if result_view is not None:
+                followup_kwargs["view"] = result_view
+            sent_message = await interaction.followup.send(**followup_kwargs)
         except Exception as exc:
             print(f"⚠️ [FATE_REVEAL_SEND_FAILED] {type(exc).__name__}: {exc}")
             try:
@@ -3866,7 +3869,11 @@ class FateCardDrawView(discord.ui.View):
                 commentary = llm_commentary.strip()[:900]
                 embed.description = commentary
                 if sent_message:
-                    await sent_message.edit(embed=embed, view=result_view)
+                    # 編輯也一樣：result_view 為 None 時省略 view，避免 TypeError。
+                    edit_kwargs = {"embed": embed}
+                    if result_view is not None:
+                        edit_kwargs["view"] = result_view
+                    await sent_message.edit(**edit_kwargs)
         except Exception as exc:
             print(f"⚠️ [FATE_COMMENTARY_EDIT_FAILED] {type(exc).__name__}: {exc}")
 
