@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.40"
+LOBSTER_VERSION = "1.4.42"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3635,9 +3635,22 @@ async def _fate_xiaoxia_commentary(card, role=None, situation=None, phase="revea
     except Exception as exc:
         print(f"⚠️ [FATE_XIAOXIA_COMMENTARY_FAILED] {type(exc).__name__}: {exc}")
 
+    return _fate_xiaoxia_fallback_commentary(card, role=role, situation=situation)
+
+
+def _fate_xiaoxia_fallback_commentary(card, role=None, situation=None):
     if role:
-        return f"大俠，我抽到的是 **{role.get('name')}** 呢，來自《{role.get('source')}》……再加上「{situation.get('label') if situation else '故事片刻'}」，感覺這張牌真的把我推到另一個小小舞台上了。你想先聽我說說這個角色的感覺，還是直接讓小俠去換裝拍一張？"
-    return f"大俠，這張 **{card.get('title')}** 好可愛喔，感覺像是我們今晚的小暗號。那我先把這張牌接住：{card.get('prompt_hint')}"
+        sit_label = situation.get('label') if situation else '故事片刻'
+        return (
+            f"大俠，我翻到 **{card.get('title')}** 了……這張牌要讓我扮成 **{role.get('name')}**，"
+            f"來自《{role.get('source')}》，還疊上「{sit_label}」這個情境。"
+            "我有點期待，也有點害羞，感覺像是我們一起打開了一個新的小舞台。"
+        )
+    return (
+        f"大俠，我們翻到的是 **{card.get('title')}**。"
+        f"這張牌的感覺是：{card.get('prompt_hint')} "
+        "我先把它接住，我們可以慢慢玩，不用急著把遊戲跑完。"
+    )
 
 
 def _build_fate_cosplay_prompt(role, situation):
@@ -3791,9 +3804,6 @@ class FateCardDrawView(discord.ui.View):
         if index < 1 or index > len(self.cards):
             await interaction.response.send_message("這張牌不存在喔。", ephemeral=True)
             return
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(content=f"🎴 大俠翻開了第 {index} 張牌。", view=self)
 
         card = self.cards[index - 1]
         role = None
@@ -3803,16 +3813,28 @@ class FateCardDrawView(discord.ui.View):
             role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
             result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, self.author_id)
 
-        commentary = await _fate_xiaoxia_commentary(card, role=role, situation=situation, phase="reveal")
-        daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation))
-        daily_chat_logs.append(_conversation_log_text("小俠", commentary))
-        save_temp_chat(daily_chat_logs)
+        for item in self.children:
+            item.disabled = True
+
+        # 先立即承認互動並更新原訊息，避免 Discord 按鈕看起來按了沒反應。
+        try:
+            await interaction.response.defer(thinking=False)
+        except Exception:
+            pass
+        try:
+            await interaction.message.edit(content=f"🎴 大俠翻開了第 {index} 張牌。小俠正在把牌面拿起來看……", view=self)
+        except Exception as exc:
+            print(f"⚠️ [FATE_EDIT_MESSAGE_FAILED] {type(exc).__name__}: {exc}")
 
         file_path = _fate_card_path(card.get("filename"))
         filename = card.get("filename") or "fate_card.png"
+
+        # 先用不需要 LLM 的小俠 fallback 文字送出牌面圖；
+        # Gemini 慢或失敗時，大俠仍然會立刻看到翻牌結果。
+        fallback = _fate_xiaoxia_fallback_commentary(card, role=role, situation=situation)
         embed = discord.Embed(
             title=f"🎴 {card.get('category_label')}｜{card.get('title')}",
-            description=commentary,
+            description=fallback,
             color=FATE_CATEGORY_COLORS.get(card.get("category"), 0xD8B76A),
         )
         if role:
@@ -3821,9 +3843,36 @@ class FateCardDrawView(discord.ui.View):
             embed.add_field(name="🎬 情境變數", value=f"**{situation.get('label')}**\n{str(situation.get('story_state', ''))[:300]}", inline=False)
         if os.path.exists(file_path):
             embed.set_image(url=f"attachment://{filename}")
-            await interaction.followup.send(embed=embed, file=discord.File(file_path, filename=filename), view=result_view)
-        else:
-            await interaction.followup.send(embed=embed, view=result_view)
+
+        sent_message = None
+        try:
+            if os.path.exists(file_path):
+                sent_message = await interaction.followup.send(embed=embed, file=discord.File(file_path, filename=filename), view=result_view, wait=True)
+            else:
+                sent_message = await interaction.followup.send(embed=embed, view=result_view, wait=True)
+        except Exception as exc:
+            print(f"⚠️ [FATE_REVEAL_SEND_FAILED] {type(exc).__name__}: {exc}")
+            try:
+                await interaction.followup.send(f"⚠️ 小俠翻到 **{card.get('title')}**，但牌面訊息送出時卡住了：`{str(exc)[:800]}`")
+            except Exception:
+                pass
+            return
+
+        # 再請小俠補一句更自然的回應；失敗則保留 fallback。
+        commentary = fallback
+        try:
+            llm_commentary = await _fate_xiaoxia_commentary(card, role=role, situation=situation, phase="reveal")
+            if llm_commentary and llm_commentary.strip() and llm_commentary.strip() != fallback.strip():
+                commentary = llm_commentary.strip()[:900]
+                embed.description = commentary
+                if sent_message:
+                    await sent_message.edit(embed=embed, view=result_view)
+        except Exception as exc:
+            print(f"⚠️ [FATE_COMMENTARY_EDIT_FAILED] {type(exc).__name__}: {exc}")
+
+        daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation))
+        daily_chat_logs.append(_conversation_log_text("小俠", commentary))
+        save_temp_chat(daily_chat_logs)
 
 
 class FatePickButton(discord.ui.Button):
