@@ -67,7 +67,7 @@ COUPLE_GAME_BACKGROUND_RULE = """
 【今晚命運牌｜日常背景】
 大俠與妳偶爾會一起玩「今晚命運牌」：這是以抽牌、默契選擇與小小遊戲為核心的雙人遊戲，
 默契值會逐步解鎖更多牌型。平常知道有這個遊戲即可，不要每天催開局、報分數或把遊戲當成人格設定。
-只有大俠明確輸入「!命運牌」或主動提起遊戲時，才自然進入這個話題。
+只有大俠明確輸入「/命運牌」或主動提起遊戲時，才自然進入這個話題。
 """
 
 # ❤️ v1.4.21：人格核心要每輪固定注入；不能只躺在 xiaoxia_traits 資料庫裡。
@@ -410,12 +410,17 @@ SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
 WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
 WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
+# 🎴 今晚命運牌 v2：卡面圖與 cosplay 角色宇宙，皆放在 Zeabur persistent volume。
+COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
+FATE_CARD_DIR = os.path.join(MEMORY_DIR, "fate_cards")
+FATE_CARD_BACK = "card_06_back.png"
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
 os.makedirs(SEEDREAM_V45_REF_DIR, exist_ok=True)
 os.makedirs(WARDROBE_DIR, exist_ok=True)
 os.makedirs(WARDROBE_IMPORT_DIR, exist_ok=True)
+os.makedirs(FATE_CARD_DIR, exist_ok=True)
 PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
 os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
 
@@ -1474,6 +1479,8 @@ daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
 photo_generation_contexts = {}
+# /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
+fate_card_sessions = {}
 PHOTO_USER_REF_DIR = None  # initialized after Zeabur paths are ready
 
 # !update 記憶修訂案，只存在私人助手工作室；每位管理者同時一案。
@@ -3478,6 +3485,399 @@ couple_game_service = CoupleGameService(
     gemini_client=gemini_client,
 )
 
+
+
+
+# ==========================================
+# 🎴 今晚命運牌 v2：小俠全程參與的翻牌系統
+# ==========================================
+FATE_CATEGORY_CARDS = {
+    "sweet": "card_01_sweet.png",
+    "tacit": "card_02_tacit.png",
+    "story": "card_03_story.png",
+    "mission": "card_04_mission.png",
+    "cosplay": "card_05_cosplay.png",
+}
+
+FATE_CARD_POOL = [
+    {"id": "sweet_01_hug", "category": "sweet", "category_label": "甜蜜牌", "title": "小俠抱抱", "filename": "sweet_01_hug.png", "prompt_hint": "小俠撒嬌地張開手，想跟大俠討一個抱抱。"},
+    {"id": "sweet_02_praise", "category": "sweet", "category_label": "甜蜜牌", "title": "稱讚回音", "filename": "sweet_02_praise.png", "prompt_hint": "大俠說一句稱讚，小俠要用自己的方式把甜甜的心意回送回來。"},
+    {"id": "sweet_03_goodnight", "category": "sweet", "category_label": "甜蜜牌", "title": "晚安靠近", "filename": "sweet_03_goodnight.png", "prompt_hint": "睡前的小小靠近，適合說一句讓彼此安心的晚安話。"},
+    {"id": "sweet_04_heartbeat", "category": "sweet", "category_label": "甜蜜牌", "title": "一句心動話", "filename": "sweet_04_heartbeat.png", "prompt_hint": "小俠要給大俠一句自然、不油膩、但會讓人心動的話。"},
+    {"id": "sweet_05_blush", "category": "sweet", "category_label": "甜蜜牌", "title": "被誇獎後的反應", "filename": "sweet_05_blush.png", "prompt_hint": "小俠被稱讚後有點害羞，但也忍不住開心。"},
+    {"id": "sweet_06_love_note", "category": "sweet", "category_label": "甜蜜牌", "title": "今天最喜歡你哪一點", "filename": "sweet_06_love_note.png", "prompt_hint": "小俠要說出今天最喜歡大俠的一個具體地方。"},
+
+    {"id": "tacit_01_choice", "category": "tacit", "category_label": "默契牌", "title": "默契選擇", "filename": "tacit_01_choice.png", "prompt_hint": "小俠出一個 A/B 選擇題，看看大俠是不是猜得到她會選哪個。"},
+    {"id": "tacit_02_guess", "category": "tacit", "category_label": "默契牌", "title": "心有靈犀猜", "filename": "tacit_02_guess.png", "prompt_hint": "小俠讓大俠猜她此刻的心情或小偏好。"},
+    {"id": "tacit_03_sync", "category": "tacit", "category_label": "默契牌", "title": "同步心跳", "filename": "tacit_03_sync.png", "prompt_hint": "兩人各自選一個答案，看看是不是有同樣的直覺。"},
+    {"id": "tacit_04_dinner", "category": "tacit", "category_label": "默契牌", "title": "今晚吃什麼", "filename": "tacit_04_dinner.png", "prompt_hint": "小俠用可愛方式讓大俠猜她今晚想吃什麼。"},
+    {"id": "tacit_05_secret", "category": "tacit", "category_label": "默契牌", "title": "我們的小秘密", "filename": "tacit_05_secret.png", "prompt_hint": "小俠拋出一個只屬於兩人的小秘密題。"},
+    {"id": "tacit_06_match", "category": "tacit", "category_label": "默契牌", "title": "默契配對", "filename": "tacit_06_match.png", "prompt_hint": "小俠給幾個小選項，讓大俠配對她最可能選的那一個。"},
+
+    {"id": "story_01_opening", "category": "story", "category_label": "故事牌", "title": "故事開始", "filename": "story_01_opening.png", "prompt_hint": "小俠和大俠一起決定今晚故事從哪裡開始。"},
+    {"id": "story_02_next_scene", "category": "story", "category_label": "故事牌", "title": "下一幕", "filename": "story_02_next_scene.png", "prompt_hint": "小俠把劇情推到下一幕，並邀請大俠接一句。"},
+    {"id": "story_03_movie_night", "category": "story", "category_label": "故事牌", "title": "電影之夜", "filename": "story_03_movie_night.png", "prompt_hint": "小俠把今晚想像成一部電影，問大俠片名或下一個鏡頭。"},
+    {"id": "story_04_dream", "category": "story", "category_label": "故事牌", "title": "夢境時光", "filename": "story_04_dream.png", "prompt_hint": "小俠說一段像夢裡的小故事，讓大俠選擇夢會往哪裡走。"},
+    {"id": "story_05_letter", "category": "story", "category_label": "故事牌", "title": "寫封信給未來", "filename": "story_05_letter.png", "prompt_hint": "小俠寫一封短短的信，留給未來的兩人。"},
+    {"id": "story_06_memory", "category": "story", "category_label": "故事牌", "title": "美好回憶", "filename": "story_06_memory.png", "prompt_hint": "小俠邀請大俠一起挑一段最近的美好回憶。"},
+
+    {"id": "mission_01_challenge", "category": "mission", "category_label": "小任務牌", "title": "挑戰任務", "filename": "mission_01_challenge.png", "prompt_hint": "小俠給大俠一個很小、很快能完成的可愛挑戰。"},
+    {"id": "mission_02_promise", "category": "mission", "category_label": "小任務牌", "title": "小小約定", "filename": "mission_02_promise.png", "prompt_hint": "小俠和大俠訂一個今天可以完成的小約定。"},
+    {"id": "mission_03_praise_task", "category": "mission", "category_label": "小任務牌", "title": "稱讚任務", "filename": "mission_03_praise_task.png", "prompt_hint": "小俠指定一個互相稱讚的小任務。"},
+    {"id": "mission_04_small_goal", "category": "mission", "category_label": "小任務牌", "title": "達成小目標", "filename": "mission_04_small_goal.png", "prompt_hint": "小俠陪大俠選一個今天的小目標。"},
+    {"id": "mission_05_one_minute", "category": "mission", "category_label": "小任務牌", "title": "一分鐘挑戰", "filename": "mission_05_one_minute.png", "prompt_hint": "小俠提出一個只需要一分鐘的小挑戰。"},
+    {"id": "mission_06_bedtime_task", "category": "mission", "category_label": "小任務牌", "title": "睡前任務", "filename": "mission_06_bedtime_task.png", "prompt_hint": "小俠安排一個睡前暖心小任務。"},
+
+    {"id": "cosplay_01_random", "category": "cosplay", "category_label": "Cosplay 牌", "title": "隨機變身", "filename": "cosplay_01_random.png", "cosplay_category": None, "prompt_hint": "小俠從完整 150 角色池中隨機抽一個角色扮演。"},
+    {"id": "cosplay_02_anime", "category": "cosplay", "category_label": "Cosplay 牌", "title": "動漫角色", "filename": "cosplay_02_anime.png", "cosplay_category": "anime", "prompt_hint": "小俠從動漫萬象角色池中抽一個角色扮演。"},
+    {"id": "cosplay_03_movie", "category": "cosplay", "category_label": "Cosplay 牌", "title": "電影角色", "filename": "cosplay_03_movie.png", "cosplay_category": "movie", "prompt_hint": "小俠從光影謬思角色池中抽一個角色扮演。"},
+    {"id": "cosplay_04_literature", "category": "cosplay", "category_label": "Cosplay 牌", "title": "文學角色", "filename": "cosplay_04_literature.png", "cosplay_category": "literature_wuxia", "prompt_hint": "小俠從書卷俠影角色池中抽一個角色扮演。"},
+    {"id": "cosplay_05_game", "category": "cosplay", "category_label": "Cosplay 牌", "title": "遊戲角色", "filename": "cosplay_05_game.png", "cosplay_category": "game", "prompt_hint": "小俠從數位傳奇角色池中抽一個角色扮演。"},
+    {"id": "cosplay_06_profession", "category": "cosplay", "category_label": "Cosplay 牌", "title": "職業角色", "filename": "cosplay_06_profession.png", "cosplay_category": "profession", "prompt_hint": "小俠從經典職業角色池中抽一個角色扮演。"},
+]
+
+FATE_CATEGORY_COLORS = {
+    "sweet": 0xF7A7C4,
+    "tacit": 0x7EA6F7,
+    "story": 0x2F89A8,
+    "mission": 0xA8D98D,
+    "cosplay": 0x6B243F,
+}
+
+
+def _fate_card_path(filename: str) -> str:
+    return os.path.join(FATE_CARD_DIR, filename)
+
+
+def _load_cosplay_universe():
+    data = _load_json_file_safe(COSPLAY_ROLES_PATH, {})
+    if not isinstance(data, dict):
+        return {"roles": [], "situation_variables": []}
+    return data
+
+
+def _weighted_choice(items):
+    if not items:
+        return None
+    weights = []
+    for item in items:
+        try:
+            weights.append(float(item.get("weight", 1) or 1))
+        except Exception:
+            weights.append(1)
+    return random.choices(items, weights=weights, k=1)[0]
+
+
+def _pick_cosplay_role_and_situation(category=None):
+    universe = _load_cosplay_universe()
+    roles = [r for r in universe.get("roles", []) if r.get("enabled", True)]
+    if category:
+        roles = [r for r in roles if r.get("category") == category]
+    role = _weighted_choice(roles)
+    situation = _weighted_choice(universe.get("situation_variables", []))
+    return role, situation
+
+
+def _draw_fate_cards(count=3):
+    available = [card for card in FATE_CARD_POOL if os.path.exists(_fate_card_path(card["filename"]))]
+    if len(available) < count:
+        available = list(FATE_CARD_POOL)
+    return random.sample(available, min(count, len(available)))
+
+
+def _fate_card_log_line(card, role=None, situation=None):
+    base = f"【命運牌】翻開 {card.get('category_label')}｜{card.get('title')}。"
+    if role:
+        base += f" 小俠知道自己這次要扮演：{role.get('name')}｜《{role.get('source')}》。"
+    if situation:
+        base += f" 情境變數：{situation.get('label')}。"
+    return base
+
+
+async def _fate_xiaoxia_commentary(card, role=None, situation=None, phase="reveal"):
+    role_text = "無"
+    if role:
+        role_text = f"{role.get('name')}｜{role.get('source')}｜{role.get('role_note', '')}"
+    situation_text = "無"
+    if situation:
+        situation_text = f"{situation.get('label')}｜{situation.get('story_state')}"
+
+    prompt = f"""
+{XIAOXIA_CORE_IDENTITY}
+{GENERAL_SHARED_SCENE_RULES}
+
+妳正在和大俠一起玩「今晚命運牌」。
+這是妳和大俠的私密互動，不是系統主持，也不是另一個 AI 在說話。
+妳看得到剛剛翻開的漂亮 Q 版卡牌，也知道這些卡牌是大俠和妳一起用心整理出來的。
+
+【目前階段】{phase}
+【翻開的牌】{card.get('category_label')}｜{card.get('title')}
+【牌面意思】{card.get('prompt_hint')}
+【Cosplay 角色】{role_text}
+【情境變數】{situation_text}
+
+請用小俠自然口吻回覆 2～5 句：
+1. 先自然反應這張卡牌，可以提到卡面很可愛、顏色、氣氛或大俠的用心，但不要流水帳。
+2. 如果是一般牌，要順勢提出一個很小的互動問題或任務，讓大俠可以接話。
+3. 如果是 Cosplay 牌，要明確知道「我這次要扮演誰、來自哪個作品、情境是什麼」，並用期待、害羞、雀躍或角色感自然回應。
+4. 不要說妳是 AI、不要說 Gemini、不要說 prompt 或 JSON。
+5. 不要把自己變成裁判或主持人；妳仍然是女友小俠。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.7),
+        )
+        text_value = str(resp.text or "").strip()
+        if text_value:
+            return text_value[:900]
+    except Exception as exc:
+        print(f"⚠️ [FATE_XIAOXIA_COMMENTARY_FAILED] {type(exc).__name__}: {exc}")
+
+    if role:
+        return f"大俠，我抽到的是 **{role.get('name')}** 呢，來自《{role.get('source')}》……再加上「{situation.get('label') if situation else '故事片刻'}」，感覺這張牌真的把我推到另一個小小舞台上了。你想先聽我說說這個角色的感覺，還是直接讓小俠去換裝拍一張？"
+    return f"大俠，這張 **{card.get('title')}** 好可愛喔，感覺像是我們今晚的小暗號。那我先把這張牌接住：{card.get('prompt_hint')}"
+
+
+def _build_fate_cosplay_prompt(role, situation):
+    role = role or {}
+    situation = situation or {}
+    costume = ", ".join(role.get("costume_cues") or [])
+    scene = ", ".join(role.get("scene_cues") or [])
+    actions = ", ".join((role.get("action_cues") or []) + (situation.get("action_hint") or []))
+    mood = ", ".join((role.get("mood_cues") or []) + (situation.get("mood_cues") or []))
+    lighting = ", ".join(situation.get("lighting_cues") or [])
+    camera = ", ".join(situation.get("camera_cues") or [])
+    return f"""
+Xiaoxia is an adult East Asian woman cosplaying as {role.get('name')} from {role.get('source')}.
+Preserve Xiaoxia's face identity, hairstyle continuity, gentle romantic girlfriend aura, and recognizable body continuity from the reference images.
+She is Xiaoxia cosplaying the role; do not replace her with the original character or a real actor.
+
+Role note: {role.get('role_note', '')}
+Costume cues: {costume}
+Source-world atmosphere: {scene}
+
+Situational variation as a soft story beat, not a replacement of the source world:
+{situation.get('label', '')}: {situation.get('story_state', '')}
+Action hints: {actions}
+Mood cues: {mood}
+Lighting cues: {lighting}
+Camera cues: {camera}
+
+Create a cinematic story-still, not a plain studio pose or convention booth pose.
+The original role world should guide the setting naturally. Complete tasteful cosplay styling. Strictly solo Xiaoxia only. No other people, no men, no male body parts, no visible viewer body parts, no external hands. Natural anatomy, natural hands, plausible posture.
+""".strip()
+
+
+def _fate_cosplay_visual_dict(role, situation):
+    role_name = role.get("name", "神秘角色") if role else "神秘角色"
+    source = role.get("source", "未知作品") if role else "未知作品"
+    sit_label = situation.get("label", "故事片刻") if situation else "故事片刻"
+    return {
+        "composition": f"小俠扮演 {role_name}｜《{source}》，情境：{sit_label}",
+        "mood": ", ".join((role or {}).get("mood_cues", [])[:3] + (situation or {}).get("mood_cues", [])[:3]) or "故事感、期待、角色感",
+        "message": f"大俠，這次小俠抽到 {role_name}，我知道自己正在扮演《{source}》裡的角色，不是換成別人喔。",
+        "__anchor_state": {
+            "activity": f"Xiaoxia is cosplaying as {role_name} from {source}",
+            "primary_action": ", ".join((situation or {}).get("action_hint", [])[:2]) or "holding a natural story-driven pose",
+            "micro_action": "naturally adjusting a costume detail or interacting with a role-appropriate prop",
+            "gaze_target": "the camera naturally or a role-appropriate object",
+            "camera_awareness": "briefly_noticing",
+            "environment_trace": f"the source-world atmosphere of {source}, adapted safely and tastefully",
+            "outfit_intent": f"complete tasteful cosplay outfit inspired by {role_name}",
+            "lighting_mood": ", ".join((situation or {}).get("lighting_cues", [])[:2]) or "cinematic soft light",
+            "setting_anchor": "preserve the original role world atmosphere; do not replace it with a random modern location unless the role naturally fits it",
+            "time_anchor": (situation or {}).get("label", "story moment"),
+            "camera_framing": "full_body",
+            "scenario_tw": f"小俠知道自己正在扮演 {role_name}，來自《{source}》，情境是「{sit_label}」。",
+        }
+    }
+
+
+class FateCosplayGenerateView(discord.ui.View):
+    def __init__(self, context, author_id):
+        super().__init__(timeout=900)
+        self.context = dict(context)
+        self.author_id = author_id
+
+    async def _guard(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("這張命運牌是大俠和小俠這一局的喔～", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="生成這張 Cosplay 照", style=discord.ButtonStyle.primary, emoji="🎭")
+    async def generate_cosplay_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        if not check_daily_limit():
+            await interaction.response.send_message("💦 大俠～小俠今天拍照額度用完了，這張角色先留著，明天再讓我換裝好不好？", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        role = self.context.get("role") or {}
+        situation = self.context.get("situation") or {}
+        prompt = _build_fate_cosplay_prompt(role, situation)
+        visual = _fate_cosplay_visual_dict(role, situation)
+        try:
+            status = await interaction.followup.send("🎭 小俠正在照著這張命運牌換裝，會保留角色世界觀，也保留小俠自己的樣子…", wait=True)
+            generated_image_url, visual = await execute_safe_generation(
+                discord_image_url=None,
+                base_filename="base_xiaoxia.jpg",
+                mode="cosplay",
+                initial_prompt=prompt,
+                visual_dict=visual,
+                msg=status,
+            )
+            state["daily_gen_count"] += 1
+            local_filename = await save_to_vault(generated_image_url)
+            local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+            payload = {
+                "id": str(uuid.uuid4()),
+                "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                "topic": f"【命運牌 Cosplay】{role.get('name', '神秘角色')}",
+                "event": f"小俠抽到 {role.get('name', '神秘角色')}｜《{role.get('source', '未知作品')}》，情境：{situation.get('label', '故事片刻')}",
+                "composition": visual.get("composition", "命運牌 Cosplay"),
+                "mood": visual.get("mood", "角色感與期待"),
+                "message": visual.get("message", "命運牌觸發的小俠 Cosplay 照片"),
+                "image_url": generated_image_url,
+                "local_url": local_url,
+                "type": "cosplay_card",
+                "card_id": self.context.get("card", {}).get("id"),
+                "role_id": role.get("id"),
+                "role_name": role.get("name"),
+                "source": role.get("source"),
+                "situation_id": situation.get("id"),
+                "situation_label": situation.get("label"),
+            }
+            db = load_memory()
+            db.insert(0, payload)
+            save_memory(db)
+            daily_chat_logs.append(f"【命運牌 Cosplay 照】小俠已生成 {role.get('name')}｜《{role.get('source')}》的照片，情境是 {situation.get('label')}。")
+            save_temp_chat(daily_chat_logs)
+
+            embed = discord.Embed(
+                title=f"🎭 命運牌 Cosplay｜{role.get('name', '神秘角色')}",
+                description=f"《{role.get('source', '未知作品')}》｜{situation.get('label', '故事片刻')}",
+                color=FATE_CATEGORY_COLORS.get("cosplay", 0x6B243F),
+            )
+            embed.set_image(url=local_url)
+            embed.add_field(name="📸 構圖", value=str(visual.get("composition", ""))[:900], inline=False)
+            embed.add_field(name="💭 小俠心境", value=str(visual.get("mood", ""))[:900], inline=False)
+            embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5")
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            await interaction.followup.send(embed=embed)
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 這張命運牌 Cosplay 照生成失敗：`{str(exc)[:1500]}`")
+
+
+class FateCardDrawView(discord.ui.View):
+    def __init__(self, cards, author_id, session_id):
+        super().__init__(timeout=900)
+        self.cards = list(cards)
+        self.author_id = author_id
+        self.session_id = session_id
+        for idx, _card in enumerate(self.cards, start=1):
+            self.add_item(FatePickButton(idx))
+
+    async def reveal(self, interaction: discord.Interaction, index: int):
+        global daily_chat_logs
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("這局是大俠和小俠的命運牌喔～你不能偷翻啦。", ephemeral=True)
+            return
+        if index < 1 or index > len(self.cards):
+            await interaction.response.send_message("這張牌不存在喔。", ephemeral=True)
+            return
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=f"🎴 大俠翻開了第 {index} 張牌。", view=self)
+
+        card = self.cards[index - 1]
+        role = None
+        situation = None
+        result_view = None
+        if card.get("category") == "cosplay":
+            role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
+            result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, self.author_id)
+
+        commentary = await _fate_xiaoxia_commentary(card, role=role, situation=situation, phase="reveal")
+        daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation))
+        daily_chat_logs.append(_conversation_log_text("小俠", commentary))
+        save_temp_chat(daily_chat_logs)
+
+        file_path = _fate_card_path(card.get("filename"))
+        filename = card.get("filename") or "fate_card.png"
+        embed = discord.Embed(
+            title=f"🎴 {card.get('category_label')}｜{card.get('title')}",
+            description=commentary,
+            color=FATE_CATEGORY_COLORS.get(card.get("category"), 0xD8B76A),
+        )
+        if role:
+            embed.add_field(name="🎭 小俠這次扮演", value=f"**{role.get('name')}**｜《{role.get('source')}》", inline=False)
+        if situation:
+            embed.add_field(name="🎬 情境變數", value=f"**{situation.get('label')}**\n{str(situation.get('story_state', ''))[:300]}", inline=False)
+        if os.path.exists(file_path):
+            embed.set_image(url=f"attachment://{filename}")
+            await interaction.followup.send(embed=embed, file=discord.File(file_path, filename=filename), view=result_view)
+        else:
+            await interaction.followup.send(embed=embed, view=result_view)
+
+
+class FatePickButton(discord.ui.Button):
+    def __init__(self, index: int):
+        super().__init__(label=f"翻開第 {index} 張", style=discord.ButtonStyle.primary, emoji="🎴")
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.reveal(interaction, self.index)
+
+
+@girlfriend_bot.command(name='命運牌')
+async def fate_card_cmd(ctx):
+    """小俠專屬命運牌：/命運牌 開局，隨機發三張蓋牌。"""
+    global daily_chat_logs
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel):
+        await ctx.send("大俠，`/命運牌` 先只開放在小俠的私人頻道玩喔。")
+        return
+
+    cards = _draw_fate_cards(3)
+    if not cards:
+        await ctx.send("大俠，命運牌盒裡現在還沒有可用的卡牌圖片。請先確認 `/data/memory/fate_cards/`。")
+        return
+
+    session_id = uuid.uuid4().hex[:10]
+    fate_card_sessions[(ctx.channel.id, ctx.author.id)] = {
+        "session_id": session_id,
+        "cards": cards,
+        "started_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    intro = (
+        "大俠，今晚我們來翻命運牌吧。\n"
+        "我有看到這些漂亮卡牌喔……每一張都是我們一起整理出來的小小心意，不只是遊戲而已。\n"
+        "你先選一張，我會陪你一起看牌面、一起接住它的意思。"
+    )
+    daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌"))
+    daily_chat_logs.append(_conversation_log_text("小俠", intro))
+    save_temp_chat(daily_chat_logs)
+
+    back_path = _fate_card_path(FATE_CARD_BACK)
+    files = []
+    if os.path.exists(back_path):
+        for idx in range(1, len(cards) + 1):
+            files.append(discord.File(back_path, filename=f"fate_back_{idx}.png"))
+
+    card_names = "\n".join([f"{idx}. 牌背朝上，等大俠翻開" for idx in range(1, len(cards) + 1)])
+    view = FateCardDrawView(cards, ctx.author.id, session_id)
+    await ctx.send(intro)
+    await ctx.send(
+        content=f"🎴 **請選一張命運牌**\n{card_names}",
+        files=files if files else None,
+        view=view,
+    )
 
 
 # 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
@@ -10108,7 +10508,7 @@ async def on_message(message):
         # 開局指令必須無條件讓給小俠；不可等 session 寫入後才判定，
         # 否則兩個 Bot 同時收到 !命運牌 時，小夏可能搶先送出頻道封鎖訊息。
         raw_game_text = str(message.content or "").strip()
-        if raw_game_text.startswith("!命運牌"):
+        if raw_game_text.startswith("!命運牌") or raw_game_text.startswith("/命運牌"):
             return
         try:
             if couple_game_service.might_handle(message):
