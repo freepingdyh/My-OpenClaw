@@ -414,6 +414,7 @@ WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
 FATE_CARD_DIR = os.path.join(MEMORY_DIR, "fate_cards")
 FATE_CARD_BACK = "card_06_back.png"
+FATE_CARD_STATE_PATH = os.path.join(MEMORY_DIR, "fate_card_state.json")
 os.makedirs(MEMORY_UPDATE_BACKUP_DIR, exist_ok=True)
 os.makedirs(MEMORY_DAILY_BACKUP_DIR, exist_ok=True)
 os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
@@ -3545,6 +3546,125 @@ FATE_CATEGORY_COLORS = {
 }
 
 
+FATE_UNLOCK_THRESHOLDS = {
+    "sweet": 0,
+    "tacit": 0,
+    "story": 0,
+    "mission": 10,
+    "cosplay": 20,
+}
+
+FATE_SCORE_BY_CATEGORY = {
+    "sweet": 1,
+    "story": 1,
+    "mission": 2,
+    "tacit": 2,
+    "cosplay": 2,
+}
+
+
+def _load_fate_card_state():
+    data = _load_json_file_safe(FATE_CARD_STATE_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("users", {})
+    return data
+
+
+def _save_fate_card_state(data):
+    if not isinstance(data, dict):
+        data = {"users": {}}
+    data.setdefault("users", {})
+    try:
+        _save_json_file_atomic(FATE_CARD_STATE_PATH, data)
+    except Exception:
+        with open(FATE_CARD_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _fate_user_state(user_id):
+    data = _load_fate_card_state()
+    users = data.setdefault("users", {})
+    key = str(user_id)
+    user_state = users.setdefault(key, {
+        "harmony_score": 0,
+        "rounds_played": 0,
+        "revealed_cards": 0,
+        "cosplay_photos": 0,
+        "history": [],
+    })
+    user_state.setdefault("harmony_score", 0)
+    user_state.setdefault("rounds_played", 0)
+    user_state.setdefault("revealed_cards", 0)
+    user_state.setdefault("cosplay_photos", 0)
+    user_state.setdefault("history", [])
+    return data, user_state
+
+
+def _fate_get_score(user_id):
+    _data, user_state = _fate_user_state(user_id)
+    try:
+        return int(user_state.get("harmony_score", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _fate_unlocked_categories(score):
+    try:
+        score = int(score or 0)
+    except Exception:
+        score = 0
+    return {cat for cat, threshold in FATE_UNLOCK_THRESHOLDS.items() if score >= threshold}
+
+
+def _fate_unlock_text(score):
+    unlocked = _fate_unlocked_categories(score)
+    labels = []
+    for cat, label in [("sweet", "甜蜜"), ("tacit", "默契"), ("story", "故事"), ("mission", "小任務"), ("cosplay", "Cosplay")]:
+        if cat in unlocked:
+            labels.append(label)
+    next_items = []
+    for cat, threshold in sorted(FATE_UNLOCK_THRESHOLDS.items(), key=lambda x: x[1]):
+        if cat not in unlocked:
+            label = {"mission": "小任務牌", "cosplay": "Cosplay 牌"}.get(cat, cat)
+            next_items.append(f"{label}：默契值 {threshold}")
+    result = f"已解鎖：{'、'.join(labels) if labels else '甜蜜、默契、故事'}"
+    if next_items:
+        result += f"｜下一階段：{next_items[0]}"
+    return result
+
+
+def _fate_add_score(user_id, delta, reason, card=None):
+    data, user_state = _fate_user_state(user_id)
+    try:
+        old_score = int(user_state.get("harmony_score", 0) or 0)
+    except Exception:
+        old_score = 0
+    delta = int(delta or 0)
+    new_score = max(0, old_score + delta)
+    user_state["harmony_score"] = new_score
+    if reason == "round_started":
+        user_state["rounds_played"] = int(user_state.get("rounds_played", 0) or 0) + 1
+    if reason == "card_revealed":
+        user_state["revealed_cards"] = int(user_state.get("revealed_cards", 0) or 0) + 1
+    if reason == "cosplay_photo_generated":
+        user_state["cosplay_photos"] = int(user_state.get("cosplay_photos", 0) or 0) + 1
+    history = user_state.setdefault("history", [])
+    history.append({
+        "at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "delta": delta,
+        "old_score": old_score,
+        "new_score": new_score,
+        "reason": reason,
+        "card_id": (card or {}).get("id"),
+        "card_title": (card or {}).get("title"),
+        "category": (card or {}).get("category"),
+    })
+    user_state["history"] = history[-120:]
+    _save_fate_card_state(data)
+    return old_score, new_score, delta
+
+
 def _fate_card_path(filename: str) -> str:
     return os.path.join(FATE_CARD_DIR, filename)
 
@@ -3578,11 +3698,51 @@ def _pick_cosplay_role_and_situation(category=None):
     return role, situation
 
 
-def _draw_fate_cards(count=3):
-    available = [card for card in FATE_CARD_POOL if os.path.exists(_fate_card_path(card["filename"]))]
+def _draw_fate_cards(count=3, score=None, include_all=False):
+    unlocked = set(FATE_UNLOCK_THRESHOLDS) if include_all else _fate_unlocked_categories(score or 0)
+    available = [
+        card for card in FATE_CARD_POOL
+        if card.get("category") in unlocked and os.path.exists(_fate_card_path(card["filename"]))
+    ]
+    if len(available) < count:
+        available = [card for card in FATE_CARD_POOL if os.path.exists(_fate_card_path(card["filename"]))]
     if len(available) < count:
         available = list(FATE_CARD_POOL)
     return random.sample(available, min(count, len(available)))
+
+
+async def _send_fate_round(channel, author_id, intro_text=None, include_all=False):
+    score = _fate_get_score(author_id)
+    cards = _draw_fate_cards(3, score=score, include_all=include_all)
+    session_id = uuid.uuid4().hex[:10]
+    fate_card_sessions[(channel.id, author_id)] = {
+        "session_id": session_id,
+        "cards": cards,
+        "started_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "score_at_start": score,
+    }
+    _fate_add_score(author_id, 0, "round_started")
+
+    if intro_text:
+        await channel.send(intro_text)
+
+    back_path = _fate_card_path(FATE_CARD_BACK)
+    files = []
+    if os.path.exists(back_path):
+        for idx in range(1, len(cards) + 1):
+            files.append(discord.File(back_path, filename=f"fate_back_{idx}.png"))
+
+    card_names = "\n".join([f"{idx}. 牌背朝上，等大俠翻開" for idx in range(1, len(cards) + 1)])
+    view = FateCardDrawView(cards, author_id, session_id)
+    await channel.send(
+        content=(
+            f"🎴 **請選一張命運牌**\n"
+            f"目前默契值：**{score}**｜{_fate_unlock_text(score)}\n"
+            f"{card_names}"
+        ),
+        files=files if files else None,
+        view=view,
+    )
 
 
 def _fate_card_log_line(card, role=None, situation=None):
@@ -3713,6 +3873,9 @@ class FateCosplayGenerateView(discord.ui.View):
         super().__init__(timeout=900)
         self.context = dict(context)
         self.author_id = author_id
+        self.add_item(FateNextRoundButton(author_id))
+        self.add_item(FateTalkButton(author_id))
+        self.add_item(FateEndButton(author_id))
 
     async def _guard(self, interaction):
         if interaction.user.id != self.author_id:
@@ -3766,7 +3929,10 @@ class FateCosplayGenerateView(discord.ui.View):
             db = load_memory()
             db.insert(0, payload)
             save_memory(db)
-            daily_chat_logs.append(f"【命運牌 Cosplay 照】小俠已生成 {role.get('name')}｜《{role.get('source')}》的照片，情境是 {situation.get('label')}。")
+            old_score, new_score, score_delta = _fate_add_score(
+                self.author_id, 3, "cosplay_photo_generated", card=self.context.get("card", {})
+            )
+            daily_chat_logs.append(f"【命運牌 Cosplay 照】小俠已生成 {role.get('name')}｜《{role.get('source')}》的照片，情境是 {situation.get('label')}。默契值 +{score_delta}，目前 {new_score}。")
             save_temp_chat(daily_chat_logs)
 
             embed = discord.Embed(
@@ -3777,7 +3943,7 @@ class FateCosplayGenerateView(discord.ui.View):
             embed.set_image(url=local_url)
             embed.add_field(name="📸 構圖", value=str(visual.get("composition", ""))[:900], inline=False)
             embed.add_field(name="💭 小俠心境", value=str(visual.get("mood", ""))[:900], inline=False)
-            embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5")
+            embed.set_footer(text=f"默契值: {old_score} → {new_score} (+{score_delta}) | 今日額度: {state['daily_gen_count']}/12 | Seedream v4.5")
             try:
                 await status.delete()
             except Exception:
@@ -3785,6 +3951,71 @@ class FateCosplayGenerateView(discord.ui.View):
             await interaction.followup.send(embed=embed)
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 這張命運牌 Cosplay 照生成失敗：`{str(exc)[:1500]}`")
+
+
+class FateAfterRevealView(discord.ui.View):
+    def __init__(self, author_id):
+        super().__init__(timeout=900)
+        self.author_id = author_id
+        self.add_item(FateNextRoundButton(author_id))
+        self.add_item(FateTalkButton(author_id))
+        self.add_item(FateEndButton(author_id))
+
+
+class FateNextRoundButton(discord.ui.Button):
+    def __init__(self, author_id):
+        super().__init__(label="再抽一輪", style=discord.ButtonStyle.success, emoji="🎴")
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("這是大俠和小俠的命運牌喔～", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=False)
+        score = _fate_get_score(self.author_id)
+        intro = (
+            f"大俠，那我把牌重新洗一下。現在默契值是 **{score}**，"
+            "我們不急著破關，就像慢慢翻一封小信一樣，再挑一張看看。"
+        )
+        daily_chat_logs.append(_conversation_log_text("大俠", "命運牌：再抽一輪"))
+        daily_chat_logs.append(_conversation_log_text("小俠", intro))
+        save_temp_chat(daily_chat_logs)
+        await _send_fate_round(interaction.channel, self.author_id, intro_text=intro)
+
+
+class FateTalkButton(discord.ui.Button):
+    def __init__(self, author_id):
+        super().__init__(label="和小俠聊這張牌", style=discord.ButtonStyle.secondary, emoji="💬")
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("這張牌是大俠和小俠的悄悄話喔～", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "大俠，我們先不急著翻下一張。你可以直接回我這張牌讓你想到什麼，我會照著剛剛的牌意接下去聊。",
+            ephemeral=False,
+        )
+
+
+class FateEndButton(discord.ui.Button):
+    def __init__(self, author_id):
+        super().__init__(label="今天先到這", style=discord.ButtonStyle.secondary, emoji="🌙")
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("這局是大俠和小俠的命運牌喔～", ephemeral=True)
+            return
+        score = _fate_get_score(self.author_id)
+        for child in self.view.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self.view)
+        text = f"好，今天命運牌先收到這裡。默契值現在是 **{score}**，這些牌意我會記得，不會像重新開始一樣全部歸零。"
+        daily_chat_logs.append(_conversation_log_text("大俠", "命運牌：今天先到這"))
+        daily_chat_logs.append(_conversation_log_text("小俠", text))
+        save_temp_chat(daily_chat_logs)
+        await interaction.followup.send(text)
 
 
 class FateCardDrawView(discord.ui.View):
@@ -3808,7 +4039,7 @@ class FateCardDrawView(discord.ui.View):
         card = self.cards[index - 1]
         role = None
         situation = None
-        result_view = None
+        result_view = FateAfterRevealView(self.author_id)
         if card.get("category") == "cosplay":
             role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
             result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, self.author_id)
@@ -3828,6 +4059,9 @@ class FateCardDrawView(discord.ui.View):
 
         file_path = _fate_card_path(card.get("filename"))
         filename = card.get("filename") or "fate_card.png"
+
+        score_delta = int(FATE_SCORE_BY_CATEGORY.get(card.get("category"), 1) or 1)
+        old_score, new_score, score_delta = _fate_add_score(self.author_id, score_delta, "card_revealed", card=card)
 
         # 先用不需要 LLM 的小俠 fallback 文字送出牌面圖；
         # Gemini 慢或失敗時，大俠仍然會立刻看到翻牌結果。
@@ -3877,7 +4111,7 @@ class FateCardDrawView(discord.ui.View):
         except Exception as exc:
             print(f"⚠️ [FATE_COMMENTARY_EDIT_FAILED] {type(exc).__name__}: {exc}")
 
-        daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation))
+        daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation) + f" 默契值 +{score_delta}，目前 {new_score}。")
         daily_chat_logs.append(_conversation_log_text("小俠", commentary))
         save_temp_chat(daily_chat_logs)
 
@@ -3892,48 +4126,32 @@ class FatePickButton(discord.ui.Button):
 
 
 @girlfriend_bot.command(name='命運牌')
-async def fate_card_cmd(ctx):
+async def fate_card_cmd(ctx, *, mode: str = ""):
     """小俠專屬命運牌：/命運牌 開局，隨機發三張蓋牌。"""
     global daily_chat_logs
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
         await ctx.send("大俠，`/命運牌` 先只開放在小俠的私人頻道玩喔。")
         return
 
-    cards = _draw_fate_cards(3)
-    if not cards:
+    if not any(os.path.exists(_fate_card_path(card.get("filename"))) for card in FATE_CARD_POOL):
         await ctx.send("大俠，命運牌盒裡現在還沒有可用的卡牌圖片。請先確認 `/data/memory/fate_cards/`。")
         return
 
-    session_id = uuid.uuid4().hex[:10]
-    fate_card_sessions[(ctx.channel.id, ctx.author.id)] = {
-        "session_id": session_id,
-        "cards": cards,
-        "started_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
+    score = _fate_get_score(ctx.author.id)
+    include_all = any(token in str(mode or "") for token in ("全卡池", "測試", "test", "all"))
     intro = (
         "大俠，今晚我們來翻命運牌吧。\n"
         "我有看到這些漂亮卡牌喔……每一張都是我們一起整理出來的小小心意，不只是遊戲而已。\n"
+        f"現在默契值是 **{score}**，{_fate_unlock_text(score)}。"
         "你先選一張，我會陪你一起看牌面、一起接住它的意思。"
     )
-    daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌"))
+    if include_all:
+        intro += "\n（這輪使用全卡池測試模式，不影響默契值累積。）"
+    daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌" + (f" {mode}" if mode else "")))
     daily_chat_logs.append(_conversation_log_text("小俠", intro))
     save_temp_chat(daily_chat_logs)
 
-    back_path = _fate_card_path(FATE_CARD_BACK)
-    files = []
-    if os.path.exists(back_path):
-        for idx in range(1, len(cards) + 1):
-            files.append(discord.File(back_path, filename=f"fate_back_{idx}.png"))
-
-    card_names = "\n".join([f"{idx}. 牌背朝上，等大俠翻開" for idx in range(1, len(cards) + 1)])
-    view = FateCardDrawView(cards, ctx.author.id, session_id)
-    await ctx.send(intro)
-    await ctx.send(
-        content=f"🎴 **請選一張命運牌**\n{card_names}",
-        files=files if files else None,
-        view=view,
-    )
+    await _send_fate_round(ctx.channel, ctx.author.id, intro_text=intro, include_all=include_all)
 
 
 # 🌟 [修改] 給你全世界頻道：分離旅遊與購物狀態
