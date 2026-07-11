@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.47"
+LOBSTER_VERSION = "1.4.48"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -5256,9 +5256,15 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "event": story["event"],
             "composition": visual["composition"],
             "mood": visual["mood"],
+            "mood_summary": visual.get("mood", ""),
             "message": visual["message"],
             "image_url": generated_image_url,
-            "local_url": local_url
+            "local_url": local_url,
+            "local_filename": local_filename,
+            "local_path": os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,
+            "type": "cosplay",
+            "source_mode": "cosplay",
+            "prompt_base": scene_prompt,
         }
         db = load_memory()
         db.insert(0, payload)
@@ -5272,10 +5278,14 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image")
 
         await msg.delete()
-        new_msg = await ctx.send(embed=embed) 
-        await new_msg.add_reaction("➕") 
-        await new_msg.add_reaction("🎲") 
-        await new_msg.add_reaction("🗑️") 
+        result_view = PhotoResultView(payload)
+        new_msg = await ctx.send(embed=embed, view=result_view)
+        payload["message_id"] = new_msg.id
+        photo_generation_contexts[new_msg.id] = payload
+        result_view.context = payload
+        await new_msg.add_reaction("➕")
+        await new_msg.add_reaction("🎲")
+        await new_msg.add_reaction("🗑️")
     except Exception as e:
         await msg.edit(content=f"⚠️ 狀況：`{str(e)}`")
 
@@ -6613,6 +6623,108 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
 
 
+def _seedream_repair_prompt(custom_prompt):
+    return (
+        "Use Images 1-9 as identity reference sheets for Xiaoxia. Image 10 is the exact generated photo that needs correction. "
+        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. "
+        "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. "
+        "Apply only the correction requested by Daxia. "
+        "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people. "
+        "If correcting anatomy, keep exactly two arms and two hands only, connected naturally to the correct wrists and arms. No duplicate hands, no extra limbs, no malformed fingers. "
+        "\n\nDAIXA REPAIR REQUEST:\n"
+        + str(custom_prompt or "").strip()
+    )
+
+
+async def generate_seedream_v45_repair(original_image_path, repair_request, enable_safety_checker=True):
+    """Seedream v4.5 修正版：Image 10 是要修的原圖，只改指定瑕疵，保留構圖與氛圍。"""
+    if not original_image_path:
+        raise RuntimeError("REPAIR_IMAGE_PATH_NONE：沒有可修正的原圖。")
+    fal_client = _get_fal_client()
+    image_urls = await _seedream_upload_reference_images()
+    image_urls.append(await _seedream_upload_single_file(original_image_path))
+    image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
+    final_prompt = _seedream_repair_prompt(repair_request)
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"🩹 [SEEDREAM_REPAIR_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V45_MODEL_ID,
+            arguments={
+                "prompt": final_prompt,
+                "image_urls": image_urls,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "max_images": 1,
+                "enable_safety_checker": bool(enable_safety_checker),
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images:
+        return f"Seedream v4.5 修圖沒有回傳圖片：{result}"
+    first = images[0]
+    if isinstance(first, dict) and first.get("url"):
+        return first["url"]
+    return f"Seedream v4.5 修圖圖片欄位格式異常：{result}"
+
+
+async def _ensure_context_local_path(context):
+    local_path = str(context.get("local_path") or "").strip()
+    if local_path and os.path.exists(local_path):
+        return local_path
+    local_filename = str(context.get("local_filename") or "").strip()
+    if local_filename:
+        candidate = os.path.join(OUTPUT_DIR, os.path.basename(local_filename))
+        if os.path.exists(candidate):
+            return candidate
+    image_url = context.get("local_url") or context.get("image_url")
+    if not image_url:
+        raise RuntimeError("這張照片沒有可修正的圖片 URL。")
+    downloaded_path, _downloaded_url = await _download_url_to_output(image_url, prefix="repair_src")
+    return downloaded_path
+
+
+async def _repair_photo_context(context, repair_request, msg=None):
+    source_path = await _ensure_context_local_path(context)
+    if msg:
+        await msg.edit(content="🩹 小俠正在保留原本構圖與氛圍，只修大俠指定的地方…")
+    generated_image_url = await generate_seedream_v45_repair(source_path, repair_request, enable_safety_checker=True)
+    if not generated_image_url or not str(generated_image_url).startswith("http"):
+        raise RuntimeError(f"修圖失敗：{generated_image_url}")
+
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+
+    repaired = dict(context)
+    repaired.update({
+        "id": str(uuid.uuid4()),
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "repair_request": str(repair_request or "").strip(),
+        "repaired_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "composition": context.get("composition") or context.get("scene_summary") or "修正版照片",
+        "mood_summary": context.get("mood_summary") or context.get("mood") or "保留原本氛圍的修正版",
+        "message": context.get("message") or "大俠，這張是我照著你的修正要求整理過的版本。",
+        "source_mode": context.get("source_mode", context.get("type", "photo_repair")),
+        "type": context.get("type", context.get("source_mode", "photo")),
+    })
+    return repaired
+
+
+
 async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference, current_outfit=None, keep_today_outfit=False, pending_wardrobe_name=""):
     """將指定文字或最近 20 句對話整理成 /photo 可用的結構化場景。"""
     recent_context = "\n".join(daily_chat_logs[-20:])
@@ -7081,6 +7193,139 @@ class DiaryOverwriteConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="已取消，沒有覆蓋 Diary 圖片。", view=None)
 
 
+def _photo_context_old_url(context):
+    return context.get("local_url") or context.get("image_url")
+
+
+async def _overwrite_generated_photo(original_context, repaired_context, message=None):
+    old_url = _photo_context_old_url(original_context)
+    repaired_payload = _photo_db_payload(repaired_context)
+
+    # 交換日記：同步 HTML 與照片 DB。
+    if str(original_context.get("type") or "").lower() == "diary" or "交換日記" in str(original_context.get("topic", "")):
+        diary_date = _extract_diary_date_from_title(original_context.get("topic")) or _extract_diary_date_from_title((getattr(message, "embeds", [None]) or [None])[0].title if message and getattr(message, "embeds", None) else "")
+        if diary_date:
+            replaced, html_old_url = replace_completed_diary_image(
+                diary_date,
+                repaired_context.get("local_url") or repaired_context.get("image_url"),
+                description=repaired_context.get("repair_request") or repaired_context.get("composition", "修正版交換日記照片"),
+                old_url_hint=old_url,
+            )
+            if replaced:
+                _safe_delete_vault_image(html_old_url or old_url)
+            else:
+                _replace_photo_db_record(old_url, repaired_payload, diary_date=diary_date)
+        else:
+            _replace_photo_db_record(old_url, repaired_payload)
+    else:
+        _replace_photo_db_record(old_url, repaired_payload)
+
+    if message:
+        repaired_context["message_id"] = message.id
+        view = PhotoResultView(repaired_context)
+        await _edit_photo_message_with_file(message, repaired_context, view=view, title_prefix="🩹 修正版已覆蓋")
+        photo_generation_contexts[message.id] = repaired_context
+
+    _safe_delete_vault_image(old_url)
+    return repaired_context
+
+
+class PhotoRepairModal(discord.ui.Modal):
+    def __init__(self, context):
+        super().__init__(title="修正這張照片")
+        self.context = dict(context)
+        self.repair_request = discord.ui.TextInput(
+            label="請描述要修正什麼",
+            placeholder="例如：移除多出來的第三隻手，保留構圖、表情、服裝與光線。",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=True,
+        )
+        self.add_item(self.repair_request)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        request_text = str(self.repair_request.value or "").strip()
+        if not request_text:
+            await interaction.response.send_message("修正內容不能是空白喔。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        status = None
+        try:
+            status = await interaction.followup.send("🩹 收到，大俠。小俠先保留這張的構圖與氣氛，只修你指定的地方…", wait=True)
+            repaired_context = await _repair_photo_context(self.context, request_text, msg=status)
+            view = PhotoRepairPreviewView(self.context, repaired_context)
+            file, filename = _photo_discord_file(repaired_context)
+            embed = _build_photo_embed(repaired_context, title_prefix="🩹 修正版預覽", attachment_filename=filename if file else None)
+            embed.add_field(name="修正要求", value=request_text[:900], inline=False)
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            if file:
+                await interaction.followup.send(embed=embed, file=file, view=view)
+            else:
+                await interaction.followup.send(embed=embed, view=view)
+        except Exception as exc:
+            if status:
+                try:
+                    await status.edit(content=f"⚠️ 修正失敗：`{str(exc)[:1500]}`")
+                    return
+                except Exception:
+                    pass
+            await interaction.followup.send(f"⚠️ 修正失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+
+class PhotoRepairPreviewView(discord.ui.View):
+    def __init__(self, original_context, repaired_context):
+        super().__init__(timeout=86400)
+        self.original_context = dict(original_context)
+        self.repaired_context = dict(repaired_context)
+
+    @discord.ui.button(label="✅ 採用並覆蓋原圖", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        try:
+            # 預覽訊息是修正版；原圖訊息 ID 存在 original_context 時，優先覆蓋原圖訊息。
+            target_message = None
+            original_message_id = self.original_context.get("message_id")
+            if original_message_id:
+                try:
+                    target_message = await interaction.channel.fetch_message(int(original_message_id))
+                except Exception:
+                    target_message = None
+            if target_message is None:
+                target_message = interaction.message
+            updated = await _overwrite_generated_photo(self.original_context, self.repaired_context, message=target_message)
+            self.original_context = dict(updated)
+            self.repaired_context = dict(updated)
+            for child in self.children:
+                child.disabled = True
+            await interaction.followup.send("✅ 已採用修正版並覆蓋原圖。", ephemeral=True)
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 覆蓋失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="🩹 再修一次", style=discord.ButtonStyle.primary)
+    async def repair_again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PhotoRepairModal(self.repaired_context))
+
+    @discord.ui.button(label="🎲 還是重擲", style=discord.ButtonStyle.secondary)
+    async def reroll_instead(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = PhotoResultView(self.original_context)
+        await view.reroll(interaction, button)
+
+    @discord.ui.button(label="🗑️ 放棄修正版", style=discord.ButtonStyle.danger)
+    async def abandon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _safe_delete_vault_image(self.repaired_context.get("local_url") or self.repaired_context.get("image_url"))
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="🗑️ 已放棄這張修正版，原圖保留。", view=self)
+
+
+
 class PhotoResultView(discord.ui.View):
     def __init__(self, context):
         super().__init__(timeout=86400)
@@ -7136,6 +7381,10 @@ class PhotoResultView(discord.ui.View):
                 await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="📸 骰子取代")
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 骰子取代失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
+    async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PhotoRepairModal(self.context))
 
     @discord.ui.button(label="收藏到衣櫃", style=discord.ButtonStyle.success)
     async def save_wardrobe(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7800,7 +8049,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "message": combined_message,
                 "image_url": up_img,
                 "local_url": local_url,
-                "type": "diary" 
+                "local_filename": os.path.basename(local_url.split("/gallery/", 1)[1]) if "/gallery/" in str(local_url) else None,
+                "local_path": os.path.join(OUTPUT_DIR, os.path.basename(local_url.split("/gallery/", 1)[1])) if "/gallery/" in str(local_url) else None,
+                "type": "diary",
+                "source_mode": "diary",
+                "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
             }
             db = load_memory()
             db.insert(0, diary_photo_payload)
@@ -7842,7 +8095,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
                 embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}")
                 # 🌟 修改這裡：綁定 msg 變數並加上三個按鈕
-                diary_msg = await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed)
+                result_view = PhotoResultView(diary_photo_payload)
+                diary_msg = await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed, view=result_view)
+                diary_photo_payload["message_id"] = diary_msg.id
+                photo_generation_contexts[diary_msg.id] = diary_photo_payload
+                result_view.context = diary_photo_payload
                 await diary_msg.add_reaction("➕")
                 await diary_msg.add_reaction("🎲")
                 await diary_msg.add_reaction("🗑️")
