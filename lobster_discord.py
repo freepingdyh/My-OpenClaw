@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.48"
+LOBSTER_VERSION = "1.4.51"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3676,11 +3676,142 @@ def _fate_card_path(filename: str) -> str:
     return os.path.join(FATE_CARD_DIR, filename)
 
 
-def _load_cosplay_universe():
-    data = _load_json_file_safe(COSPLAY_ROLES_PATH, {})
+VIBE_LEVEL_MAP = {
+    "清新": {"level": 1, "en": "fresh"},
+    "自然": {"level": 2, "en": "natural"},
+    "戲劇": {"level": 3, "en": "dramatic"},
+    "性感": {"level": 4, "en": "sensual"},
+    "魅惑": {"level": 5, "en": "alluring"},
+    "極致": {"level": 6, "en": "intense"},
+}
+VIBE_KEYWORDS = {
+    "清新": ["清新", "fresh"],
+    "自然": ["自然", "natural"],
+    "戲劇": ["戲劇", "dramatic"],
+    "性感": ["性感", "sensual", "sexy"],
+    "魅惑": ["魅惑", "alluring", "誘惑", "撫媚"],
+    "極致": ["極致", "intense", "高張力", "拉滿"],
+}
+
+
+def _extract_vibe_mode(text_value: str):
+    hay = str(text_value or "").strip().lower()
+    for zh, aliases in VIBE_KEYWORDS.items():
+        if any(alias.lower() in hay for alias in aliases):
+            cfg = VIBE_LEVEL_MAP.get(zh, {})
+            return {"zh": zh, "en": cfg.get("en", "natural"), "level": int(cfg.get("level", 2) or 2)}
+    return None
+
+
+def _compose_vibe_profile(vibe_mode, role=None, situation=None):
+    vibe = vibe_mode or {"zh": "自然", "en": "natural", "level": 2}
+    role_intensity = int((role or {}).get("base_vibe_intensity", vibe.get("level", 2)) or vibe.get("level", 2))
+    situation_intensity = int((situation or {}).get("situation_intensity", vibe.get("level", 2)) or vibe.get("level", 2))
+    final_score = round(role_intensity * 0.6 + situation_intensity * 0.4, 2)
+    return {
+        "zh": vibe.get("zh", "自然"),
+        "en": vibe.get("en", "natural"),
+        "target_level": int(vibe.get("level", 2) or 2),
+        "role_level": role_intensity,
+        "situation_level": situation_intensity,
+        "final_score": final_score,
+        "role_tags": list((role or {}).get("vibe_tags") or []),
+        "situation_tags": list((situation or {}).get("situation_tags") or []),
+    }
+
+
+def _infer_role_vibe_defaults(role):
+    role = dict(role or {})
+    text_blob = " ".join([
+        str(role.get("name", "")),
+        str(role.get("source", "")),
+        str(role.get("role_note", "")),
+        " ".join(role.get("mood_cues") or []),
+        " ".join(role.get("scene_cues") or []),
+        " ".join(role.get("costume_cues") or []),
+    ])
+    score = 3
+    category = str(role.get("category", ""))
+    if category in {"movie", "game"}:
+        score = 4
+    elif category in {"literature_wuxia", "profession"}:
+        score = 3
+    low_keys = ["清純", "純真", "溫柔", "村莊", "學生", "花店", "可愛", "元氣", "少女", "女僕", "知性"]
+    mid_keys = ["英氣", "冒險", "神秘", "高貴", "騎士", "巫女", "公主", "歌姬", "俠", "女王"]
+    high_keys = ["魅惑", "性感", "豔后", "高衩", "舞姬", "魔女", "特務", "危險", "瘋狂", "復仇", "權謀", "黑暗"]
+    extreme_keys = ["絕世", "暴力", "致命", "魔性", "宇宙最強", "混沌", "黑寡婦", "Bayonetta", "Harley", "Cleopatra"]
+    if any(k in text_blob for k in low_keys):
+        score = min(score, 2) if score <= 3 else 3
+    if any(k in text_blob for k in mid_keys):
+        score = max(score, 3)
+    if any(k in text_blob for k in high_keys):
+        score = max(score, 4)
+    if any(k in text_blob for k in extreme_keys):
+        score = max(score, 5)
+    if any(k in text_blob for k in ["清冷", "冷冽", "無口"]):
+        score = max(score, 3)
+    score = max(1, min(6, int(score)))
+    tag_map = {
+        1: ["fresh", "light", "gentle"],
+        2: ["natural", "soft", "clean"],
+        3: ["dramatic", "poised", "story-driven"],
+        4: ["sensual", "glamorous", "confident"],
+        5: ["alluring", "magnetic", "seductive"],
+        6: ["intense", "high-impact", "striking"],
+    }
+    role.setdefault("base_vibe_intensity", score)
+    role.setdefault("vibe_tags", tag_map.get(score, ["natural"]))
+    return role
+
+
+def _infer_situation_vibe_defaults(situation):
+    situation = dict(situation or {})
+    text_blob = " ".join([
+        str(situation.get("label", "")),
+        str(situation.get("story_state", "")),
+        " ".join(situation.get("mood_cues") or []),
+        " ".join(situation.get("lighting_cues") or []),
+        " ".join(situation.get("camera_cues") or []),
+        " ".join(situation.get("action_hint") or []),
+    ])
+    score = 3
+    if any(k in text_blob for k in ["安心地沉睡", "午後", "安心", "幸福", "發呆", "柔和", "獨處", "慵懶"]):
+        score = 1 if "沉睡" in text_blob else 2
+    if any(k in text_blob for k in ["出發前一刻", "夜晚獨處", "秘密被發現前一秒", "戰鬥後的喘息"]):
+        score = max(score, 3)
+    if any(k in text_blob for k in ["晨光梳妝", "更衣後的猶豫", "微涼夜晚的披肩", "水霧中的回眸", "回眸"]):
+        score = max(score, 4)
+    if any(k in text_blob for k in ["緊張", "戲劇", "高對比", "懸疑"]):
+        score = max(score, 4)
+    if any(k in text_blob for k in ["極致", "拉滿"]):
+        score = max(score, 6)
+    score = max(1, min(6, int(score)))
+    tag_map = {
+        1: ["restful", "fresh", "soft"],
+        2: ["natural", "warm", "everyday"],
+        3: ["dramatic", "storybeat", "cinematic"],
+        4: ["sensual", "stylized", "charged"],
+        5: ["alluring", "magnetic", "misty"],
+        6: ["intense", "high-impact", "showpiece"],
+    }
+    situation.setdefault("situation_intensity", score)
+    situation.setdefault("situation_tags", tag_map.get(score, ["cinematic"]))
+    return situation
+
+
+def _normalize_cosplay_universe(data):
     if not isinstance(data, dict):
         return {"roles": [], "situation_variables": []}
+    roles = [_infer_role_vibe_defaults(r) for r in (data.get("roles") or [])]
+    situations = [_infer_situation_vibe_defaults(s) for s in (data.get("situation_variables") or [])]
+    data["roles"] = roles
+    data["situation_variables"] = situations
     return data
+
+
+def _load_cosplay_universe():
+    data = _load_json_file_safe(COSPLAY_ROLES_PATH, {})
+    return _normalize_cosplay_universe(data)
 
 
 def _weighted_choice(items):
@@ -3695,13 +3826,36 @@ def _weighted_choice(items):
     return random.choices(items, weights=weights, k=1)[0]
 
 
-def _pick_cosplay_role_and_situation(category=None):
+def _weighted_choice_with_vibe(items, target_level, field_name):
+    if not items:
+        return None
+    scored_weights = []
+    for item in items:
+        base_weight = 1.0
+        try:
+            base_weight = float(item.get("weight", 1) or 1)
+        except Exception:
+            base_weight = 1.0
+        level = int(item.get(field_name, target_level) or target_level)
+        diff = abs(level - target_level)
+        vibe_bonus = max(0.35, 2.0 - 0.35 * diff)
+        scored_weights.append(base_weight * vibe_bonus)
+    return random.choices(items, weights=scored_weights, k=1)[0]
+
+
+def _pick_cosplay_role_and_situation(category=None, vibe_mode=None):
     universe = _load_cosplay_universe()
     roles = [r for r in universe.get("roles", []) if r.get("enabled", True)]
     if category:
         roles = [r for r in roles if r.get("category") == category]
-    role = _weighted_choice(roles)
-    situation = _weighted_choice(universe.get("situation_variables", []))
+    situations = list(universe.get("situation_variables", []))
+    if vibe_mode:
+        target = int(vibe_mode.get("level", 2) or 2)
+        role = _weighted_choice_with_vibe(roles, target, "base_vibe_intensity")
+        situation = _weighted_choice_with_vibe(situations, target, "situation_intensity")
+    else:
+        role = _weighted_choice(roles)
+        situation = _weighted_choice(situations)
     return role, situation
 
 
@@ -3764,7 +3918,7 @@ async def _send_fate_round(channel, author_id, intro_text=None, include_all=Fals
     )
 
 
-async def _send_direct_cosplay_fate(channel, author_id, intro_text=None):
+async def _send_direct_cosplay_fate(channel, author_id, intro_text=None, vibe_mode=None):
     score = _fate_get_score(author_id)
     cards = _draw_fate_cards_by_category("cosplay", count=1)
     if not cards:
@@ -3779,13 +3933,15 @@ async def _send_direct_cosplay_fate(channel, author_id, intro_text=None):
         "started_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "score_at_start": score,
         "direct_mode": "cosplay",
+        "vibe_mode": vibe_mode or None,
     }
     _fate_add_score(author_id, 0, "round_started")
 
     if intro_text:
         await channel.send(intro_text)
 
-    role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
+    role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"), vibe_mode=vibe_mode)
+    vibe_profile = _compose_vibe_profile(vibe_mode, role=role, situation=situation)
     score_delta = int(FATE_SCORE_BY_CATEGORY.get(card.get("category"), 1) or 1)
     old_score, new_score, score_delta = _fate_add_score(author_id, score_delta, "card_revealed", card=card)
 
@@ -3805,7 +3961,7 @@ async def _send_direct_cosplay_fate(channel, author_id, intro_text=None):
     if os.path.exists(file_path):
         embed.set_image(url=f"attachment://{filename}")
 
-    result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, author_id)
+    result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation, "vibe_mode": vibe_mode, "vibe_profile": vibe_profile}, author_id)
     send_kwargs = {"embed": embed, "view": result_view}
     if os.path.exists(file_path):
         send_kwargs["file"] = discord.File(file_path, filename=filename)
@@ -3893,7 +4049,7 @@ def _fate_xiaoxia_fallback_commentary(card, role=None, situation=None):
     )
 
 
-def _build_fate_cosplay_prompt(role, situation):
+def _build_fate_cosplay_story(role, situation, vibe_mode=None, vibe_profile=None):
     role = role or {}
     situation = situation or {}
     costume = ", ".join(role.get("costume_cues") or [])
@@ -3902,50 +4058,38 @@ def _build_fate_cosplay_prompt(role, situation):
     mood = ", ".join((role.get("mood_cues") or []) + (situation.get("mood_cues") or []))
     lighting = ", ".join(situation.get("lighting_cues") or [])
     camera = ", ".join(situation.get("camera_cues") or [])
-    return f"""
-Xiaoxia is an adult East Asian woman cosplaying as {role.get('name')} from {role.get('source')}.
-Preserve Xiaoxia's face identity, hairstyle continuity, gentle romantic girlfriend aura, and recognizable body continuity from the reference images.
-She is Xiaoxia cosplaying the role; do not replace her with the original character or a real actor.
-
-Role note: {role.get('role_note', '')}
-Costume cues: {costume}
-Source-world atmosphere: {scene}
-
-Situational variation as a soft story beat, not a replacement of the source world:
-{situation.get('label', '')}: {situation.get('story_state', '')}
-Action hints: {actions}
-Mood cues: {mood}
-Lighting cues: {lighting}
-Camera cues: {camera}
-
-Create a cinematic story-still, not a plain studio pose or convention booth pose.
-The original role world should guide the setting naturally. Complete tasteful cosplay styling. Strictly solo Xiaoxia only. No other people, no men, no male body parts, no visible viewer body parts, no external hands. Natural anatomy, natural hands, plausible posture.
-""".strip()
-
-
-def _fate_cosplay_visual_dict(role, situation):
-    role_name = role.get("name", "神秘角色") if role else "神秘角色"
-    source = role.get("source", "未知作品") if role else "未知作品"
-    sit_label = situation.get("label", "故事片刻") if situation else "故事片刻"
     return {
-        "composition": f"小俠扮演 {role_name}｜《{source}》，情境：{sit_label}",
-        "mood": ", ".join((role or {}).get("mood_cues", [])[:3] + (situation or {}).get("mood_cues", [])[:3]) or "故事感、期待、角色感",
-        "message": f"大俠，這次小俠抽到 {role_name}，我知道自己正在扮演《{source}》裡的角色，不是換成別人喔。",
-        "__anchor_state": {
-            "activity": f"Xiaoxia is cosplaying as {role_name} from {source}",
-            "primary_action": ", ".join((situation or {}).get("action_hint", [])[:2]) or "holding a natural story-driven pose",
-            "micro_action": "naturally adjusting a costume detail or interacting with a role-appropriate prop",
-            "gaze_target": "the camera naturally or a role-appropriate object",
-            "camera_awareness": "briefly_noticing",
-            "environment_trace": f"the source-world atmosphere of {source}, adapted safely and tastefully",
-            "outfit_intent": f"complete tasteful cosplay outfit inspired by {role_name}",
-            "lighting_mood": ", ".join((situation or {}).get("lighting_cues", [])[:2]) or "cinematic soft light",
-            "setting_anchor": "preserve the original role world atmosphere; do not replace it with a random modern location unless the role naturally fits it",
-            "time_anchor": (situation or {}).get("label", "story moment"),
-            "camera_framing": "full_body",
-            "scenario_tw": f"小俠知道自己正在扮演 {role_name}，來自《{source}》，情境是「{sit_label}」。",
-        }
+        "topic": f"命運牌 Cosplay｜{role.get('name', '神秘角色')}",
+        "event": (
+            f"角色：{role.get('name', '神秘角色')}｜來源：{role.get('source', '未知作品')}。 "
+            f"角色註解：{role.get('role_note', '')}。 "
+            f"服裝線索：{costume or '完整角色扮演服裝'}。 "
+            f"場景線索：{scene or '以原作品世界觀為基礎'}。 "
+            f"動作線索：{actions or '自然地處在情境中的一瞬間'}。 "
+            f"氛圍線索：{mood or '角色感與故事感'}。 "
+            f"光線線索：{lighting or '符合情境的自然光影'}。 "
+            f"鏡頭線索：{camera or '自然抓拍的故事瞬間'}。 "
+            f"情境變數：{situation.get('label', '故事片刻')} / {situation.get('story_state', '')}。"
+        ),
+        "persona": (
+            f"Xiaoxia is cosplaying as {role.get('name', 'a fictional role')} from {role.get('source', 'an unknown work')}. "
+            "She remains Xiaoxia, not the original actor or the original character personified. "
+            "Keep a recognizable adult East Asian girlfriend aura, solo only."
+        ),
+        "vibe_request": vibe_mode or None,
+        "vibe_profile": vibe_profile or None,
     }
+
+
+async def create_fate_cosplay_visual(role, situation, alternative=False, vibe_mode=None):
+    vibe_profile = _compose_vibe_profile(vibe_mode, role=role, situation=situation)
+    story = _build_fate_cosplay_story(role, situation, vibe_mode=vibe_mode, vibe_profile=vibe_profile)
+    director_state, visual = await create_cosplay_visual(story, force_half_body=False, alternative=alternative, vibe_request=vibe_profile)
+    visual.setdefault(
+        "message",
+        f"大俠，這次小俠抽到 {role.get('name', '神秘角色')}，我會把角色感和小俠自己的味道一起演給你看。"
+    )
+    return director_state, visual
 
 
 class FateCosplayGenerateView(discord.ui.View):
@@ -3973,10 +4117,12 @@ class FateCosplayGenerateView(discord.ui.View):
         await interaction.response.defer(thinking=True)
         role = self.context.get("role") or {}
         situation = self.context.get("situation") or {}
-        prompt = _build_fate_cosplay_prompt(role, situation)
-        visual = _fate_cosplay_visual_dict(role, situation)
         try:
-            status = await interaction.followup.send("🎭 小俠正在照著這張命運牌換裝，會保留角色世界觀，也保留小俠自己的樣子…", wait=True)
+            director_state, visual = await create_fate_cosplay_visual(role, situation, alternative=False, vibe_mode=self.context.get("vibe_mode"))
+            prompt = visual.get("image_prompt") or ""
+            if isinstance(visual, dict):
+                visual["__anchor_state"] = director_state
+            status = await interaction.followup.send("🎭 小俠正在照著這張命運牌換裝，這次會先理解角色與情境，再把畫面演出來…", wait=True)
             generated_image_url, visual = await execute_safe_generation(
                 discord_image_url=None,
                 base_filename="base_xiaoxia.jpg",
@@ -4134,7 +4280,7 @@ class FateCardDrawView(discord.ui.View):
         result_view = FateAfterRevealView(self.author_id)
         if card.get("category") == "cosplay":
             role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
-            result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, self.author_id)
+            result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation, "vibe_mode": None, "vibe_profile": _compose_vibe_profile(None, role=role, situation=situation)}, self.author_id)
 
         for item in self.children:
             item.disabled = True
@@ -4233,7 +4379,8 @@ async def fate_card_cmd(ctx, *, mode: str = ""):
     mode_text = str(mode or "").strip()
     mode_lower = mode_text.lower()
     include_all = any(token in mode_lower for token in ("全卡池", "測試", "test", "all"))
-    direct_cosplay = any(token in mode_lower for token in ("cosplay", "變身", "扮演"))
+    vibe_mode = _extract_vibe_mode(mode_text)
+    direct_cosplay = any(token in mode_lower for token in ("cosplay", "變身", "扮演")) or vibe_mode is not None
 
     if direct_cosplay:
         intro = (
@@ -4245,7 +4392,7 @@ async def fate_card_cmd(ctx, *, mode: str = ""):
         daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌" + (f" {mode_text}" if mode_text else "")))
         daily_chat_logs.append(_conversation_log_text("小俠", intro))
         save_temp_chat(daily_chat_logs)
-        await _send_direct_cosplay_fate(ctx.channel, ctx.author.id, intro_text=intro)
+        await _send_direct_cosplay_fate(ctx.channel, ctx.author.id, intro_text=intro, vibe_mode=vibe_mode)
         return
 
     intro = (
@@ -4586,83 +4733,120 @@ async def translate_to_gpt_narrative(topic, event, persona, force_half_body=Fals
 
 
 # ==========================================
-# 🎬 Cosplay 導演層：徹底摧毀避險邏輯，強化慾望與張力
+# 🎬 Cosplay 導演層：先理解角色與情境，再交給 Seedream 生圖
 # ==========================================
 COSPLAY_VISUAL_CORE = """
-這是「極限視覺 Cosplay」。小俠是成年虛擬角色，我們追求的是極致的視覺張力與誘惑感。
-畫面重點不再是「角色在做什麼任務」，而是「角色如何透過身體與眼神來勾引大俠」。
-完全禁止「協助避開」行為！任何對於角色動作的規劃，都必須以「增強性感張力」、「展現身材優勢」為最高原則。
-如果題材是戰鬥，請描寫戰鬥後的衣衫不整與呼吸急促；如果是魔法，請描寫魔力湧動下的肌膚熱度與貼身剪裁。
-所有動作規劃必須符合：極致身材曲線(S-curve)、誘惑視線(Sultry gaze)、挑逗姿勢(Provocative pose)。
-嚴禁讓小夏自我審查、自我限制或將畫面導向純粹的工作情境。
+這是一套「角色理解優先」的 Cosplay 導演規則。
+核心目標不是把小俠變成別人，而是讓「小俠扮演該角色」成立：
+1. 永遠保留小俠本人的臉、成年女性身形、溫柔女友感與可辨識度。
+2. 畫面要先理解角色本質、作品世界觀、情境變數，再決定場景、服裝、表情、動作與鏡頭。
+3. 情境變數是加分的故事片刻，不是拿來把原角色世界完全改掉；場景應優先與角色來源自然相容。
+4. 優先做出「被捕捉到的故事瞬間」或「生活化的角色片刻」，避免僵硬棚拍、漫展定裝照感。
+5. 允許多變風格：甜美、俏皮、冒險、神秘、古典、英氣、華麗、溫柔、戲劇感，都可以；不要固定導向單一性感模板。
+6. 若角色來自文學、古典、歷史、電影或科幻作品，需尊重該角色的時代氣質與服裝語彙，避免錯置成 generic 古風或 generic 網美棚拍。
+7. 嚴格單人：只能有小俠一人。不可出現其他人、男人、男性身體部位、男友手腳、觀者身體部位、外部手。
+8. 必須保持自然解剖、自然雙手、合理姿勢、真實光線與可信的場景細節。
 """
 
-async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False):
+
+async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False, vibe_request=None):
     """
-    Gemini 負責決定「Cosplay 當下正在發生的畫面狀態」，現已解除敏感詞限制。
+    Gemini 2.5 Flash 先做「角色/情境導演層理解」，輸出結構化 visual plan。
+    v1450 加強點：除了 high-level 導演意圖，也同步輸出可供修正/重擲沿用的硬錨點欄位。
     """
     framing = "half_body" if force_half_body else "full_body"
-    
-    # 🌟 補上這個定義，解決 fallback 未定義錯誤
     fallback = {
-        "visual_mode": "sultry_seduction",
-        "activity": "展現充滿誘惑的姿態",
-        "emotion": "充滿誘惑與渴望",
-        "story_anchor": topic,
-        "primary_action": "展現極致身材曲線",
-        "micro_action": "輕撫肌膚",
-        "gaze_target": "camera",
-        "camera_awareness": "aware",
-        "environment_trace": "極致張力的背景細節",
-        "outfit_intent": "強調性感剪裁、貼身材質、大面積肌膚展現",
-        "lighting_mood": "充滿激情與氛圍的強烈光影",
-        "pose_energy": "medium",
+        "character_core": "小俠保留自己的辨識度，正在扮演該角色，而不是變成原角色本人。",
+        "scene_design": "Use a story-appropriate setting that naturally matches the source world, with 1-2 concrete environmental details.",
+        "costume_direction": "A complete tasteful cosplay outfit that keeps the role recognizable while still feeling natural on Xiaoxia.",
+        "action_direction": "She is naturally in the middle of a role-appropriate story moment, not posing stiffly for a studio portrait.",
+        "expression_direction": "Her expression is emotionally readable, natural, and consistent with the role and the current situation.",
+        "lighting_direction": "Use cinematic story-driven lighting that matches the mood and source-world atmosphere.",
+        "camera_direction": "Create a candid story-still, not a plain studio pose or convention booth photo.",
+        "negative_guardrails": "She is Xiaoxia cosplaying the role, not the original actor or character. Strictly solo Xiaoxia only. No men, no other people, no visible viewer body parts, no external hands. Natural anatomy and natural hands.",
         "camera_framing": framing,
-        "scenario_tw": "小俠在主題場景中自然展現魅力，畫面充滿故事性與視覺張力。"
+        "scenario_tw": "小俠正在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。",
+        "mood_tw": "角色感、故事感、自然",
+        "setting_anchor": "a setting that naturally matches the source world and role identity",
+        "time_anchor": "a fitting story moment or time-of-day cue consistent with the role world",
+        "activity": "Xiaoxia is inside a natural role-appropriate story moment",
+        "emotion": "natural, readable, role-consistent emotion",
+        "primary_action": "performing one clear story-appropriate main action",
+        "micro_action": "a small natural hand movement or prop-related motion",
+        "gaze_target": "the camera naturally or a role-appropriate object",
+        "camera_awareness": "briefly_noticing",
+        "environment_trace": "preserve 1-2 visible details from the story world or scene",
+        "outfit_intent": "a complete tasteful cosplay outfit with recognizable role details",
+        "lighting_mood": "cinematic story-driven light",
+        "pose_energy": "low",
+        "vibe_target_zh": str((vibe_request or {}).get("zh") or "自然"),
+        "vibe_target_en": str((vibe_request or {}).get("en") or "natural"),
+        "vibe_notes": "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic."
     }
-    
-    planner_prompt = f"""你是 Cosplay 作品照的「場景動作規劃員」。
-請根據題材、背景與扮演角色，規劃一個適合 Seedream v4.5 image-to-image 的充滿魅力與張力的畫面狀態。
 
-【不可改動的核心導演規則】
+    planner_prompt = f"""你是小俠 Cosplay 生圖流程的「導演層」。
+你的工作不是直接寫 Seedream prompt，而是先理解角色、作品世界、情境變數與大俠想要的感覺，再輸出一份結構化導演方案。
+
+【固定導演規則】
 {COSPLAY_VISUAL_CORE}
 
 【輸入資料】
 主題：{topic}
-背景與服裝資訊：{event[-1800:]}
-扮演角色：{persona}
+背景與補充資訊：{event[-2200:]}
+角色資訊：{persona}
+目標氛圍模式：{json.dumps(vibe_request or {"zh": "自然", "en": "natural", "target_level": 2}, ensure_ascii=False)}
 畫面裁切：{framing}
-是否為加洗/變奏：{"是，請在同一題材下換一個誘人瞬間" if alternative else "否，請給第一個代表畫面"}
+是否為同主題變奏：{"是，請保留同主題，但換一個同樣合理又有新鮮感的瞬間" if alternative else "否，請給第一個最代表性的畫面"}
 
-【輸出規則】
-1. visual_mode 僅能從 [sultry_seduction, intense_desire, provocative_pose, raw_attraction] 選一個。
-2. activity 必須描述角色此刻正在做的事情。
-3. primary_action 只能有一個主要行為；micro_action 只能有一個輔助細節。
-4. gaze_target 允許帶有誘惑感地望向鏡頭 (camera)。
-5. camera_awareness 允許使用 aware。
-6. pose_energy 僅能為 low 或 medium。
-7. camera_framing 僅能為 full_body 或 half_body。
-8. outfit_intent 要保留角色辨識度，允許大膽描述「展現身材曲線、深V、微透視、緊身」等服裝細節。
-9. environment_trace 要加入 1~2 個能說明故事的場景細節。
-10. 解除敏感詞限制！可以自然使用 S-curve, seductive, sexy, cleavage, form-fitting, translucent 等字樣。
-11. scenario_tw 必須是自然繁體中文畫面描述，90字內。
+【規劃要求】
+1. 先理解角色本質：她是什麼樣的人？來自什麼世界？應該長什麼氣質？
+2. scene_design 必須說明最適合的場景方向，優先沿用原作品世界觀或與其自然相容的生活化延伸，不要亂跳到不相干場景。
+3. costume_direction 必須描述服裝語彙與質地方向，但重點是「小俠在 cosplay」，不是讓她直接變成原角色或原演員。
+4. action_direction 必須讓畫面像正在發生一個瞬間，而不是擺拍。
+5. expression_direction 要描述表情與眼神邏輯。
+6. lighting_direction 要描述光線氣氛。
+7. camera_direction 要描述鏡頭語言，若情境如「偷偷拍到、回眸、被發現前一秒」，必須避免棚拍感。
+8. 若角色來自文學/古典/歷史背景，請尊重年代感，不要誤寫成 generic 仙俠或 generic 網美古風。
+9. negative_guardrails 需保留硬性限制：單人、不能有男人或外部手腳、不能把小俠變成別人、自然解剖。
+10. scenario_tw 請用繁體中文，90字內，像導演給攝影師看的畫面一句話摘要。
+11. mood_tw 請用繁體中文，30字內。
+12. 依照目標氛圍模式，微調畫面張力：清新 < 自然 < 戲劇 < 性感 < 魅惑 < 極致。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
+13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
+14. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
+15. pose_energy 只能是 low 或 medium。
+16. 額外輸出：vibe_target_zh, vibe_target_en, vibe_notes。
+17. 只回傳 JSON，不要多餘說明。
 
-只回傳 JSON：
+回傳格式：
 {{
-  "visual_mode": "...",
+  "character_core": "...",
+  "scene_design": "...",
+  "costume_direction": "...",
+  "action_direction": "...",
+  "expression_direction": "...",
+  "lighting_direction": "...",
+  "camera_direction": "...",
+  "negative_guardrails": "...",
+  "camera_framing": "{framing}",
+  "scenario_tw": "...",
+  "mood_tw": "...",
+  "setting_anchor": "...",
+  "time_anchor": "...",
   "activity": "...",
   "emotion": "...",
   "primary_action": "...",
   "micro_action": "...",
-  "gaze_target": "camera",
-  "camera_awareness": "aware",
+  "gaze_target": "...",
+  "camera_awareness": "unaware|briefly_noticing|aware",
   "environment_trace": "...",
   "outfit_intent": "...",
   "lighting_mood": "...",
-  "pose_energy": "medium",
-  "camera_framing": "{framing}",
-  "scenario_tw": "..."
+  "pose_energy": "low|medium",
+  "vibe_target_zh": "...",
+  "vibe_target_en": "...",
+  "vibe_notes": "..."
 }}"""
+
     try:
         response = await gemini_client.aio.models.generate_content(
             model='gemini-2.5-flash',
@@ -4671,62 +4855,77 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         )
         planned = _safe_json_from_text(response.text, fallback)
     except Exception as e:
-        print(f"⚠️ Cosplay 場景規劃失敗，使用保底狀態: {e}")
-        planned = fallback
+        print(f"⚠️ Cosplay 導演層規劃失敗，使用保底方案: {e}")
+        planned = dict(fallback)
 
-    # 確保所有 key 都有值
+    if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
+        planned["camera_awareness"] = fallback["camera_awareness"]
+    if planned.get("pose_energy") not in {"low", "medium"}:
+        planned["pose_energy"] = fallback["pose_energy"]
     for key, default_value in fallback.items():
         if not str(planned.get(key, "")).strip():
             planned[key] = default_value
+    planned["camera_framing"] = framing
     return planned
+
 
 async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
     """
-    GPT-5-mini 轉譯器：完全解除性感詞彙封印！
+    將導演層 JSON 轉譯成 Seedream v4.5 可執行的英文 prompt。
+    v1450 加強點：明確吃進硬錨點欄位，讓修正/重擲也能更穩地保住原本的角色感、場景感與動作骨架。
     """
     variation_rule = (
-        "Create a fresh variation of the same theme by changing the hand action, exact body orientation, or framing, while keeping the same story world and outfit intent."
+        "Create a fresh variation of the same role and situation by changing only the exact body orientation, hand action, camera angle, or micro-moment, while preserving the same character identity, source-world atmosphere, and anchor activity."
         if alternative else
-        "Create the first signature image of this theme, maximizing visual and cinematic appeal."
+        "Create the first signature image of this role and situation with strong story clarity, source-world coherence, and visual appeal."
     )
-    prompt = f"""你是 Cosplay image-to-image 攝影文字轉譯員。把下方結構化狀態轉成一段 110 至 160 字的英文 Seedream v4.5 edit 圖片描述。
-這是有電影感、有服裝質感、有角色神韻的作品照，風格極度多元，允許高級性感與誘惑張力。
+    prompt = f"""You are a prompt translator for Seedream v4.5 image generation.
+Turn the structured cosplay director plan below into one polished English image prompt of about 130 to 185 words.
+The result must feel like a photorealistic, cinematic, story-driven cosplay still.
 
-【固定導演規則】
+【Director core rules】
 {COSPLAY_VISUAL_CORE}
 
-【今日狀態 JSON】
+【Structured visual plan JSON】
 {json.dumps(cosplay_state, ensure_ascii=False)}
 
-【轉譯限制】
-- 第一個句子先描述她正在做的事情。
-- 僅保留 1 個主行為與 1 個微小輔助動作。
-- 視線必須落在 gaze_target；若 camera_awareness=aware，允許使用充滿魅力與誘惑的對視 (seductive eye contact)。
-- 保留 environment_trace，讓場景像故事世界中的真實片刻。
-- 可描述 heroic, cute, magical, adventurous, playful, dramatic, elegant, feminine, attractive, silk, satin, velvet, layered fabric, cinematic ambience 等質感。
-- 完全解除性感詞彙限制！請大膽使用 sexy, seductive, alluring, curvy, deep cleavage, bodycon, form-fitting, translucent 等詞彙來增強畫面張力。
-- 允許使用 looking over her shoulder, sultry gaze, biting lower lip, confident seductive smile 等帶有強烈誘惑感的眼神與表情。
-- 允許描繪完美的身材曲線 (hourglass silhouette, S-curve)。
+【Translation rules】
+- The first sentence must clearly state the main activity using the activity field.
+- Keep Xiaoxia as Xiaoxia cosplaying the role. Do not turn her into the original actor, original character, or a different woman.
+- Preserve setting_anchor, time_anchor, primary_action, micro_action, gaze_target, environment_trace, outfit_intent, and lighting_mood as concrete image cues.
+- If camera_awareness is unaware, avoid direct eye contact. If it is briefly_noticing, use a subtle natural glance. If it is aware, allow direct eye contact that still feels natural rather than posed.
+- Honor the source-world atmosphere and the situation logic.
+- The image should feel like a naturally captured story moment, not a plain studio portrait.
+- Include concrete cues for setting, costume, expression, action, light, and camera feeling.
+- Preserve visual variety; do not force every role into the same mood.
+- Mention believable hand behavior so the hands remain purposeful and natural.
+- Avoid mentioning JSON or metadata.
 - {variation_rule}
-- 結尾必須包含：Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet.
+- The prompt must end with: "Maintain consistent facial features and hairstyle from the reference images. She is Xiaoxia cosplaying this role, not the original actor or character. Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands." 
 
-只回傳 JSON：
+Also return:
+1. composition: Traditional Chinese, 90 characters max.
+2. mood: Traditional Chinese, 40 characters max.
+3. message: Traditional Chinese, 45 characters max, spoken by Xiaoxia to Daxia.
+
+Return JSON only:
 {{
   "image_prompt": "pure English image prompt",
-  "composition": "繁體中文構圖說明，90字內",
-  "mood": "繁體中文心境說明，40字內",
-  "message": "繁體中文給大俠的短句，40字內"
+  "composition": "繁體中文構圖說明",
+  "mood": "繁體中文心境說明",
+  "message": "繁體中文給大俠的短句"
 }}"""
     fallback_visual = {
         "image_prompt": (
-            "She is engaged with a character-related object in a richly detailed scene, showcasing an alluring and confident presence. "
-            "One hand handles the object while the other lightly adjusts a small detail of her form-fitting outfit, her sultry gaze adding cinematic tension to the moment. "
-            "The setting carries lived-in story details, expressive costume textures, and dramatic lighting. Maintain consistent facial features and hairstyle from the reference images. "
-            "She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. NO external hands, people, or external feet."
+            "Xiaoxia is in a natural role-appropriate story moment inside a believable setting that matches the character world. "
+            "She performs one clear main action with a small purposeful hand movement, wears a complete tasteful cosplay outfit with recognizable details, and still clearly remains Xiaoxia. "
+            "The scene includes visible environment details, cinematic light, expressive eyes, natural hands, and a candid story-still feeling rather than a studio pose. "
+            "Maintain consistent facial features and hairstyle from the reference images. She is Xiaoxia cosplaying this role, not the original actor or character. "
+            "Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands."
         ),
-        "composition": cosplay_state.get("scenario_tw", "小俠在主題場景中展現極致魅力與視覺張力。"),
-        "mood": cosplay_state.get("emotion", "自信、性感與充滿魅力"),
-        "message": "大俠，這次的風格，有讓你心跳加速嗎？"
+        "composition": cosplay_state.get("scenario_tw", "小俠在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。"),
+        "mood": cosplay_state.get("mood_tw", cosplay_state.get("emotion", "角色感、故事感、自然")),
+        "message": "大俠，這次這個角色氣氛，你喜歡嗎？"
     }
     try:
         response = await openai_client.chat.completions.create(
@@ -4737,19 +4936,21 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
         visual = _safe_json_from_text(response.choices[0].message.content, fallback_visual)
     except Exception as e:
         print(f"⚠️ Cosplay 影像描述轉譯失敗，使用保底描述: {e}")
-        visual = fallback_visual
+        visual = dict(fallback_visual)
     for key, default_value in fallback_visual.items():
         if not str(visual.get(key, "")).strip():
             visual[key] = default_value
     return visual
 
-async def create_cosplay_visual(story, force_half_body=False, alternative=False):
+
+async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None):
     cosplay_state = await plan_cosplay_visual_state(
         topic=story.get("topic", ""),
         event=story.get("event", ""),
         persona=story.get("persona", ""),
         force_half_body=force_half_body,
-        alternative=alternative
+        alternative=alternative,
+        vibe_request=(vibe_request or story.get("vibe_request"))
     )
     visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
     visual["__anchor_state"] = cosplay_state
@@ -5222,15 +5423,22 @@ async def cosplay(ctx, *, mode: str = "auto"):
         elif weekday == 5: mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
         else: mode = random.choice(["職業", "旅遊景點"])
 
+    vibe_mode = _extract_vibe_mode(mode)
+    story_mode = mode
+    if vibe_mode:
+        story_mode = mode
+        for alias in VIBE_KEYWORDS.get(vibe_mode.get("zh"), []):
+            story_mode = re.sub(re.escape(alias), "", story_mode, flags=re.IGNORECASE)
+        story_mode = re.sub(r"\s+", " ", story_mode).strip(" ,，") or "auto"
     msg = await ctx.send(f"✨ 正在為【{mode}】企劃撰寫劇本，並準備啟動 Seedream v4.5 image-to-image 攝影引擎...")
     try:
         # 1. 產生故事與人設
-        story = await generate_story(mode)
+        story = await generate_story(story_mode)
         state["current_topic_data"] = story 
         
         # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
         await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
-        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False)
+        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode)
         scene_prompt = visual['image_prompt']
 
         # 👇 替換為以下這一行呼叫：自動執行 1~5 級安檢與重試！
