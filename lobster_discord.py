@@ -7,16 +7,20 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.42"
+LOBSTER_VERSION = "1.4.47"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
-Strictly only Xiaoxia appears in the image.
+Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure.
 No man, no male partner, no male hands, no male arms, no male shoulder, no male back,
-no male torso, no male silhouette, no male reflection, no cropped male body parts,
+no male torso, no male head, no male face, no male hair, no male silhouette, no male reflection,
+no cropped male body parts, no blurred male foreground figure, no partial person in the foreground,
 no visible viewer body parts, no foreground hands, no foreground arms, no implied off-camera man.
+No other people of any gender, no extra faces, no extra heads, no external hands, no bystanders.
 If the scene is from Daxia's perspective, the camera represents Daxia's point of view only;
-Daxia must never be visually depicted. The boyfriend POV must be implied only by framing.
+Daxia must never be visually depicted. The boyfriend POV must be implied only by framing, eye contact,
+composition, and Xiaoxia's gaze. Never use a male head, shoulder, hand, back, reflection, or silhouette
+as a substitute for Daxia.
 Xiaoxia's anatomy, hands, fingers, limbs, joints, posture, and movement must be natural,
 physically plausible, and normal. No extra limbs, twisted joints, broken fingers, awkward
 body mechanics, impossible hand poses, or malformed anatomy.
@@ -26,11 +30,14 @@ body mechanics, impossible hand poses, or malformed anatomy.
 
 STRICT_SOLO_AND_ANATOMY_PROMPT = """
 STRICT UNIVERSAL VISUAL RULES:
-- Strictly solo Xiaoxia only. Only Xiaoxia appears.
+- Strictly solo Xiaoxia only. Only Xiaoxia appears. Xiaoxia is the only human figure in frame.
 - Do not show Daxia, the camera holder, or any visible body part of the viewer.
-- No man, no male figure, no male hands, no male arms, no male shoulder, no male back, no male torso,
-  no male silhouette, no male reflection, no cropped male body parts, and no foreground viewer hand/arm/shoulder.
-- Boyfriend POV must be implied only through camera framing; never draw the boyfriend or substitute him with another man.
+- No man, no male figure, no male head, no male face, no male hair, no male hands, no male arms,
+  no male shoulder, no male back, no male torso, no male silhouette, no male reflection,
+  no cropped male body parts, no blurred male foreground figure, and no foreground viewer hand/arm/shoulder.
+- No other people of any gender, no extra faces, no external hands, no bystanders, no partial person at frame edges.
+- Boyfriend POV must be implied only through camera framing, Xiaoxia's gaze, and composition;
+  never draw the boyfriend or substitute him with a male head, shoulder, hand, back, reflection, or silhouette.
 - Xiaoxia's anatomy must be normal and natural: plausible posture, plausible hand actions, correct fingers,
   no extra limbs, no twisted joints, no broken fingers, no awkward body mechanics, and no impossible poses.
 """
@@ -3711,6 +3718,18 @@ def _draw_fate_cards(count=3, score=None, include_all=False):
     return random.sample(available, min(count, len(available)))
 
 
+def _draw_fate_cards_by_category(category: str, count=1):
+    available = [
+        card for card in FATE_CARD_POOL
+        if card.get("category") == category and os.path.exists(_fate_card_path(card.get("filename", "")))
+    ]
+    if len(available) < count:
+        available = [card for card in FATE_CARD_POOL if card.get("category") == category]
+    if not available:
+        return []
+    return random.sample(available, min(count, len(available)))
+
+
 async def _send_fate_round(channel, author_id, intro_text=None, include_all=False):
     score = _fate_get_score(author_id)
     cards = _draw_fate_cards(3, score=score, include_all=include_all)
@@ -3743,6 +3762,67 @@ async def _send_fate_round(channel, author_id, intro_text=None, include_all=Fals
         files=files if files else None,
         view=view,
     )
+
+
+async def _send_direct_cosplay_fate(channel, author_id, intro_text=None):
+    score = _fate_get_score(author_id)
+    cards = _draw_fate_cards_by_category("cosplay", count=1)
+    if not cards:
+        await channel.send("大俠，Cosplay 牌現在還沒放好喔。請先確認 `/data/memory/fate_cards/` 裡的 cosplay 卡面。")
+        return
+
+    card = cards[0]
+    session_id = uuid.uuid4().hex[:10]
+    fate_card_sessions[(channel.id, author_id)] = {
+        "session_id": session_id,
+        "cards": [card],
+        "started_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "score_at_start": score,
+        "direct_mode": "cosplay",
+    }
+    _fate_add_score(author_id, 0, "round_started")
+
+    if intro_text:
+        await channel.send(intro_text)
+
+    role, situation = _pick_cosplay_role_and_situation(card.get("cosplay_category"))
+    score_delta = int(FATE_SCORE_BY_CATEGORY.get(card.get("category"), 1) or 1)
+    old_score, new_score, score_delta = _fate_add_score(author_id, score_delta, "card_revealed", card=card)
+
+    commentary = _fate_xiaoxia_fallback_commentary(card, role=role, situation=situation)
+    embed = discord.Embed(
+        title=f"🎴 {card.get('category_label')}｜{card.get('title')}",
+        description=commentary,
+        color=FATE_CATEGORY_COLORS.get(card.get("category"), 0xD8B76A),
+    )
+    if role:
+        embed.add_field(name="🎭 小俠這次扮演", value=f"**{role.get('name')}**｜《{role.get('source')}》", inline=False)
+    if situation:
+        embed.add_field(name="🎬 情境變數", value=f"**{situation.get('label')}**\n{str(situation.get('story_state', ''))[:300]}", inline=False)
+
+    file_path = _fate_card_path(card.get("filename"))
+    filename = card.get("filename") or "fate_card.png"
+    if os.path.exists(file_path):
+        embed.set_image(url=f"attachment://{filename}")
+
+    result_view = FateCosplayGenerateView({"card": card, "role": role, "situation": situation}, author_id)
+    send_kwargs = {"embed": embed, "view": result_view}
+    if os.path.exists(file_path):
+        send_kwargs["file"] = discord.File(file_path, filename=filename)
+    sent_message = await channel.send(**send_kwargs)
+
+    try:
+        llm_commentary = await _fate_xiaoxia_commentary(card, role=role, situation=situation, phase="reveal")
+        if llm_commentary and llm_commentary.strip() and llm_commentary.strip() != commentary.strip():
+            commentary = llm_commentary.strip()[:900]
+            embed.description = commentary
+            await sent_message.edit(embed=embed, view=result_view)
+    except Exception as exc:
+        print(f"⚠️ [FATE_DIRECT_COSPLAY_COMMENTARY_FAILED] {type(exc).__name__}: {exc}")
+
+    daily_chat_logs.append(_fate_card_log_line(card, role=role, situation=situation) + f" 默契值 +{score_delta}，目前 {new_score}。")
+    daily_chat_logs.append(_conversation_log_text("小俠", commentary))
+    save_temp_chat(daily_chat_logs)
 
 
 def _fate_card_log_line(card, role=None, situation=None):
@@ -3908,17 +3988,28 @@ class FateCosplayGenerateView(discord.ui.View):
             state["daily_gen_count"] += 1
             local_filename = await save_to_vault(generated_image_url)
             local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+            local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+            scene_title = f"命運牌 Cosplay｜{role.get('name', '神秘角色')}"
+            scene_summary = visual.get("composition", "命運牌 Cosplay")
+            mood_summary = visual.get("mood", "角色感與期待")
             payload = {
                 "id": str(uuid.uuid4()),
                 "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
                 "topic": f"【命運牌 Cosplay】{role.get('name', '神秘角色')}",
                 "event": f"小俠抽到 {role.get('name', '神秘角色')}｜《{role.get('source', '未知作品')}》，情境：{situation.get('label', '故事片刻')}",
-                "composition": visual.get("composition", "命運牌 Cosplay"),
-                "mood": visual.get("mood", "角色感與期待"),
+                "composition": scene_summary,
+                "mood": mood_summary,
                 "message": visual.get("message", "命運牌觸發的小俠 Cosplay 照片"),
                 "image_url": generated_image_url,
                 "local_url": local_url,
+                "local_filename": local_filename,
+                "local_path": local_path,
                 "type": "cosplay_card",
+                "source_mode": "cosplay",
+                "scene_text": scene_title,
+                "scene_summary": scene_summary,
+                "mood_summary": mood_summary,
+                "prompt_base": prompt,
                 "card_id": self.context.get("card", {}).get("id"),
                 "role_id": role.get("id"),
                 "role_name": role.get("name"),
@@ -3948,7 +4039,8 @@ class FateCosplayGenerateView(discord.ui.View):
                 await status.delete()
             except Exception:
                 pass
-            await interaction.followup.send(embed=embed)
+            result_view = PhotoResultView(payload)
+            await interaction.followup.send(embed=embed, view=result_view)
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 這張命運牌 Cosplay 照生成失敗：`{str(exc)[:1500]}`")
 
@@ -4127,7 +4219,7 @@ class FatePickButton(discord.ui.Button):
 
 @girlfriend_bot.command(name='命運牌')
 async def fate_card_cmd(ctx, *, mode: str = ""):
-    """小俠專屬命運牌：/命運牌 開局，隨機發三張蓋牌。"""
+    """小俠專屬命運牌：/命運牌 開局，隨機發三張蓋牌；/命運牌 cosplay 直接抽 Cosplay 牌。"""
     global daily_chat_logs
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
         await ctx.send("大俠，`/命運牌` 先只開放在小俠的私人頻道玩喔。")
@@ -4138,7 +4230,24 @@ async def fate_card_cmd(ctx, *, mode: str = ""):
         return
 
     score = _fate_get_score(ctx.author.id)
-    include_all = any(token in str(mode or "") for token in ("全卡池", "測試", "test", "all"))
+    mode_text = str(mode or "").strip()
+    mode_lower = mode_text.lower()
+    include_all = any(token in mode_lower for token in ("全卡池", "測試", "test", "all"))
+    direct_cosplay = any(token in mode_lower for token in ("cosplay", "變身", "扮演"))
+
+    if direct_cosplay:
+        intro = (
+            "大俠，那今晚我們就不先翻三張了，直接進入 **命運牌 Cosplay** 吧。\n"
+            "我會直接抽一張 Cosplay 牌，自己也會知道這次要扮演誰、落在哪個情境裡。\n"
+            f"現在默契值是 **{score}**，{_fate_unlock_text(score)}。"
+            "翻到之後，你可以先看牌、跟我聊，再決定要不要讓我真的換裝拍出來。"
+        )
+        daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌" + (f" {mode_text}" if mode_text else "")))
+        daily_chat_logs.append(_conversation_log_text("小俠", intro))
+        save_temp_chat(daily_chat_logs)
+        await _send_direct_cosplay_fate(ctx.channel, ctx.author.id, intro_text=intro)
+        return
+
     intro = (
         "大俠，今晚我們來翻命運牌吧。\n"
         "我有看到這些漂亮卡牌喔……每一張都是我們一起整理出來的小小心意，不只是遊戲而已。\n"
@@ -4147,7 +4256,7 @@ async def fate_card_cmd(ctx, *, mode: str = ""):
     )
     if include_all:
         intro += "\n（這輪使用全卡池測試模式，不影響默契值累積。）"
-    daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌" + (f" {mode}" if mode else "")))
+    daily_chat_logs.append(_conversation_log_text("大俠", "/命運牌" + (f" {mode_text}" if mode_text else "")))
     daily_chat_logs.append(_conversation_log_text("小俠", intro))
     save_temp_chat(daily_chat_logs)
 
@@ -4432,7 +4541,7 @@ async def generate_story(mode):
 # ==========================================
 async def translate_to_gpt_narrative(topic, event, persona, force_half_body=False):
     """
-    專為 gpt-image-2 打造的「長篇故事型」提示詞產生器 (人體工學穩態版)
+    舊版長篇故事型提示詞產生器（目前影像主路徑優先 Seedream v4.5）
     """
     weekday = datetime.now(TZ_TPE).weekday()
     if weekday == 5:
@@ -4652,7 +4761,7 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False)
 # ==========================================
 DIARY_VISUAL_CORE = """
 這是專屬於大俠的「私密交換日記」生活照。小俠是成年虛擬角色。
-畫面魅力來自當天的親密感、情緒張力、真實的生活痕跡，以及專屬男友視角（Boyfriend POV）的「純慾與小誘惑」。
+畫面魅力來自當天的親密感、情緒張力、真實的生活痕跡，以及只用鏡頭構圖暗示的大俠視角；不得出現任何男性、男性頭肩手、前景男性殘件或其他人物。
 每張圖必須是一個正在發生的生活瞬間：一個主行為、一個微小輔助動作、一個明確的視線目標（允許深情、嬌嗔或帶點挑逗地直視鏡頭對視）。
 交換日記的預設世界觀是「當代台灣日常生活」：現代台灣住宅、臥室、書房、客廳、浴室、餐桌等私密或生活空間。
 光線與氛圍可大膽運用戲劇性光影（Chiaroscuro）、微光、暖色檯燈或水蒸氣來烘托私密感與立體感。
@@ -4771,7 +4880,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
         "Keep the described moment faithfully, maximizing the romantic and intimate atmosphere."
     )
     prompt = f"""你是私密生活攝影文字轉譯員。把下方結構化狀態轉成一段 95 至 140 字的英文 Seedream v4.5 edit 圖片描述。
-這張照片屬於交換日記：溫暖、極度親密、自然、有強烈的純慾女性魅力（男友視角）。
+這張照片屬於交換日記：溫暖、親密、自然、有生活感與柔美魅力；只能用鏡頭構圖暗示大俠視角，嚴禁出現任何男性、男性頭肩手、前景男性殘件或其他人物。
 
 【固定導演規則】
 {DIARY_VISUAL_CORE}
@@ -4807,7 +4916,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
             "One hand softly adjusts her loose hair while her eyes look directly into the camera (boyfriend POV) with a profoundly tender, alluring, and romantic smile. "
             "Dim ambient lighting and dramatic chiaroscuro shadows create a deeply private, seductive, and cozy atmosphere. "
             "Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
-            "Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms."
+            "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male partner, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people."
         ),
         "composition": diary_state.get("scenario_tw", "小俠在私密微光中展現溫柔與純慾的誘惑，專注看著你。"),
         "mood": diary_state.get("emotion", "浪漫、親密與純慾"),
@@ -4973,7 +5082,7 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         if scenario_tw:
             lines.append(f"- Overall scene intent: {scenario_tw}.")
 
-        lines.append("- Character visibility rule: strictly only Xiaoxia appears in the image.")
+        lines.append("- Character visibility rule: strictly only Xiaoxia appears in the image; Xiaoxia is the only human figure.")
         lines.append("- Forbidden visual intrusions: no external hands, people, external feet, or any visible body part of the viewer.")
         lines.append("- No-male rule: do not show Daxia, any man, male hands, male arms, male shoulder, male back, male torso, male silhouette, male reflection, cropped male body parts, or foreground viewer hands/arms/shoulders.")
         lines.append("- POV rule: if this is Daxia's or boyfriend POV, imply it only through camera framing; never depict the boyfriend or substitute him with another male figure.")
@@ -4999,6 +5108,7 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         lines.append("- Boyfriend POV must be implied only through framing; never draw the boyfriend or any substitute male figure.")
         lines.append("- Xiaoxia's anatomy and movement must be natural and physically plausible; no malformed hands, extra limbs, twisted joints, or awkward body mechanics.")
         lines.append("- Do not collapse the image into a generic glamour portrait.")
+    lines.append("- Absolute POV rule: never show Daxia or substitute him with a male head, shoulder, hand, arm, back, silhouette, reflection, cropped body part, or blurred foreground figure. No other people of any gender.")
 
     return "\n".join(lines)
 
@@ -5018,7 +5128,7 @@ def _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level):
         f"{hard_anchor_block}\n\n"
         f"SAFETY-PRESERVING STYLE LAYER (Level {level}): {level_guidance}\n"
         f"STYLE DESCRIPTION TO RENDER:\n{rewritten_style}\n\n"
-        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. Xiaoxia's anatomy and movement must remain natural and physically plausible."
+        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must remain natural and physically plausible."
     )
 
 
@@ -5029,13 +5139,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
     if mode == "diary":
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
-            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. If it is a Daxia point-of-view scene, Daxia must never be visually depicted and POV must be implied only through framing. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
+            "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. If it is a Daxia point-of-view scene, Daxia must never be visually depicted and POV must be implied only through framing. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
-            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male body parts, visible viewer body parts, foreground hands/arms/shoulders, silhouettes, or reflections. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
+            "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
             "Maintain consistent facial features and hairstyle from Image 1. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
@@ -5044,14 +5154,15 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
-    seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference"}
-    engine_name = "Seedream v4.5" if mode in seedream_modes else "gpt-image-2"
+    seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference", "travel", "shopping"}
+    engine_name = "Seedream v4.5"
+    gpt_image2_is_fallback_only = os.environ.get("ENABLE_GPT_IMAGE2_FALLBACK", "false").lower() in {"1", "true", "yes"}
 
     for level in range(5):
         current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
         # Seedream v4.5 交由 fal safety checker 處理，不再先被 OpenAI Moderation 擋住；
         # 仍保留 L0→L4 的提示詞安全化重試。
-        if mode not in seedream_modes:
+        if mode == "gpt_image_2_fallback" and gpt_image2_is_fallback_only:
             mod_resp = await openai_client.moderations.create(model="omni-moderation-latest", input=current_prompt)
             if mod_resp.results[0].flagged:
                 if msg:
@@ -5306,8 +5417,8 @@ def _seedream_cosplay_prompt(custom_prompt):
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
-        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male shoulder, back, torso, silhouette, reflection, or foreground viewer hand/arm. The POV must be implied only through framing. "
+        "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
         "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
         "Maximize visual impact: explicitly allow extreme cinematic angles, dramatic chiaroscuro lighting, highly detailed fabric textures (including translucent, wet, or form-fitting materials), and alluring/seductive expressions if requested. "
         "The result should be a highly polished cinematic cosplay photograph with vivid character storytelling and intense visual appeal.\n\n"
@@ -5366,8 +5477,8 @@ def _seedream_diary_prompt(custom_prompt):
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new candid diary/lifestyle photograph according to the prompt. Do not copy any one reference pose or background exactly. "
         "This is a warm, highly intimate, and romantic private exchange-diary moment in a contemporary Taiwan daily-life setting (often from a Boyfriend POV). "
-        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male shoulder, back, torso, silhouette, reflection, or foreground viewer hand/arm. The POV must be implied only through framing. "
+        "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
         "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
         "Clothing can range from cozy loungewear to intimate sleepwear (such as silk slip dresses, lace chemises, or form-fitting outfits), allowing for figure-flattering, translucent, or alluring styles to portray romantic closeness. "
         "Preserve the described daily action, props, gaze direction, romantic lighting mood, and lived-in environment details.\n\n"
@@ -6432,8 +6543,8 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
         "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
-        "Only Xiaoxia may appear. No man, no male hands, no male arms, no other people, no reflections of other people. "
-        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No male figure, no male shoulder, no male back, no male torso, no male silhouette, no male reflection, and no foreground arm or hand from the viewer. The boyfriend POV must be implied only through framing, never by showing another person. "
+        "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
+        "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male head, no male face, no male hair, no male shoulder, no male back, no male torso, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The boyfriend POV must be implied only through framing, Xiaoxia's gaze, and composition, never by showing another person. "
         "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. Xiaoxia's pose and limb positions must be anatomically normal and natural, with no extra limbs, twisted joints, broken fingers, or awkward body mechanics. "
     )
     if has_reference:
@@ -7039,8 +7150,78 @@ class PhotoResultView(discord.ui.View):
         await interaction.response.send_modal(PhotoNameModal(self.context, "diary"))
 
 # 🌟 [究極穩定版] 萬能攝影機：支援「有圖融合」與「無圖變裝」+ Base64 自動解碼
-async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="travel", custom_prompt="", current_outfit=None):
+async def _download_reference_for_seedream(discord_image_url):
+    if not discord_image_url:
+        return None
+    if os.path.exists(str(discord_image_url)):
+        return str(discord_image_url)
+    if not str(discord_image_url).startswith("http"):
+        return None
+    temp_path = os.path.join(OUTPUT_DIR, f"seedream_ref_{uuid.uuid4().hex[:8]}.png")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(discord_image_url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"下載 Seedream 參考圖失敗 HTTP {resp.status}")
+            with open(temp_path, "wb") as f:
+                f.write(await resp.read())
+    return temp_path
+
+
+async def _generate_gpt_image2_fallback(discord_image_url=None, base_filename="base_xiaoxia.jpg", custom_prompt=""):
+    """僅作為明確啟用的備援引擎；小朋友說故事可保留自己的 gpt-image-2 路徑。"""
     files_to_close = []
+    try:
+        base_image_path = os.path.join(MEMORY_DIR, base_filename)
+        b_file = open(base_image_path, "rb")
+        files_to_close.append(b_file)
+        image_list = [b_file]
+
+        if discord_image_url:
+            temp_path = os.path.join(OUTPUT_DIR, f"gpt_fallback_ref_{uuid.uuid4().hex[:8]}.png")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(discord_image_url) as resp:
+                    if resp.status == 200:
+                        with open(temp_path, "wb") as f:
+                            f.write(await resp.read())
+            if os.path.exists(temp_path):
+                ref_file = open(temp_path, "rb")
+                files_to_close.append(ref_file)
+                image_list.append(ref_file)
+
+        final_prompt = f"Image 1 is Xiaoxia's identity reference.\n{STRICT_SOLO_AND_ANATOMY_PROMPT}\n[大俠要求]: {custom_prompt}"
+        result = await openai_client.images.edit(
+            model="gpt-image-2",
+            image=image_list,
+            prompt=final_prompt,
+            size="1024x1024",
+            quality="auto"
+        )
+
+        img_data = result.data[0]
+        if hasattr(img_data, "url") and img_data.url:
+            return img_data.url
+        if hasattr(img_data, "b64_json") and img_data.b64_json:
+            filename = f"gptfallback_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(OUTPUT_DIR, filename)
+            image_bytes = base64.b64decode(img_data.b64_json)
+            with open(filepath, "wb") as f:
+                f.write(image_bytes)
+            return f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+        return "gpt-image-2 fallback 無法取得圖片數據"
+    finally:
+        for f in files_to_close:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+
+async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="photo_scene", custom_prompt="", current_outfit=None):
+    """
+    影像總入口：
+    - 除小朋友說故事等獨立模組外，預設一律優先 Seedream v4.5。
+    - gpt-image-2 僅保留為明確 mode='gpt_image_2_fallback' 且 ENABLE_GPT_IMAGE2_FALLBACK=true 時的備援。
+    """
     try:
         if mode == "cosplay":
             return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
@@ -7051,81 +7232,32 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
         if mode == "photo_reference":
             return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True, current_outfit=current_outfit)
 
-        # 1. 定位人物底圖 (Image 1)
-        base_image_path = os.path.join(MEMORY_DIR, base_filename)
-        b_file = open(base_image_path, "rb")
-        files_to_close.append(b_file)
-        image_list = [b_file]
+        # 舊 travel / shopping / 未分類圖片模式也先轉 Seedream v4.5，避免回到 gpt-image-2 舊路徑。
+        if mode in {"travel", "shopping", "default", "world", "scene"} or mode != "gpt_image_2_fallback":
+            reference_path = await _download_reference_for_seedream(discord_image_url)
+            adapted_prompt = (
+                f"{custom_prompt}\n\n"
+                "Render this with Seedream v4.5 as a solo Xiaoxia image. "
+                "If a reference image is provided, use it as background/item/style reference only; "
+                "do not introduce any other person."
+            )
+            return await generate_seedream_v45_photo(
+                adapted_prompt,
+                reference_image_path=reference_path,
+                enable_safety_checker=True,
+                current_outfit=current_outfit,
+            )
 
-        # 2. 判斷大俠這次有沒有傳參考圖 (風景或物品)
-        has_ref = False
-        if discord_image_url:
-            temp_path = os.path.join(OUTPUT_DIR, f"ref_{uuid.uuid4().hex[:6]}.png")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(discord_image_url) as resp:
-                    if resp.status == 200:
-                        with open(temp_path, "wb") as f:
-                            f.write(await resp.read())
-            ref_file = open(temp_path, "rb")
-            files_to_close.append(ref_file)
-            image_list.append(ref_file)
-            has_ref = True
+        if mode == "gpt_image_2_fallback" and os.environ.get("ENABLE_GPT_IMAGE2_FALLBACK", "false").lower() in {"1", "true", "yes"}:
+            print("⚠️ [GPT_IMAGE2_FALLBACK_USED] gpt-image-2 fallback explicitly enabled.")
+            return await _generate_gpt_image2_fallback(discord_image_url, base_filename, custom_prompt)
 
-        # 3. 🤖 智慧指令分流：確保單圖時不會因為找不到 Image 2 而噴錯
-        if has_ref:
-            # 模式 A：雙圖融合 (大俠有給風景/物品照)
-            if mode == "travel":
-                base_p = "Image 1 is the subject. Image 2 is the background. Place Image 1 into Image 2."
-            else: # shopping
-                base_p = "Image 1 is the subject. Image 2 is an item. Add Image 2 onto the subject in Image 1."
-        else:
-            # 模式 B：單圖變身 (大俠沒給圖，讓 AI 根據文字憑空生出背景、服裝與較自由的動作)
-            if mode == "cosplay":
-                base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity, hairstyle, and overall recognizability, "
-                    "but you may substantially change her full-body pose, body orientation, hand placement, camera framing, outfit, and background to match the prompt. "
-                    "Do not simply copy the original composition or pose from Image 1."
-                )
-            elif mode == "diary":
-                base_p = (
-                    "Image 1 is the base character identity reference. Preserve her facial identity and hairstyle, "
-                    "while creating a new candid daily-life moment with natural posture, outfit, and background based on the prompt."
-                )
-            else:
-                base_p = "Image 1 is the base character. Modify the outfit and background based on the prompt."
-
-        final_prompt = f"{base_p}\n{STRICT_SOLO_AND_ANATOMY_PROMPT}\n[大俠要求]: {custom_prompt}"
-
-        # 4. 呼叫 API (移除 moderation, quality 改 auto, 尺寸 1024x1024 最穩)
-        result = await openai_client.images.edit(
-            model="gpt-image-2",
-            image=image_list,
-            prompt=final_prompt,
-            size="1024x1024",
-            quality="auto"
-        )
-        
-        # 5. 解碼與回傳邏輯
-        img_data = result.data[0]
-        if hasattr(img_data, "url") and img_data.url:
-            return img_data.url
-        elif hasattr(img_data, "b64_json") and img_data.b64_json:
-            import base64
-            filename = f"gptimg_{uuid.uuid4().hex[:8]}.png"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-            image_bytes = base64.b64decode(img_data.b64_json)
-            with open(filepath, "wb") as f:
-                f.write(image_bytes)
-            return f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
-        
-        return "無法取得圖片數據"
+        return "未啟用 gpt-image-2 fallback；請改用 Seedream v4.5 模式。"
 
     except Exception as e:
-        print(f"❌ 攝影機異常: {e}")
+        print(f"❌ Seedream v4.5 攝影機異常: {e}")
         return str(e)
-    finally:
-        for f in files_to_close: f.close()
-        if 'temp_path' in locals() and os.path.exists(temp_path): os.remove(temp_path)
+
 # ==========================================
 # 🌟 日記回覆與生活感引擎 (The Heart of Xiaoxia - 雙向性感進化版)
 # ==========================================
@@ -7607,7 +7739,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     json.dump(diary_db, f, ensure_ascii=False, indent=2)
 
             # 🌙 交換日記圖片改走獨立「日記導演層」：
-            # 由 Gemini 根據當日互動規劃生活狀態，再由 GPT-5-mini 翻成 gpt-image-2 描述。
+            # 由 Gemini 根據當日互動規劃生活狀態，再由 GPT-5-mini 翻成 Seedream v4.5 描述。
             # /cosplay 的時尚攝影 prompt 完全不會混入這條路線。
             diary_state = None
             diary_visual = {
@@ -8939,7 +9071,7 @@ async def on_raw_reaction_add(payload):
                         inline=False,
                     )
                 embed.set_footer(
-                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | gpt-image-2 日記生活攝影"
+                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | Seedream v4.5 日記生活攝影"
                 )
 
                 if is_reroll:
