@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.51"
+LOBSTER_VERSION = "1.4.48"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3694,6 +3694,63 @@ VIBE_KEYWORDS = {
 }
 
 
+VIBE_RENDER_GUIDE = {
+    "清新": {
+        "planner": "清新：偏年輕、輕盈、乾淨、明亮，魅力來自清爽與自然好感。",
+        "translator": "fresh, bright, light, airy, gently charming"
+    },
+    "自然": {
+        "planner": "自然：偏生活感、真實、放鬆，像日常中自然流露的好看。",
+        "translator": "natural, relaxed, soft, lived-in, believable"
+    },
+    "戲劇": {
+        "planner": "戲劇：光影、敘事與情緒更鮮明，像電影感劇照。",
+        "translator": "cinematic, dramatic, story-driven, emotionally charged"
+    },
+    "性感": {
+        "planner": "性感：要明顯是成熟女性的性感與吸引力，而不只是優雅或夢幻。可合理加入貼身剪裁、收腰、開領、露肩、露背、開衩、絲襪、絲緞或微透材質，並透過眼神、唇部表情、姿態與鏡頭距離呈現撩人的親密張力。若只做成知性、夢幻或保守漂亮，算失敗。",
+        "translator": "sensual, womanly, body-aware, alluring, fitted silhouette, elegant cleavage or neckline, bare shoulders or back when appropriate, satin or sheer texture, intimate eye contact, subtly teasing expression"
+    },
+    "魅惑": {
+        "planner": "魅惑：比性感再更有勾人張力，允許更濃的誘惑眼神、曖昧表情與更鮮明的身體線條，但仍要符合角色邏輯與美感。",
+        "translator": "seductive, magnetic, dangerously alluring, sultry gaze, teasing smile, seductive posture, luxurious sensual styling"
+    },
+    "極致": {
+        "planner": "極致：在不破壞角色識別與審核邊界下，把成熟魅力與戲劇張力推到最高。",
+        "translator": "high-impact sensuality, maximum dramatic allure, striking glamour, intense seductive presence"
+    },
+}
+
+
+def _get_vibe_guide(vibe_request):
+    zh = str((vibe_request or {}).get("zh") or "自然")
+    return VIBE_RENDER_GUIDE.get(zh, VIBE_RENDER_GUIDE["自然"])
+
+
+def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
+    planned = dict(planned or {})
+    zh = str((vibe_request or {}).get("zh") or planned.get("vibe_target_zh") or "自然")
+    level = int((vibe_request or {}).get("level") or 2)
+    planned["vibe_target_zh"] = zh
+    planned["vibe_target_en"] = str((vibe_request or {}).get("en") or planned.get("vibe_target_en") or "natural")
+    if zh == "性感" or level >= 4:
+        planned["mood_tw"] = planned.get("mood_tw") or "成熟、撩人、角色感"
+        planned["camera_awareness"] = "aware" if planned.get("camera_awareness") == "unaware" else planned.get("camera_awareness", "aware")
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Use clearly sensual adult-feminine styling rather than mere elegance: fitted silhouette, a defined waist, open neckline or tasteful cleavage when fitting the role, possible bare shoulders, back, slit, stockings, satin, silk, or slightly sheer layers as appropriate.").strip()
+        planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Make the look genuinely sensual and body-aware, not only elegant or dreamy.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, soft teasing smile, quietly inviting energy.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer, more intimate sculpting light that helps the body lines and fabric texture read as sensual.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her in a way that lets the sensual styling read clearly instead of flattening it into a safe documentary shot.").strip()
+        planned["vibe_notes"] = "This should read as unmistakably sensual, adult, and alluring — not merely elegant, dreamy, or cute."
+    if zh == "魅惑" or level >= 5:
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Increase the seductive pull: stronger gaze, more knowingly alluring facial expression, more magnetic emotional tension.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use richer contrast and more decadent cinematic glow.").strip()
+        planned["vibe_notes"] = "This should feel distinctly seductive and magnetic, with obvious romantic tension and glamour."
+    if zh == "極致" or level >= 6:
+        planned["vibe_notes"] = "Push the glamour and sensual drama to the maximum safe level while preserving role identity and plausibility."
+    return planned
+
+
 def _extract_vibe_mode(text_value: str):
     hay = str(text_value or "").strip().lower()
     for zh, aliases in VIBE_KEYWORDS.items():
@@ -4755,6 +4812,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
     v1450 加強點：除了 high-level 導演意圖，也同步輸出可供修正/重擲沿用的硬錨點欄位。
     """
     framing = "half_body" if force_half_body else "full_body"
+    vibe_guide = _get_vibe_guide(vibe_request)
     fallback = {
         "character_core": "小俠保留自己的辨識度，正在扮演該角色，而不是變成原角色本人。",
         "scene_design": "Use a story-appropriate setting that naturally matches the source world, with 1-2 concrete environmental details.",
@@ -4781,7 +4839,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         "pose_energy": "low",
         "vibe_target_zh": str((vibe_request or {}).get("zh") or "自然"),
         "vibe_target_en": str((vibe_request or {}).get("en") or "natural"),
-        "vibe_notes": "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic."
+        "vibe_notes": str(vibe_guide.get("planner") or "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic.")
     }
 
     planner_prompt = f"""你是小俠 Cosplay 生圖流程的「導演層」。
@@ -4811,6 +4869,8 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 10. scenario_tw 請用繁體中文，90字內，像導演給攝影師看的畫面一句話摘要。
 11. mood_tw 請用繁體中文，30字內。
 12. 依照目標氛圍模式，微調畫面張力：清新 < 自然 < 戲劇 < 性感 < 魅惑 < 極致。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
+12b. 這次目標氛圍補充說明：{vibe_guide.get("planner")}。
+12c. 如果目標是「性感」或以上，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
 13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
 14. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
 15. pose_energy 只能是 low 或 medium。
@@ -4858,6 +4918,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         print(f"⚠️ Cosplay 導演層規劃失敗，使用保底方案: {e}")
         planned = dict(fallback)
 
+    planned = _strengthen_cosplay_state_for_vibe(planned, vibe_request)
     if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
         planned["camera_awareness"] = fallback["camera_awareness"]
     if planned.get("pose_energy") not in {"low", "medium"}:
@@ -4879,6 +4940,7 @@ async def render_cosplay_visual_prompt(cosplay_state, alternative=False):
         if alternative else
         "Create the first signature image of this role and situation with strong story clarity, source-world coherence, and visual appeal."
     )
+    vibe_guide = _get_vibe_guide({"zh": cosplay_state.get("vibe_target_zh"), "en": cosplay_state.get("vibe_target_en")})
     prompt = f"""You are a prompt translator for Seedream v4.5 image generation.
 Turn the structured cosplay director plan below into one polished English image prompt of about 130 to 185 words.
 The result must feel like a photorealistic, cinematic, story-driven cosplay still.
@@ -4897,6 +4959,10 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Honor the source-world atmosphere and the situation logic.
 - The image should feel like a naturally captured story moment, not a plain studio portrait.
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
+- Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
+- If the vibe target is 性感 or above, the prompt must make the sensuality unmistakable through concrete styling and framing, such as fitted silhouette, body-aware styling, open neckline or tasteful cleavage, bare shoulders or back, slit, stockings, satin/silk/sheer texture, more intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
+- For 性感, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
+- For profession roles, preserve the occupational task and props, but still allow clearly sensual adult-feminine styling if 性感 or above is requested.
 - Preserve visual variety; do not force every role into the same mood.
 - Mention believable hand behavior so the hands remain purposeful and natural.
 - Avoid mentioning JSON or metadata.
@@ -5886,6 +5952,103 @@ def _wardrobe_item_generation_hint(item):
         )
     return hint.strip()
 
+
+
+
+def _extract_wardrobe_ids_from_text(text_value):
+    """抓出 W003 / w003 這類衣櫃編號。"""
+    return [m.group(0).upper() for m in re.finditer(r"\bW\d{3,4}\b", str(text_value or ""), flags=re.IGNORECASE)]
+
+
+def _find_first_wardrobe_item_in_text(text_value):
+    """文字有指定衣櫃編號時，必須回到衣櫃資料，不可只靠名稱腦補。"""
+    for wid in _extract_wardrobe_ids_from_text(text_value):
+        item = _find_wardrobe_item(wid)
+        if item:
+            return item
+    return None
+
+
+def _wardrobe_reference_for_generation(item):
+    """回傳可餵給 Seedream 的衣櫃參考圖路徑/URL。找不到就回 None，避免望名自創。"""
+    if not isinstance(item, dict):
+        return None, None
+    ref_path = str(item.get("reference_image_path") or "").strip()
+    ref_url = str(item.get("local_url") or item.get("reference_item_url") or "").strip()
+    if ref_path and os.path.exists(ref_path):
+        return ref_path, ref_url or None
+    if ref_url.startswith("http"):
+        return ref_url, ref_url
+    return None, ref_url or None
+
+
+def _diary_promises_for_entry(profile, entry_date, max_items=4):
+    """
+    交換日記履約只抓「本篇日期」的承諾。
+    尤其照片/穿搭承諾不可跨日自動延續；隔天沒有明講就回到場景自動穿搭。
+    """
+    bucket = profile.get("xiaoxia_self", {}).get("promises", [])
+    selected, seen = [], set()
+    for item in reversed(bucket):
+        value = item.get("text", "") if isinstance(item, dict) else str(item)
+        value = narrative_safe_text(value, max_len=180)
+        if not value:
+            continue
+        added_at = str(item.get("added_at", "") if isinstance(item, dict) else "").strip()
+        kind = infer_diary_promise_kind(value)
+        is_outfit_or_photo = bool(re.search(r"(W\d{3,4}|衣櫃|穿|穿搭|服裝|照片|外出照|生活照|圖片|寫真)", value, re.I))
+        # 有日期的穿搭/照片承諾只能在當日履約；舊日記重跑則以該 entry_date 為準。
+        if is_outfit_or_photo and added_at and added_at != entry_date:
+            continue
+        # 無日期的舊承諾只允許文字，不讓它長期綁住照片穿搭。
+        if is_outfit_or_photo and not added_at:
+            continue
+        key = value.rstrip("。")
+        if key and key not in seen:
+            seen.add(key)
+            selected.append({"text": value, "kind": kind})
+            if len(selected) >= max_items:
+                break
+    return selected
+
+
+def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=None):
+    """
+    只有「本篇日記 / 今日聊天 / 本篇應履約承諾」明確指定衣櫃編號時，交換日記才使用衣櫃參考圖。
+    不從 yesterday/current_outfit/recent_context 自動延續。
+    """
+    sources = [
+        entry_content,
+        chat_context,
+        "\n".join([p.get("text", "") for p in due_promises or []]),
+    ]
+    if isinstance(result, dict):
+        sources.extend([
+            result.get("scenario_tw", ""),
+            result.get("scenario", ""),
+            result.get("promise_delivery", ""),
+        ])
+    blob = "\n".join(str(x or "") for x in sources)
+    item = _find_first_wardrobe_item_in_text(blob)
+    if not item:
+        return None
+    reference_path, reference_url = _wardrobe_reference_for_generation(item)
+    if not reference_path:
+        print(f"⚠️ [DIARY_WARDROBE_REFERENCE_MISSING] id={item.get('id')} name={item.get('name')}")
+        return {
+            "item": item,
+            "reference_path": None,
+            "reference_url": reference_url,
+            "hint": _wardrobe_item_generation_hint(item),
+            "error": "衣櫃項目找不到可用參考圖，已拒絕望名自創。",
+        }
+    return {
+        "item": item,
+        "reference_path": reference_path,
+        "reference_url": reference_url,
+        "hint": _wardrobe_item_generation_hint(item),
+        "error": "",
+    }
 
 def _update_wardrobe_item_from_command(payload):
     """
@@ -7683,6 +7846,13 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
         if mode == "cosplay":
             return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
         if mode == "diary":
+            if discord_image_url:
+                return await generate_seedream_v45_photo(
+                    custom_prompt,
+                    reference_image_path=discord_image_url,
+                    enable_safety_checker=True,
+                    current_outfit=current_outfit,
+                )
             return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
         if mode == "photo_scene":
             return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit)
@@ -7926,7 +8096,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
             current_promise_texts = _memory_text_values(promises_list)
             current_promises = "、".join(current_promise_texts) if current_promise_texts else "無特殊承諾"
-            due_promises = get_due_diary_promises(profile, max_items=4)
+            due_promises = _diary_promises_for_entry(profile, entry_date, max_items=4)
             promise_requirements = format_diary_promise_requirements(due_promises)
 
             # 🌟 檢查是否有大俠準備好的「交換日記指定圖」
@@ -7942,7 +8112,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 """
             else:
                 custom_scenario_rule = """
-               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須聚焦於兌現該承諾，並保持自然、成熟、非露骨。
+               - 交換日記的服裝不得跨日自動延續。只有【本篇日期】的大俠日記、今日聊天或本篇待履約承諾明確指定衣服/衣櫃編號時，才穿指定衣服。
+               - 若今日無明確服裝/照片承諾，`scenario_tw` 必須依當下生活場景自動搭配新衣，不得沿用昨天、上一則日記、上一張照片或 recent_context 中的衣服。
+               - 檢視【本篇必須實際履行的承諾】；只有其中明確要求特定款式、顏色或衣櫃編號時，`scenario_tw` 才可聚焦於兌現該承諾。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
                - 嚴禁在 scenario 中使用「全裸」等極度露骨字眼。
                 """
@@ -8205,6 +8377,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "message": "大俠，這是今天只屬於我們的小片刻。"
             }
 
+            diary_wardrobe = _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=result)
+            if diary_wardrobe and diary_wardrobe.get("error"):
+                print(f"⚠️ [{entry_date}] {diary_wardrobe.get('error')} item={diary_wardrobe.get('item', {}).get('id')}")
+                diary_wardrobe = None
+
             if custom_diary:
                 print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 AI 生圖！")
                 up_img = custom_diary["image_url"]
@@ -8215,24 +8392,42 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 del overrides[entry_date]
                 save_diary_override(overrides)
             else:
+                wardrobe_hard_note = ""
+                if diary_wardrobe:
+                    wardrobe_item = diary_wardrobe.get("item", {})
+                    wardrobe_hard_note = (
+                        "\n\n【本篇衣櫃強制參考】"
+                        f"\n- 指定衣櫃：{wardrobe_item.get('id')} {wardrobe_item.get('name')}"
+                        "\n- 生圖必須以衣櫃參考圖為服裝主參考，不得只依名稱自行創作。"
+                        f"\n{diary_wardrobe.get('hint', '')}"
+                    )
                 diary_state, diary_visual = await create_diary_visual(
                     entry_content=entry_content,
                     chat_context=chat_context,
                     result=result,
-                    current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements,
+                    current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note,
                     season_rule=season_rule,
-                    scenario_hint=result.get("scenario_tw", result.get("scenario", ""))
+                    scenario_hint=(result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note)
                 )
                 result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
                 image_prompt = diary_visual["image_prompt"]
 
+                diary_reference_path = diary_wardrobe.get("reference_path") if diary_wardrobe else None
+                if diary_wardrobe:
+                    image_prompt = (
+                        image_prompt
+                        + "\n\nWARDROBE REFERENCE OVERRIDE FOR DIARY:\n"
+                        + diary_wardrobe.get("hint", "")
+                        + "\nImage 10 is the exact wardrobe reference. The clothing style, cut, material, color, category, and silhouette must follow Image 10. Do not invent a different garment from the item name."
+                    )
                 generated_image_url, diary_visual = await execute_safe_generation(
-                    discord_image_url=None,
+                    discord_image_url=diary_reference_path,
                     base_filename="base_xiaoxia.jpg",
                     mode="diary",
                     initial_prompt=image_prompt,
                     visual_dict=diary_visual,
-                    msg=None
+                    msg=None,
+                    current_outfit=(diary_wardrobe.get("hint") if diary_wardrobe else None)
                 )
                 up_img = generated_image_url
                 local_filename = await save_to_vault(up_img)
@@ -8262,6 +8457,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "type": "diary",
                 "source_mode": "diary",
                 "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
+                "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id") if not custom_diary else None,
+                "reference_item_path": (diary_wardrobe or {}).get("reference_path") if not custom_diary else None,
+                "reference_item_url": (diary_wardrobe or {}).get("reference_url") if not custom_diary else None,
             }
             db = load_memory()
             db.insert(0, diary_photo_payload)
