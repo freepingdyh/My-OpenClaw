@@ -6,8 +6,9 @@ import os
 import io
 import json
 import re
+import math
 
-LOBSTER_VERSION = "1.4.59"
+LOBSTER_VERSION = "1.4.60"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
