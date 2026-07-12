@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.57"
+LOBSTER_VERSION = "1.4.58"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6607,7 +6607,7 @@ def _wardrobe_embed_for_item(item, title_prefix="👗 小俠衣櫃"):
     return embed
 
 
-WARDROBE_PAGE_SIZE = 10
+WARDROBE_PAGE_SIZE = 5
 
 
 def _wardrobe_filtered_items(query=""):
@@ -6640,8 +6640,8 @@ def _wardrobe_item_browse_embed(item):
 
 def _wardrobe_browse_payload(query="", page=0, page_size=WARDROBE_PAGE_SIZE):
     """
-    /衣櫃 分頁瀏覽：每頁最多 10 件 item embeds。
-    由於 Discord 一則訊息最多 10 個 embeds，頁面標題改用 content 顯示，讓 10 個 embeds 都留給衣服卡片。
+    /衣櫃 分頁瀏覽：每頁最多 5 件 item embeds，避免 Discord 單訊息 embeds 總字數限制造成 /衣櫃 無回應。
+    Discord 對單則訊息 embeds 總字數也有限制；每頁降為 5 件，頁面標題改用 content 顯示。
     """
     matched = _wardrobe_filtered_items(query)
     total = len(matched)
@@ -9009,6 +9009,25 @@ async def more(ctx):
     except Exception as e: 
         await msg.edit(content=f"⚠️ 失敗：{e}")
 
+async def _send_wardrobe_browse_message(ctx, query="", page=0):
+    """安全送出 /衣櫃 分頁；Discord embed 限制失敗時退回純文字清單。"""
+    content, embeds, page, _total_pages, total = _wardrobe_browse_payload(query=query, page=page)
+    view = WardrobeBrowseView(query=query, page=page)
+    try:
+        await ctx.send(content=content, embeds=embeds, view=view)
+        return
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_BROWSE_SEND_FAILED] {type(exc).__name__}: {exc}")
+        matched = _wardrobe_filtered_items(query)
+        start = max(0, int(page or 0)) * WARDROBE_PAGE_SIZE
+        page_items = matched[start:start + WARDROBE_PAGE_SIZE]
+        lines = [content, "", "⚠️ 圖片卡片太多或字數超過 Discord 限制，先用純文字列出本頁："]
+        for item in page_items:
+            lines.append(f"- **{item.get('id')}** {item.get('name')}｜{item.get('main_category')}/{item.get('sub_category')}")
+        lines.append("\n可用 `/衣櫃看 Wxxx` 查看單件大圖，或 `/衣櫃穿 Wxxx` 套用到下一張 `/photo`。")
+        await ctx.send("\n".join(lines)[:1900], view=view if total else None)
+
+
 @girlfriend_bot.command(name='衣櫃')
 async def wardrobe_command(ctx, *, args: str = ""):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
@@ -9017,12 +9036,10 @@ async def wardrobe_command(ctx, *, args: str = ""):
 
     action, payload = _parse_wardrobe_command(ctx.message.content)
     if action == "browse":
-        content, embeds, page, _total_pages, _total = _wardrobe_browse_payload()
-        await ctx.send(content=content, embeds=embeds, view=WardrobeBrowseView(page=page))
+        await _send_wardrobe_browse_message(ctx, query="", page=0)
         return
     if action == "search":
-        content, embeds, page, _total_pages, _total = _wardrobe_browse_payload(payload)
-        await ctx.send(content=content, embeds=embeds, view=WardrobeBrowseView(query=payload, page=page))
+        await _send_wardrobe_browse_message(ctx, query=payload, page=0)
         return
     if action == "新增":
         await _handle_wardrobe_add_command(ctx, payload, remove_person=False)
