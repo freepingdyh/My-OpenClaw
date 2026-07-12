@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.56"
+LOBSTER_VERSION = "1.4.57"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -3710,48 +3710,54 @@ def _fate_card_path(filename: str) -> str:
     return os.path.join(FATE_CARD_DIR, filename)
 
 
-VIBE_LEVEL_MAP = {
-    "清新": {"level": 1, "en": "fresh"},
+CANONICAL_VIBE_MAP = {
+    "甜": {"level": 1, "en": "sweet"},
     "自然": {"level": 2, "en": "natural"},
-    "戲劇": {"level": 3, "en": "dramatic"},
-    "性感": {"level": 4, "en": "sensual"},
-    "魅惑": {"level": 5, "en": "alluring"},
-    "極致": {"level": 6, "en": "intense"},
+    "雅": {"level": 3, "en": "elegant"},
+    "凜": {"level": 4, "en": "sharp"},
+    "幻": {"level": 5, "en": "fantasy"},
+    "魅": {"level": 6, "en": "alluring-max"},
 }
-VIBE_KEYWORDS = {
-    "清新": ["清新", "fresh"],
-    "自然": ["自然", "natural"],
-    "戲劇": ["戲劇", "dramatic"],
-    "性感": ["性感", "sensual", "sexy"],
-    "魅惑": ["魅惑", "alluring", "誘惑", "撫媚"],
-    "極致": ["極致", "intense", "高張力", "拉滿"],
+VIBE_LEVEL_MAP = dict(CANONICAL_VIBE_MAP)
+VIBE_ALIAS_TO_CANONICAL = {
+    "甜": "甜", "甜系": "甜", "可愛": "甜", "俏皮": "甜", "甜美": "甜", "清新": "甜", "活潑": "甜", "元氣": "甜", "cute": "甜", "playful": "甜", "sweet": "甜",
+    "自然": "自然", "natural": "自然",
+    "雅": "雅", "雅系": "雅", "優雅": "雅", "端莊": "雅", "溫柔": "雅", "氣質": "雅", "柔美": "雅", "graceful": "雅", "elegant": "雅", "gentle": "雅",
+    "凜": "凜", "凜系": "凜", "英氣": "凜", "專業": "凜", "強勢": "凜", "俐落": "凜", "幹練": "凜", "sharp": "凜", "professional": "凜", "commanding": "凜",
+    "幻": "幻", "幻系": "幻", "夢幻": "幻", "神秘": "幻", "華麗": "幻", "奇幻": "幻", "魔幻": "幻", "cinematic": "幻", "dreamy": "幻", "mystic": "幻", "fantasy": "幻",
+    "魅": "魅", "魅系": "魅", "性感": "魅", "魅惑": "魅", "極致": "魅", "大膽": "魅", "誘惑": "魅", "撫媚": "魅", "拉滿": "魅", "高張力": "魅", "seductive": "魅", "sensual": "魅", "alluring": "魅", "sexy": "魅", "intense": "魅",
 }
+VIBE_KEYWORDS = {}
+for alias, canonical in VIBE_ALIAS_TO_CANONICAL.items():
+    VIBE_KEYWORDS.setdefault(canonical, []).append(alias)
+for canonical in list(VIBE_KEYWORDS.keys()):
+    VIBE_KEYWORDS[canonical] = sorted(list(dict.fromkeys(VIBE_KEYWORDS[canonical] + [canonical])), key=len, reverse=True)
 
 
 VIBE_RENDER_GUIDE = {
-    "清新": {
-        "planner": "清新：偏年輕、輕盈、乾淨、明亮，魅力來自清爽與自然好感。",
-        "translator": "fresh, bright, light, airy, gently charming"
+    "甜": {
+        "planner": "甜：重點是甜美、可愛、親近、俏皮，要讓人一看就覺得討喜、有戀人感與互動感。服裝與表情要輕快、明亮、討喜。",
+        "translator": "sweet, cute, playful, charming, youthful warmth, affectionate energy"
     },
     "自然": {
         "planner": "自然：偏生活感、真實、放鬆，像日常中自然流露的好看。",
         "translator": "natural, relaxed, soft, lived-in, believable"
     },
-    "戲劇": {
-        "planner": "戲劇：光影、敘事與情緒更鮮明，像電影感劇照。",
-        "translator": "cinematic, dramatic, story-driven, emotionally charged"
+    "雅": {
+        "planner": "雅：重點是優雅、端莊、溫柔與氣質，人物應該精緻、柔和、有教養感，不可做成過度活潑或刻意撩人。",
+        "translator": "elegant, graceful, poised, refined, gentle, polished"
     },
-    "性感": {
-        "planner": "性感：要明顯是成熟女性的性感與吸引力，而不只是優雅或夢幻。可合理加入貼身剪裁、收腰、開領、露肩、露背、開衩、絲襪、絲緞或微透材質，並透過眼神、唇部表情、姿態與鏡頭距離呈現撩人的親密張力。若只做成知性、夢幻或保守漂亮，算失敗。",
-        "translator": "sensual, womanly, body-aware, alluring, fitted silhouette, elegant cleavage or neckline, bare shoulders or back when appropriate, satin or sheer texture, intimate eye contact, subtly teasing expression"
+    "凜": {
+        "planner": "凜：重點是俐落、專業、英氣、掌控感。姿態、服裝結構與眼神都要有主導性與效率感，不可軟糯化。",
+        "translator": "sharp, capable, commanding, professional, tailored, confident"
     },
-    "魅惑": {
-        "planner": "魅惑：比性感再更有勾人張力，允許更濃的誘惑眼神、曖昧表情與更鮮明的身體線條，但仍要符合角色邏輯與美感。",
-        "translator": "seductive, magnetic, dangerously alluring, sultry gaze, teasing smile, seductive posture, luxurious sensual styling"
+    "幻": {
+        "planner": "幻：重點是夢幻、神秘、華麗與非日常感。要有世界觀、空氣感、光影儀式感與戲劇性，不可做成普通日常拍照。",
+        "translator": "dreamy, mysterious, ornate, magical, atmospheric, cinematic fantasy"
     },
-    "極致": {
-        "planner": "極致：在不破壞角色識別與審核邊界下，把成熟魅力與戲劇張力推到最高。",
-        "translator": "high-impact sensuality, maximum dramatic allure, striking glamour, intense seductive presence"
+    "魅": {
+        "planner": "魅：這是本系統唯一的『開到滿』成人女性魅力模式。成熟、撩人、勾人、帶有明確浪漫張力，而且要落到服裝結構、開放度、貼身度、材質、腿線、領口、肩背、腰線與鏡頭關係。不可再縮回優雅、知性、夢幻或保守漂亮。fal.ai 會把關，程式不要替它自我設限。",
+        "translator": "maximum alluring sensuality, mature feminine magnetism, seductive, body-aware, high-glamour, open neckline, visible shoulder or back, legline emphasis, satin silk sheer texture, intimate eye contact, teasing lips, unmistakable romantic tension"
     },
 }
 
@@ -3764,33 +3770,55 @@ def _get_vibe_guide(vibe_request):
 def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
     planned = dict(planned or {})
     zh = str((vibe_request or {}).get("zh") or planned.get("vibe_target_zh") or "自然")
-    level = int((vibe_request or {}).get("level") or 2)
     planned["vibe_target_zh"] = zh
     planned["vibe_target_en"] = str((vibe_request or {}).get("en") or planned.get("vibe_target_en") or "natural")
-    if zh == "性感" or level >= 4:
-        planned["mood_tw"] = planned.get("mood_tw") or "成熟、撩人、角色感"
+
+    if zh == "甜":
+        planned["mood_tw"] = "甜美、俏皮、親近"
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Lean cute and lovable: soft youthful styling, playful details, lighter palette, sweet approachable silhouette.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Use a bright, sweet, playful expression with affectionate warmth.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use clean, bright, flattering light with a cheerful romantic feel.").strip()
+        planned["vibe_notes"] = "This should read clearly as sweet, lovable, and playful."
+    elif zh == "雅":
+        planned["mood_tw"] = "溫柔、端莊、優雅"
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Keep the styling refined, graceful, softly luxurious, and elegantly composed.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Use a poised, gentle, softly warm expression.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use polished soft light that supports elegance and refinement.").strip()
+        planned["vibe_notes"] = "This should read as elegant, graceful, and poised."
+    elif zh == "凜":
+        planned["mood_tw"] = "俐落、專業、英氣"
+        planned["camera_awareness"] = planned.get("camera_awareness", "aware")
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Keep the silhouette sharp, tailored, efficient, and strong rather than soft or decorative.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Use a focused, capable, confident expression with controlled intensity.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use cleaner contrast and structured lighting that reinforces competence and authority.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Favor angles that preserve posture, precision, and command.").strip()
+        planned["vibe_notes"] = "This should read as sharp, competent, and commanding."
+    elif zh == "幻":
+        planned["mood_tw"] = "神秘、夢幻、戲劇感"
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Push the styling toward fantasy, mystery, ornament, layered drape, and visual atmosphere.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Use an enigmatic, dreamy, story-rich expression.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use atmospheric, cinematic, possibly mystical light with visible mood.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Let the worldbuilding and aura read clearly, not just the person alone.").strip()
+        planned["vibe_notes"] = "This should feel magical, atmospheric, and non-everyday."
+    elif zh == "魅":
+        planned["mood_tw"] = "成熟、撩人、角色感"
         planned["camera_awareness"] = "aware" if planned.get("camera_awareness") == "unaware" else planned.get("camera_awareness", "aware")
-        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " Use clearly sensual adult-feminine styling rather than mere elegance: fitted silhouette, a defined waist, open neckline or tasteful cleavage when fitting the role, possible bare shoulders, back, slit, stockings, satin, silk, or slightly sheer layers as appropriate.").strip()
-        planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Make the look genuinely sensual and body-aware, not only elegant or dreamy.").strip()
-        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, soft teasing smile, quietly inviting energy.").strip()
-        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer, more intimate sculpting light that helps the body lines and fabric texture read as sensual.").strip()
-        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her in a way that lets the sensual styling read clearly instead of flattening it into a safe documentary shot.").strip()
-        planned["vibe_notes"] = "This should read as unmistakably sensual, adult, and alluring — not merely elegant, dreamy, or cute."
-    if zh == "魅惑" or level >= 5:
-        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " Increase the seductive pull: stronger gaze, more knowingly alluring facial expression, more magnetic emotional tension.").strip()
-        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use richer contrast and more decadent cinematic glow.").strip()
-        planned["vibe_notes"] = "This should feel distinctly seductive and magnetic, with obvious romantic tension and glamour."
-    if zh == "極致" or level >= 6:
-        planned["vibe_notes"] = "Push the glamour and sensual drama to the maximum safe level while preserving role identity and plausibility."
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " This is the max-allure lane: use clearly sensual adult-feminine styling, visible waist definition, open neckline or tasteful cleavage when fitting the role, possible bare shoulders or back, slit, stockings, satin, silk, lace, or slightly sheer layers as appropriate. Do not soften this into merely elegant, cute, or conservative styling.").strip()
+        planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Make the look genuinely sensual, body-aware, glamorous, and magnetically feminine.").strip()
+        planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, softly teasing smile or parted lips, knowingly inviting energy.").strip()
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer sculpting light and richer contrast so body lines, curves, and fabric texture read clearly as sensual.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the allure is legible in outfit, silhouette, posture, and emotional tension rather than flattening it into a safe documentary shot.").strip()
+        planned["vibe_notes"] = "This must read as maximum alluring adult femininity with obvious romantic tension and glamour."
     return planned
 
 
 def _extract_vibe_mode(text_value: str):
     hay = str(text_value or "").strip().lower()
-    for zh, aliases in VIBE_KEYWORDS.items():
-        if any(alias.lower() in hay for alias in aliases):
-            cfg = VIBE_LEVEL_MAP.get(zh, {})
-            return {"zh": zh, "en": cfg.get("en", "natural"), "level": int(cfg.get("level", 2) or 2)}
+    alias_pairs = sorted(VIBE_ALIAS_TO_CANONICAL.items(), key=lambda kv: len(kv[0]), reverse=True)
+    for alias, canonical in alias_pairs:
+        if alias.lower() in hay:
+            cfg = VIBE_LEVEL_MAP.get(canonical, {})
+            return {"zh": canonical, "en": cfg.get("en", "natural"), "level": int(cfg.get("level", 2) or 2)}
     return None
 
 
@@ -4738,51 +4766,57 @@ def _cosplay_is_profession_context(topic="", event="", persona="", user_request=
 
 
 def _choose_outfit_elements(vibe_zh, is_profession=False, user_outfit_hints=None):
-    """服裝開放度元素池。不是審核；是把審美意圖交給 Gemini/Seedream。"""
+    """依 5 大風格族群挑選服裝元素，讓各系外觀有鑑別度。"""
     user_tokens = []
     if isinstance(user_outfit_hints, dict):
         user_tokens = list(user_outfit_hints.get("tokens") or [])
-    base_profession = [
-        "tailored professional silhouette",
-        "defined waistline",
-        "fitted blouse or structured top",
-        "pencil skirt or body-contouring skirt",
-        "stockings or sheer tights",
-        "high heels",
-        "jacket worn open, half-draped, or slipping from the shoulders",
-        "office-appropriate props kept visible",
-    ]
-    sensual_pool = [
-        "fitted silhouette", "defined waistline", "soft V neckline", "visible collarbones",
-        "bare shoulder or one-shoulder line", "subtle slit", "shorter skirt or visible leg line",
-        "smooth satin or silk sheen", "tasteful stockings", "high heels"
-    ]
-    alluring_pool = [
-        "deeper V neckline", "open neckline", "bare shoulders", "off-shoulder or asymmetric shoulder",
-        "open-back detail", "body-hugging skirt", "noticeable slit", "stockings or thigh-high stockings",
-        "high heels", "satin, lace, or sheer accents", "jacket half-draped", "unbuttoned blouse styling",
-        "corset-like waist structure"
-    ]
-    intense_pool = [
-        "plunging neckline or low-cut visual focus", "large shoulder and collarbone exposure",
-        "open-back styling", "high slit or dramatic leg line", "body-contouring fit",
-        "tight pencil skirt, mini skirt, or high-slit skirt", "stockings or thigh-high stockings",
-        "stiletto heels", "bustier or corset-like structure", "sheer layered sensuality",
-        "silk, satin, lace, or translucent fabric", "jacket slipping from shoulders",
-        "unbuttoned or open-layer styling"
-    ]
-    if vibe_zh == "性感":
-        pool, count, openness, fit = sensual_pool, 3, 3, 3
-    elif vibe_zh == "魅惑":
-        pool, count, openness, fit = alluring_pool, 4, 4, 4
-    elif vibe_zh == "極致":
-        pool, count, openness, fit = intense_pool, 6, 5, 5
-    else:
-        pool, count, openness, fit = sensual_pool[:5], 0, 1, 2
 
-    if is_profession and vibe_zh in {"性感", "魅惑", "極致"}:
+    base_profession = [
+        "task-appropriate professional props kept visible",
+        "clean tailored structure",
+        "defined waistline",
+    ]
+    sweet_pool = [
+        "soft youthful silhouette", "playful ribbon or bow detail", "light knit or soft cotton texture",
+        "short cardigan or cropped outer layer", "pleated skirt or softly flared hem",
+        "bright or pastel palette", "cute hair accessory", "knee socks or sweet leg styling",
+        "girlish romantic detail"
+    ]
+    elegant_pool = [
+        "graceful drape", "refined waist definition", "tasteful neckline", "flowing skirt or long dress",
+        "pearl or delicate jewelry", "silk or chiffon texture", "polished feminine silhouette",
+        "clean elegant heels", "soft luxurious palette"
+    ]
+    sharp_pool = [
+        "structured tailoring", "crisp blouse or fitted top", "precise waist shaping", "sleek pencil skirt or sharp trousers",
+        "boots or pointed heels", "minimal powerful accessories", "confident body line", "sleek professional outer layer"
+    ]
+    fantasy_pool = [
+        "ornate or symbolic accessories", "dramatic sleeves or layered drape", "ethereal sheer layer",
+        "mysterious color story", "worldbuilding costume detail", "ceremonial or magical silhouette",
+        "flowing fabric movement", "cinematic decorative accents"
+    ]
+    allure_pool = [
+        "plunging or open neckline", "visible collarbones and shoulder line", "bare shoulder or open-back styling",
+        "body-hugging or curve-aware fit", "high slit or strong leg line", "stockings or thigh-high stockings",
+        "stiletto heels", "corset-like or waist-cinching structure", "silk, satin, lace, or translucent fabric",
+        "jacket worn open, half-draped, or slipping from shoulders", "unbuttoned or open-layer styling",
+        "glamorous high-contrast sensual styling"
+    ]
+    config = {
+        "甜": {"pool": sweet_pool, "count": 4, "openness": 1, "fit": 2},
+        "雅": {"pool": elegant_pool, "count": 4, "openness": 2, "fit": 3},
+        "凜": {"pool": sharp_pool, "count": 4, "openness": 2, "fit": 3},
+        "幻": {"pool": fantasy_pool, "count": 5, "openness": 2, "fit": 3},
+        "魅": {"pool": allure_pool, "count": 6, "openness": 5, "fit": 5},
+        "自然": {"pool": ["scene-appropriate everyday styling"], "count": 1, "openness": 1, "fit": 2},
+    }
+    picked = config.get(vibe_zh, config["自然"])
+    pool, count, openness, fit = picked["pool"], picked["count"], picked["openness"], picked["fit"]
+
+    if is_profession and vibe_zh in {"凜", "魅"}:
         pool = list(dict.fromkeys(base_profession + pool))
-    # 使用者指定永遠優先，且不被元素池覆蓋。
+
     selected = []
     if user_tokens:
         selected.extend([f"user-specified: {t}" for t in user_tokens])
@@ -4796,60 +4830,42 @@ def _choose_outfit_elements(vibe_zh, is_profession=False, user_outfit_hints=None
 
 
 def _build_outfit_control(vibe_request=None, topic="", event="", persona="", user_outfit_hints=None, user_request=""):
-    """把性感/魅惑/極致落到服裝結構，而不是只停在氛圍詞。"""
+    """把 5 大風格族群落到服裝結構，而不是只停在抽象氛圍詞。"""
     vibe_zh = str((vibe_request or {}).get("zh") or "自然")
     vibe_en = str((vibe_request or {}).get("en") or "natural")
     level = int((vibe_request or {}).get("level") or 2)
     is_profession = _cosplay_is_profession_context(topic, event, persona, user_request)
     selected, openness, fit = _choose_outfit_elements(vibe_zh, is_profession=is_profession, user_outfit_hints=user_outfit_hints)
 
-    if vibe_zh not in {"性感", "魅惑", "極致"}:
-        return {
-            "style_level_zh": vibe_zh,
-            "style_level_en": vibe_en,
-            "target_level": level,
-            "outfit_openness_level": 1,
-            "body_fit_level": 2,
-            "seduction_level": max(1, min(level, 3)),
-            "is_profession": is_profession,
-            "explicit_user_outfit_hints": user_outfit_hints or {},
-            "mandatory_elements": selected,
-            "directive": "Use scene-appropriate clothing. If the user specified clothing, preserve it.",
-        }
+    family_directive = {
+        "甜": "Sweet means visibly cute, lovable, playful, and approachable. The look should read youthful and charming through silhouette, details, and expression rather than through glamour or authority.",
+        "雅": "Elegant means refined, graceful, and poised. The styling should feel polished, softly luxurious, and feminine without sliding into childishness or overt seduction.",
+        "凜": "Sharp means capable, tailored, and commanding. The styling should show structure, confidence, and control rather than softness or pure ornament.",
+        "幻": "Fantasy means dreamy, mysterious, and non-everyday. The styling should visibly carry atmosphere, worldbuilding, and dramatic visual language instead of looking like normal casual wear.",
+        "魅": "Allure is the max-open adult-feminine lane in this system. At L0, do not self-censor or pre-soften it; fal.ai safety checking will decide. The outfit must visibly push openness, fit, material, neckline, shoulders, back, waistline, and legline. It must not collapse into a conservative uniform with only a flirtatious pose.",
+        "自然": "Use scene-appropriate clothing. If the user specified clothing, preserve it."
+    }
+    directive = family_directive.get(vibe_zh, family_directive["自然"])
 
-    if vibe_zh == "性感":
-        directive = (
-            "Sensual means visible mature feminine appeal. It must affect the garment structure, not only facial expression or atmosphere. "
-            "Use clear fit, waist definition, neckline/shoulder/legline or smooth fabric cues. Do not collapse into a fully covered ordinary uniform."
-        )
-    elif vibe_zh == "魅惑":
-        directive = (
-            "Alluring means sensuality plus stronger seductive pull. The clothing should be more body-aware and more intentionally attractive than the sensual tier, "
-            "with more obvious neckline/shoulder/back/legline/material choices whenever role-appropriate."
-        )
-    else:
-        directive = (
-            "Extreme is the most open and high-impact tier within this system. At L0, do not self-censor or pre-soften it; fal.ai safety checker will decide. "
-            "The outfit must visibly upgrade openness, fit, material, legline/neckline/shoulder/back cues, and glamour. "
-            "It must not look like a normal conservative uniform plus a flirtatious pose."
-        )
-    if is_profession:
-        directive += (
-            " This is a profession cosplay: preserve the occupational identity, task, props, and setting, but do not let professionalism suppress the requested sensual/alluring/extreme outfit intensity. "
-            "Transform the uniform into a high-fashion adult-feminine version rather than a fully covered workplace uniform."
-        )
+    if is_profession and vibe_zh == "魅":
+        directive += " This is a profession cosplay: keep the occupation, task, props, and setting readable, but transform the outfit into a high-fashion adult-feminine reinterpretation. Professionalism must not suppress the requested allure."
+    elif is_profession and vibe_zh == "凜":
+        directive += " This is a profession cosplay: keep the work identity visible and sharpen it with high-competence, high-style tailoring rather than generic workwear."
+
     if user_outfit_hints and (user_outfit_hints.get("tokens") or user_outfit_hints.get("freeform")):
         directive += (
             " User-specified outfit details have the highest priority and must be preserved unless physically impossible. "
             f"User hints: {json.dumps(user_outfit_hints, ensure_ascii=False)}."
         )
+
+    seduction_level = 5 if vibe_zh == "魅" else (1 if vibe_zh == "甜" else 2 if vibe_zh == "雅" else 3 if vibe_zh == "凜" else 3 if vibe_zh == "幻" else max(1, min(level, 3)))
     return {
         "style_level_zh": vibe_zh,
         "style_level_en": vibe_en,
         "target_level": level,
         "outfit_openness_level": openness,
         "body_fit_level": fit,
-        "seduction_level": min(5, max(3, level)),
+        "seduction_level": seduction_level,
         "is_profession": is_profession,
         "explicit_user_outfit_hints": user_outfit_hints or {},
         "mandatory_elements": selected,
@@ -4876,7 +4892,7 @@ def _apply_outfit_control_to_planned(planned, outfit_control):
             str(planned.get("costume_direction") or "").strip()
             + "\nThe requested vibe must be visible in actual garment structure, openness, fit, fabric, and silhouette."
         ).strip()
-        if outfit_control.get("style_level_zh") in {"性感", "魅惑", "極致"}:
+        if outfit_control.get("style_level_zh") == "魅":
             planned["camera_awareness"] = "aware" if planned.get("camera_awareness") == "unaware" else planned.get("camera_awareness", "aware")
             planned["expression_direction"] = (
                 str(planned.get("expression_direction") or "").strip()
@@ -4897,15 +4913,15 @@ async def generate_story(mode):
     if weekday == 5:
         style_desc = (
             "【選角限制】：請挑選『陽光、唯美、正向、熱血、奇幻、俏皮或有辨識度』的知名動漫/電玩/電影角色！\n"
-            "【服裝與場景限制】：請以角色世界觀再詮釋服裝，可是英氣、可愛、魔法感、冒險感、未來感、運動感、戲劇感、高級質感或成熟魅力；若後續氛圍指定為性感、魅惑、極致，不可先行保守化。\n"
+            "【服裝與場景限制】：請以角色世界觀再詮釋服裝，可是英氣、可愛、魔法感、冒險感、未來感、運動感、戲劇感、高級質感或成熟魅力；若後續氛圍指定為「魅」，不可先行保守化；若指定為「甜／雅／凜／幻」，也要做出明顯族群辨識度。\n"
             "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具、準備施法、檢查裝備。"
         )
         system_mod = "妳要規劃兼具角色氣質、故事性與視覺吸引力的 Cosplay 題材。風格可以多變，不必侷限優雅；重點是人物正在做某件事，而不是站著擺拍。"
     else:
         style_desc = (
-            "【服裝與場景限制】：請設計有角色感與故事感的服裝與場景，風格可為英氣、俏皮、魔法感、冒險感、運動感、復古感、未來感、華麗、清爽或成熟魅力；若後續氛圍指定為性感、魅惑、極致，不可先行保守化。\n"
+            "【服裝與場景限制】：請設計有角色感與故事感的服裝與場景，風格可為英氣、俏皮、魔法感、冒險感、運動感、復古感、未來感、華麗、清爽或成熟魅力；若後續氛圍指定為「魅」，不可先行保守化；若指定為「甜／雅／凜／幻」，也要做出明顯族群辨識度。\n"
             "【行為限制】：必須給出一個主行為與一個微小輔助動作，讓人物像在生活或劇情之中，例如整理裝備、翻看筆記、準備出門、檢查道具、練習姿勢、回頭確認場景。\n"
-            "【注意事項】：不要把所有題材都寫成同一種棚拍；但也不要替後續性感、魅惑、極致指令預先降級。"
+            "【注意事項】：不要把所有題材都寫成同一種棚拍；但也不要替後續「魅」指令預先降級；其他族群也要明顯區分。"
         )
         system_mod = "妳要展現電影感、角色感與女性魅力，風格可以多變，不必侷限優雅；人物必須像在故事裡自然行動，而不是廣告模特兒。"
 
@@ -5083,11 +5099,11 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 9. negative_guardrails 需保留硬性限制：單人、不能有男人或外部手腳、不能把小俠變成別人、自然解剖。
 10. scenario_tw 請用繁體中文，90字內，像導演給攝影師看的畫面一句話摘要。
 11. mood_tw 請用繁體中文，30字內。
-12. 依照目標氛圍模式，微調畫面張力：清新 < 自然 < 戲劇 < 性感 < 魅惑 < 極致。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
+12. 依照目標氛圍模式，微調畫面張力與視覺語彙：甜 = 可愛親近；雅 = 優雅端莊；凜 = 俐落專業；幻 = 夢幻神秘；魅 = 成熟女性魅力拉滿。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
 12b. 這次目標氛圍補充說明：{vibe_guide.get("planner")}。
-12c. 如果目標是「性感」或以上，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
-12d. 服裝控制指令是硬性創作指令，不是建議。性感/魅惑/極致必須落到「服裝結構、開放度、貼身度、材質、腿線/領口/肩背/腰線」上，不可只改表情或氛圍。
-12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把性感/魅惑/極致壓回保守制服。必須做成高級時尚、成熟女性化的職業再詮釋。
+12c. 如果目標是「魅」，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
+12d. 服裝控制指令是硬性創作指令，不是建議。五大族群都要落到可見造型；其中「魅」必須特別落到「服裝結構、開放度、貼身度、材質、腿線/領口/肩背/腰線」上，不可只改表情或氛圍。
+12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把「魅」壓回保守制服；若是「凜」，則要做成高效率、高專業感的俐落再詮釋。
 12f. 若使用者明確指定服裝元素，這些元素優先於角色預設服裝與場景偏好。
 13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
 14. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
@@ -5181,10 +5197,10 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
 - Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
 - MANDATORY OUTFIT CONTROL: {json.dumps(cosplay_state.get("outfit_control", {}), ensure_ascii=False)}. Treat this as a hard visual requirement, not optional flavor text.
-- If the vibe target is 性感 or above, the prompt must make the sensuality unmistakable through concrete styling and framing, such as fitted silhouette, body-aware styling, open neckline or tasteful cleavage, bare shoulders or back, slit, stockings, satin/silk/sheer texture, more intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
-- For 性感, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
-- For profession roles, preserve the occupational task and props, but explicitly transform the uniform into a high-fashion adult-feminine version if 性感/魅惑/極致 is requested; do not default to fully covered conservative workwear.
-- If the target is 極致, make the outfit visibly the most open, fitted, high-impact version that remains coherent for the role. It must not be merely a conservative outfit with a flirtier pose.
+- If the vibe target is 魅, the prompt must make the sensuality unmistakable through concrete styling and framing, such as fitted silhouette, body-aware styling, open neckline or tasteful cleavage, bare shoulders or back, slit, stockings, satin/silk/sheer texture, more intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
+- For 魅, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
+- For profession roles, preserve the occupational task and props, but explicitly transform the uniform into a high-fashion adult-feminine version if 魅 is requested; do not default to fully covered conservative workwear.
+- If the target is 魅, make the outfit visibly the most open, fitted, high-impact version that remains coherent for the role. It must not be merely a conservative outfit with a flirtier pose.
 - Preserve visual variety; do not force every role into the same mood.
 - Mention believable hand behavior so the hands remain purposeful and natural.
 - Avoid mentioning JSON or metadata.
