@@ -6608,7 +6608,7 @@ def _wardrobe_embed_for_item(item, title_prefix="👗 小俠衣櫃"):
     return embed
 
 
-WARDROBE_PAGE_SIZE = 5
+WARDROBE_PAGE_SIZE = 10
 
 
 def _wardrobe_filtered_items(query=""):
