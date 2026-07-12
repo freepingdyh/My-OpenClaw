@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.58"
+LOBSTER_VERSION = "1.4.59"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -9083,6 +9083,107 @@ async def wardrobe_command(ctx, *, args: str = ""):
         return
 
 
+class _WardrobeMessageCtxAdapter:
+    """讓 /衣櫃 可以直接由 on_message 攔截處理，避免 prefix command parser 在部分頻道/手機輸入時無聲失敗。"""
+    def __init__(self, message):
+        self.message = message
+        self.channel = message.channel
+        self.author = message.author
+        self.guild = getattr(message, "guild", None)
+
+    async def send(self, *args, **kwargs):
+        return await self.channel.send(*args, **kwargs)
+
+
+async def _handle_wardrobe_message_direct(message):
+    """
+    /衣櫃 文字指令的保險通道。
+    原本也註冊成 discord.py prefix command，但實測有時 process_commands 沒有觸發；
+    這裡直接解析 message.content，確保前台一定有回應或錯誤訊息。
+    """
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/衣櫃(?:\s+|$)", content, flags=re.IGNORECASE):
+        return False
+
+    ctx = _WardrobeMessageCtxAdapter(message)
+    try:
+        if not _is_girlfriend_xiaoxia_channel(message.channel):
+            await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠的私人頻道使用喔。")
+            return True
+
+        action, payload = _parse_wardrobe_command(content)
+
+        if action == "browse":
+            await _send_wardrobe_browse_message(ctx, query="", page=0)
+            return True
+
+        if action == "search":
+            await _send_wardrobe_browse_message(ctx, query=payload, page=0)
+            return True
+
+        if action == "新增":
+            await _handle_wardrobe_add_command(ctx, payload, remove_person=False)
+            return True
+
+        if action == "去人":
+            await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
+            return True
+
+        if action == "問小俠":
+            await _ask_xiaoxia_about_wardrobe(ctx, payload)
+            return True
+
+        if action == "看":
+            item = _find_wardrobe_item(payload)
+            if not item:
+                await ctx.send("找不到這個衣櫃編號喔。請先 `/衣櫃` 看看目前有哪些收藏。")
+                return True
+            await ctx.send(embed=_wardrobe_embed_for_item(item), view=WardrobeApplyView(item))
+            return True
+
+        if action == "穿":
+            item = _find_wardrobe_item(payload)
+            if not item:
+                await ctx.send("找不到這個衣櫃編號喔。")
+                return True
+            _set_pending_wardrobe_state(item)
+            await ctx.send(f"✅ 已選定 **{item.get('id')} {item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。")
+            return True
+
+        if action == "修正":
+            ok, result = _update_wardrobe_item_from_command(payload)
+            if not ok:
+                await ctx.send(f"⚠️ {result}")
+                return True
+            await ctx.send(
+                f"✅ 已修正衣櫃項目：**{result.get('id')} {result.get('name')}** → {result.get('main_category')}/{result.get('sub_category')}",
+                embed=_wardrobe_embed_for_item(result),
+            )
+            return True
+
+        if action == "刪除":
+            target = _find_wardrobe_item(payload)
+            if not target:
+                await ctx.send("找不到要刪除的衣櫃編號。")
+                return True
+            items = [item for item in load_wardrobe() if str(item.get('id')) != str(target.get('id'))]
+            save_wardrobe(items)
+            await ctx.send(f"🗑️ 已刪除衣櫃項目：**{target.get('id')} {target.get('name')}**")
+            return True
+
+        await ctx.send("大俠，這個 `/衣櫃` 指令我看不懂。可用：`/衣櫃`、`/衣櫃看 W001`、`/衣櫃穿 W001`、`/衣櫃 新增 名稱`。")
+        return True
+
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_DIRECT_HANDLER_FAILED] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        try:
+            await ctx.send(f"⚠️ `/衣櫃` 發生錯誤：`{str(exc)[:1200]}`")
+        except Exception:
+            pass
+        return True
+
+
 @girlfriend_bot.command(name='今日衣著')
 async def today_outfit_command(ctx):
     outfit = _get_current_outfit_state()
@@ -9466,6 +9567,10 @@ async def on_message(message):
 
     # 2. 處理其他斜線指令
     if message.content.startswith('/') and not inline_intimate_text:
+        # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
+        if await _handle_wardrobe_message_direct(message):
+            return
+
         # 🌟 特例：/photo 是留給世界頻道拍照用的，不要被指令處理器攔截！
         if not message.content.startswith('/photo'):
             await girlfriend_bot.process_commands(message)
