@@ -7,7 +7,7 @@ import io
 import json
 import re
 
-LOBSTER_VERSION = "1.4.48"
+LOBSTER_VERSION = "1.4.56"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -41,6 +41,40 @@ STRICT UNIVERSAL VISUAL RULES:
 - Xiaoxia's anatomy must be normal and natural: plausible posture, plausible hand actions, correct fingers,
   no extra limbs, no twisted joints, no broken fingers, no awkward body mechanics, and no impossible poses.
 """
+
+
+XIAOXIA_APPEARANCE_CORE = """
+Xiaoxia is a recognizable adult fictional East Asian woman with fair skin, a sweet refined face, a tall and slim figure, a defined waist, graceful feminine curves, and a naturally full bust proportion.
+Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, heavier, flatter, older, or like a different woman.
+Preserve her long-hair feminine aura and photorealistic lifestyle feel.
+"""
+
+XIAOXIA_HAIR_RULE_GENERAL = """
+For everyday, diary, and general /photo scenes: keep Xiaoxia's recognizable long-hair identity and natural brown-family hair color.
+Hairstyle may vary naturally to fit the scene, such as loose soft waves, straight loose hair, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo.
+Do not radically change her into a short-haired look, an unnatural fantasy color, or a heavily character-like wig unless the request is explicit.
+"""
+
+XIAOXIA_HAIR_RULE_COSPLAY = """
+For cosplay scenes: keep Xiaoxia's face identity and core body identity clearly recognizable first.
+Hairstyle and hair color may adapt to the role when needed for recognizable cosplay fidelity, including signature role hair shapes or colors.
+Even when the hair changes for the role, the result must still read clearly as Xiaoxia cosplaying the character, not the original actor or an entirely different woman.
+"""
+
+
+def _appearance_anchor_block(mode):
+    cosplay_like = str(mode or '').lower() == 'cosplay'
+    lines = [
+        "APPEARANCE ANCHORS — preserve these identity facts at every safety level:",
+        f"- {XIAOXIA_APPEARANCE_CORE.strip()}",
+    ]
+    if cosplay_like:
+        lines.append(f"- {XIAOXIA_HAIR_RULE_COSPLAY.strip()}")
+    else:
+        lines.append(f"- {XIAOXIA_HAIR_RULE_GENERAL.strip()}")
+    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim, with a defined waist and naturally full bust proportion; do not weaken or flatten these traits unless the user explicitly asks for a change.")
+    lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, or childlike silhouette.")
+    return "\n".join(lines)
 
 # ❤️ 一般聊天共同情境沉浸規則：
 # 小俠不是旁觀分析者、客服或只會安撫的助手；她是正在共同經歷眼前情境的人。
@@ -4678,6 +4712,183 @@ async def suno_callback(request: Request):
 # 🧠 雙腦架構與生圖引擎
 # ==========================================
 
+
+EXPLICIT_OUTFIT_HINT_RE = re.compile(
+    r"(絲襪|大腿襪|過膝襪|高跟|細跟|綁帶高跟|深V|深 V|低胸|開領|露肩|平口|斜肩|露背|高衩|開衩|包臀|窄裙|短裙|迷你裙|貼身|緊身|合身|收腰|束腰|馬甲|corset|bustier|蕾絲|薄紗|透視|微透|半透|絲質|緞面|真絲|睡衣|內衣|襯衫|白襯衫|秘書|OL|套裝|外套半披|扣子|解開)"
+)
+
+
+def _extract_user_outfit_hints(raw_text):
+    """從使用者原始 /cosplay 指令中抽取明確服裝元素。這些元素優先於角色預設服裝。"""
+    value = str(raw_text or "")
+    hits = []
+    for m in EXPLICIT_OUTFIT_HINT_RE.finditer(value):
+        token = m.group(0).strip()
+        if token and token not in hits:
+            hits.append(token)
+    # 同時保留冒號後面的自由描述，讓「職業：私人秘書 深V」這類可以被 Gemini 看到。
+    m = re.search(r"[：:](.+)$", value)
+    freeform = m.group(1).strip() if m else ""
+    return {"tokens": hits, "freeform": freeform}
+
+
+def _cosplay_is_profession_context(topic="", event="", persona="", user_request=""):
+    blob = f"{topic}\n{event}\n{persona}\n{user_request}"
+    return bool(re.search(r"(職業|現代職業|秘書|調香師|護理師|醫師|律師|教師|空服員|工程師|咖啡師|記者|女總裁|上班|辦公室|制服|工作服|專業)", blob, re.I))
+
+
+def _choose_outfit_elements(vibe_zh, is_profession=False, user_outfit_hints=None):
+    """服裝開放度元素池。不是審核；是把審美意圖交給 Gemini/Seedream。"""
+    user_tokens = []
+    if isinstance(user_outfit_hints, dict):
+        user_tokens = list(user_outfit_hints.get("tokens") or [])
+    base_profession = [
+        "tailored professional silhouette",
+        "defined waistline",
+        "fitted blouse or structured top",
+        "pencil skirt or body-contouring skirt",
+        "stockings or sheer tights",
+        "high heels",
+        "jacket worn open, half-draped, or slipping from the shoulders",
+        "office-appropriate props kept visible",
+    ]
+    sensual_pool = [
+        "fitted silhouette", "defined waistline", "soft V neckline", "visible collarbones",
+        "bare shoulder or one-shoulder line", "subtle slit", "shorter skirt or visible leg line",
+        "smooth satin or silk sheen", "tasteful stockings", "high heels"
+    ]
+    alluring_pool = [
+        "deeper V neckline", "open neckline", "bare shoulders", "off-shoulder or asymmetric shoulder",
+        "open-back detail", "body-hugging skirt", "noticeable slit", "stockings or thigh-high stockings",
+        "high heels", "satin, lace, or sheer accents", "jacket half-draped", "unbuttoned blouse styling",
+        "corset-like waist structure"
+    ]
+    intense_pool = [
+        "plunging neckline or low-cut visual focus", "large shoulder and collarbone exposure",
+        "open-back styling", "high slit or dramatic leg line", "body-contouring fit",
+        "tight pencil skirt, mini skirt, or high-slit skirt", "stockings or thigh-high stockings",
+        "stiletto heels", "bustier or corset-like structure", "sheer layered sensuality",
+        "silk, satin, lace, or translucent fabric", "jacket slipping from shoulders",
+        "unbuttoned or open-layer styling"
+    ]
+    if vibe_zh == "性感":
+        pool, count, openness, fit = sensual_pool, 3, 3, 3
+    elif vibe_zh == "魅惑":
+        pool, count, openness, fit = alluring_pool, 4, 4, 4
+    elif vibe_zh == "極致":
+        pool, count, openness, fit = intense_pool, 6, 5, 5
+    else:
+        pool, count, openness, fit = sensual_pool[:5], 0, 1, 2
+
+    if is_profession and vibe_zh in {"性感", "魅惑", "極致"}:
+        pool = list(dict.fromkeys(base_profession + pool))
+    # 使用者指定永遠優先，且不被元素池覆蓋。
+    selected = []
+    if user_tokens:
+        selected.extend([f"user-specified: {t}" for t in user_tokens])
+    candidates = [x for x in pool if x not in selected]
+    try:
+        sample_count = min(max(count - len(selected), 0), len(candidates))
+        selected.extend(random.sample(candidates, sample_count))
+    except Exception:
+        selected.extend(candidates[:max(count - len(selected), 0)])
+    return selected, openness, fit
+
+
+def _build_outfit_control(vibe_request=None, topic="", event="", persona="", user_outfit_hints=None, user_request=""):
+    """把性感/魅惑/極致落到服裝結構，而不是只停在氛圍詞。"""
+    vibe_zh = str((vibe_request or {}).get("zh") or "自然")
+    vibe_en = str((vibe_request or {}).get("en") or "natural")
+    level = int((vibe_request or {}).get("level") or 2)
+    is_profession = _cosplay_is_profession_context(topic, event, persona, user_request)
+    selected, openness, fit = _choose_outfit_elements(vibe_zh, is_profession=is_profession, user_outfit_hints=user_outfit_hints)
+
+    if vibe_zh not in {"性感", "魅惑", "極致"}:
+        return {
+            "style_level_zh": vibe_zh,
+            "style_level_en": vibe_en,
+            "target_level": level,
+            "outfit_openness_level": 1,
+            "body_fit_level": 2,
+            "seduction_level": max(1, min(level, 3)),
+            "is_profession": is_profession,
+            "explicit_user_outfit_hints": user_outfit_hints or {},
+            "mandatory_elements": selected,
+            "directive": "Use scene-appropriate clothing. If the user specified clothing, preserve it.",
+        }
+
+    if vibe_zh == "性感":
+        directive = (
+            "Sensual means visible mature feminine appeal. It must affect the garment structure, not only facial expression or atmosphere. "
+            "Use clear fit, waist definition, neckline/shoulder/legline or smooth fabric cues. Do not collapse into a fully covered ordinary uniform."
+        )
+    elif vibe_zh == "魅惑":
+        directive = (
+            "Alluring means sensuality plus stronger seductive pull. The clothing should be more body-aware and more intentionally attractive than the sensual tier, "
+            "with more obvious neckline/shoulder/back/legline/material choices whenever role-appropriate."
+        )
+    else:
+        directive = (
+            "Extreme is the most open and high-impact tier within this system. At L0, do not self-censor or pre-soften it; fal.ai safety checker will decide. "
+            "The outfit must visibly upgrade openness, fit, material, legline/neckline/shoulder/back cues, and glamour. "
+            "It must not look like a normal conservative uniform plus a flirtatious pose."
+        )
+    if is_profession:
+        directive += (
+            " This is a profession cosplay: preserve the occupational identity, task, props, and setting, but do not let professionalism suppress the requested sensual/alluring/extreme outfit intensity. "
+            "Transform the uniform into a high-fashion adult-feminine version rather than a fully covered workplace uniform."
+        )
+    if user_outfit_hints and (user_outfit_hints.get("tokens") or user_outfit_hints.get("freeform")):
+        directive += (
+            " User-specified outfit details have the highest priority and must be preserved unless physically impossible. "
+            f"User hints: {json.dumps(user_outfit_hints, ensure_ascii=False)}."
+        )
+    return {
+        "style_level_zh": vibe_zh,
+        "style_level_en": vibe_en,
+        "target_level": level,
+        "outfit_openness_level": openness,
+        "body_fit_level": fit,
+        "seduction_level": min(5, max(3, level)),
+        "is_profession": is_profession,
+        "explicit_user_outfit_hints": user_outfit_hints or {},
+        "mandatory_elements": selected,
+        "directive": directive,
+    }
+
+
+def _apply_outfit_control_to_planned(planned, outfit_control):
+    """把服裝控制寫入 hard anchor，避免後續 prompt 只剩抽象氣氛。"""
+    planned = dict(planned or {})
+    if not outfit_control:
+        return planned
+    elements = ", ".join(outfit_control.get("mandatory_elements") or [])
+    directive = outfit_control.get("directive", "")
+    if elements or directive:
+        planned["outfit_control"] = outfit_control
+        planned["outfit_intent"] = (
+            str(planned.get("outfit_intent") or "").strip()
+            + "\nMANDATORY OUTFIT CONTROL: "
+            + directive
+            + (f"\nMandatory outfit elements to visibly include or reinterpret: {elements}." if elements else "")
+        ).strip()
+        planned["costume_direction"] = (
+            str(planned.get("costume_direction") or "").strip()
+            + "\nThe requested vibe must be visible in actual garment structure, openness, fit, fabric, and silhouette."
+        ).strip()
+        if outfit_control.get("style_level_zh") in {"性感", "魅惑", "極致"}:
+            planned["camera_awareness"] = "aware" if planned.get("camera_awareness") == "unaware" else planned.get("camera_awareness", "aware")
+            planned["expression_direction"] = (
+                str(planned.get("expression_direction") or "").strip()
+                + "\nUse a clearly adult, romantically charged expression appropriate to the requested vibe."
+            ).strip()
+            planned["camera_direction"] = (
+                str(planned.get("camera_direction") or "").strip()
+                + "\nFrame the outfit clearly enough that the openness, fit, and silhouette differences are visible."
+            ).strip()
+    return planned
+
+
 async def generate_story(mode):
     today = datetime.now(TZ_TPE)
     year, month, day = today.year, today.month, today.day
@@ -4686,19 +4897,19 @@ async def generate_story(mode):
     if weekday == 5:
         style_desc = (
             "【選角限制】：請挑選『陽光、唯美、正向、熱血、奇幻、俏皮或有辨識度』的知名動漫/電玩/電影角色！\n"
-            "【服裝與場景限制】：請以角色世界觀再詮釋服裝，可是英氣、可愛、魔法感、冒險感、未來感、運動感、戲劇感或高級質感；魅力來自角色神韻、故事動作、道具與材質，而不是裸露或身體部位強調。\n"
-            "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具、準備施法、檢查裝備。絕對不要用伸展台模特兒站姿、S 曲線擺拍、刻意看鏡頭邀請式微笑。"
+            "【服裝與場景限制】：請以角色世界觀再詮釋服裝，可是英氣、可愛、魔法感、冒險感、未來感、運動感、戲劇感、高級質感或成熟魅力；若後續氛圍指定為性感、魅惑、極致，不可先行保守化。\n"
+            "【行為限制】：請替她設計一個『正在發生的角色行為』與一個『微小輔助動作』，例如翻閱古書、整理披風、扶住欄杆、輕觸道具、準備施法、檢查裝備。"
         )
         system_mod = "妳要規劃兼具角色氣質、故事性與視覺吸引力的 Cosplay 題材。風格可以多變，不必侷限優雅；重點是人物正在做某件事，而不是站著擺拍。"
     else:
         style_desc = (
-            "【服裝與場景限制】：請設計有角色感與故事感的服裝與場景，風格可為英氣、俏皮、魔法感、冒險感、運動感、復古感、未來感、華麗或清爽，不必侷限成熟優雅；魅力應來自材質、剪裁、角色狀態、道具互動與情緒。\n"
+            "【服裝與場景限制】：請設計有角色感與故事感的服裝與場景，風格可為英氣、俏皮、魔法感、冒險感、運動感、復古感、未來感、華麗、清爽或成熟魅力；若後續氛圍指定為性感、魅惑、極致，不可先行保守化。\n"
             "【行為限制】：必須給出一個主行為與一個微小輔助動作，讓人物像在生活或劇情之中，例如整理裝備、翻看筆記、準備出門、檢查道具、練習姿勢、回頭確認場景。\n"
-            "【禁止事項】：拒絕香水廣告文案、模特兒走秀站姿、完美 S 曲線、過度直視鏡頭、刻意誘惑姿勢。"
+            "【注意事項】：不要把所有題材都寫成同一種棚拍；但也不要替後續性感、魅惑、極致指令預先降級。"
         )
         system_mod = "妳要展現電影感、角色感與女性魅力，風格可以多變，不必侷限優雅；人物必須像在故事裡自然行動，而不是廣告模特兒。"
 
-    if mode == "職業":
+    if str(mode).startswith("職業") or "職業" in str(mode):
         prompt = (
             f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n"
             f"[絕對限制]：\n"
@@ -4806,13 +5017,14 @@ COSPLAY_VISUAL_CORE = """
 """
 
 
-async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False, vibe_request=None):
+async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None, user_request=""):
     """
     Gemini 2.5 Flash 先做「角色/情境導演層理解」，輸出結構化 visual plan。
     v1450 加強點：除了 high-level 導演意圖，也同步輸出可供修正/重擲沿用的硬錨點欄位。
     """
     framing = "half_body" if force_half_body else "full_body"
     vibe_guide = _get_vibe_guide(vibe_request)
+    outfit_control = _build_outfit_control(vibe_request, topic=topic, event=event, persona=persona, user_outfit_hints=user_outfit_hints, user_request=user_request)
     fallback = {
         "character_core": "小俠保留自己的辨識度，正在扮演該角色，而不是變成原角色本人。",
         "scene_design": "Use a story-appropriate setting that naturally matches the source world, with 1-2 concrete environmental details.",
@@ -4839,7 +5051,8 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         "pose_energy": "low",
         "vibe_target_zh": str((vibe_request or {}).get("zh") or "自然"),
         "vibe_target_en": str((vibe_request or {}).get("en") or "natural"),
-        "vibe_notes": str(vibe_guide.get("planner") or "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic.")
+        "vibe_notes": str(vibe_guide.get("planner") or "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic."),
+        "outfit_control": outfit_control
     }
 
     planner_prompt = f"""你是小俠 Cosplay 生圖流程的「導演層」。
@@ -4853,6 +5066,8 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 背景與補充資訊：{event[-2200:]}
 角色資訊：{persona}
 目標氛圍模式：{json.dumps(vibe_request or {"zh": "自然", "en": "natural", "target_level": 2}, ensure_ascii=False)}
+使用者明確服裝要求：{json.dumps(user_outfit_hints or {}, ensure_ascii=False)}
+服裝控制指令：{json.dumps(outfit_control, ensure_ascii=False)}
 畫面裁切：{framing}
 是否為同主題變奏：{"是，請保留同主題，但換一個同樣合理又有新鮮感的瞬間" if alternative else "否，請給第一個最代表性的畫面"}
 
@@ -4871,6 +5086,9 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 12. 依照目標氛圍模式，微調畫面張力：清新 < 自然 < 戲劇 < 性感 < 魅惑 < 極致。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
 12b. 這次目標氛圍補充說明：{vibe_guide.get("planner")}。
 12c. 如果目標是「性感」或以上，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
+12d. 服裝控制指令是硬性創作指令，不是建議。性感/魅惑/極致必須落到「服裝結構、開放度、貼身度、材質、腿線/領口/肩背/腰線」上，不可只改表情或氛圍。
+12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把性感/魅惑/極致壓回保守制服。必須做成高級時尚、成熟女性化的職業再詮釋。
+12f. 若使用者明確指定服裝元素，這些元素優先於角色預設服裝與場景偏好。
 13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
 14. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
 15. pose_energy 只能是 low 或 medium。
@@ -4904,7 +5122,8 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
   "pose_energy": "low|medium",
   "vibe_target_zh": "...",
   "vibe_target_en": "...",
-  "vibe_notes": "..."
+  "vibe_notes": "...",
+  "outfit_control": {...}
 }}"""
 
     try:
@@ -4919,6 +5138,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         planned = dict(fallback)
 
     planned = _strengthen_cosplay_state_for_vibe(planned, vibe_request)
+    planned = _apply_outfit_control_to_planned(planned, outfit_control)
     if planned.get("camera_awareness") not in {"unaware", "briefly_noticing", "aware"}:
         planned["camera_awareness"] = fallback["camera_awareness"]
     if planned.get("pose_energy") not in {"low", "medium"}:
@@ -4960,14 +5180,16 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - The image should feel like a naturally captured story moment, not a plain studio portrait.
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
 - Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
+- MANDATORY OUTFIT CONTROL: {json.dumps(cosplay_state.get("outfit_control", {}), ensure_ascii=False)}. Treat this as a hard visual requirement, not optional flavor text.
 - If the vibe target is 性感 or above, the prompt must make the sensuality unmistakable through concrete styling and framing, such as fitted silhouette, body-aware styling, open neckline or tasteful cleavage, bare shoulders or back, slit, stockings, satin/silk/sheer texture, more intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
 - For 性感, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
-- For profession roles, preserve the occupational task and props, but still allow clearly sensual adult-feminine styling if 性感 or above is requested.
+- For profession roles, preserve the occupational task and props, but explicitly transform the uniform into a high-fashion adult-feminine version if 性感/魅惑/極致 is requested; do not default to fully covered conservative workwear.
+- If the target is 極致, make the outfit visibly the most open, fitted, high-impact version that remains coherent for the role. It must not be merely a conservative outfit with a flirtier pose.
 - Preserve visual variety; do not force every role into the same mood.
 - Mention believable hand behavior so the hands remain purposeful and natural.
 - Avoid mentioning JSON or metadata.
 - {variation_rule}
-- The prompt must end with: "Maintain consistent facial features and hairstyle from the reference images. She is Xiaoxia cosplaying this role, not the original actor or character. Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands." 
+- The prompt must end with: "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying the role, not the original actor or character. Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands." 
 
 Also return:
 1. composition: Traditional Chinese, 90 characters max.
@@ -4986,7 +5208,7 @@ Return JSON only:
             "Xiaoxia is in a natural role-appropriate story moment inside a believable setting that matches the character world. "
             "She performs one clear main action with a small purposeful hand movement, wears a complete tasteful cosplay outfit with recognizable details, and still clearly remains Xiaoxia. "
             "The scene includes visible environment details, cinematic light, expressive eyes, natural hands, and a candid story-still feeling rather than a studio pose. "
-            "Maintain consistent facial features and hairstyle from the reference images. She is Xiaoxia cosplaying this role, not the original actor or character. "
+            "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying this role, not the original actor or character. "
             "Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands."
         ),
         "composition": cosplay_state.get("scenario_tw", "小俠在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。"),
@@ -5009,14 +5231,16 @@ Return JSON only:
     return visual
 
 
-async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None):
+async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None):
     cosplay_state = await plan_cosplay_visual_state(
         topic=story.get("topic", ""),
         event=story.get("event", ""),
         persona=story.get("persona", ""),
         force_half_body=force_half_body,
         alternative=alternative,
-        vibe_request=(vibe_request or story.get("vibe_request"))
+        vibe_request=(vibe_request or story.get("vibe_request")),
+        user_outfit_hints=(user_outfit_hints or story.get("user_outfit_hints")),
+        user_request=story.get("user_mode_request", "")
     )
     visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
     visual["__anchor_state"] = cosplay_state
@@ -5168,7 +5392,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 允許使用 looking directly at the camera (boyfriend POV), sultry gaze, biting lower lip, tender yet alluring smile 等充滿情侶間私密張力的神情。
 - 畫面中只能出現小俠本人；不可出現任何男性、其他人物、男性手部/手臂、男性剪影或被裁切的男性身體部位。鏡頭只代表大俠的視角。
 - {variation_rule}
-- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -5182,7 +5406,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
             "In a warmly lit contemporary Taiwan bedroom, she is resting intimately on the edge of the bed, wearing a soft, slightly translucent silk slip dress that tastefully flatters her graceful curves. "
             "One hand softly adjusts her loose hair while her eyes look directly into the camera (boyfriend POV) with a profoundly tender, alluring, and romantic smile. "
             "Dim ambient lighting and dramatic chiaroscuro shadows create a deeply private, seductive, and cozy atmosphere. "
-            "Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
+            "Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
             "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male partner, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people."
         ),
         "composition": diary_state.get("scenario_tw", "小俠在私密微光中展現溫柔與純慾的誘惑，專注看著你。"),
@@ -5318,12 +5542,14 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         camera_awareness = _clean_anchor_text(state.get("camera_awareness"), "unaware")
         environment_trace = _clean_anchor_text(state.get("environment_trace"), "keep real scene details and props")
         outfit_intent = _clean_anchor_text(state.get("outfit_intent"), "an elegant, story-appropriate outfit")
+        outfit_control = state.get("outfit_control") if isinstance(state, dict) else None
         lighting_mood = _clean_anchor_text(state.get("lighting_mood"), "soft natural or ambient light")
         setting_anchor = _clean_anchor_text(state.get("setting_anchor"), "")
         time_anchor = _clean_anchor_text(state.get("time_anchor"), "")
         camera_framing = _clean_anchor_text(state.get("camera_framing"), "full_body")
         scenario_tw = _clean_anchor_text(state.get("scenario_tw"), "")
 
+        lines.append(_appearance_anchor_block(mode))
         lines.append("HARD SCENE ANCHORS — preserve all of the following core scene facts at every safety level:")
         lines.append(f"- Main activity: {activity}.")
         lines.append(f"- Primary action: {primary_action}.")
@@ -5345,6 +5571,8 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
             lines.append(f"- Time/season anchor: {time_anchor}.")
         lines.append(f"- Environment details that must remain visible: {environment_trace}.")
         lines.append(f"- Outfit intent that must remain recognizable: {outfit_intent}.")
+        if outfit_control:
+            lines.append(f"- Mandatory outfit control that must remain visible even during retries: {json.dumps(outfit_control, ensure_ascii=False)}.")
         lines.append(f"- Lighting mood to preserve: {lighting_mood}.")
         if scenario_tw:
             lines.append(f"- Overall scene intent: {scenario_tw}.")
@@ -5365,9 +5593,11 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         elif mode == "cosplay":
             lines.append("- This is a story-driven cosplay scene, not a perfume advertisement, runway pose, or model showcase.")
             lines.append("- Preserve the character-task interaction and the sense that she is doing something in-scene.")
-            lines.append("- Maintain consistent facial features and hairstyle from Image 1. She is an adult fictional character.")
+            lines.append("- Maintain consistent facial identity and core body identity from Image 1. She is an adult fictional character.")
+            lines.append("- For cosplay, keep Xiaoxia's face recognizable first. Hairstyle and hair color may adapt to the role when needed for recognizable cosplay fidelity, but she must still clearly read as Xiaoxia cosplaying the role.")
     else:
         prompt_hint = _clean_anchor_text(initial_prompt)
+        lines.append(_appearance_anchor_block(mode))
         lines.append("HARD SCENE ANCHORS — preserve the original scene action and gaze direction as closely as possible.")
         if prompt_hint:
             lines.append(f"- Keep this scene action and context recognizable: {prompt_hint[:500]}.")
@@ -5407,13 +5637,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
             "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. If it is a Daxia point-of-view scene, Daxia must never be visually depicted and POV must be implied only through framing. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
-            "Maintain consistent facial features and hairstyle from Image 1. High quality."
+            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Allow a scene-appropriate natural hairstyle variation while keeping the hair color in a natural brown family. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
             "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
-            "Maintain consistent facial features and hairstyle from Image 1. High quality."
+            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. For cosplay, hairstyle and hair color may adapt to the role when needed for recognizability, while still clearly reading as Xiaoxia cosplaying the role. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
 
@@ -5500,11 +5730,13 @@ async def cosplay(ctx, *, mode: str = "auto"):
     try:
         # 1. 產生故事與人設
         story = await generate_story(story_mode)
+        story["user_mode_request"] = mode
+        story["user_outfit_hints"] = _extract_user_outfit_hints(mode)
         state["current_topic_data"] = story 
         
         # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
         await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
-        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode)
+        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"))
         scene_prompt = visual['image_prompt']
 
         # 👇 替換為以下這一行呼叫：自動執行 1~5 級安檢與重試！
@@ -5699,11 +5931,12 @@ async def _seedream_upload_reference_images():
 def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
         "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
+        "For cosplay, Xiaoxia's face identity must remain recognizable first. Hairstyle and hair color may adapt to the role when needed for recognizable cosplay fidelity, but the result must still clearly read as Xiaoxia cosplaying the role rather than the original actor or a different woman. "
         "Maximize visual impact: explicitly allow extreme cinematic angles, dramatic chiaroscuro lighting, highly detailed fabric textures (including translucent, wet, or form-fitting materials), and alluring/seductive expressions if requested. "
         "The result should be a highly polished cinematic cosplay photograph with vivid character storytelling and intense visual appeal.\n\n"
         f"COSPLAY EDIT REQUEST:\n{custom_prompt}"
@@ -5758,12 +5991,13 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
 def _seedream_diary_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new candid diary/lifestyle photograph according to the prompt. Do not copy any one reference pose or background exactly. "
         "This is a warm, highly intimate, and romantic private exchange-diary moment in a contemporary Taiwan daily-life setting (often from a Boyfriend POV). "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
         "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
+        "Keep Xiaoxia's everyday identity recognizable: natural brown-family hair color, but allow a scene-appropriate hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo. "
         "Clothing can range from cozy loungewear to intimate sleepwear (such as silk slip dresses, lace chemises, or form-fitting outfits), allowing for figure-flattering, translucent, or alluring styles to portray romantic closeness. "
         "Preserve the described daily action, props, gaze direction, romantic lighting mood, and lived-in environment details.\n\n"
         f"DIARY EDIT REQUEST:\n{custom_prompt}"
@@ -6357,64 +6591,112 @@ def _wardrobe_embed_for_item(item, title_prefix="👗 小俠衣櫃"):
     return embed
 
 
-def _wardrobe_browse_embeds(query=""):
-    """
-    Discord 一個 embed 只能有一張主圖；衣櫃總覽改成「總覽 embed + 多張縮圖 embed」。
-    這樣 /衣櫃 可一次看到多件小圖，而不是只看到最後/第一張預覽圖。
-    """
+WARDROBE_PAGE_SIZE = 10
+
+
+def _wardrobe_filtered_items(query=""):
     items = load_wardrobe()
-    matched = [item for item in items if _wardrobe_matches(item, query)]
-    counts = _wardrobe_category_counts(items)
+    return [item for item in items if _wardrobe_matches(item, query)]
+
+
+def _wardrobe_total_pages(total, page_size=WARDROBE_PAGE_SIZE):
+    return max(1, math.ceil(max(0, int(total)) / page_size))
+
+
+def _wardrobe_item_browse_embed(item):
+    tag_text = "、".join((item.get("tags") or [])[:4]) or "無"
+    item_embed = discord.Embed(
+        title=f"{item.get('id')}｜{item.get('name')}",
+        description=(item.get("style_summary") or item.get("name") or "")[:300],
+        color=0xcfa7ff,
+    )
+    item_embed.add_field(
+        name="分類",
+        value=f"{item.get('main_category')} / {item.get('sub_category')}",
+        inline=True,
+    )
+    item_embed.add_field(name="標籤", value=tag_text[:300], inline=True)
+    if item.get("local_url"):
+        # 用 thumbnail 顯示成小圖；/衣櫃看 Wxxx 仍保留大圖。
+        item_embed.set_thumbnail(url=item.get("local_url"))
+    return item_embed
+
+
+def _wardrobe_browse_payload(query="", page=0, page_size=WARDROBE_PAGE_SIZE):
+    """
+    /衣櫃 分頁瀏覽：每頁最多 10 件 item embeds。
+    由於 Discord 一則訊息最多 10 個 embeds，頁面標題改用 content 顯示，讓 10 個 embeds 都留給衣服卡片。
+    """
+    matched = _wardrobe_filtered_items(query)
+    total = len(matched)
+    total_pages = _wardrobe_total_pages(total, page_size=page_size)
+    safe_page = max(0, min(int(page or 0), total_pages - 1))
+    start_idx = safe_page * page_size
+    page_items = matched[start_idx:start_idx + page_size]
+
+    counts = _wardrobe_category_counts(load_wardrobe())
     summary = "｜".join([f"{k}:{v}" for k, v in counts.items() if v]) or "目前還沒有收藏"
     title = "👗 小俠衣櫃總覽" if not query else f"👗 小俠衣櫃搜尋｜{query}"
 
-    lines = []
-    for item in matched[:12]:
-        tag_text = "、".join((item.get("tags") or [])[:4])
-        lines.append(
-            f"`{item.get('id')}` **{item.get('name')}**｜{item.get('main_category')}/{item.get('sub_category')}"
-            + (f"｜{tag_text}" if tag_text else "")
-        )
-
-    summary_embed = discord.Embed(
-        title=title,
-        description=summary,
-        color=0xcfa7ff,
+    if total:
+        range_text = f"{start_idx + 1}-{start_idx + len(page_items)}"
+    else:
+        range_text = "0-0"
+    content = (
+        f"👗 **{title}**\n"
+        f"共 **{total}** 件｜第 **{safe_page + 1} / {total_pages}** 頁｜本頁 {range_text}\n"
+        f"{summary}\n"
+        "可用 `/衣櫃看 Wxxx` 查看大圖，或 `/衣櫃穿 Wxxx` 套用到下一張 `/photo`。"
     )
-    summary_embed.add_field(
-        name="最近／符合項目",
-        value="\n".join(lines) if lines else "查無符合項目。",
-        inline=False,
-    )
-    summary_embed.set_footer(
-        text=f"共 {len(matched)} 件｜下方顯示最多 8 件縮圖；可用 /衣櫃看 Wxxx 查看大圖，或 /衣櫃穿 Wxxx 套用到下一張 /photo"
-    )
+    embeds = [_wardrobe_item_browse_embed(item) for item in page_items]
+    if not embeds:
+        embeds = [discord.Embed(title=title, description="查無符合項目。", color=0xcfa7ff)]
+    return content, embeds, safe_page, total_pages, total
 
-    embeds = [summary_embed]
-    for item in matched[:8]:
-        tag_text = "、".join((item.get("tags") or [])[:4]) or "無"
-        item_embed = discord.Embed(
-            title=f"{item.get('id')}｜{item.get('name')}",
-            description=(item.get("style_summary") or item.get("name") or "")[:300],
-            color=0xcfa7ff,
-        )
-        item_embed.add_field(
-            name="分類",
-            value=f"{item.get('main_category')} / {item.get('sub_category')}",
-            inline=True,
-        )
-        item_embed.add_field(name="標籤", value=tag_text[:300], inline=True)
-        if item.get("local_url"):
-            # 用 thumbnail 顯示成小圖；/衣櫃看 Wxxx 仍保留大圖。
-            item_embed.set_thumbnail(url=item.get("local_url"))
-        embeds.append(item_embed)
 
-    return embeds[:10]
+def _wardrobe_browse_embeds(query="", page=0):
+    """相容舊呼叫；回傳指定頁的衣服 embeds。"""
+    _content, embeds, _page, _total_pages, _total = _wardrobe_browse_payload(query=query, page=page)
+    return embeds
 
 
 def _wardrobe_browse_embed(query=""):
-    """相容舊呼叫；只回傳總覽 embed。"""
-    return _wardrobe_browse_embeds(query)[0]
+    """相容舊呼叫；只回傳第一張 embed。"""
+    return _wardrobe_browse_embeds(query, page=0)[0]
+
+
+class WardrobeBrowseView(discord.ui.View):
+    def __init__(self, query="", page=0):
+        super().__init__(timeout=86400)
+        self.query = str(query or "").strip()
+        _matched = _wardrobe_filtered_items(self.query)
+        self.total_pages = _wardrobe_total_pages(len(_matched))
+        self.page = max(0, min(int(page or 0), self.total_pages - 1))
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        for child in self.children:
+            if getattr(child, "custom_id", "") == "wardrobe_prev":
+                child.disabled = self.page <= 0
+            elif getattr(child, "custom_id", "") == "wardrobe_next":
+                child.disabled = self.page >= self.total_pages - 1
+
+    async def _refresh(self, interaction):
+        self._sync_buttons()
+        content, embeds, self.page, self.total_pages, _total = _wardrobe_browse_payload(self.query, self.page)
+        self._sync_buttons()
+        await interaction.response.edit_message(content=content, embeds=embeds, view=self)
+
+    @discord.ui.button(label="◀ 上一頁", style=discord.ButtonStyle.secondary, custom_id="wardrobe_prev")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="下一頁 ▶", style=discord.ButtonStyle.secondary, custom_id="wardrobe_next")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.total_pages - 1, self.page + 1)
+        await self._refresh(interaction)
+
 
 
 
@@ -6922,11 +7204,12 @@ async def _seedream_upload_single_file(path):
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
     base = (
         "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable East Asian facial identity, hairstyle direction, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male head, no male face, no male hair, no male shoulder, no male back, no male torso, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The boyfriend POV must be implied only through framing, Xiaoxia's gaze, and composition, never by showing another person. "
         "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. Xiaoxia's pose and limb positions must be anatomically normal and natural, with no extra limbs, twisted joints, broken fingers, or awkward body mechanics. "
+        "Keep Xiaoxia's everyday identity recognizable: maintain natural brown-family hair color, but allow a scene-appropriate hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo. Do not drift into a short-haired look, a random fantasy wig, or an unnatural hair color unless the request explicitly calls for it. "
     )
     if has_reference:
         base += (
@@ -6997,7 +7280,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
 def _seedream_repair_prompt(custom_prompt):
     return (
         "Use Images 1-9 as identity reference sheets for Xiaoxia. Image 10 is the exact generated photo that needs correction. "
-        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. "
+        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. Preserve her fair skin, tall slim figure, defined waist, and naturally full bust proportion; do not drift into a shorter, heavier, flatter, or different-looking woman. "
         "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. "
         "Apply only the correction requested by Daxia. "
         "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people. "
@@ -8718,10 +9001,12 @@ async def wardrobe_command(ctx, *, args: str = ""):
 
     action, payload = _parse_wardrobe_command(ctx.message.content)
     if action == "browse":
-        await ctx.send(embeds=_wardrobe_browse_embeds())
+        content, embeds, page, _total_pages, _total = _wardrobe_browse_payload()
+        await ctx.send(content=content, embeds=embeds, view=WardrobeBrowseView(page=page))
         return
     if action == "search":
-        await ctx.send(embeds=_wardrobe_browse_embeds(payload))
+        content, embeds, page, _total_pages, _total = _wardrobe_browse_payload(payload)
+        await ctx.send(content=content, embeds=embeds, view=WardrobeBrowseView(query=payload, page=page))
         return
     if action == "新增":
         await _handle_wardrobe_add_command(ctx, payload, remove_person=False)
