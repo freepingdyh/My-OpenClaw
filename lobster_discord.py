@@ -7,8 +7,9 @@ import io
 import json
 import re
 import math
+import traceback
 
-LOBSTER_VERSION = "1.4.60"
+LOBSTER_VERSION = "1.4.63"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -5995,7 +5996,15 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
             on_queue_update=on_queue_update,
         )
 
-    result = await asyncio.to_thread(_subscribe)
+    try:
+        result = await asyncio.to_thread(_subscribe)
+    except Exception as exc:
+        if _is_fal_content_policy_error(exc):
+            raise RuntimeError(
+                "WARDROBE_CLEANUP_CONTENT_POLICY：這張圖被 fal.ai / Seedream 的圖片安全檢查擋下，無法自動去人。"
+                "請換一張更像商品平鋪照、模特兒露膚較少的圖，或先用 `/衣櫃 新增 名稱` 直接收藏原圖。"
+            ) from exc
+        raise
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
         return f"Seedream v4.5 沒有回傳圖片：{result}"
@@ -6066,6 +6075,65 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
 WARDROBE_MAIN_CATEGORIES = [
     "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
 ]
+
+WARDROBE_SUBCATEGORY_OPTIONS = {
+    "洋裝": ["洋裝", "短洋裝", "長洋裝", "連衣裙", "禮服"],
+    "上衣": ["T恤", "襯衫", "針織衫", "背心", "罩衫", "上衣"],
+    "下身": ["短裙", "長裙", "半身裙", "褲子", "短褲", "下身"],
+    "套裝": ["裙裝套裝", "褲裝套裝", "居家套裝", "圍裙套裝", "上下身套裝", "套裝"],
+    "外套": ["外套", "罩衫", "大衣", "針織外套"],
+    "睡衣／居家服": ["睡裙", "睡袍", "睡衣套裝", "居家套裝", "居家服"],
+    "內衣": ["內衣套裝", "胸罩", "內褲", "吊帶內衣", "內衣"],
+    "泳裝": ["比基尼", "連身泳衣", "泳裝"],
+    "鞋子": ["高跟鞋", "靴子", "球鞋", "拖鞋", "鞋子"],
+    "包包": ["肩背包", "手提包", "斜背包", "包包"],
+    "配件": ["項鍊", "耳環", "手鍊", "帽子", "絲巾", "腰帶", "配件"],
+    "Cosplay／特殊服裝": ["Cosplay", "角色服", "特殊服裝"],
+}
+
+WARDROBE_CATEGORY_ALIASES = {
+    "睡衣/居家服": "睡衣／居家服", "睡衣／居家": "睡衣／居家服", "睡衣": "睡衣／居家服", "居家服": "睡衣／居家服", "居家": "睡衣／居家服",
+    "cosplay": "Cosplay／特殊服裝", "Cosplay": "Cosplay／特殊服裝", "特殊服裝": "Cosplay／特殊服裝", "角色服": "Cosplay／特殊服裝",
+    "鞋": "鞋子", "包": "包包", "飾品": "配件", "配飾": "配件",
+}
+
+
+def _normalize_wardrobe_main_category(value, fallback=None):
+    raw = _clean_text_compact(value).replace("/", "／")
+    if not raw:
+        return fallback if fallback in WARDROBE_MAIN_CATEGORIES else "上衣"
+    if raw in WARDROBE_MAIN_CATEGORIES:
+        return raw
+    if raw in WARDROBE_CATEGORY_ALIASES:
+        return WARDROBE_CATEGORY_ALIASES[raw]
+    if raw == "睡衣／居家服":
+        return "睡衣／居家服"
+    return fallback if fallback in WARDROBE_MAIN_CATEGORIES else None
+
+
+def _normalize_wardrobe_sub_category(main_category, value):
+    main_category = _normalize_wardrobe_main_category(main_category, fallback="上衣") or "上衣"
+    raw = _clean_text_compact(value)
+    if not raw:
+        return WARDROBE_SUBCATEGORY_OPTIONS.get(main_category, [main_category])[0]
+    aliases = {
+        "連身裙": "連衣裙", "連身洋裝": "洋裝", "睡衣": "睡衣套裝", "睡袍／罩衫": "睡袍",
+        "半裙": "半身裙", "裙": "半身裙", "衣服": main_category,
+    }
+    return aliases.get(raw, raw)
+
+
+def _wardrobe_tags_from_text(*parts, limit=8):
+    blob = " ".join(str(p or "") for p in parts)
+    tokens = [x for x in re.split(r"[\s,，、/／「」()（）]+", blob) if x]
+    result = []
+    for token in tokens:
+        token = _clean_text_compact(token)
+        if token and token not in result:
+            result.append(token)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _clean_text_compact(value):
@@ -6301,30 +6369,84 @@ def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, r
         "error": "",
     }
 
+def _parse_key_value_fields(raw_text):
+    """解析 `名稱=... 分類=... 子分類=... 標籤=...`，value 可含空白，直到下一個 key。"""
+    raw = str(raw_text or "").strip()
+    key_re = re.compile(r"(名稱|名字|name|分類|主分類|category|main_category|子分類|sub_category|標籤|tags|tag)\s*[=＝:]\s*", re.IGNORECASE)
+    matches = list(key_re.finditer(raw))
+    fields = {}
+    if not matches:
+        return fields
+    for idx, match in enumerate(matches):
+        key = match.group(1).lower()
+        value_start = match.end()
+        value_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+        value = raw[value_start:value_end].strip().strip("，,；;")
+        if key in {"名稱", "名字", "name"}:
+            fields["name"] = value
+        elif key in {"分類", "主分類", "category", "main_category"}:
+            fields["main_category"] = value
+        elif key in {"子分類", "sub_category"}:
+            fields["sub_category"] = value
+        elif key in {"標籤", "tags", "tag"}:
+            fields["tags"] = [x.strip() for x in re.split(r"[,，、/／\s]+", value) if x.strip()]
+    return fields
+
+
 def _update_wardrobe_item_from_command(payload):
-    """
-    /衣櫃 修正 W003 內衣 米白色珍珠結構款內衣套裝
-    /衣櫃 修正 W003 套裝 新名稱...
-    """
-    tokens = str(payload or "").strip().split(maxsplit=2)
-    if len(tokens) < 2:
-        return False, "用法：`/衣櫃 修正 W003 內衣 米白色珍珠結構款內衣套裝`"
-    item_id = tokens[0].upper().strip("，,。；;")
-    category = tokens[1].strip()
-    new_name = tokens[2].strip() if len(tokens) >= 3 else ""
-    if category not in WARDROBE_MAIN_CATEGORIES:
-        return False, f"分類 `{category}` 不在可用分類內。可用：{'、'.join(WARDROBE_MAIN_CATEGORIES)}"
+    raw = str(payload or "").strip()
+    if not raw:
+        return False, "用法：`/衣櫃 修正 W049 名稱=白色蕾絲薄紗睡衣`"
+    first, _, rest = raw.partition(" ")
+    item_id = first.upper().strip("，,。；;")
+    rest = rest.strip()
+    if not item_id:
+        return False, "請提供衣櫃編號，例如：`/衣櫃 修正 W049 名稱=白色蕾絲薄紗睡衣`"
+
+    fields = _parse_key_value_fields(rest)
+    if not fields and rest:
+        tokens = rest.split(maxsplit=1)
+        maybe_cat = _normalize_wardrobe_main_category(tokens[0], fallback=None)
+        if maybe_cat:
+            fields["main_category"] = maybe_cat
+            if len(tokens) > 1:
+                fields["name"] = tokens[1].strip()
+        else:
+            fields["name"] = rest
+
+    if not fields:
+        return False, "請提供要修正的欄位，例如：`名稱=...`、`分類=...`、`子分類=...`、`標籤=...`"
 
     items = load_wardrobe()
     for item in items:
         if str(item.get("id", "")).upper() == item_id:
-            if new_name:
-                item["name"] = new_name
-            item["main_category"] = category
-            item["sub_category"] = category
-            base_name = item.get("name") or item_id
-            item["tags"] = [x for x in re.split(r"[\s,，、/／「」]+", str(base_name)) if x][:8]
-            item["style_summary"] = f"{base_name}（{category}）"
+            old_main = item.get("main_category") if item.get("main_category") in WARDROBE_MAIN_CATEGORIES else "上衣"
+            main_category = old_main
+            if "main_category" in fields:
+                normalized = _normalize_wardrobe_main_category(fields.get("main_category"), fallback=None)
+                if not normalized:
+                    return False, f"分類 `{fields.get('main_category')}` 不在可用分類內。可用：{'、'.join(WARDROBE_MAIN_CATEGORIES)}"
+                main_category = normalized
+                item["main_category"] = main_category
+
+            if fields.get("name"):
+                item["name"] = _clean_text_compact(fields.get("name"))
+
+            if "sub_category" in fields:
+                item["sub_category"] = _normalize_wardrobe_sub_category(main_category, fields.get("sub_category"))
+            elif "main_category" in fields:
+                item["sub_category"] = WARDROBE_SUBCATEGORY_OPTIONS.get(main_category, [main_category])[0]
+            else:
+                item["sub_category"] = _normalize_wardrobe_sub_category(main_category, item.get("sub_category") or main_category)
+
+            if "tags" in fields:
+                item["tags"] = [_clean_text_compact(x) for x in fields.get("tags", []) if _clean_text_compact(x)][:8]
+            elif not item.get("tags") or str(item.get("name", "")).startswith("去人化服飾"):
+                item["tags"] = _wardrobe_tags_from_text(item.get("name"), item.get("main_category"), item.get("sub_category"))
+
+            item["style_summary"] = _clean_text_compact(
+                fields.get("style_summary") or f"{item.get('name')}｜{item.get('main_category')}／{item.get('sub_category')}"
+            )
             item["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
             save_wardrobe(items)
             return True, item
@@ -6362,37 +6484,78 @@ def _wardrobe_matches(item, query):
 def _infer_wardrobe_meta_from_name(name_hint="", category_hint=""):
     name = _clean_text_compact(name_hint or "未命名服飾")
     hay = name + " " + str(category_hint or "")
-    if any(k in hay for k in ("洋裝", "連身裙", "小洋裝")):
-        main = "洋裝"
-    elif any(k in hay for k in ("睡衣", "居家", "睡袍")):
-        main = "睡衣／居家服"
-    elif any(k in hay for k in ("內衣", "胸罩", "bra", "貼身")):
-        main = "內衣"
+
+    if any(k in hay for k in ("內衣", "胸罩", "bra", "比基尼內衣", "貼身內衣")):
+        main, sub = "內衣", "內衣套裝"
     elif any(k in hay for k in ("泳裝", "泳衣", "比基尼")):
-        main = "泳裝"
+        main, sub = "泳裝", "比基尼" if "比基尼" in hay else "泳裝"
+    elif any(k in hay for k in ("睡衣", "睡袍", "睡裙", "居家", "睡眠")):
+        main = "睡衣／居家服"
+        if "睡袍" in hay or "罩衫" in hay:
+            sub = "睡袍"
+        elif "睡裙" in hay or "薄紗睡衣" in hay or "蕾絲睡衣" in hay:
+            sub = "睡裙"
+        elif "套裝" in hay:
+            sub = "睡衣套裝"
+        else:
+            sub = "居家服"
+    elif any(k in hay for k in ("套裝", "整套", "搭配套裝", "兩件式", "三件式")):
+        main = "套裝"
+        if any(k in hay for k in ("裙", "裙裝", "洋裝")):
+            sub = "裙裝套裝"
+        elif any(k in hay for k in ("褲", "褲裝")):
+            sub = "褲裝套裝"
+        elif any(k in hay for k in ("居家", "睡衣")):
+            sub = "居家套裝"
+        else:
+            sub = "套裝"
+    elif any(k in hay for k in ("洋裝", "連衣裙", "連身裙", "小洋裝", "禮服")):
+        main = "洋裝"
+        if "禮服" in hay:
+            sub = "禮服"
+        elif any(k in hay for k in ("長洋裝", "長裙")):
+            sub = "長洋裝"
+        elif any(k in hay for k in ("短洋裝", "短裙")):
+            sub = "短洋裝"
+        else:
+            sub = "連衣裙" if any(k in hay for k in ("連衣裙", "連身裙")) else "洋裝"
+    elif any(k in hay for k in ("外套", "罩衫", "大衣", "開衫")):
+        main, sub = "外套", "罩衫" if "罩衫" in hay else "外套"
+    elif any(k in hay for k in ("短褲", "長褲", "半身裙", "短裙", "長裙", "下身")):
+        main = "下身"
+        if "短裙" in hay:
+            sub = "短裙"
+        elif "長裙" in hay:
+            sub = "長裙"
+        elif "半身裙" in hay:
+            sub = "半身裙"
+        elif "短褲" in hay:
+            sub = "短褲"
+        elif "褲" in hay:
+            sub = "褲子"
+        else:
+            sub = "下身"
     elif any(k in hay for k in ("鞋", "靴", "拖鞋")):
         main = "鞋子"
-    elif any(k in hay for k in ("包", "背包", "手提")):
-        main = "包包"
-    elif any(k in hay for k in ("外套", "罩衫", "大衣")):
-        main = "外套"
-    elif any(k in hay for k in ("短褲", "長褲", "裙", "下身")):
-        main = "下身"
-    elif any(k in hay for k in ("套裝", "整套", "組合")):
-        main = "套裝"
-    elif any(k in hay for k in ("項鍊", "耳環", "帽", "配件", "飾品")):
-        main = "配件"
+        sub = "靴子" if "靴" in hay else ("拖鞋" if "拖鞋" in hay else "鞋子")
+    elif any(k in hay for k in ("包", "背包", "手提", "肩背")):
+        main, sub = "包包", "包包"
+    elif any(k in hay for k in ("項鍊", "耳環", "帽", "配件", "飾品", "絲巾", "腰帶")):
+        main, sub = "配件", "配件"
     elif any(k in hay for k in ("cosplay", "角色", "特殊")):
-        main = "Cosplay／特殊服裝"
+        main, sub = "Cosplay／特殊服裝", "Cosplay"
     else:
-        main = "上衣"
-    tags = [x for x in re.split(r"[\s,，、/／「」]+", name) if x][:8]
+        main, sub = "上衣", "上衣"
+
+    main = _normalize_wardrobe_main_category(main, fallback="上衣") or "上衣"
+    sub = _normalize_wardrobe_sub_category(main, sub)
+    tags = _wardrobe_tags_from_text(name, main, sub)
     return {
         "name": name,
         "main_category": main,
-        "sub_category": main,
+        "sub_category": sub,
         "tags": tags,
-        "style_summary": name,
+        "style_summary": f"{name}｜{main}／{sub}",
     }
 
 
@@ -6434,17 +6597,27 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
             data = f.read()
         prompt = f"""
 你是小俠衣櫃整理員。請根據這張服飾/配件參考圖，整理成結構化衣櫃資料。
-若使用者有提供名稱，優先保留該名稱，不要任意改得太遠。
+請用「整套造型／衣櫃收藏」角度分類，不要把連衣裙誤判成下身。
+若使用者有提供名稱，優先保留該名稱；若沒有名稱，請依圖片取一個 8~18 字的中文衣服名稱，不要使用「去人化服飾」。
 
 使用者名稱提示：{name_hint or '無'}
 可用主分類只能從以下挑一個：{', '.join(WARDROBE_MAIN_CATEGORIES)}
+子分類建議：{json.dumps(WARDROBE_SUBCATEGORY_OPTIONS, ensure_ascii=False)}
+
+分類規則：
+- 連衣裙、連身裙、小洋裝、禮服 → 洋裝。
+- 明顯上下身一起搭配、含包鞋配件的整套造型 → 套裝。
+- 睡裙、睡袍、居家套裝 → 睡衣／居家服。
+- 胸罩、內褲、吊帶、內衣套組 → 內衣。
+- 比基尼、泳衣 → 泳裝。
+- 只有單件裙子、褲子、短褲才歸下身；不要把連衣裙歸下身。
 
 只回傳 JSON：
 {{
-  "name": "",
-  "main_category": "",
-  "sub_category": "",
-  "tags": ["", ""],
+  "name": "中文衣服名稱",
+  "main_category": "上方主分類之一",
+  "sub_category": "更細的子分類，例如：連衣裙、裙裝套裝、睡裙、內衣套裝",
+  "tags": ["顏色", "材質", "風格", "用途"],
   "style_summary": "一句中文說明這件服飾/配件的特色與適用場景"
 }}
 """
@@ -6459,15 +6632,21 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
         data = _extract_json_object(resp.text)
         if isinstance(data, dict):
             name = _clean_text_compact(name_hint or data.get("name") or "未命名服飾")
-            main_category = data.get("main_category") if data.get("main_category") in WARDROBE_MAIN_CATEGORIES else "配件"
-            sub_category = _clean_text_compact(data.get("sub_category") or main_category)
+            if name in {"去人化服飾", "未命名服飾"}:
+                name = _clean_text_compact(data.get("name") or name)
+            main_category = _normalize_wardrobe_main_category(data.get("main_category"), fallback=None)
+            if not main_category:
+                main_category = _infer_wardrobe_meta_from_name(name).get("main_category", "上衣")
+            sub_category = _normalize_wardrobe_sub_category(main_category, data.get("sub_category") or "")
             tags = [ _clean_text_compact(x) for x in (data.get("tags") or []) if _clean_text_compact(x) ]
+            if not tags:
+                tags = _wardrobe_tags_from_text(name, main_category, sub_category)
             return {
                 "name": name,
                 "main_category": main_category,
                 "sub_category": sub_category,
                 "tags": tags[:8],
-                "style_summary": _clean_text_compact(data.get("style_summary") or name),
+                "style_summary": _clean_text_compact(data.get("style_summary") or f"{name}｜{main_category}／{sub_category}"),
             }
     except Exception as exc:
         print(f"⚠️ [WARDROBE_CLASSIFY_FAILED] {type(exc).__name__}: {exc}")
@@ -6479,6 +6658,14 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
         "tags": [],
         "style_summary": fallback_name,
     }
+
+
+def _is_fal_content_policy_error(exc):
+    raw = str(exc or "").lower()
+    return any(token in raw for token in (
+        "content_policy_violation", "partner_validation_failed", "content checker",
+        "safety", "moderation", "policy", "flagged"
+    ))
 
 
 async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_prompt=""):
@@ -6497,8 +6684,7 @@ async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_pr
         "No person, no face, no hair, no skin, no body, no mannequin, no hands, no extra props. "
         "If the item is a bag, shoes, hat, or accessory, preserve only that item cleanly."
     )
-    if custom_prompt:
-        prompt += "\n\nAdditional user preference:\n" + str(custom_prompt).strip()
+    # 注意：衣服名稱只用於衣櫃資料，不送入 Seedream prompt；避免睡衣/薄紗/內衣等命名詞觸發 partner safety。
 
     def _subscribe():
         def on_queue_update(update):
@@ -7026,8 +7212,8 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
             await ctx.send("這是整理後的衣櫃預覽，要收藏嗎？", embed=_wardrobe_embed_for_item(preview_item, title_prefix="👗 衣櫃預覽"), view=WardrobePendingConfirmView(pending_payload))
             return
 
-        # 去人化：優先直接把 Discord CDN URL 丟給 Seedream；若 save_to_vault 失敗，仍保留生成 URL。
-        generated_url = await generate_seedream_v45_wardrobe_cleanup(source_url, custom_prompt=name_hint)
+        # 去人化：名稱只作為衣櫃 display name / 分類提示，不送進 Seedream prompt，避免「薄紗、睡衣」等詞觸發安全檢查。
+        generated_url = await generate_seedream_v45_wardrobe_cleanup(source_url, custom_prompt="")
         if not isinstance(generated_url, str) or not generated_url.startswith("http"):
             raise RuntimeError(str(generated_url))
 
@@ -7039,7 +7225,10 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
             reference_path = generated_url
             reference_url = generated_url
 
-        meta = _infer_wardrobe_meta_from_name(name_hint or "去人化服飾")
+        if local_filename and os.path.exists(str(reference_path)):
+            meta = await _classify_wardrobe_item_from_image(reference_path, name_hint=name_hint)
+        else:
+            meta = _infer_wardrobe_meta_from_name(name_hint or "未命名服飾")
         pending_payload = {
             "source_path": source_url,
             "source_attachment_url": source_url,
@@ -7060,7 +7249,19 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
     except Exception as exc:
         print(f"⚠️ [WARDROBE_ADD_FAILED] {type(exc).__name__}: {exc}")
         traceback.print_exc()
-        await status.edit(content=f"⚠️ 衣櫃整理失敗：`{str(exc)[:1500]}`")
+        err_text = str(exc)
+        if "WARDROBE_CLEANUP_CONTENT_POLICY" in err_text:
+            await status.edit(
+                content=(
+                    "⚠️ 這張圖被 fal.ai / Seedream 的安全檢查擋下，沒辦法自動「去人」。\n"
+                    "這通常不是指令格式錯，而是原圖人物、膚色面積、睡衣/內衣類或姿態被判定太敏感。\n\n"
+                    "可改用：\n"
+                    "1. 換一張更像商品平鋪照、露膚較少的圖再 `/衣櫃 去人 名稱`。\n"
+                    "2. 或先用 `/衣櫃 新增 名稱` 直接收藏原圖。"
+                )
+            )
+        else:
+            await status.edit(content=f"⚠️ 衣櫃整理失敗：`{err_text[:1500]}`")
 
 
 
