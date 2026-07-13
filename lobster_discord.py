@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.64"
+LOBSTER_VERSION = "1.4.65"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -5911,18 +5911,25 @@ def _get_fal_client():
         return fal_client
 
 
-async def _seedream_upload_reference_images():
-    """將本機 /data/memory/seedream_v45 參考圖上傳到 fal 檔案服務並快取 URL。"""
+async def _seedream_upload_reference_images(force_refresh=False):
+    """將本機 /data/memory/seedream_v45 參考圖上傳到 fal 檔案服務並快取 URL。
+
+    fal media URL 可能過期或失效；若後續 Seedream 回 file_download_error，
+    呼叫端會用 force_refresh=True 重新上傳 1-9 號人物底稿再重試。
+    """
     fal_client = _get_fal_client()
     cache = _load_json_file_safe(SEEDREAM_V45_UPLOAD_CACHE_PATH, {})
-    changed = False
+    if force_refresh or not isinstance(cache, dict):
+        cache = {}
+    changed = bool(force_refresh)
     urls = []
     for path in _seedream_reference_paths():
         stat = os.stat(path)
         key = os.path.basename(path)
         cached = cache.get(key, {}) if isinstance(cache, dict) else {}
         valid = (
-            cached.get("path") == path
+            not force_refresh
+            and cached.get("path") == path
             and cached.get("mtime") == stat.st_mtime
             and cached.get("size") == stat.st_size
             and str(cached.get("url", "")).startswith("http")
@@ -5930,7 +5937,7 @@ async def _seedream_upload_reference_images():
         if valid:
             url = cached["url"]
         else:
-            print(f"🌱 [SEEDREAM_UPLOAD] uploading {path}")
+            print(f"🌱 [SEEDREAM_UPLOAD] uploading {path} force={force_refresh}")
             url = await asyncio.to_thread(fal_client.upload_file, path)
             cache[key] = {
                 "path": path,
@@ -6665,6 +6672,14 @@ def _is_fal_content_policy_error(exc):
     return any(token in raw for token in (
         "content_policy_violation", "partner_validation_failed", "content checker",
         "safety", "moderation", "policy", "flagged"
+    ))
+
+
+def _is_fal_file_download_error(exc):
+    raw = str(exc or "").lower()
+    return any(token in raw for token in (
+        "file_download_error", "failed to download the file", "check if the url is accessible",
+        "body', 'image_urls", "body\", \"image_urls"
     ))
 
 
@@ -7563,17 +7578,19 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
 async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     fal_client = _get_fal_client()
-    image_urls = await _seedream_upload_reference_images()
-    if reference_image_path:
-        if str(reference_image_path).startswith("http"):
-            # 理論上 /photo 會先下載成本機檔；此處保留 URL 相容。
-            image_urls.append(str(reference_image_path))
-        else:
-            image_urls.append(await _seedream_upload_single_file(reference_image_path))
-    image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit)
 
-    def _subscribe():
+    async def _build_image_urls(force_reference_refresh=False):
+        urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
+        if reference_image_path:
+            if str(reference_image_path).startswith("http"):
+                # URL 相容：衣櫃舊資料可能仍是 Discord CDN / gallery URL。
+                urls.append(str(reference_image_path))
+            else:
+                urls.append(await _seedream_upload_single_file(reference_image_path))
+        return urls[-10:] if len(urls) > 10 else urls
+
+    def _subscribe(image_urls):
         def on_queue_update(update):
             try:
                 if isinstance(update, fal_client.InProgress):
@@ -7595,7 +7612,27 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             on_queue_update=on_queue_update,
         )
 
-    result = await asyncio.to_thread(_subscribe)
+    image_urls = await _build_image_urls(force_reference_refresh=False)
+    try:
+        result = await asyncio.to_thread(_subscribe, image_urls)
+    except Exception as exc:
+        if _is_fal_file_download_error(exc):
+            print(f"⚠️ [SEEDREAM_PHOTO_FILE_DOWNLOAD_ERROR] refresh reference uploads and retry once: {exc}")
+            image_urls = await _build_image_urls(force_reference_refresh=True)
+            try:
+                result = await asyncio.to_thread(_subscribe, image_urls)
+            except Exception as retry_exc:
+                if _is_fal_file_download_error(retry_exc) and reference_image_path and str(reference_image_path).startswith("http"):
+                    raise RuntimeError(
+                        "SEEDREAM_PHOTO_REFERENCE_URL_EXPIRED：Seedream 無法下載其中一張輸入圖。"
+                        "我已重新上傳小俠 1-9 號人物底稿並重試一次，仍失敗。"
+                        "最可能是衣櫃圖片或附件的外部 URL 已過期或無法被 fal.ai 讀取。"
+                        "請用 `/衣櫃 換圖 Wxxx` 或 `/衣櫃 換圖去人 Wxxx` 把該衣櫃項目換成新的可用圖片後再試。"
+                    ) from retry_exc
+                raise
+        else:
+            raise
+
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
         return f"Seedream v4.5 沒有回傳 /photo 圖片：{result}"
@@ -7603,7 +7640,6 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
     return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
-
 
 def _seedream_repair_prompt(custom_prompt):
     return (
