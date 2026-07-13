@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.63"
+LOBSTER_VERSION = "1.4.64"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6567,7 +6567,7 @@ def _parse_wardrobe_command(command_text):
     first, _, rest = raw.partition(" ")
     action = first.strip()
     rest = rest.strip()
-    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠", "修正"}:
+    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠", "修正", "換圖", "換圖去人", "換圖去人化"}:
         return action, rest
     return "search", raw
 
@@ -7263,6 +7263,116 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
         else:
             await status.edit(content=f"⚠️ 衣櫃整理失敗：`{err_text[:1500]}`")
 
+
+
+async def _handle_wardrobe_replace_image_command(ctx, args, remove_person=False):
+    """
+    只替換指定衣櫃項目的圖片欄位，不改 id/name/category/tags/style_summary。
+    用法：
+    /衣櫃 換圖 W001        （直接用附圖/回覆圖）
+    /衣櫃 換圖去人 W001    （先用 Seedream 去人，再替換 W001 圖）
+    """
+    raw = str(args or "").strip()
+    item_id, _, _rest = raw.partition(" ")
+    item_id = item_id.strip().upper()
+
+    if not item_id:
+        await ctx.send(
+            "大俠，要指定要換哪一件喔。\n"
+            "用法：`/衣櫃 換圖 W001`，或需要先去人就用 `/衣櫃 換圖去人 W001`。"
+        )
+        return
+
+    items = load_wardrobe()
+    target_index = None
+    for idx, item in enumerate(items):
+        if str(item.get("id", "")).upper() == item_id:
+            target_index = idx
+            break
+
+    if target_index is None:
+        await ctx.send(f"找不到衣櫃項目 **{item_id}**。請先 `/衣櫃` 看看目前有哪些收藏。")
+        return
+
+    attachment, attachment_error = await _get_photo_reference_attachment(ctx.message)
+    if attachment_error:
+        await ctx.send(attachment_error)
+        return
+    if not attachment:
+        await ctx.send(
+            "大俠，要換圖時請附上一張新圖片，或回覆含有單張圖片的訊息再打指令。\n"
+            f"例如：`/衣櫃 換圖 {item_id}` 或 `/衣櫃 換圖去人 {item_id}`。"
+        )
+        return
+
+    target = dict(items[target_index])
+    old_local_url = target.get("local_url")
+    old_reference_path = target.get("reference_image_path")
+    status = await ctx.send(
+        f"👗 小俠正在替 **{item_id} {target.get('name', '')}** 換圖..."
+        if not remove_person else
+        f"👗 小俠正在先幫新圖去人，再替 **{item_id} {target.get('name', '')}** 換圖..."
+    )
+
+    try:
+        source_url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
+        if not source_url:
+            raise RuntimeError("WARDROBE_REPLACE_ATTACHMENT_URL_NONE：Discord 沒有提供可用的附件網址。")
+
+        if remove_person:
+            try:
+                generated_url = await generate_seedream_v45_wardrobe_cleanup(source_url, custom_prompt="")
+            except Exception as exc:
+                if _is_fal_content_policy_error(exc):
+                    await status.edit(
+                        content=(
+                            "⚠️ 這張新圖被 fal.ai / Seedream 的安全檢查擋下，沒辦法自動去人換圖。\n"
+                            "可改用較像商品平鋪照、露膚較少的圖片再試，或直接用 `/衣櫃 換圖 "
+                            f"{item_id}` 保留原圖替換。"
+                        )
+                    )
+                    return
+                raise
+
+            if not isinstance(generated_url, str) or not generated_url.startswith("http"):
+                raise RuntimeError(str(generated_url))
+
+            local_filename = await save_to_vault(generated_url)
+            if local_filename:
+                reference_path = os.path.join(OUTPUT_DIR, local_filename)
+                reference_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            else:
+                reference_path = generated_url
+                reference_url = generated_url
+            replace_mode = "去人後換圖"
+        else:
+            reference_path = source_url
+            reference_url = source_url
+            replace_mode = "直接換圖"
+
+        items[target_index]["reference_image_path"] = reference_path
+        items[target_index]["local_url"] = reference_url
+        items[target_index]["source_attachment_url"] = source_url
+        items[target_index]["image_replaced_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        items[target_index]["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        items[target_index]["image_replace_mode"] = replace_mode
+        if old_local_url:
+            items[target_index]["previous_local_url"] = old_local_url
+        if old_reference_path:
+            items[target_index]["previous_reference_image_path"] = old_reference_path
+
+        save_wardrobe(items)
+        updated = items[target_index]
+        await status.edit(
+            content=f"✅ 已替 **{updated.get('id')} {updated.get('name')}** 更新圖片（{replace_mode}）。",
+            embed=_wardrobe_embed_for_item(updated),
+            view=WardrobeApplyView(updated),
+        )
+
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_REPLACE_IMAGE_FAILED] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        await status.edit(content=f"⚠️ 換圖失敗：`{str(exc)[:1500]}`")
 
 
 
@@ -9249,6 +9359,12 @@ async def wardrobe_command(ctx, *, args: str = ""):
     if action == "去人":
         await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
         return
+    if action == "換圖":
+        await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=False)
+        return
+    if action in {"換圖去人", "換圖去人化"}:
+        await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=True)
+        return
     if action == "問小俠":
         await _ask_xiaoxia_about_wardrobe(ctx, payload)
         return
@@ -9331,6 +9447,14 @@ async def _handle_wardrobe_message_direct(message):
             await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
             return True
 
+        if action == "換圖":
+            await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=False)
+            return True
+
+        if action in {"換圖去人", "換圖去人化"}:
+            await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=True)
+            return True
+
         if action == "問小俠":
             await _ask_xiaoxia_about_wardrobe(ctx, payload)
             return True
@@ -9373,7 +9497,7 @@ async def _handle_wardrobe_message_direct(message):
             await ctx.send(f"🗑️ 已刪除衣櫃項目：**{target.get('id')} {target.get('name')}**")
             return True
 
-        await ctx.send("大俠，這個 `/衣櫃` 指令我看不懂。可用：`/衣櫃`、`/衣櫃看 W001`、`/衣櫃穿 W001`、`/衣櫃 新增 名稱`。")
+        await ctx.send("大俠，這個 `/衣櫃` 指令我看不懂。可用：`/衣櫃`、`/衣櫃看 W001`、`/衣櫃穿 W001`、`/衣櫃 新增 名稱`、`/衣櫃 換圖 W001`。")
         return True
 
     except Exception as exc:
