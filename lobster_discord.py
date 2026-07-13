@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.68"
+LOBSTER_VERSION = "1.4.69"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6184,6 +6184,33 @@ def _get_pending_wardrobe_state():
     return state_data.get("photo_pending_wardrobe")
 
 
+def _refresh_pending_wardrobe_from_current_db(pending_item):
+    """photo_pending_wardrobe 可能是換圖前的舊快照；每次 /photo 前用目前 wardrobe DB 重新取一次。"""
+    if not isinstance(pending_item, dict):
+        return pending_item
+    wid = str(pending_item.get("id") or "").strip().upper()
+    if not wid:
+        return pending_item
+    current = _find_wardrobe_item(wid)
+    if isinstance(current, dict):
+        return current
+    return pending_item
+
+
+def _sync_pending_wardrobe_if_same_item(updated_item):
+    """若目前已預選同一件衣服，換圖/修正後同步 pending，避免 /photo 繼續拿舊 URL。"""
+    if not isinstance(updated_item, dict):
+        return
+    wid = str(updated_item.get("id") or "").strip().upper()
+    if not wid:
+        return
+    state_data = load_state()
+    pending = state_data.get("photo_pending_wardrobe")
+    if isinstance(pending, dict) and str(pending.get("id") or "").strip().upper() == wid:
+        state_data["photo_pending_wardrobe"] = updated_item
+        save_state(state_data)
+
+
 def _pending_wardrobe_has_usable_reference(item):
     """預選衣櫃必須真的有可用圖片；否則清掉，避免 /photo 被切到 photo_reference 但拿到 None。"""
     if not isinstance(item, dict):
@@ -7391,6 +7418,7 @@ async def _handle_wardrobe_replace_image_command(ctx, args, remove_person=False)
 
         save_wardrobe(items)
         updated = items[target_index]
+        _sync_pending_wardrobe_if_same_item(updated)
         await status.edit(
             content=f"✅ 已替 **{updated.get('id')} {updated.get('name')}** 更新圖片（{replace_mode}）。",
             embed=_wardrobe_embed_for_item(updated),
@@ -8237,7 +8265,7 @@ async def handle_unified_photo_command(message, user_input):
         await message.channel.send(attachment_error)
         return None
 
-    pending_wardrobe = _get_pending_wardrobe_state()
+    pending_wardrobe = _refresh_pending_wardrobe_from_current_db(_get_pending_wardrobe_state())
     if pending_wardrobe and not _pending_wardrobe_has_usable_reference(pending_wardrobe):
         print(f"⚠️ [PHOTO_PENDING_WARDROBE_INVALID] item={pending_wardrobe}")
         _clear_pending_wardrobe_state()
