@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.65"
+LOBSTER_VERSION = "1.4.66"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -448,6 +448,8 @@ BROADCAST_BUTTON_STORE_PATH = os.path.join(MEMORY_DIR, "broadcast_button_store.j
 BROADCAST_AUDIO_DIR = os.path.join(VAULT_DIR, "broadcast_audio")
 SEEDREAM_V45_REF_DIR = os.path.join(MEMORY_DIR, "seedream_v45")
 SEEDREAM_V45_UPLOAD_CACHE_PATH = os.path.join(SEEDREAM_V45_REF_DIR, "fal_upload_cache.json")
+SEEDREAM_V45_REMOTE_CACHE_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "remote_cache")
+os.makedirs(SEEDREAM_V45_REMOTE_CACHE_DIR, exist_ok=True)
 SEEDREAM_V45_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
@@ -6687,10 +6689,7 @@ async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_pr
     fal_client = _get_fal_client()
     if not reference_image_path:
         raise RuntimeError("WARDROBE_CLEANUP_REFERENCE_NONE")
-    if str(reference_image_path).startswith("http"):
-        image_urls = [str(reference_image_path)]
-    else:
-        image_urls = [await _seedream_upload_single_file(reference_image_path)]
+    image_urls = [await _seedream_upload_single_file(reference_image_path)]
     prompt = (
         "Image 1 is a clothing or accessory reference photo and may contain a human model. "
         "Remove the human completely and preserve only the clothing or accessory itself as a clean reference image. "
@@ -7535,13 +7534,43 @@ async def _download_url_to_output(image_url, prefix="wardrobe"):
     return path, f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
 
 
+async def _seedream_download_remote_reference(url):
+    if not url or not str(url).startswith("http"):
+        raise RuntimeError(f"SEEDREAM_REMOTE_REFERENCE_INVALID_URL：{url}")
+    raw_url = str(url)
+    cleaned_url = raw_url.split("?", 1)[0]
+    suffix = Path(cleaned_url).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".png"
+    digest = hashlib.md5(raw_url.encode("utf-8")).hexdigest()
+    local_path = os.path.join(SEEDREAM_V45_REMOTE_CACHE_DIR, f"{digest}{suffix}")
+    timeout = aiohttp.ClientTimeout(total=60)
+    headers = {
+        "User-Agent": "Mozilla/5.0 XiaoxiaBot/1.0",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(raw_url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"SEEDREAM_REMOTE_REFERENCE_DOWNLOAD_FAILED：HTTP {resp.status} url={raw_url}")
+            data = await resp.read()
+    if not data:
+        raise RuntimeError(f"SEEDREAM_REMOTE_REFERENCE_EMPTY：{raw_url}")
+    with open(local_path, "wb") as f:
+        f.write(data)
+    return local_path
+
+
 async def _seedream_upload_single_file(path):
     if not path:
         raise RuntimeError("SEEDREAM_UPLOAD_PATH_NONE：要上傳給 Seedream 的圖片路徑是 None。")
-    if not str(path).startswith("http") and not os.path.exists(str(path)):
+    upload_path = str(path)
+    if upload_path.startswith("http"):
+        upload_path = await _seedream_download_remote_reference(upload_path)
+    elif not os.path.exists(upload_path):
         raise RuntimeError(f"SEEDREAM_UPLOAD_PATH_MISSING：找不到要上傳給 Seedream 的圖片：{path}")
     fal_client = _get_fal_client()
-    return await asyncio.to_thread(fal_client.upload_file, str(path))
+    return await asyncio.to_thread(fal_client.upload_file, upload_path)
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
@@ -7583,11 +7612,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     async def _build_image_urls(force_reference_refresh=False):
         urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
         if reference_image_path:
-            if str(reference_image_path).startswith("http"):
-                # URL 相容：衣櫃舊資料可能仍是 Discord CDN / gallery URL。
-                urls.append(str(reference_image_path))
-            else:
-                urls.append(await _seedream_upload_single_file(reference_image_path))
+            # 不直接把外部 URL 丟給 Seedream；先由本機下載後再上傳到 fal，避免 Discord CDN / 外部圖床過期。
+            urls.append(await _seedream_upload_single_file(reference_image_path))
         return urls[-10:] if len(urls) > 10 else urls
 
     def _subscribe(image_urls):
