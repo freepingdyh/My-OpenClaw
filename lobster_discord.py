@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.66"
+LOBSTER_VERSION = "1.4.68"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6576,7 +6576,7 @@ def _parse_wardrobe_command(command_text):
     first, _, rest = raw.partition(" ")
     action = first.strip()
     rest = rest.strip()
-    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠", "修正", "換圖", "換圖去人", "換圖去人化"}:
+    if action in {"新增", "去人", "看", "穿", "刪除", "問小俠", "修正", "換圖", "換圖去人", "換圖去人化", "健檢", "修復圖片", "圖片修復"}:
         return action, rest
     return "search", raw
 
@@ -6783,6 +6783,7 @@ def _build_wardrobe_item_payload(meta, reference_path, reference_url):
         "style_summary": meta.get("style_summary") or meta.get("name") or item_id,
         "reference_image_path": reference_path,
         "local_url": reference_url,
+        "image_storage": "zeabur_local" if str(reference_path or "").startswith(OUTPUT_DIR) else "remote_or_external",
         "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -7205,21 +7206,29 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
             raise RuntimeError("WARDROBE_ATTACHMENT_URL_NONE：Discord 沒有提供可用的附件網址。")
 
         if not remove_person:
-            # 直接新增：不再下載、不再 Gemini 看圖分類，避免 Discord 手機附件 metadata 造成 NoneType path。
+            # 直接新增也必須落地保存到 Zeabur，衣櫃不能只存 Discord CDN 臨時網址。
+            local_filename = await save_to_vault(source_url)
+            if local_filename:
+                reference_path = os.path.join(OUTPUT_DIR, local_filename)
+                reference_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            else:
+                raise RuntimeError("WARDROBE_DIRECT_LOCAL_SAVE_FAILED：無法將 Discord 圖片轉存到 Zeabur。")
+
             meta = _infer_wardrobe_meta_from_name(name_hint or getattr(attachment, "filename", "") or "未命名服飾")
             pending_payload = {
-                "source_path": None,
+                "source_path": source_url,
                 "source_attachment_url": source_url,
-                "reference_path": source_url,
-                "reference_url": source_url,
+                "reference_path": reference_path,
+                "reference_url": reference_url,
                 "meta": meta,
                 "remove_person": False,
                 "extra_hint": name_hint,
+                "image_storage": "zeabur_local",
             }
             preview_item = {
                 "id": "預覽",
                 **meta,
-                "local_url": source_url,
+                "local_url": reference_url,
                 "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             }
             await status.delete()
@@ -7360,9 +7369,13 @@ async def _handle_wardrobe_replace_image_command(ctx, args, remove_person=False)
                 reference_url = generated_url
             replace_mode = "去人後換圖"
         else:
-            reference_path = source_url
-            reference_url = source_url
-            replace_mode = "直接換圖"
+            local_filename = await save_to_vault(source_url)
+            if local_filename:
+                reference_path = os.path.join(OUTPUT_DIR, local_filename)
+                reference_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            else:
+                raise RuntimeError("WARDROBE_REPLACE_LOCAL_SAVE_FAILED：無法將新圖片轉存到 Zeabur。")
+            replace_mode = "直接換圖並轉存"
 
         items[target_index]["reference_image_path"] = reference_path
         items[target_index]["local_url"] = reference_url
@@ -7370,6 +7383,7 @@ async def _handle_wardrobe_replace_image_command(ctx, args, remove_person=False)
         items[target_index]["image_replaced_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
         items[target_index]["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
         items[target_index]["image_replace_mode"] = replace_mode
+        items[target_index]["image_storage"] = "zeabur_local"
         if old_local_url:
             items[target_index]["previous_local_url"] = old_local_url
         if old_reference_path:
@@ -7559,6 +7573,196 @@ async def _seedream_download_remote_reference(url):
     with open(local_path, "wb") as f:
         f.write(data)
     return local_path
+
+
+def _gallery_url_to_local_path(url):
+    value = str(url or "").strip()
+    if not value:
+        return None
+    # 目前 gallery route 對應 OUTPUT_DIR 內檔案。
+    if "/gallery/" in value:
+        filename = value.split("/gallery/", 1)[-1].split("?", 1)[0].split("#", 1)[0].strip()
+        if filename:
+            return os.path.join(OUTPUT_DIR, os.path.basename(filename))
+    return None
+
+
+def _wardrobe_local_reference_ok(item):
+    ref = str((item or {}).get("reference_image_path") or "").strip()
+    if ref and not ref.startswith("http") and os.path.exists(ref):
+        return True
+    local_url = str((item or {}).get("local_url") or "").strip()
+    candidate = _gallery_url_to_local_path(local_url)
+    return bool(candidate and os.path.exists(candidate))
+
+
+def _wardrobe_reference_candidates(item):
+    candidates = []
+    for key in ("reference_image_path", "local_url", "reference_url", "source_attachment_url", "source_path"):
+        value = str((item or {}).get(key) or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
+async def _wardrobe_url_reachable(url):
+    value = str(url or "").strip()
+    if not value.startswith("http"):
+        return False, "not_http"
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        headers = {"User-Agent": "Mozilla/5.0 XiaoxiaBot/1.0"}
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(value) as resp:
+                if resp.status == 200:
+                    # 不用整包讀完；讀一小段確認有資料即可。
+                    chunk = await resp.content.read(64)
+                    return bool(chunk), "ok" if chunk else "empty"
+                return False, f"HTTP {resp.status}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def _localize_wardrobe_item_image(item):
+    """
+    將衣櫃項目的圖片轉存到 Zeabur /data/output。
+    成功回傳 (True, updated_item, reason)，失敗回傳 (False, original_item, reason)。
+    """
+    if not isinstance(item, dict):
+        return False, item, "invalid item"
+
+    updated = dict(item)
+    wid = str(updated.get("id") or "").strip()
+
+    # 1. reference_image_path 已是本地檔
+    ref = str(updated.get("reference_image_path") or "").strip()
+    if ref and not ref.startswith("http") and os.path.exists(ref):
+        filename = os.path.basename(ref)
+        updated["reference_image_path"] = ref
+        updated["local_url"] = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+        updated["image_storage"] = "zeabur_local"
+        return True, updated, "local file exists"
+
+    # 2. local_url 是 Zeabur gallery 且本地檔存在
+    local_path = _gallery_url_to_local_path(updated.get("local_url"))
+    if local_path and os.path.exists(local_path):
+        filename = os.path.basename(local_path)
+        updated["reference_image_path"] = local_path
+        updated["local_url"] = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+        updated["image_storage"] = "zeabur_local"
+        return True, updated, "gallery file exists"
+
+    # 3. 嘗試從任何 URL 候選下載轉存
+    last_reason = "no usable image candidate"
+    for candidate in _wardrobe_reference_candidates(updated):
+        if not str(candidate).startswith("http"):
+            continue
+        local_filename = await save_to_vault(candidate)
+        if local_filename:
+            local_ref = os.path.join(OUTPUT_DIR, local_filename)
+            updated["reference_image_path"] = local_ref
+            updated["local_url"] = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
+            updated["image_storage"] = "zeabur_localized_from_remote"
+            updated["image_localized_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            updated["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            return True, updated, f"downloaded from {candidate[:80]}"
+        ok, reason = await _wardrobe_url_reachable(candidate)
+        last_reason = reason
+
+    return False, updated, last_reason
+
+
+async def _handle_wardrobe_healthcheck(ctx):
+    items = load_wardrobe()
+    if not items:
+        await ctx.send("衣櫃目前是空的，或 `xiaoxia_wardrobe.json` 格式不是 list。")
+        return
+
+    local_ok, remote_ok, broken, unknown = [], [], [], []
+    status = await ctx.send(f"🩺 小俠正在幫衣櫃做圖片健檢，共 {len(items)} 件...")
+
+    for item in items:
+        wid = str(item.get("id") or "?")
+        if _wardrobe_local_reference_ok(item):
+            local_ok.append(wid)
+            continue
+
+        reachable = False
+        last_reason = "no candidate"
+        for candidate in _wardrobe_reference_candidates(item):
+            if str(candidate).startswith("http"):
+                ok, reason = await _wardrobe_url_reachable(candidate)
+                last_reason = reason
+                if ok:
+                    reachable = True
+                    break
+        if reachable:
+            remote_ok.append(wid)
+        elif last_reason and ("HTTP 404" in last_reason or "404" in last_reason):
+            broken.append(wid)
+        else:
+            unknown.append(f"{wid}({last_reason})")
+
+    def _fmt(seq, maxn=25):
+        if not seq:
+            return "無"
+        short = seq[:maxn]
+        more = f" ...等 {len(seq)} 件" if len(seq) > maxn else ""
+        return ", ".join(short) + more
+
+    msg = (
+        f"🩺 **衣櫃圖片健檢完成**\\n"
+        f"✅ 已本地化可用：{len(local_ok)} 件\\n"
+        f"🟡 遠端仍抓得到、可修復：{len(remote_ok)} 件\\n"
+        f"❌ 遠端已失效/404：{len(broken)} 件\\n"
+        f"⚠️ 其他不明狀態：{len(unknown)} 件\\n\\n"
+        f"🟡 可自動修復：{_fmt(remote_ok)}\\n"
+        f"❌ 需重補圖：{_fmt(broken)}"
+    )
+    await status.edit(content=msg[:1900])
+
+
+async def _handle_wardrobe_repair_images(ctx):
+    items = load_wardrobe()
+    if not items:
+        await ctx.send("衣櫃目前是空的，或 `xiaoxia_wardrobe.json` 格式不是 list。")
+        return
+
+    status = await ctx.send(f"🛠️ 小俠正在把衣櫃圖片轉存到 Zeabur，本次會盡量補救 {len(items)} 件...")
+    repaired, already_ok, failed = [], [], []
+    new_items = []
+
+    for item in items:
+        wid = str(item.get("id") or "?")
+        was_local = _wardrobe_local_reference_ok(item)
+        ok, updated, reason = await _localize_wardrobe_item_image(item)
+        new_items.append(updated if ok else item)
+
+        if ok and was_local:
+            already_ok.append(wid)
+        elif ok:
+            repaired.append(wid)
+        else:
+            failed.append(f"{wid}({reason})")
+
+    save_wardrobe(new_items)
+
+    def _fmt(seq, maxn=25):
+        if not seq:
+            return "無"
+        short = seq[:maxn]
+        more = f" ...等 {len(seq)} 件" if len(seq) > maxn else ""
+        return ", ".join(short) + more
+
+    msg = (
+        f"🛠️ **衣櫃圖片修復完成**\\n"
+        f"✅ 原本就可用：{len(already_ok)} 件\\n"
+        f"✅ 本次成功轉存：{len(repaired)} 件\\n"
+        f"❌ 仍需重補圖：{len(failed)} 件\\n\\n"
+        f"成功轉存：{_fmt(repaired)}\\n"
+        f"需重補圖：{_fmt(failed, maxn=18)}"
+    )
+    await status.edit(content=msg[:1900])
 
 
 async def _seedream_upload_single_file(path):
@@ -8133,7 +8337,30 @@ async def handle_unified_photo_command(message, user_input):
     except Exception as exc:
         print(f"⚠️ [PHOTO_UNIFIED_FAILED] {type(exc).__name__}: {exc}")
         traceback.print_exc()
-        await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{str(exc)[:1500]}`")
+        err_text = str(exc)
+
+        if pending_wardrobe and (
+            "SEEDREAM_REMOTE_REFERENCE_DOWNLOAD_FAILED" in err_text
+            or "SEEDREAM_PHOTO_REFERENCE_URL_EXPIRED" in err_text
+            or "HTTP 404" in err_text
+            or "file_download_error" in err_text
+        ):
+            wid = pending_wardrobe.get("id") or wardrobe_id or "這件"
+            wname = pending_wardrobe.get("name") or ""
+            await status.edit(
+                content=(
+                    f"⚠️ 大俠，**{wid} {wname}** 的衣櫃圖片連結已失效或無法下載，所以這次 `/photo` 沒辦法套用這件。\n\n"
+                    "這不是 prompt 問題，也不是小俠 1–9 號人物底稿問題；是這件衣服目前記錄的舊 Discord/CDN 圖片 URL 已經 404 或過期。\n\n"
+                    "請重新上傳這件衣服的圖片，然後用：\n"
+                    f"`/衣櫃 換圖 {wid}`\n"
+                    "如果新圖有人，要先去人就用：\n"
+                    f"`/衣櫃 換圖去人 {wid}`\n\n"
+                    "換好後再打一次 `/衣櫃 穿 {wid}` 與 `/photo ...`。"
+                )
+            )
+            return None
+
+        await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{err_text[:1500]}`")
         return None
 
 
@@ -9421,6 +9648,12 @@ async def wardrobe_command(ctx, *, args: str = ""):
     if action == "去人":
         await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
         return
+    if action == "健檢":
+        await _handle_wardrobe_healthcheck(ctx)
+        return
+    if action in {"修復圖片", "圖片修復"}:
+        await _handle_wardrobe_repair_images(ctx)
+        return
     if action == "換圖":
         await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=False)
         return
@@ -9509,6 +9742,14 @@ async def _handle_wardrobe_message_direct(message):
             await _handle_wardrobe_add_command(ctx, payload, remove_person=True)
             return True
 
+        if action == "健檢":
+            await _handle_wardrobe_healthcheck(ctx)
+            return True
+
+        if action in {"修復圖片", "圖片修復"}:
+            await _handle_wardrobe_repair_images(ctx)
+            return True
+
         if action == "換圖":
             await _handle_wardrobe_replace_image_command(ctx, payload, remove_person=False)
             return True
@@ -9559,7 +9800,7 @@ async def _handle_wardrobe_message_direct(message):
             await ctx.send(f"🗑️ 已刪除衣櫃項目：**{target.get('id')} {target.get('name')}**")
             return True
 
-        await ctx.send("大俠，這個 `/衣櫃` 指令我看不懂。可用：`/衣櫃`、`/衣櫃看 W001`、`/衣櫃穿 W001`、`/衣櫃 新增 名稱`、`/衣櫃 換圖 W001`。")
+        await ctx.send("大俠，這個 `/衣櫃` 指令我看不懂。可用：`/衣櫃`、`/衣櫃看 W001`、`/衣櫃穿 W001`、`/衣櫃 新增 名稱`、`/衣櫃 換圖 W001`、`/衣櫃 健檢`、`/衣櫃 修復圖片`。")
         return True
 
     except Exception as exc:
