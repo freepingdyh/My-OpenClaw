@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.69"
+LOBSTER_VERSION = "1.4.70"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -43,6 +43,22 @@ STRICT UNIVERSAL VISUAL RULES:
 - Xiaoxia's anatomy must be normal and natural: plausible posture, plausible hand actions, correct fingers,
   no extra limbs, no twisted joints, no broken fingers, no awkward body mechanics, and no impossible poses.
 """
+
+
+SOLO_SCENE_REWRITE_GUARD = """
+SOLO SCENE REWRITE GUARD:
+The image must be composed as a one-person solo portrait/lifestyle photograph of Xiaoxia only.
+Treat Daxia/boyfriend POV as an invisible camera position only; never visualize the boyfriend, partner, viewer, photographer, lover, or any second person.
+Do not create a couple scene, embrace scene, over-the-shoulder partner view, hand-reaching-in scene, bed partner scene, reflection partner, shadow partner, cropped torso, partial limb, or foreground body part.
+All romantic, seductive, intimate, diary, bedroom, candlelight, waiting-for-you, or couple-like emotion must be expressed only through Xiaoxia's solo pose, gaze, facial expression, hands belonging to Xiaoxia, clothing, lighting, props, and empty surrounding space.
+The frame must contain exactly one human figure: Xiaoxia. Her hands must be the only visible hands, attached to her own arms. Reflections, mirrors, windows, shadows, and background must not contain any other human.
+If a requested action would normally imply another person, rewrite it as a solo camera-facing or task-focused moment.
+"""
+
+SOLO_NEGATIVE_MINIMAL = (
+    "EXACTLY ONE HUMAN FIGURE: Xiaoxia only. Invisible-camera boyfriend POV only. "
+    "No second person, no partner in frame, no external hands or arms, no male body parts, no reflections/shadows of another person, no couple composition."
+)
 
 
 XIAOXIA_APPEARANCE_CORE = """
@@ -5248,6 +5264,13 @@ Return JSON only:
     for key, default_value in fallback_visual.items():
         if not str(visual.get(key, "")).strip():
             visual[key] = default_value
+    visual["image_prompt"] = (
+        str(visual.get("image_prompt") or "").strip()
+        + "\n\n"
+        + SOLO_SCENE_REWRITE_GUARD.strip()
+        + "\n"
+        + SOLO_NEGATIVE_MINIMAL
+    )
     return visual
 
 
@@ -5328,6 +5351,7 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 
 【輸出規則】
 1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life, romantic_seduction 選一個。
+1A. 不管日記文字多浪漫，畫面都只能安排小俠一人；大俠、男友、伴侶、第二人、外來手、倒影、影子、前景肩膀或身體殘件都不得被規劃進任何欄位。所有親密感必須由小俠單人的眼神、姿態、道具、燈光、空間留白呈現。
 2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如臥室、浴室、客廳、餐桌等私密空間。
 3. time_anchor 必須反映台灣當下合理的時段氛圍，例如夜晚微光、沐浴後的熱氣、清晨慵懶等。
 4. activity 必須是居家或日常可自然發生的一件事。
@@ -5409,10 +5433,10 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 保留生活痕跡 environment_trace，大膽使用戲劇性光影、微光或燭光來烘托氛圍。
 - 交換日記的服裝允許大膽展現私密感。可描述 soft silk, satin slip dress, sheer fabric, translucent, form-fitting knitwear 等材質與貼身曲線。
 - 完全解除性感詞彙限制！若情境發生在臥室、浴室或私密獨處，請大膽使用 sexy, seductive, alluring, curvy, deep cleavage, bodycon, form-fitting, translucent 等詞彙來增強「純慾」的畫面張力。
-- 允許使用 looking directly at the camera (boyfriend POV), sultry gaze, biting lower lip, tender yet alluring smile 等充滿情侶間私密張力的神情。
-- 畫面中只能出現小俠本人；不可出現任何男性、其他人物、男性手部/手臂、男性剪影或被裁切的男性身體部位。鏡頭只代表大俠的視角。
+- 允許使用 looking directly at the camera, sultry gaze, biting lower lip, tender yet alluring smile 等神情；這些都必須是小俠獨自面對看不見的鏡頭，不可形成雙人互動畫面。
+- 畫面中只能出現小俠本人；不可出現任何男性、第二人、其他人物、外來手部/手臂、男性剪影、倒影、影子、被裁切的身體部位、床邊另一個人或前景肩膀。鏡頭只代表大俠的不可見視角。
 - {variation_rule}
-- 結尾必須包含：Strictly only Xiaoxia appears in the image. No man, no male partner, no male hands, no male arms, no male silhouette, no male reflection, no cropped male body parts, no implied off-camera man. The camera represents Daxia's point of view and Daxia must never be visually depicted. Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. The frame contains exactly one human figure: Xiaoxia. No man, no second person, no visible partner, no external hands, no male hands, no male arms, no male silhouette, no male reflection, no cropped body parts, no shadow or reflection of another person, no foreground shoulder or viewer body part. The camera is an invisible Daxia point of view and Daxia must never be visually depicted. All romance is expressed through Xiaoxia's solo gaze, pose, lighting, props, and empty surrounding space. Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -5570,6 +5594,11 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         scenario_tw = _clean_anchor_text(state.get("scenario_tw"), "")
 
         lines.append(_appearance_anchor_block(mode))
+        if str(mode or "").lower() in {"diary", "photo_scene", "photo_reference"}:
+            lines.append(SOLO_SCENE_REWRITE_GUARD.strip())
+            violation = visual_dict.get("__solo_gate_violation") if isinstance(visual_dict, dict) else None
+            if violation:
+                lines.append(f"PREVIOUS OUTPUT FAILED SOLO CHECK: {violation}. Regenerate as a clean solo Xiaoxia image with zero second-person traces.")
         lines.append("HARD SCENE ANCHORS — preserve all of the following core scene facts at every safety level:")
         lines.append(f"- Main activity: {activity}.")
         lines.append(f"- Primary action: {primary_action}.")
@@ -5645,7 +5674,9 @@ def _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level):
         f"{hard_anchor_block}\n\n"
         f"SAFETY-PRESERVING STYLE LAYER (Level {level}): {level_guidance}\n"
         f"STYLE DESCRIPTION TO RENDER:\n{rewritten_style}\n\n"
-        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. Strictly solo focus on Xiaoxia. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must remain natural and physically plausible."
+        "Critical rule: if there is any tension between style wording and hard scene anchors, the hard scene anchors always win. "
+        + SOLO_NEGATIVE_MINIMAL + " "
+        "Strictly solo focus on Xiaoxia. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must remain natural and physically plausible."
     )
 
 
@@ -5666,6 +5697,84 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
             "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. For cosplay, hairstyle and hair color may adapt to the role when needed for recognizability, while still clearly reading as Xiaoxia cosplaying the role. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
+
+
+
+async def _download_image_bytes_for_vision(image_url, max_bytes=8_000_000):
+    if not image_url or not str(image_url).startswith("http"):
+        return None, None
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(str(image_url)) as resp:
+                if resp.status != 200:
+                    return None, None
+                data = await resp.read()
+        if not data or len(data) > max_bytes:
+            return None, None
+        # 粗略從 URL 判斷；gallery 多半是 jpg/png，Gemini 可接受 image/jpeg 作為保底。
+        url_lower = str(image_url).lower()
+        if ".png" in url_lower:
+            mime = "image/png"
+        elif ".webp" in url_lower:
+            mime = "image/webp"
+        else:
+            mime = "image/jpeg"
+        return data, mime
+    except Exception as exc:
+        print(f"⚠️ [SOLO_GATE_DOWNLOAD_FAILED] {type(exc).__name__}: {exc}")
+        return None, None
+
+
+async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo"):
+    """
+    出圖後的輕量驗圖 gate：只檢查是否混入第二人/男人/外來手腳。
+    失敗時回傳 (False, reason)；無法檢查時為避免誤殺，回傳 (True, reason)。
+    """
+    if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary"}:
+        return True, "mode not checked"
+
+    data, mime = await _download_image_bytes_for_vision(image_url)
+    if not data:
+        return True, "vision skipped: cannot download generated image"
+
+    prompt = """
+You are an image QA checker for a solo character generation pipeline.
+Check the image strictly for unwanted additional people.
+
+Return JSON only:
+{
+  "solo_xiaoxia_only": true/false,
+  "human_count": number,
+  "has_male_or_partner": true/false,
+  "has_external_hands_or_body_parts": true/false,
+  "has_second_person_reflection_shadow_or_partial": true/false,
+  "reason": "short explanation"
+}
+
+Rules:
+- Pass only if the image contains exactly one visible human figure and that person is the female subject Xiaoxia.
+- Fail if there is any man, second person, partner, external hand/arm/leg/shoulder, cropped body part, reflection/shadow of another person, or foreground viewer body part.
+- A printed photo, painting, statue, mannequin, or decorative object is not a person unless it appears as a real human in the scene.
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0,
+            ),
+        )
+        result = _safe_json_from_text(resp.text, {})
+        if not isinstance(result, dict):
+            return True, "vision skipped: invalid JSON"
+        ok = bool(result.get("solo_xiaoxia_only")) and int(result.get("human_count", 1) or 1) <= 1 and not bool(result.get("has_male_or_partner")) and not bool(result.get("has_external_hands_or_body_parts")) and not bool(result.get("has_second_person_reflection_shadow_or_partial"))
+        reason = str(result.get("reason") or result)
+        return ok, reason[:300]
+    except Exception as exc:
+        print(f"⚠️ [SOLO_GATE_VISION_FAILED] {type(exc).__name__}: {exc}")
+        return True, "vision skipped: checker error"
 
 
 
@@ -5709,6 +5818,18 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 continue
             raise Exception(f"攝影機異常：{generated_image_url}")
 
+        if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
+            solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode=mode)
+            if not solo_ok:
+                print(f"⚠️ [SOLO_GATE_REJECTED] mode={mode} reason={solo_reason}")
+                if msg:
+                    await msg.edit(content=f"⚠️ 小俠發現這張混入了不該出現的人物/肢體，正在自動重拍（原因：{solo_reason[:120]}）...")
+                if isinstance(visual_dict, dict):
+                    visual_dict["__solo_gate_violation"] = solo_reason
+                    visual_dict["composition"] = str(visual_dict.get("composition", "")) + "\n*(Solo gate rejected previous output: regenerate as Xiaoxia-only, no second person, no external body parts.)*"
+                initial_prompt = SOLO_SCENE_REWRITE_GUARD.strip() + "\n\n" + str(initial_prompt)
+                continue
+
         if isinstance(visual_dict, dict):
             visual_dict["engine"] = engine_name
         return generated_image_url, visual_dict
@@ -5723,6 +5844,10 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
+    if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
+        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode)
+        if not solo_ok:
+            raise Exception(f"最終保底仍混入第二人/男人/外來肢體：{solo_reason}")
     if isinstance(visual_dict, dict):
         visual_dict["engine"] = engine_name
     return final_url, visual_dict
@@ -6028,7 +6153,8 @@ def _seedream_diary_prompt(custom_prompt):
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new candid diary/lifestyle photograph according to the prompt. Do not copy any one reference pose or background exactly. "
-        "This is a warm, highly intimate, and romantic private exchange-diary moment in a contemporary Taiwan daily-life setting (often from a Boyfriend POV). "
+        "This is a warm, intimate, romantic private exchange-diary moment in a contemporary Taiwan daily-life setting, but the visual frame is a solo Xiaoxia photograph only. "
+        + SOLO_SCENE_REWRITE_GUARD.strip() + " "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
         "Keep anatomy natural, hands plausible; Xiaoxia's posture, limbs, joints, hands, and fingers must be physically plausible and normal, with no awkward body mechanics. "
@@ -7810,6 +7936,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
         "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
         "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
+        + SOLO_SCENE_REWRITE_GUARD.strip() + " "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male head, no male face, no male hair, no male shoulder, no male back, no male torso, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The boyfriend POV must be implied only through framing, Xiaoxia's gaze, and composition, never by showing another person. "
         "Keep anatomy natural, hands plausible, full body or half body as appropriate, fully clothed, tasteful, non-explicit. Xiaoxia's pose and limb positions must be anatomically normal and natural, with no extra limbs, twisted joints, broken fingers, or awkward body mechanics. "
@@ -8023,10 +8150,11 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
   "action_summary": "小俠正在做的自然動作",
   "mood_summary": "氣氛與光線",
   "camera_framing": "half_body 或 full_body",
-  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；嚴格單人小俠，不出現男人、其他人、任何男性身體部位、或鏡頭持有者的手／肩／背影；動作與肢體必須自然正常；完整衣著、生活感、非露骨"
+  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；必須改寫成小俠一人的單人鏡頭，嚴格單人小俠，不出現男人、第二人、伴侶、其他人、任何男性身體部位、鏡頭持有者的手／肩／背影、外來手、倒影或影子；動作與肢體必須自然正常；完整衣著、生活感、非露骨"
 }}
 
 規則：
+0. 若大俠指定的是浪漫、床邊、燭光、等待、撩人、情侶感、男友視角等情境，必須把它改寫為「小俠單人對鏡頭或單人生活動作」；不得把大俠、男友、伴侶或第二人畫面化。
 1. 若大俠指定內容不為無，scene_summary 必須以指定內容為主。
 2. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
 3. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
