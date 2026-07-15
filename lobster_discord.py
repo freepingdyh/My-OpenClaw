@@ -474,6 +474,7 @@ WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
 WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 # 🎴 今晚命運牌 v2：卡面圖與 cosplay 角色宇宙，皆放在 Zeabur persistent volume。
 COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
+WARDROBE_USAGE_LOG_PATH = os.path.join(MEMORY_DIR, "wardrobe_usage_log.json")
 FATE_CARD_DIR = os.path.join(MEMORY_DIR, "fate_cards")
 FATE_CARD_BACK = "card_06_back.png"
 FATE_CARD_STATE_PATH = os.path.join(MEMORY_DIR, "fate_card_state.json")
@@ -569,8 +570,93 @@ def _compact_wardrobe_brief(item):
     }
 
 
-def _fallback_free_wardrobe_pick(scene_text, items):
+def _recent_wardrobe_usage(limit=50):
+    entries = load_wardrobe_usage_log()
+    if not isinstance(entries, list):
+        return []
+    valid = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        if not wid:
+            continue
+        valid.append(entry)
+    return valid[-limit:]
+
+
+def _wardrobe_recent_usage_sets(recent_entries=None):
+    recent_entries = recent_entries or _recent_wardrobe_usage(50)
+    last_10_ids = []
+    today = datetime.now(TZ_TPE).date()
+    recent_3day_ids = set()
+    for entry in reversed(recent_entries[-10:]):
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        if wid and wid not in last_10_ids:
+            last_10_ids.append(wid)
+    for entry in recent_entries:
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        ds = str(entry.get("date") or "").strip()
+        if not wid or not ds:
+            continue
+        try:
+            used_date = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if (today - used_date).days <= 2:
+            recent_3day_ids.add(wid)
+    return recent_3day_ids, set(last_10_ids), last_10_ids
+
+
+def _summarize_recent_wardrobe_usage(recent_entries=None, limit=8):
+    recent_entries = recent_entries or _recent_wardrobe_usage(50)
+    lines = []
+    seen = set()
+    for entry in reversed(recent_entries):
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        if not wid or wid in seen:
+            continue
+        seen.add(wid)
+        name = str(entry.get("name") or "").strip()
+        purpose = str(entry.get("purpose") or "").strip()
+        scene = _clean_text_compact(entry.get("scene") or "")
+        date = str(entry.get("date") or "").strip()
+        lines.append(f"- {wid} {name}｜{date}｜{purpose}｜{scene[:40]}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) if lines else "- 無"
+
+
+def _log_wardrobe_usage(item, purpose="photo", scene_text="", extra=None):
+    if not isinstance(item, dict):
+        return
+    wid = str(item.get("id") or "").strip().upper()
+    if not wid:
+        return
+    entries = load_wardrobe_usage_log()
+    payload = {
+        "timestamp": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "date": _today_str_tpe(),
+        "wardrobe_id": wid,
+        "name": str(item.get("name") or "").strip(),
+        "main_category": str(item.get("main_category") or "").strip(),
+        "sub_category": str(item.get("sub_category") or "").strip(),
+        "purpose": str(purpose or "photo"),
+        "scene": _clean_text_compact(scene_text or ""),
+    }
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if v is None:
+                continue
+            payload[str(k)] = v
+    entries.append(payload)
+    save_wardrobe_usage_log(entries)
+
+
+def _fallback_free_wardrobe_pick(scene_text, items, hard_exclude_ids=None, soft_avoid_ids=None):
     usable = []
+    hard_exclude_ids = set(hard_exclude_ids or [])
+    soft_avoid_ids = set(soft_avoid_ids or [])
     for item in items or []:
         ref_path, _ref_url = _wardrobe_reference_for_generation(item)
         if ref_path:
@@ -589,11 +675,15 @@ def _fallback_free_wardrobe_pick(scene_text, items):
     elif any(k in hay for k in ["運動", "健身", "瑜伽", "跑步"]):
         preferred = ["套裝", "上衣", "下身"]
 
+    pool = usable
     if preferred:
         filtered = [it for it in usable if str(it.get("main_category") or "") in preferred]
         if filtered:
-            return random.choice(filtered)
-    return random.choice(usable)
+            pool = filtered
+
+    pool_hard = [it for it in pool if str(it.get("id") or "").strip().upper() not in hard_exclude_ids] or pool
+    pool_soft = [it for it in pool_hard if str(it.get("id") or "").strip().upper() not in soft_avoid_ids] or pool_hard
+    return random.choice(pool_soft)
 
 
 async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
@@ -606,38 +696,55 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
     if not usable:
         return None
 
-    catalog = [_compact_wardrobe_brief(item) for item in usable]
+    recent_entries = _recent_wardrobe_usage(50)
+    recent_3day_ids, last_10_ids_set, last_10_ids_ordered = _wardrobe_recent_usage_sets(recent_entries)
+    candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in recent_3day_ids] or usable
+
+    catalog = [_compact_wardrobe_brief(item) for item in candidate_items]
+    recent_summary = _summarize_recent_wardrobe_usage(recent_entries, limit=8)
     prompt = f"""
 你是小俠的穿搭挑選助理。請根據需求，從衣櫃中挑出最適合的一件。
 
 模式：{purpose}
 需求描述：{str(scene_text or '').strip() or '小俠依今天心情自由發揮'}
 
+最近穿搭紀錄（避免一直重複）：
+{recent_summary}
+
 規則：
 1. 只能從提供的衣櫃清單中挑一個 existing wardrobe_id。
 2. 不可自創不存在的 W 編號。
-3. 若場景偏居家、床邊、燭光、夜晚、交換日記，可優先考慮睡衣／居家服或內衣，但仍需看整體氣氛。
-4. 若場景偏外出、餐廳、夜景、約會，可優先考慮洋裝、套裝或適合外出的造型。
-5. 回答必須是 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由"}}
+3. 最近 3 天穿過的同一件，原則上不要再選，除非候選非常少。
+4. 最近 10 次內出現過的衣服，請降低優先權，讓整體更有輪替感。
+5. 若場景偏居家、床邊、燭光、夜晚、交換日記，可優先考慮睡衣／居家服或內衣，但仍需看整體氣氛。
+6. 若場景偏外出、餐廳、夜景、約會，可優先考慮洋裝、套裝或適合外出的造型。
+7. 回答必須是 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由"}}
 
-衣櫃清單：
+本次可選衣櫃清單：
 {json.dumps(catalog, ensure_ascii=False)}
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.25),
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.45),
         )
         data = _extract_json_object(getattr(resp, 'text', '') or '')
         wid = str((data or {}).get("wardrobe_id") or "").strip().upper()
         if wid:
             picked = _find_wardrobe_item(wid)
             if picked and _wardrobe_reference_for_generation(picked)[0]:
+                if wid not in recent_3day_ids:
+                    return picked
+                # 若模型仍選了近 3 日重複項，就先嘗試改用其他候選。
+                alternates = [it for it in candidate_items if str(it.get("id") or "").strip().upper() != wid]
+                if alternates:
+                    softened = [it for it in alternates if str(it.get("id") or "").strip().upper() not in last_10_ids_set] or alternates
+                    return random.choice(softened)
                 return picked
     except Exception as exc:
         print(f"⚠️ [FREE_WARDROBE_PICK_FAILED] {type(exc).__name__}: {exc}")
-    return _fallback_free_wardrobe_pick(scene_text, usable)
+    return _fallback_free_wardrobe_pick(scene_text, candidate_items, hard_exclude_ids=recent_3day_ids, soft_avoid_ids=last_10_ids_set)
 
 
 def _strip_photo_mode_prefix(raw_scene_text):
@@ -1905,6 +2012,22 @@ def load_wardrobe():
 def save_wardrobe(items):
     with open(WARDROBE_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+
+def load_wardrobe_usage_log():
+    if not os.path.exists(WARDROBE_USAGE_LOG_PATH):
+        return []
+    try:
+        with open(WARDROBE_USAGE_LOG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_wardrobe_usage_log(entries):
+    trimmed = entries[-500:] if isinstance(entries, list) else []
+    with open(WARDROBE_USAGE_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
 
 def _clean_profile_memory_items(items):
     """
@@ -6543,6 +6666,31 @@ def _build_outfit_state_from_context(context):
     }
 
 
+def _log_wardrobe_usage_from_context(context, purpose="photo"):
+    if not isinstance(context, dict):
+        return
+    wid = str(context.get("wardrobe_id") or "").strip().upper()
+    if not wid:
+        return
+    item = _find_wardrobe_item(wid)
+    if not item:
+        item = {
+            "id": wid,
+            "name": context.get("outfit_summary") or wid,
+            "main_category": "",
+            "sub_category": "",
+        }
+    _log_wardrobe_usage(
+        item,
+        purpose=purpose,
+        scene_text=context.get("scene_text") or context.get("scene_summary") or context.get("composition") or "",
+        extra={
+            "source_mode": context.get("source_mode"),
+            "mood": _clean_text_compact(context.get("mood_summary") or context.get("mood") or ""),
+        },
+    )
+
+
 def _wardrobe_item_short(item):
     return f"{item.get('id')}｜{item.get('name')}｜{item.get('main_category')}/{item.get('sub_category')}"
 
@@ -8682,6 +8830,7 @@ async def handle_unified_photo_command(message, user_input):
         db.insert(0, _photo_db_payload(context))
         save_memory(db)
         _set_current_outfit_state(_build_outfit_state_from_context(context))
+        _log_wardrobe_usage_from_context(context, purpose="photo")
         if pending_wardrobe:
             _clear_pending_wardrobe_state()
 
@@ -8974,6 +9123,7 @@ class PhotoResultView(discord.ui.View):
             db.insert(0, _photo_db_payload(new_context))
             save_memory(db)
             _set_current_outfit_state(_build_outfit_state_from_context(new_context))
+            _log_wardrobe_usage_from_context(new_context, purpose="photo_more")
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
             embed = _build_photo_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
@@ -9003,6 +9153,7 @@ class PhotoResultView(discord.ui.View):
             _replace_photo_db_record(old_url, _photo_db_payload(new_context))
             _safe_delete_vault_image(old_url)
             _set_current_outfit_state(_build_outfit_state_from_context(new_context))
+            _log_wardrobe_usage_from_context(new_context, purpose="photo_reroll")
             self.context = new_context
             if interaction.message:
                 new_context["message_id"] = interaction.message.id
@@ -9722,6 +9873,13 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             db = load_memory()
             db.insert(0, diary_photo_payload)
             save_memory(db)
+            if diary_wardrobe and diary_wardrobe.get("item"):
+                _log_wardrobe_usage(
+                    diary_wardrobe.get("item"),
+                    purpose="diary",
+                    scene_text=result.get("scenario_tw", ""),
+                    extra={"mood": diary_visual.get("mood", "愛意與生活感")},
+                )
             
             # 組合網頁顯示的 HTML
             reply_html = (
