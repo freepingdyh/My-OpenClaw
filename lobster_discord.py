@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.70"
+LOBSTER_VERSION = "1.4.71"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -454,6 +454,7 @@ STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 �
 PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
+DIARY_WARDROBE_PREFS_PATH = os.path.join(MEMORY_DIR, "diary_wardrobe_prefs.json") # 👗 今日交換日記衣櫃模式
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
 MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
@@ -497,6 +498,162 @@ def load_diary_override():
 def save_diary_override(data):
     with open(DIARY_OVERRIDE_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _load_json_file_or_default(path, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def load_diary_wardrobe_prefs():
+    data = _load_json_file_or_default(DIARY_WARDROBE_PREFS_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_diary_wardrobe_prefs(data):
+    with open(DIARY_WARDROBE_PREFS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _prune_diary_wardrobe_prefs(data, keep_days=7):
+    if not isinstance(data, dict):
+        return {}
+    today = datetime.now(TZ_TPE).date()
+    cleaned = {}
+    for key, value in data.items():
+        try:
+            dt = datetime.strptime(str(key), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if abs((today - dt).days) <= keep_days:
+            cleaned[str(key)] = value
+    return cleaned
+
+
+def set_diary_wardrobe_pref(mode, wardrobe_id=None, target_date=None):
+    date_key = target_date or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    data = _prune_diary_wardrobe_prefs(load_diary_wardrobe_prefs())
+    payload = {
+        "mode": str(mode or "").strip(),
+        "wardrobe_id": str(wardrobe_id or "").strip().upper(),
+        "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    data[date_key] = payload
+    save_diary_wardrobe_prefs(data)
+    return payload
+
+
+def get_diary_wardrobe_pref(target_date=None):
+    date_key = target_date or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    data = _prune_diary_wardrobe_prefs(load_diary_wardrobe_prefs())
+    if data != load_diary_wardrobe_prefs():
+        save_diary_wardrobe_prefs(data)
+    pref = data.get(date_key)
+    return pref if isinstance(pref, dict) else None
+
+
+def _compact_wardrobe_brief(item):
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "id": str(item.get("id") or "").strip(),
+        "name": str(item.get("name") or "").strip(),
+        "main_category": str(item.get("main_category") or "").strip(),
+        "sub_category": str(item.get("sub_category") or "").strip(),
+        "tags": [str(x).strip() for x in (item.get("tags") or []) if str(x).strip()][:6],
+        "style_summary": str(item.get("style_summary") or "").strip(),
+    }
+
+
+def _fallback_free_wardrobe_pick(scene_text, items):
+    usable = []
+    for item in items or []:
+        ref_path, _ref_url = _wardrobe_reference_for_generation(item)
+        if ref_path:
+            usable.append(item)
+    if not usable:
+        return None
+
+    hay = str(scene_text or "")
+    preferred = []
+    if any(k in hay for k in ["泳", "海邊", "泳池", "溫泉", "比基尼"]):
+        preferred = ["泳裝"]
+    elif any(k in hay for k in ["床", "臥室", "睡", "燭光", "居家", "沙發", "夜裡"]):
+        preferred = ["睡衣／居家服", "內衣"]
+    elif any(k in hay for k in ["夜景", "餐廳", "約會", "晚餐", "外出", "街", "咖啡"]):
+        preferred = ["洋裝", "套裝", "上衣"]
+    elif any(k in hay for k in ["運動", "健身", "瑜伽", "跑步"]):
+        preferred = ["套裝", "上衣", "下身"]
+
+    if preferred:
+        filtered = [it for it in usable if str(it.get("main_category") or "") in preferred]
+        if filtered:
+            return random.choice(filtered)
+    return random.choice(usable)
+
+
+async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
+    items = load_wardrobe()
+    usable = []
+    for item in items:
+        ref_path, _ref_url = _wardrobe_reference_for_generation(item)
+        if ref_path:
+            usable.append(item)
+    if not usable:
+        return None
+
+    catalog = [_compact_wardrobe_brief(item) for item in usable]
+    prompt = f"""
+你是小俠的穿搭挑選助理。請根據需求，從衣櫃中挑出最適合的一件。
+
+模式：{purpose}
+需求描述：{str(scene_text or '').strip() or '小俠依今天心情自由發揮'}
+
+規則：
+1. 只能從提供的衣櫃清單中挑一個 existing wardrobe_id。
+2. 不可自創不存在的 W 編號。
+3. 若場景偏居家、床邊、燭光、夜晚、交換日記，可優先考慮睡衣／居家服或內衣，但仍需看整體氣氛。
+4. 若場景偏外出、餐廳、夜景、約會，可優先考慮洋裝、套裝或適合外出的造型。
+5. 回答必須是 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由"}}
+
+衣櫃清單：
+{json.dumps(catalog, ensure_ascii=False)}
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.25),
+        )
+        data = _extract_json_object(getattr(resp, 'text', '') or '')
+        wid = str((data or {}).get("wardrobe_id") or "").strip().upper()
+        if wid:
+            picked = _find_wardrobe_item(wid)
+            if picked and _wardrobe_reference_for_generation(picked)[0]:
+                return picked
+    except Exception as exc:
+        print(f"⚠️ [FREE_WARDROBE_PICK_FAILED] {type(exc).__name__}: {exc}")
+    return _fallback_free_wardrobe_pick(scene_text, usable)
+
+
+def _strip_photo_mode_prefix(raw_scene_text):
+    raw = str(raw_scene_text or "").strip()
+    if not raw:
+        return {"mode": "normal", "scene_text": ""}
+
+    if re.match(r"^(?:自發發揮|自由發揮)(?:\s+|$)", raw):
+        cleaned = re.sub(r"^(?:自發發揮|自由發揮)(?:\s+|$)", "", raw, count=1).strip()
+        return {"mode": "freestyle", "scene_text": cleaned}
+
+    if re.match(r"^(?:衣櫃自由)(?:\s+|$)", raw):
+        cleaned = re.sub(r"^(?:衣櫃自由)(?:\s+|$)", "", raw, count=1).strip()
+        return {"mode": "wardrobe_free", "scene_text": cleaned}
+
+    return {"mode": "normal", "scene_text": raw}
 
 def _extract_diary_date_from_title(title):
     """從 Discord Embed 標題抓出 YYYY-MM-DD。"""
@@ -6493,9 +6650,12 @@ def _diary_promises_for_entry(profile, entry_date, max_items=4):
     return selected
 
 
-def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=None):
+async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=None, target_date=None):
     """
-    只有「本篇日記 / 今日聊天 / 本篇應履約承諾」明確指定衣櫃編號時，交換日記才使用衣櫃參考圖。
+    交換日記只有在以下情況才使用衣櫃：
+    1. 本篇/今日聊天/履約文字明確指定 Wxxx。
+    2. 大俠用 `/交換日記 穿 Wxxx` 指定今天穿哪件。
+    3. 大俠用 `/交換日記 衣櫃自由`，由小俠今日自由挑一件。
     不從 yesterday/current_outfit/recent_context 自動延續。
     """
     sources = [
@@ -6510,9 +6670,24 @@ def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, r
             result.get("promise_delivery", ""),
         ])
     blob = "\n".join(str(x or "") for x in sources)
+
     item = _find_first_wardrobe_item_in_text(blob)
+    selection_source = "chat_or_diary_text"
+
+    if not item:
+        pref = get_diary_wardrobe_pref(target_date=target_date)
+        pref_mode = str((pref or {}).get("mode") or "").strip()
+        pref_wid = str((pref or {}).get("wardrobe_id") or "").strip().upper()
+        if pref_mode == "specified" and pref_wid:
+            item = _find_wardrobe_item(pref_wid)
+            selection_source = "diary_pref_specified"
+        elif pref_mode == "free":
+            item = await _choose_wardrobe_item_for_free_mode(blob, purpose="diary")
+            selection_source = "diary_pref_free"
+
     if not item:
         return None
+
     reference_path, reference_url = _wardrobe_reference_for_generation(item)
     if not reference_path:
         print(f"⚠️ [DIARY_WARDROBE_REFERENCE_MISSING] id={item.get('id')} name={item.get('name')}")
@@ -6528,6 +6703,7 @@ def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, r
         "reference_path": reference_path,
         "reference_url": reference_url,
         "hint": _wardrobe_item_generation_hint(item),
+        "selection_source": selection_source,
         "error": "",
     }
 
@@ -8387,7 +8563,10 @@ async def handle_unified_photo_command(message, user_input):
 
     raw_input = str(user_input or "").strip()
     raw_scene_text = re.sub(r"^/photo\b", "", raw_input, flags=re.IGNORECASE).strip()
-    print(f"📸 [PHOTO_UNIFIED_START] channel={getattr(message.channel, 'name', '')} user={getattr(message.author, 'id', '')} raw_scene={raw_scene_text[:120]}")
+    photo_mode_info = _strip_photo_mode_prefix(raw_scene_text)
+    photo_mode_override = photo_mode_info.get("mode", "normal")
+    raw_scene_text = photo_mode_info.get("scene_text", raw_scene_text)
+    print(f"📸 [PHOTO_UNIFIED_START] channel={getattr(message.channel, 'name', '')} user={getattr(message.author, 'id', '')} raw_scene={raw_scene_text[:120]} mode_override={photo_mode_override}")
     attachment, attachment_error = await _get_photo_reference_attachment(message)
     if attachment_error:
         await message.channel.send(attachment_error)
@@ -8398,6 +8577,16 @@ async def handle_unified_photo_command(message, user_input):
         print(f"⚠️ [PHOTO_PENDING_WARDROBE_INVALID] item={pending_wardrobe}")
         _clear_pending_wardrobe_state()
         pending_wardrobe = None
+
+    free_mode_item = None
+    if photo_mode_override == "freestyle":
+        pending_wardrobe = None
+    elif photo_mode_override == "wardrobe_free":
+        pending_wardrobe = None
+        free_mode_item = await _choose_wardrobe_item_for_free_mode(raw_scene_text or "小俠依今天心情自由發揮", purpose="photo")
+        if free_mode_item:
+            pending_wardrobe = free_mode_item
+            print(f"👗 [PHOTO_WARDROBE_FREE_PICK] {free_mode_item.get('id')} {free_mode_item.get('name')}")
 
     current_outfit_state = _get_current_outfit_state()
     explicit_outfit_change = _photo_requests_outfit_change(raw_scene_text)
@@ -8428,13 +8617,19 @@ async def handle_unified_photo_command(message, user_input):
         reference_item_url = None
         wardrobe_id = None
 
-    keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change)
+    keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change and photo_mode_override == "normal")
 
     status = await message.channel.send(
         "📸 小俠正在整理這一刻的畫面，準備用 Seedream v4.5 拍一張照片..."
     )
+    scene_seed_text = raw_scene_text
+    if photo_mode_override == "freestyle" and not scene_seed_text:
+        scene_seed_text = "小俠依自己的心情設計場景與穿搭，不使用衣櫃。"
+    elif photo_mode_override == "wardrobe_free" and not scene_seed_text:
+        scene_seed_text = "小俠依自己的心情設計場景，並從衣櫃自由挑選一套最適合的穿搭。"
+
     scene_data = await _summarize_scene_for_photo(
-        raw_scene_text,
+        scene_seed_text,
         source_mode,
         has_reference=bool(attachment or pending_wardrobe),
         current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
@@ -8449,7 +8644,13 @@ async def handle_unified_photo_command(message, user_input):
         )
     else:
         wardrobe_hint = ""
-    prompt_base = scene_data.get("photo_prompt") or raw_scene_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
+
+    prompt_base = scene_data.get("photo_prompt") or scene_seed_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
+    if photo_mode_override == "freestyle":
+        prompt_base = (
+            str(prompt_base).strip()
+            + "\n\nFREESTYLE OUTFIT MODE:\nXiaoxia may freely design today's outfit and scene. Do not use wardrobe references. Do not force carry-over from previous outfit continuity."
+        ).strip()
     if wardrobe_hint:
         prompt_base = (
             str(prompt_base).strip()
@@ -8460,7 +8661,7 @@ async def handle_unified_photo_command(message, user_input):
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
-        "scene_text": raw_scene_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
+        "scene_text": scene_seed_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
         "scene_summary": scene_data.get("scene_summary", ""),
         "outfit_summary": scene_data.get("outfit_summary", ""),
         "action_summary": scene_data.get("action_summary", ""),
@@ -8472,6 +8673,7 @@ async def handle_unified_photo_command(message, user_input):
         "wardrobe_id": wardrobe_id,
         "current_outfit_for_seedream": (current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
         "used_pending_wardrobe": bool(pending_wardrobe),
+        "photo_mode_override": photo_mode_override,
     }
 
     try:
@@ -9433,7 +9635,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "message": "大俠，這是今天只屬於我們的小片刻。"
             }
 
-            diary_wardrobe = _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=result)
+            diary_wardrobe = await _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=result, target_date=entry_date)
             if diary_wardrobe and diary_wardrobe.get("error"):
                 print(f"⚠️ [{entry_date}] {diary_wardrobe.get('error')} item={diary_wardrobe.get('item', {}).get('id')}")
                 diary_wardrobe = None
@@ -9862,6 +10064,66 @@ class _WardrobeMessageCtxAdapter:
 
     async def send(self, *args, **kwargs):
         return await self.channel.send(*args, **kwargs)
+
+
+async def _handle_diary_wardrobe_message_direct(message):
+    """
+    交換日記衣櫃模式快捷指令：
+    /交換日記 穿 W011
+    /交換日記 衣櫃自由
+    僅作用於今天的交換日記。
+    """
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/交換日記(?:\s+|$)", content, flags=re.IGNORECASE):
+        return False
+
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/交換日記 ...` 先只開放在女友小俠的私人頻道使用喔。")
+        return True
+
+    raw = re.sub(r"^/交換日記(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    today = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+
+    if not raw:
+        await message.channel.send(
+            "大俠，交換日記衣櫃模式可用：`/交換日記 穿 W011` 或 `/交換日記 衣櫃自由`。\n"
+            "若沒有下這類指令，今天的交換日記就維持 default 自由發揮。"
+        )
+        return True
+
+    m = re.match(r"^穿\s+(W\d{3,4})$", raw, flags=re.IGNORECASE)
+    if m:
+        wid = m.group(1).upper()
+        item = _find_wardrobe_item(wid)
+        if not item:
+            await message.channel.send(f"找不到衣櫃項目 **{wid}**。請先 `/衣櫃` 看看目前有哪些收藏。")
+            return True
+        ref_path, _ref_url = _wardrobe_reference_for_generation(item)
+        if not ref_path:
+            await message.channel.send(
+                f"⚠️ **{wid} {item.get('name', '')}** 目前沒有可用的本地衣櫃圖片，所以暫時不能指定給今日交換日記。\n"
+                f"請先用 `/衣櫃 換圖 {wid}` 更新成可用圖片。"
+            )
+            return True
+        set_diary_wardrobe_pref("specified", wardrobe_id=wid, target_date=today)
+        await message.channel.send(
+            f"✅ 已設定 **{today}** 的交換日記指定穿 **{wid} {item.get('name', '')}**。\n"
+            "這個設定只對今天有效，不會改變 `/photo` 目前的已穿狀態。"
+        )
+        return True
+
+    if raw == "衣櫃自由":
+        set_diary_wardrobe_pref("free", wardrobe_id="", target_date=today)
+        await message.channel.send(
+            f"✅ 已設定 **{today}** 的交換日記為 **衣櫃自由**。\n"
+            "今晚小俠會依當天心情與日記情境，自己從衣櫃挑一件最適合的穿搭。"
+        )
+        return True
+
+    await message.channel.send(
+        "大俠，這個 `/交換日記` 指令我目前只看得懂：`/交換日記 穿 W011` 或 `/交換日記 衣櫃自由`。"
+    )
+    return True
 
 
 async def _handle_wardrobe_message_direct(message):
@@ -10354,6 +10616,10 @@ async def on_message(message):
     if message.content.startswith('/') and not inline_intimate_text:
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_wardrobe_message_direct(message):
+            return
+
+        # 📔 /交換日記 衣櫃模式快捷指令
+        if await _handle_diary_wardrobe_message_direct(message):
             return
 
         # 🌟 特例：/photo 是留給世界頻道拍照用的，不要被指令處理器攔截！
