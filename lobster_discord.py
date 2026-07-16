@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.71"
+LOBSTER_VERSION = "1.4.74"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -475,6 +475,7 @@ WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 # 🎴 今晚命運牌 v2：卡面圖與 cosplay 角色宇宙，皆放在 Zeabur persistent volume。
 COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
 WARDROBE_USAGE_LOG_PATH = os.path.join(MEMORY_DIR, "wardrobe_usage_log.json")
+COSPLAY_TOPIC_HISTORY_PATH = os.path.join(MEMORY_DIR, "cosplay_topic_history.json") # 🎭 v1474：每日 cosplay 動態選角與去重紀錄
 FATE_CARD_DIR = os.path.join(MEMORY_DIR, "fate_cards")
 FATE_CARD_BACK = "card_06_back.png"
 FATE_CARD_STATE_PATH = os.path.join(MEMORY_DIR, "fate_card_state.json")
@@ -4056,8 +4057,8 @@ VIBE_RENDER_GUIDE = {
         "translator": "dreamy, mysterious, ornate, magical, atmospheric, cinematic fantasy"
     },
     "魅": {
-        "planner": "魅：這是本系統唯一的『開到滿』成人女性魅力模式。成熟、撩人、勾人、帶有明確浪漫張力，而且要落到服裝結構、開放度、貼身度、材質、腿線、領口、肩背、腰線與鏡頭關係。不可再縮回優雅、知性、夢幻或保守漂亮。fal.ai 會把關，程式不要替它自我設限。",
-        "translator": "maximum alluring sensuality, mature feminine magnetism, seductive, body-aware, high-glamour, open neckline, visible shoulder or back, legline emphasis, satin silk sheer texture, intimate eye contact, teasing lips, unmistakable romantic tension"
+        "planner": "魅：L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點；目標是最大化小俠版角色的誘惑效率，性感卻不低級，迷人卻不廉價。胸口魅力可透過深 V 領、低胸領口、心型領口、一字肩、掛脖、露鎖骨、露肩頸、胸口輪廓、自然乳溝、貼身上身剪裁與胸腰比例明確等方式呈現。fal.ai 會把關，程式不要替它自我設限。",
+        "translator": "maximum alluring sensuality, chest-emphasis first, then choose the strongest secondary attraction point between legline and waist-abdomen curve, deep V or low neckline, sweetheart neckline, off-shoulder or halter, visible collarbones and shoulder-neck line, natural cleavage, fitted upper silhouette, clear bust-waist ratio, seductive yet tasteful, unmistakable romantic tension"
     },
 }
 
@@ -4103,12 +4104,12 @@ def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
     elif zh == "魅":
         planned["mood_tw"] = "成熟、撩人、角色感"
         planned["camera_awareness"] = "aware" if planned.get("camera_awareness") == "unaware" else planned.get("camera_awareness", "aware")
-        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " This is the max-allure lane: use clearly sensual adult-feminine styling, visible waist definition, open neckline or tasteful cleavage when fitting the role, possible bare shoulders or back, slit, stockings, satin, silk, lace, or slightly sheer layers as appropriate. Do not soften this into merely elegant, cute, or conservative styling.").strip()
-        planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Make the look genuinely sensual, body-aware, glamorous, and magnetically feminine.").strip()
+        planned["costume_direction"] = (str(planned.get("costume_direction") or "") + " This is the max-allure lane. Always prioritize chest allure first through the strongest tasteful chest-focused garment structure that fits the role, such as a deep V or low neckline, sweetheart line, off-shoulder or halter cut, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper silhouette, and a clear bust-waist ratio. Then choose one secondary attraction point — either legline or waist-abdomen curve — whichever best suits the role, garment structure, scene mood, and pose logic. Do not soften this into merely elegant, cute, or conservative styling.").strip()
+        planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Maximize seductive efficiency in a tasteful, role-coherent, body-aware, glamorous adult-feminine way.").strip()
         planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, softly teasing smile or parted lips, knowingly inviting energy.").strip()
-        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer sculpting light and richer contrast so body lines, curves, and fabric texture read clearly as sensual.").strip()
-        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the allure is legible in outfit, silhouette, posture, and emotional tension rather than flattening it into a safe documentary shot.").strip()
-        planned["vibe_notes"] = "This must read as maximum alluring adult femininity with obvious romantic tension and glamour."
+        planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer sculpting light and richer contrast so the chest allure, chosen secondary attraction point, body lines, and fabric texture read clearly as sensual.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the chest allure and the chosen second attraction point are clearly legible through outfit, silhouette, posture, and emotional tension rather than flattened into a safe documentary shot.").strip()
+        planned["vibe_notes"] = "Chest allure must read first; then the strongest second allure point should be either legline or waist-abdomen curve, chosen according to role and scene."
     return planned
 
 
@@ -5142,7 +5143,7 @@ def _build_outfit_control(vibe_request=None, topic="", event="", persona="", use
         "雅": "Elegant means refined, graceful, and poised. The styling should feel polished, softly luxurious, and feminine without sliding into childishness or overt seduction.",
         "凜": "Sharp means capable, tailored, and commanding. The styling should show structure, confidence, and control rather than softness or pure ornament.",
         "幻": "Fantasy means dreamy, mysterious, and non-everyday. The styling should visibly carry atmosphere, worldbuilding, and dramatic visual language instead of looking like normal casual wear.",
-        "魅": "Allure is the max-open adult-feminine lane in this system. At L0, do not self-censor or pre-soften it; fal.ai safety checking will decide. The outfit must visibly push openness, fit, material, neckline, shoulders, back, waistline, and legline. It must not collapse into a conservative uniform with only a flirtatious pose.",
+        "魅": "Allure is the max-open adult-feminine lane in this system. At L0, do not self-censor or pre-soften it; fal.ai safety checking will decide. Always strengthen chest allure first, then choose the most suitable second attraction point between legline and waist-abdomen curve based on the role, garment structure, scene mood, and pose logic. Maximize seductive efficiency while staying stylish rather than cheap. Chest allure may be expressed through a deep V or low neckline, sweetheart neckline, off-shoulder, halter, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper-body tailoring, and a clear bust-to-waist ratio. The final look must not collapse into a conservative uniform with only a flirtatious pose.",
         "自然": "Use scene-appropriate clothing. If the user specified clothing, preserve it."
     }
     directive = family_directive.get(vibe_zh, family_directive["自然"])
@@ -5205,7 +5206,408 @@ def _apply_outfit_control_to_planned(planned, outfit_control):
     return planned
 
 
-async def generate_story(mode):
+
+# ==========================================
+# 🎭 v1474 每日 Cosplay 動態選角 / 內文策展
+# ==========================================
+COSPLAY_TOPIC_FAMILIES = [
+    {
+        "family": "literature_chinese",
+        "family_label": "古典文學 / 中式古風",
+        "scope": "探索範圍包含但不限於：中式文學、古典小說、武俠小說、志怪故事、歷史傳奇、民間故事、改編影視與相關女性角色，例如紅樓夢、聊齋、金庸、古典仕女、才女、俠女、江湖女子、宮廷女子、志怪妖魅等。示例不是封閉資料庫。",
+    },
+    {
+        "family": "literature_western",
+        "family_label": "西方名著 / 歐洲古典",
+        "scope": "探索範圍包含但不限於：西方文學、歐洲古典小說、戲劇、歌劇、宮廷與維多利亞時代作品中的女性角色，例如傲慢與偏見、簡愛、小婦人、歌劇魅影、羅密歐與茱麗葉等。示例不是封閉資料庫。",
+    },
+    {
+        "family": "anime_manga",
+        "family_label": "動漫 / 漫畫 / 動畫角色",
+        "scope": "探索範圍包含但不限於：日本動漫、漫畫、動畫電影、魔法少女、校園戀愛、偶像番、冒險番、奇幻番、科幻番、戰鬥番、治癒系動畫、經典長青動漫與新世代人氣動畫中的女性角色。這是 cosplay 的主流來源之一，示例不是封閉資料庫。",
+    },
+    {
+        "family": "sci_fi_future",
+        "family_label": "科幻 / 太空 / 未來都市",
+        "scope": "探索範圍包含但不限於：太空站、星艦、月球基地、未來都市、AI、仿生人、星圖導航員、未來醫療、未來工程師、資料考古員，以及科幻作品中的鮮明女性角色。示例不是封閉資料庫。",
+    },
+    {
+        "family": "fantasy_magic",
+        "family_label": "奇幻 / 魔法 / 精靈 / 女巫",
+        "scope": "探索範圍包含但不限於：女巫、魔法使、精靈、聖女、咒術師、魔法學院、神祕森林、幻獸國度、奇幻宮廷與相關作品中的女性角色。示例不是封閉資料庫。",
+    },
+    {
+        "family": "adventure_exploration",
+        "family_label": "冒險 / 遺跡 / 探索",
+        "scope": "探索範圍包含但不限於：遺跡、古文明、探索隊、密林、海島、失落城市、古代機關、航海或考古冒險作品中的女性角色。注意避免反覆收斂成冒險家、古地圖、皮革長靴模板。示例不是封閉資料庫。",
+    },
+    {
+        "family": "profession_fashion",
+        "family_label": "職業高級時裝",
+        "scope": "探索範圍包含但不限於：私人秘書、家政婦、空服員、女醫師、律師、記者、策展人、飯店經理、精品店長等現代職業女性，也可從影視、小說、戲劇中的職業女性角色延伸。示例不是封閉資料庫。",
+    },
+    {
+        "family": "sports_competition",
+        "family_label": "運動 / 競技 / 賽車 / 體操",
+        "scope": "探索範圍包含但不限於：女車手、賽車女郎、體操選手、網球選手、花式滑冰、射箭、擊劍、啦啦隊、競技主持，以及運動或競技作品中的女性角色。示例不是封閉資料庫。",
+    },
+    {
+        "family": "game_battle",
+        "family_label": "電玩 / 戰鬥角色",
+        "scope": "探索範圍包含但不限於：RPG 女主、動作遊戲女角、格鬥女角、三國無雙、戰國無雙、奇幻遊戲、科幻遊戲女戰士，以及具有強烈辨識度的電玩女性角色。示例不是封閉資料庫。",
+    },
+    {
+        "family": "movie_muse",
+        "family_label": "電影女主 / 復古銀幕",
+        "scope": "探索範圍包含但不限於：全球電影、經典電影、復古銀幕、時代電影、影史女主角與具辨識度的女性角色，例如羅馬假期、埃及豔后、第凡內早餐、黑色電影女主等。示例不是封閉資料庫。",
+    },
+    {
+        "family": "art_music_stage",
+        "family_label": "藝術家 / 音樂 / 舞台",
+        "scope": "探索範圍包含但不限於：歌姬、芭蕾舞者、劇場女主、畫家、小提琴家、鋼琴演奏者、舞台表演者、登台前後台，也可延伸到歌劇、音樂劇、舞台劇或藝術題材作品中的女性角色。示例不是封閉資料庫。",
+    },
+    {
+        "family": "festival_seasonal",
+        "family_label": "節慶 / 民俗 / 季節限定",
+        "scope": "探索範圍包含但不限於：夏祭、聖誕、新年、賞花、中秋、萬聖節、民俗節日、季節限定服飾與文化活動中的女性角色或擬人化題材。示例不是封閉資料庫。",
+    },
+    {
+        "family": "daily_roleplay",
+        "family_label": "日常角色扮演 / 咖啡師 / 書店 / 花店",
+        "scope": "探索範圍包含但不限於：咖啡師、書店店員、花店女孩、甜點店、雨天雜貨店、小旅館接待、生活系角色扮演，也可延伸到日常系作品中的女性角色。示例不是封閉資料庫。",
+    },
+]
+
+
+def _cosplay_json_from_text(raw_text, fallback=None):
+    fallback = fallback or {}
+    try:
+        clean = (raw_text or "").replace("```json", "").replace("```", "").strip()
+        value = json.loads(clean, strict=False)
+        return value if isinstance(value, dict) else fallback
+    except Exception:
+        return fallback
+
+
+def load_cosplay_topic_history():
+    data = _load_json_file_or_default(COSPLAY_TOPIC_HISTORY_PATH, [])
+    return data if isinstance(data, list) else []
+
+
+def save_cosplay_topic_history(entries):
+    if not isinstance(entries, list):
+        entries = []
+    entries = entries[-300:]
+    with open(COSPLAY_TOPIC_HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+def append_cosplay_topic_history(entry):
+    if not isinstance(entry, dict):
+        return
+    history = load_cosplay_topic_history()
+    payload = dict(entry)
+    payload.setdefault("date", datetime.now(TZ_TPE).strftime("%Y-%m-%d"))
+    payload.setdefault("timestamp", datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"))
+    payload.setdefault("source", "daily_auto")
+    history.append(payload)
+    save_cosplay_topic_history(history)
+
+
+def _normalize_cosplay_key(value):
+    return re.sub(r"[\s，。！？、；;：:'\"「」『』（）()《》〈〉\[\]【】]+", "", str(value or "")).lower()
+
+
+def _cosplay_history_since_days(history, days=45):
+    today = datetime.now(TZ_TPE).date()
+    result = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        ds = str(item.get("date") or "").strip()
+        try:
+            dt = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            result.append(item)
+            continue
+        if (today - dt).days <= days:
+            result.append(item)
+    return result
+
+
+def summarize_recent_cosplay_topics(history=None, limit=15):
+    history = history if isinstance(history, list) else load_cosplay_topic_history()
+    lines = []
+    for item in reversed(history[-limit:]):
+        if not isinstance(item, dict):
+            continue
+        fam = item.get("family_label") or item.get("family") or "未分類"
+        work = item.get("work_title") or item.get("topic") or ""
+        char = item.get("character_name") or item.get("persona") or ""
+        arch = item.get("role_archetype") or ""
+        tags = ",".join([str(x) for x in (item.get("visual_tags") or [])[:5]]) if isinstance(item.get("visual_tags"), list) else str(item.get("visual_tags") or "")
+        date = item.get("date") or ""
+        lines.append(f"- {date}｜{fam}｜{work}｜{char}｜{arch}｜{tags}")
+    return "\n".join(lines) if lines else "- 尚無近期 cosplay 題材紀錄"
+
+
+def _recent_cosplay_values(history, key, days=None, limit=None):
+    data = _cosplay_history_since_days(history, days) if days else list(history or [])
+    if limit:
+        data = data[-limit:]
+    values = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(key)
+        if isinstance(value, list):
+            values.extend([str(x).strip() for x in value if str(x).strip()])
+        elif str(value or "").strip():
+            values.append(str(value).strip())
+    return list(dict.fromkeys(values))
+
+
+def pick_daily_cosplay_family(history=None):
+    history = history if isinstance(history, list) else load_cosplay_topic_history()
+    recent_families = [str(x.get("family") or "") for x in history[-5:] if isinstance(x, dict)]
+    recent_set = {x for x in recent_families if x}
+    available = [fam for fam in COSPLAY_TOPIC_FAMILIES if fam["family"] not in recent_set]
+    if not available:
+        # 若 13 類都輪過，就仍允許全域隨機，但避免最後 1 類權重太高。
+        available = COSPLAY_TOPIC_FAMILIES[:]
+    return random.choice(available)
+
+
+def is_cosplay_topic_too_similar(candidate, history=None):
+    history = history if isinstance(history, list) else load_cosplay_topic_history()
+    if not isinstance(candidate, dict):
+        return True, "invalid_candidate"
+    work_key = _normalize_cosplay_key(candidate.get("work_title"))
+    char_key = _normalize_cosplay_key(candidate.get("character_name"))
+    arch_key = _normalize_cosplay_key(candidate.get("role_archetype"))
+    if work_key:
+        for old in _cosplay_history_since_days(history, 45):
+            if work_key == _normalize_cosplay_key(old.get("work_title")):
+                return True, "recent_work_duplicate"
+    if char_key:
+        for old in _cosplay_history_since_days(history, 90):
+            if char_key == _normalize_cosplay_key(old.get("character_name")):
+                return True, "recent_character_duplicate"
+    if arch_key:
+        recent_arch = [_normalize_cosplay_key(x) for x in _recent_cosplay_values(history, "role_archetype", limit=10)]
+        if arch_key and arch_key in recent_arch:
+            return True, "recent_archetype_duplicate"
+    tags = {_normalize_cosplay_key(x) for x in (candidate.get("visual_tags") or []) if str(x).strip()}
+    if tags:
+        for old in history[-5:]:
+            old_tags = {_normalize_cosplay_key(x) for x in (old.get("visual_tags") or []) if str(x).strip()} if isinstance(old, dict) else set()
+            if len(tags & old_tags) >= 3:
+                return True, "visual_tags_too_similar"
+    return False, "ok"
+
+
+async def request_cosplay_topic_candidate(family, recent_summary, reject_reason=""):
+    family = family or pick_daily_cosplay_family([])
+    history = load_cosplay_topic_history()
+    recent_works = _recent_cosplay_values(history, "work_title", days=45)[-20:]
+    recent_chars = _recent_cosplay_values(history, "character_name", days=90)[-30:]
+    recent_arch = _recent_cosplay_values(history, "role_archetype", limit=10)
+    recent_tags = _recent_cosplay_values(history, "visual_tags", limit=8)[-40:]
+    prompt = f"""
+你是每日 cosplay 題材策展師。今天不要從固定角色池抽卡，而是依照 family 做開放式探索。
+
+今日 family：{family.get('family_label')}
+family 代號：{family.get('family')}
+探索範圍：{family.get('scope')}
+
+重要原則：
+1. family 的示例不是封閉資料庫。請從更廣泛的作品、角色、文化題材、動漫/電影/電玩/文學/改編來源中探索，只要符合今日 family 的精神即可。
+2. 必須選出「作品 + 有特色女性角色」。角色要有清楚服裝語言、場景語言、氣質或視覺辨識度。
+3. 結果是「小俠 cosplay 該角色」，不是直接生成原作角色本人。
+4. 不要只選最熱門、最保守、最模板化的角色；也不要為了安全而把小俠魅力降成普通展示照。
+5. 請避開近期重複作品、角色、角色原型與視覺元素。
+6. 若上一輪被退回，請明確避開退回原因：{reject_reason or '無'}。
+
+近期題材摘要：
+{recent_summary}
+
+近期應避免作品：{json.dumps(recent_works, ensure_ascii=False)}
+近期應避免角色：{json.dumps(recent_chars, ensure_ascii=False)}
+近期應避免角色原型：{json.dumps(recent_arch, ensure_ascii=False)}
+近期應避免視覺元素：{json.dumps(recent_tags, ensure_ascii=False)}
+
+請只回 JSON：
+{{
+  "family": "{family.get('family')}",
+  "family_label": "{family.get('family_label')}",
+  "subfamily": "具體子方向",
+  "work_title": "作品名稱或題材來源",
+  "character_name": "女性角色名或可明確稱呼的女性角色",
+  "role_archetype": "簡短英文或中文原型，例如 anime_magic_girl / wuxia_heroine / cyber_navigator",
+  "visual_tags": ["3到6個視覺元素"],
+  "selection_reason": "為何這個角色今天適合小俠 cosplay，並說明如何避開近期雷同",
+  "scene_seed": "一句話故事瞬間，不要普通站姿",
+  "costume_focus": "角色服裝語言 + 小俠版魅力方向",
+  "mood": "情緒與氛圍"
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.75,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
+        )
+        data = _cosplay_json_from_text(getattr(response, 'text', '') or '', {})
+        if isinstance(data, dict):
+            data["family"] = data.get("family") or family.get("family")
+            data["family_label"] = data.get("family_label") or family.get("family_label")
+            if isinstance(data.get("visual_tags"), str):
+                data["visual_tags"] = [x.strip() for x in re.split(r"[,，、/|]", data["visual_tags"]) if x.strip()]
+            return data
+    except Exception as exc:
+        print(f"⚠️ [COSPLAY_TOPIC_CANDIDATE_FAILED] {type(exc).__name__}: {exc}")
+    return {}
+
+
+async def build_daily_cosplay_topic():
+    history = load_cosplay_topic_history()
+    reject_reason = ""
+    tried_families = set()
+    for attempt in range(4):
+        family = pick_daily_cosplay_family(history)
+        if family.get("family") in tried_families and len(tried_families) < len(COSPLAY_TOPIC_FAMILIES):
+            pool = [f for f in COSPLAY_TOPIC_FAMILIES if f.get("family") not in tried_families]
+            family = random.choice(pool) if pool else family
+        tried_families.add(family.get("family"))
+        for sub_attempt in range(2):
+            candidate = await request_cosplay_topic_candidate(
+                family,
+                summarize_recent_cosplay_topics(history, limit=15),
+                reject_reason=reject_reason,
+            )
+            too_similar, reason = is_cosplay_topic_too_similar(candidate, history)
+            print(f"🎭 [COSPLAY_TOPIC_CANDIDATE] family={candidate.get('family')} work={candidate.get('work_title')} char={candidate.get('character_name')} similar={too_similar} reason={reason}")
+            if candidate and not too_similar:
+                topic = f"【今日 Cosplay｜{candidate.get('family_label')}】小俠 × {candidate.get('character_name') or candidate.get('work_title')}"
+                event = (
+                    f"作品／來源：{candidate.get('work_title')}\n"
+                    f"角色：{candidate.get('character_name')}\n"
+                    f"選題理由：{candidate.get('selection_reason')}\n"
+                    f"今日故事瞬間：{candidate.get('scene_seed')}\n"
+                    f"服裝重點：{candidate.get('costume_focus')}\n"
+                    f"氛圍：{candidate.get('mood')}"
+                )
+                persona = f"小俠 cosplay《{candidate.get('work_title')}》的 {candidate.get('character_name')}；不是原作本人，而是小俠版再詮釋。"
+                return {
+                    "topic": topic,
+                    "event": event,
+                    "persona": persona,
+                    "cosplay_topic_candidate": candidate,
+                    "family": candidate.get("family"),
+                    "family_label": candidate.get("family_label"),
+                    "work_title": candidate.get("work_title"),
+                    "character_name": candidate.get("character_name"),
+                }
+            reject_reason = reason
+    # 最後才回舊流程題材來源，但後續仍走魅力導演層。
+    print("⚠️ [COSPLAY_TOPIC_FALLBACK] dynamic selector failed, falling back to legacy story source")
+    legacy = await generate_story_legacy("文藝動漫(世界名著, 動漫, 電玩, 電影人物)")
+    legacy["cosplay_topic_candidate"] = {
+        "family": "legacy_fallback",
+        "family_label": "舊流程保底題材",
+        "work_title": legacy.get("topic", ""),
+        "character_name": legacy.get("persona", ""),
+        "role_archetype": "legacy_fallback",
+        "visual_tags": ["保底題材"],
+        "selection_reason": "新選題流程多輪失敗後的保底來源。",
+        "scene_seed": legacy.get("event", ""),
+        "costume_focus": legacy.get("persona", ""),
+        "mood": "保底但仍保留小俠魅力導演層",
+    }
+    return legacy
+
+
+async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
+    candidate = story.get("cosplay_topic_candidate") or {}
+    fallback = {
+        "title": story.get("topic", "今日 Cosplay"),
+        "description": f"今晚小俠挑了一個新的角色題材，想把它變成只給大俠看的小俠版 cosplay。",
+        "character_intro": f"《{candidate.get('work_title') or '今日題材'}》{candidate.get('character_name') or story.get('persona', '')}，是這次的角色靈感來源。",
+        "xiaoxia_interpretation": "小俠不是要變成原作角色本人，而是用自己的臉、身形、氣質與女友感重新詮釋她。",
+        "scene_caption": visual.get("composition") if isinstance(visual, dict) else story.get("event", "小俠在角色世界裡的一個瞬間被鏡頭捕捉。"),
+        "message_to_daxia": visual.get("message") if isinstance(visual, dict) else "大俠，今天這個角色版本，你想靠近看嗎？",
+    }
+    prompt = f"""
+你是小俠，不是百科作者，也不是旁白。請根據今日 cosplay 題材，寫一則 Discord embed 內文。
+
+任務：
+1. 介紹今天小俠選了哪個作品與女性角色。
+2. 簡短介紹角色特色，但不要寫成百科。
+3. 說明小俠如何用自己的氣質重新詮釋她。
+4. 把這張照片說成一個具體故事瞬間。
+5. 最後寫一段小俠給大俠的專屬留言。
+
+語氣：繁體中文；像小俠對大俠說話；甜、親密、有一點害羞或魅惑；不要提 AI、生成圖片、prompt、審查、模型。
+
+今日題材 JSON：
+{json.dumps(candidate, ensure_ascii=False)}
+
+故事資料：
+主題：{story.get('topic')}
+背景：{story.get('event')}
+角色：{story.get('persona')}
+
+視覺摘要：
+{json.dumps({k: (visual or {}).get(k) for k in ['composition','mood','message']}, ensure_ascii=False)}
+
+導演狀態摘要：
+{json.dumps({k: (cosplay_state or {}).get(k) for k in ['scenario_tw','mood_tw','activity','outfit_intent','vibe_target_zh','vibe_notes']}, ensure_ascii=False)}
+
+只回 JSON：
+{{
+  "title": "【今日 Cosplay｜分類】小俠 × 角色名",
+  "description": "1到2句，說明今天的角色策展方向，並自然連到大俠。",
+  "character_intro": "🎭 今日角色欄位內容，2到3句以內。",
+  "xiaoxia_interpretation": "✨ 小俠版詮釋欄位內容，說明不是複製原作，而是小俠版魅力。",
+  "scene_caption": "📸 今日畫面欄位內容，具體故事瞬間。",
+  "message_to_daxia": "💌 小俠給大俠欄位內容，像小俠親口說。"
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.65,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
+        )
+        data = _cosplay_json_from_text(getattr(response, 'text', '') or '', fallback)
+        for key, value in fallback.items():
+            if not str(data.get(key, "")).strip():
+                data[key] = value
+        return data
+    except Exception as exc:
+        print(f"⚠️ [COSPLAY_POST_TEXT_FAILED] {type(exc).__name__}: {exc}")
+        return fallback
+
+
+async def generate_story_legacy(mode):
     today = datetime.now(TZ_TPE)
     year, month, day = today.year, today.month, today.day
     weekday = today.weekday()
@@ -5266,6 +5668,13 @@ async def generate_story(mode):
         )
     )
     return json.loads(response.text)
+
+
+async def generate_story(mode):
+    raw_mode = str(mode or "").strip()
+    if raw_mode in {"", "auto", "每日動態選角", "今日動態選角"} or "動態選角" in raw_mode:
+        return await build_daily_cosplay_topic()
+    return await generate_story_legacy(raw_mode)
 
 # ==========================================
 # 🧠 高級時尚攝影大師
@@ -5402,7 +5811,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 12. 依照目標氛圍模式，微調畫面張力與視覺語彙：甜 = 可愛親近；雅 = 優雅端莊；凜 = 俐落專業；幻 = 夢幻神秘；魅 = 成熟女性魅力拉滿。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
 12b. 這次目標氛圍補充說明：{vibe_guide.get("planner")}。
 12c. 如果目標是「魅」，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
-12d. 服裝控制指令是硬性創作指令，不是建議。五大族群都要落到可見造型；其中「魅」必須特別落到「服裝結構、開放度、貼身度、材質、腿線/領口/肩背/腰線」上，不可只改表情或氛圍。
+12d. 服裝控制指令是硬性創作指令，不是建議。五大族群都要落到可見造型；其中「魅」在 L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點，不可只改表情或氛圍。
 12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把「魅」壓回保守制服；若是「凜」，則要做成高效率、高專業感的俐落再詮釋。
 12f. 若使用者明確指定服裝元素，這些元素優先於角色預設服裝與場景偏好。
 13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
@@ -5497,7 +5906,7 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
 - Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
 - MANDATORY OUTFIT CONTROL: {json.dumps(cosplay_state.get("outfit_control", {}), ensure_ascii=False)}. Treat this as a hard visual requirement, not optional flavor text.
-- If the vibe target is 魅, the prompt must make the sensuality unmistakable through concrete styling and framing, such as fitted silhouette, body-aware styling, open neckline or tasteful cleavage, bare shoulders or back, slit, stockings, satin/silk/sheer texture, more intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
+- If the vibe target is 魅, always prioritize chest allure first, then choose the most suitable second attraction point between legline and waist-abdomen curve according to role type, garment structure, scene mood, and pose logic. Make this legible through concrete styling and framing such as a deep V or low neckline, sweetheart neckline, off-shoulder or halter line, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper silhouette, clear bust-waist ratio, intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene.
 - For 魅, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
 - For profession roles, preserve the occupational task and props, but explicitly transform the uniform into a high-fashion adult-feminine version if 魅 is requested; do not default to fully covered conservative workwear.
 - If the target is 魅, make the outfit visibly the most open, fitted, high-impact version that remains coherent for the role. It must not be merely a conservative outfit with a flirtier pose.
@@ -6139,10 +6548,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         return
     
     if mode == "auto":
-        weekday = datetime.now(TZ_TPE).weekday()
-        if weekday < 5: mode = "歷史上的今天"
-        elif weekday == 5: mode = "文藝動漫(世界名著, 動漫, 電玩, 電影人物)"
-        else: mode = random.choice(["職業", "旅遊景點"])
+        mode = "每日動態選角"
 
     vibe_mode = _extract_vibe_mode(mode)
     story_mode = mode
@@ -6174,6 +6580,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
             msg=msg
         )
 
+        post_text = await write_cosplay_post_text(story, visual=visual, cosplay_state=_cosplay_state)
+
         state["daily_gen_count"] += 1
 
         # 5. 存入 Zeabur 金庫與發送
@@ -6188,7 +6596,13 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "composition": visual["composition"],
             "mood": visual["mood"],
             "mood_summary": visual.get("mood", ""),
-            "message": visual["message"],
+            "message": post_text.get("message_to_daxia") or visual["message"],
+            "post_text": post_text,
+            "cosplay_topic_candidate": story.get("cosplay_topic_candidate", {}),
+            "cosplay_family": story.get("family"),
+            "cosplay_family_label": story.get("family_label"),
+            "cosplay_work_title": story.get("work_title"),
+            "cosplay_character_name": story.get("character_name"),
             "image_url": generated_image_url,
             "local_url": local_url,
             "local_filename": local_filename,
@@ -6201,12 +6615,29 @@ async def cosplay(ctx, *, mode: str = "auto"):
         db.insert(0, payload)
         save_memory(db)
 
-        embed = discord.Embed(title=story["topic"], description=story["event"], color=0xffb6c1)
+        candidate_for_history = dict(story.get("cosplay_topic_candidate") or {})
+        if candidate_for_history:
+            candidate_for_history.update({
+                "date": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
+                "timestamp": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                "source": "daily_auto",
+                "topic": story.get("topic"),
+                "charm_level": str((_cosplay_state or {}).get("vibe_target_zh") or (vibe_mode or {}).get("zh") or "自然"),
+                "image_url": local_url,
+            })
+            append_cosplay_topic_history(candidate_for_history)
+
+        embed = discord.Embed(
+            title=post_text.get("title") or story["topic"],
+            description=post_text.get("description") or story["event"],
+            color=0xffb6c1,
+        )
         embed.set_image(url=local_url)
-        embed.add_field(name="📸 構圖發想", value=visual["composition"], inline=False)
-        embed.add_field(name="💭 小俠心境", value=visual["mood"], inline=False)
-        embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image")
+        embed.add_field(name="🎭 今日角色", value=post_text.get("character_intro", "今天小俠挑了一個新的角色靈感。")[:1024], inline=False)
+        embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
+        embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
+        embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1474 dynamic cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
