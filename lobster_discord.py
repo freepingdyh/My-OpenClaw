@@ -536,12 +536,13 @@ def _prune_diary_wardrobe_prefs(data, keep_days=7):
     return cleaned
 
 
-def set_diary_wardrobe_pref(mode, wardrobe_id=None, target_date=None):
+def set_diary_wardrobe_pref(mode, wardrobe_id=None, target_date=None, scene_request=None):
     date_key = target_date or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     data = _prune_diary_wardrobe_prefs(load_diary_wardrobe_prefs())
     payload = {
         "mode": str(mode or "").strip(),
         "wardrobe_id": str(wardrobe_id or "").strip().upper(),
+        "scene_request": _clean_text_compact(scene_request or ""),
         "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
     }
     data[date_key] = payload
@@ -6012,7 +6013,8 @@ def _safe_json_from_text(raw_text, fallback):
         return fallback
 
 async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, reply_to_daxia,
-                                  current_promises, season_rule, scenario_hint=""):
+                                  current_promises, season_rule, scenario_hint="", forced_scene=""):
+
     """
     Gemini 只負責「今天小俠在做什麼、感受什麼」。現已解除性感詞彙限制。
     """
@@ -6033,6 +6035,10 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
         "pose_energy": "low",
         "scenario_tw": "小俠坐在台灣住家的書桌前翻看日記，視線落在紙頁上，神情溫柔而帶點慵懶。"
     }
+    if forced_scene:
+        fallback["setting_anchor"] = forced_scene[:80]
+        fallback["activity"] = f"在「{forced_scene[:60]}」的情境中自然地停留、自拍或進行當下合理的小動作"
+        fallback["scenario_tw"] = f"小俠在「{forced_scene[:60]}」的情境裡，以自然生活感的方式留下今天的交換日記照片。"
     planner_prompt = f"""你是交換日記中的「生活狀態規劃員」，負責安排具有親密感與純慾張力的生活瞬間。
 請根據今天的大俠日記、小俠回覆與今日互動，產生一個只屬於今天的私密生活狀態。
 
@@ -6047,11 +6053,13 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 尚未完成的服裝/照片承諾：{current_promises}
 季節服裝邊界：{season_rule}
 既有場景提示（僅供保留承諾或日記重點，不得照抄成廣告）：{scenario_hint or "無"}
+大俠指定場景（若有，必須優先遵守）：{forced_scene or "無"}
 
 【輸出規則】
 1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life, romantic_seduction 選一個。
 1A. 不管日記文字多浪漫，畫面都只能安排小俠一人；大俠、男友、伴侶、第二人、外來手、倒影、影子、前景肩膀或身體殘件都不得被規劃進任何欄位。所有親密感必須由小俠單人的眼神、姿態、道具、燈光、空間留白呈現。
 2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如臥室、浴室、客廳、餐桌等私密空間。
+2A. 若「大俠指定場景」有內容，setting_anchor、activity、environment_trace、scenario_tw 都必須明確反映該場景／活動，不可忽略；服裝與小動作可自由發揮，但畫面場景必須被保留。
 3. time_anchor 必須反映台灣當下合理的時段氛圍，例如夜晚微光、沐浴後的熱氣、清晨慵懶等。
 4. activity 必須是居家或日常可自然發生的一件事。
 5. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。
@@ -6102,6 +6110,8 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
     for key, default_value in fallback.items():
         if not str(planned.get(key, "")).strip():
             planned[key] = default_value
+    if forced_scene:
+        planned["forced_scene"] = forced_scene
     return planned
 
 async def render_diary_visual_prompt(diary_state, season_rule, alternative=False):
@@ -6122,11 +6132,15 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 【今日狀態 JSON】
 {json.dumps(diary_state, ensure_ascii=False)}
 
+【大俠指定場景（若有）】
+{diary_state.get("forced_scene", "無")}
+
 【季節服裝邊界】
 {season_rule}
 
 【轉譯限制】
 - 第一個句子先描述她正在做的事情。
+- 若【大俠指定場景】有內容，整段提示詞必須把該場景／活動當成硬條件保留下來；可自然轉譯，但不可忽略或改成完全不同的地點。
 - 明確保留 setting_anchor 與 time_anchor，讓畫面看起來像發生在當代台灣私密空間裡。
 - 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。如果 camera_awareness 是 aware，請盡情描繪充滿愛意或誘惑的眼神接觸 (deep eye contact)。
 - 保留生活痕跡 environment_trace，大膽使用戲劇性光影、微光或燭光來烘托氛圍。
@@ -6172,7 +6186,8 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
     return visual
 
 async def create_diary_visual(entry_content, chat_context, result, current_promises, season_rule,
-                              scenario_hint="", alternative=False):
+                              scenario_hint="", forced_scene="", alternative=False):
+
     """日記唯一入口：每日狀態規劃 -> 生活照片提示詞轉譯。"""
     diary_state = await plan_diary_visual_state(
         entry_content=entry_content,
@@ -6181,7 +6196,8 @@ async def create_diary_visual(entry_content, chat_context, result, current_promi
         reply_to_daxia=result.get("reply_to_daxia", ""),
         current_promises=current_promises,
         season_rule=season_rule,
-        scenario_hint=scenario_hint
+        scenario_hint=scenario_hint,
+        forced_scene=forced_scene
     )
     visual = await render_diary_visual_prompt(diary_state, season_rule, alternative=alternative)
     visual["__anchor_state"] = diary_state
@@ -10367,6 +10383,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # 由 Gemini 根據當日互動規劃生活狀態，再由 GPT-5-mini 翻成 Seedream v4.5 描述。
             # /cosplay 的時尚攝影 prompt 完全不會混入這條路線。
             diary_state = None
+            diary_pref = get_diary_wardrobe_pref(target_date=entry_date) or {}
+            diary_forced_scene = _clean_text_compact((diary_pref or {}).get("scene_request") or "")
             diary_visual = {
                 "composition": result.get("scenario_tw", "與大俠分享今天的一個自然生活瞬間"),
                 "mood": "愛意與生活感",
@@ -10389,6 +10407,13 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 save_diary_override(overrides)
             else:
                 wardrobe_hard_note = ""
+                scene_hard_note = ""
+                if diary_forced_scene:
+                    scene_hard_note = (
+                        "\n\n【本篇場景強制要求】"
+                        f"\n- 大俠指定場景：{diary_forced_scene}"
+                        "\n- 本篇交換日記照片必須優先在這個場景／活動下規劃；服裝可自由發揮或依衣櫃設定，但場景不可忽略。"
+                    )
                 if diary_wardrobe:
                     wardrobe_item = diary_wardrobe.get("item", {})
                     wardrobe_hard_note = (
@@ -10401,9 +10426,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     entry_content=entry_content,
                     chat_context=chat_context,
                     result=result,
-                    current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note,
+                    current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note + scene_hard_note,
                     season_rule=season_rule,
-                    scenario_hint=(result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note)
+                    scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note,
+                    forced_scene=diary_forced_scene
                 )
                 result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
                 image_prompt = diary_visual["image_prompt"]
@@ -10813,9 +10839,12 @@ class _WardrobeMessageCtxAdapter:
 
 async def _handle_diary_wardrobe_message_direct(message):
     """
-    交換日記衣櫃模式快捷指令：
+    交換日記快捷指令：
     /交換日記 穿 W011
+    /交換日記 穿 W011 文創園區自拍
     /交換日記 衣櫃自由
+    /交換日記 衣櫃自由 文創園區自拍
+    /交換日記 文創園區自拍
     僅作用於今天的交換日記。
     """
     content = str(getattr(message, "content", "") or "").strip()
@@ -10829,16 +10858,24 @@ async def _handle_diary_wardrobe_message_direct(message):
     raw = re.sub(r"^/交換日記(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
     today = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
 
+    help_text = (
+        "大俠，交換日記模式可用：\n"
+        "• `/交換日記 穿 W011` → 指定穿 W011，場景自由發揮\n"
+        "• `/交換日記 穿 W011 文創園區自拍` → 指定穿 W011，並指定場景\n"
+        "• `/交換日記 衣櫃自由` → 小俠自行從衣櫃挑衣，場景自由發揮\n"
+        "• `/交換日記 衣櫃自由 文創園區自拍` → 小俠自行從衣櫃挑衣，並指定場景\n"
+        "• `/交換日記 文創園區自拍` → 服裝自由發揮，但場景照你指定\n"
+        "若沒有下這類指令，今天的交換日記就維持 default 自由發揮。"
+    )
+
     if not raw:
-        await message.channel.send(
-            "大俠，交換日記衣櫃模式可用：`/交換日記 穿 W011` 或 `/交換日記 衣櫃自由`。\n"
-            "若沒有下這類指令，今天的交換日記就維持 default 自由發揮。"
-        )
+        await message.channel.send(help_text)
         return True
 
-    m = re.match(r"^穿\s+(W\d{3,4})$", raw, flags=re.IGNORECASE)
+    m = re.match(r"^穿\s+(W\d{3,4})(?:\s+(.+))?$", raw, flags=re.IGNORECASE)
     if m:
         wid = m.group(1).upper()
+        scene_request = _clean_text_compact(m.group(2) or "")
         item = _find_wardrobe_item(wid)
         if not item:
             await message.channel.send(f"找不到衣櫃項目 **{wid}**。請先 `/衣櫃` 看看目前有哪些收藏。")
@@ -10850,24 +10887,35 @@ async def _handle_diary_wardrobe_message_direct(message):
                 f"請先用 `/衣櫃 換圖 {wid}` 更新成可用圖片。"
             )
             return True
-        set_diary_wardrobe_pref("specified", wardrobe_id=wid, target_date=today)
+        set_diary_wardrobe_pref("specified", wardrobe_id=wid, target_date=today, scene_request=scene_request)
+        extra = f"\n📍 場景：{scene_request}" if scene_request else ""
         await message.channel.send(
-            f"✅ 已設定 **{today}** 的交換日記指定穿 **{wid} {item.get('name', '')}**。\n"
+            f"✅ 已設定 **{today}** 的交換日記指定穿 **{wid} {item.get('name', '')}**。{extra}\n"
             "這個設定只對今天有效，不會改變 `/photo` 目前的已穿狀態。"
         )
         return True
 
-    if raw == "衣櫃自由":
-        set_diary_wardrobe_pref("free", wardrobe_id="", target_date=today)
+    m = re.match(r"^衣櫃自由(?:\s+(.+))?$", raw, flags=re.IGNORECASE)
+    if m:
+        scene_request = _clean_text_compact(m.group(1) or "")
+        set_diary_wardrobe_pref("free", wardrobe_id="", target_date=today, scene_request=scene_request)
+        extra = f"\n📍 場景：{scene_request}" if scene_request else ""
         await message.channel.send(
-            f"✅ 已設定 **{today}** 的交換日記為 **衣櫃自由**。\n"
+            f"✅ 已設定 **{today}** 的交換日記為 **衣櫃自由**。{extra}\n"
             "今晚小俠會依當天心情與日記情境，自己從衣櫃挑一件最適合的穿搭。"
         )
         return True
 
-    await message.channel.send(
-        "大俠，這個 `/交換日記` 指令我目前只看得懂：`/交換日記 穿 W011` 或 `/交換日記 衣櫃自由`。"
-    )
+    scene_request = _clean_text_compact(raw)
+    if scene_request:
+        set_diary_wardrobe_pref("scene_only", wardrobe_id="", target_date=today, scene_request=scene_request)
+        await message.channel.send(
+            f"✅ 已設定 **{today}** 的交換日記場景：{scene_request}\n"
+            "今晚小俠會保留這個場景內容；服裝則由她自由發揮，不受衣櫃限制。"
+        )
+        return True
+
+    await message.channel.send(help_text)
     return True
 
 
