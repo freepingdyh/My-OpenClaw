@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.74"
+LOBSTER_VERSION = "1.4.75"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -4057,7 +4057,7 @@ VIBE_RENDER_GUIDE = {
         "translator": "dreamy, mysterious, ornate, magical, atmospheric, cinematic fantasy"
     },
     "魅": {
-        "planner": "魅：L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點；目標是最大化小俠版角色的誘惑效率，性感卻不低級，迷人卻不廉價。胸口魅力可透過深 V 領、低胸領口、心型領口、一字肩、掛脖、露鎖骨、露肩頸、胸口輪廓、自然乳溝、貼身上身剪裁與胸腰比例明確等方式呈現。fal.ai 會把關，程式不要替它自我設限。",
+        "planner": "魅：L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點；目標是最大化小俠版角色的誘惑效率，性感卻不低級，迷人卻不廉價。胸口魅力不是可有可無，而是 L0 圖像的第一視覺吸引；可透過深 V 領、低胸領口、心型領口、一字肩、掛脖、露鎖骨、露肩頸、胸口輪廓、自然乳溝、貼身上身剪裁與胸腰比例明確等方式呈現。若角色原始服裝太保守，必須做成小俠版高魅力再詮釋，不可退回包緊的保守角色服。fal.ai 會把關，程式不要替它自我設限。",
         "translator": "maximum alluring sensuality, chest-emphasis first, then choose the strongest secondary attraction point between legline and waist-abdomen curve, deep V or low neckline, sweetheart neckline, off-shoulder or halter, visible collarbones and shoulder-neck line, natural cleavage, fitted upper silhouette, clear bust-waist ratio, seductive yet tasteful, unmistakable romantic tension"
     },
 }
@@ -4109,7 +4109,7 @@ def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
         planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, softly teasing smile or parted lips, knowingly inviting energy.").strip()
         planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer sculpting light and richer contrast so the chest allure, chosen secondary attraction point, body lines, and fabric texture read clearly as sensual.").strip()
         planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the chest allure and the chosen second attraction point are clearly legible through outfit, silhouette, posture, and emotional tension rather than flattened into a safe documentary shot.").strip()
-        planned["vibe_notes"] = "Chest allure must read first; then the strongest second allure point should be either legline or waist-abdomen curve, chosen according to role and scene."
+        planned["vibe_notes"] = "Chest allure must be the first visual attraction in L0, not optional. If the original role outfit is conservative, reinterpret it as Xiaoxia's high-allure version while preserving role identity; then choose the strongest second allure point, either legline or waist-abdomen curve, according to role and scene."
     return planned
 
 
@@ -6311,6 +6311,9 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         lines.append(f"- Outfit intent that must remain recognizable: {outfit_intent}.")
         if outfit_control:
             lines.append(f"- Mandatory outfit control that must remain visible even during retries: {json.dumps(outfit_control, ensure_ascii=False)}.")
+        if mode == "cosplay" and isinstance(state, dict) and str(state.get("vibe_target_zh") or "") == "魅":
+            lines.append("- L0 allure anchor: chest allure is the first visual attraction and must remain clearly present; do not regress into a fully covered conservative costume.")
+            lines.append("- L0 allure anchor: choose the strongest second attraction point, either legline or waist-abdomen curve, according to the role, garment structure, scene mood, and pose logic; keep it seductive but not cheap.")
         lines.append(f"- Lighting mood to preserve: {lighting_mood}.")
         if scenario_tw:
             lines.append(f"- Overall scene intent: {scenario_tw}.")
@@ -6550,7 +6553,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
     if mode == "auto":
         mode = "每日動態選角"
 
-    vibe_mode = _extract_vibe_mode(mode)
+    vibe_mode = _default_cosplay_vibe(_extract_vibe_mode(mode))
     story_mode = mode
     if vibe_mode:
         story_mode = mode
@@ -6610,6 +6613,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "type": "cosplay",
             "source_mode": "cosplay",
             "prompt_base": scene_prompt,
+            "vibe_request": vibe_mode,
+            "vibe_target_zh": (_cosplay_state or {}).get("vibe_target_zh", "魅"),
         }
         db = load_memory()
         db.insert(0, payload)
@@ -6637,7 +6642,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1474 dynamic cosplay")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1475 dynamic cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
@@ -8845,11 +8850,25 @@ async def _ensure_context_local_path(context):
         candidate = os.path.join(OUTPUT_DIR, os.path.basename(local_filename))
         if os.path.exists(candidate):
             return candidate
-    image_url = context.get("local_url") or context.get("image_url")
-    if not image_url:
+    urls = []
+    for key in ("local_url", "image_url"):
+        url = str(context.get(key) or "").strip()
+        if url and url.startswith("http") and url not in urls:
+            urls.append(url)
+    if not urls:
         raise RuntimeError("這張照片沒有可修正的圖片 URL。")
-    downloaded_path, _downloaded_url = await _download_url_to_output(image_url, prefix="repair_src")
-    return downloaded_path
+    last_error = None
+    for image_url in urls:
+        try:
+            downloaded_path, _downloaded_url = await _download_url_to_output(image_url, prefix="repair_src")
+            if downloaded_path and os.path.exists(downloaded_path):
+                context["local_path"] = downloaded_path
+                return downloaded_path
+        except Exception as exc:
+            last_error = exc
+            print(f"⚠️ [REPAIR_SOURCE_DOWNLOAD_FAILED] url={image_url} {type(exc).__name__}: {exc}")
+            continue
+    raise RuntimeError(f"修圖來源圖片下載失敗，已嘗試 local_url/image_url：{last_error}")
 
 
 async def _repair_photo_context(context, repair_request, msg=None):
@@ -8991,6 +9010,15 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "source_mode": context.get("source_mode", "photo_scene"),
         "reference_item_path": context.get("reference_item_path"),
         "reference_item_url": context.get("reference_item_url"),
+        "local_filename": context.get("local_filename"),
+        "local_path": context.get("local_path"),
+        "post_text": context.get("post_text"),
+        "cosplay_topic_candidate": context.get("cosplay_topic_candidate"),
+        "cosplay_family": context.get("cosplay_family"),
+        "cosplay_family_label": context.get("cosplay_family_label"),
+        "cosplay_work_title": context.get("cosplay_work_title"),
+        "cosplay_character_name": context.get("cosplay_character_name"),
+        "prompt_base": context.get("prompt_base"),
     }
 
 
@@ -9039,6 +9067,8 @@ def _photo_discord_file(context):
 
 
 def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
+    if _is_cosplay_context(context):
+        return _build_cosplay_embed(context, title_prefix=title_prefix, attachment_filename=attachment_filename)
     embed = discord.Embed(
         title=f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}",
         description=context.get("message", "大俠按下 /photo 留住這一刻。"),
@@ -9133,6 +9163,184 @@ async def _generate_photo_from_context(context, msg=None):
     })
     return context
 
+
+
+
+def _default_cosplay_vibe(vibe_mode=None):
+    """每日 /cosplay 預設走 L0 魅系；若大俠明確指定甜/雅/凜/幻/自然，才覆蓋。"""
+    if vibe_mode:
+        return vibe_mode
+    return {"zh": "魅", "en": "alluring-max", "level": 6}
+
+
+def _is_cosplay_context(context):
+    if not isinstance(context, dict):
+        return False
+    return str(context.get("source_mode") or context.get("type") or "").lower().startswith("cosplay") or str(context.get("type") or "").lower() == "cosplay"
+
+
+def _cosplay_story_from_context(context):
+    context = dict(context or {})
+    candidate = dict(context.get("cosplay_topic_candidate") or {})
+    work = context.get("cosplay_work_title") or candidate.get("work_title") or "未知作品"
+    char = context.get("cosplay_character_name") or candidate.get("character_name") or "今日角色"
+    family_label = context.get("cosplay_family_label") or candidate.get("family_label") or "Cosplay"
+    topic = context.get("topic") or f"【今日 Cosplay｜{family_label}】小俠 × {char}"
+    event = context.get("event") or candidate.get("scene_seed") or context.get("composition") or "小俠正在重新詮釋今日角色。"
+    persona = context.get("persona") or f"小俠 cosplay《{work}》的 {char}；不是原作本人，而是小俠版再詮釋。"
+    return {
+        "topic": topic,
+        "event": event,
+        "persona": persona,
+        "cosplay_topic_candidate": candidate,
+        "family": context.get("cosplay_family") or candidate.get("family"),
+        "family_label": family_label,
+        "work_title": work,
+        "character_name": char,
+        "user_mode_request": context.get("user_mode_request") or "cosplay_reroll_same_topic",
+        "user_outfit_hints": context.get("user_outfit_hints") or {},
+    }
+
+
+def _build_cosplay_embed(context, title_prefix=None, attachment_filename=None):
+    post_text = context.get("post_text") or {}
+    title = post_text.get("title") or context.get("topic") or "【今日 Cosplay】小俠"
+    if title_prefix:
+        title = f"{title_prefix}｜{title}"
+    embed = discord.Embed(
+        title=title,
+        description=post_text.get("description") or context.get("event") or "小俠今天為大俠準備了一張新的 Cosplay 照片。",
+        color=0xffb6c1,
+    )
+    if attachment_filename:
+        embed.set_image(url=f"attachment://{attachment_filename}")
+    else:
+        embed.set_image(url=context.get("local_url") or context.get("image_url"))
+    if post_text:
+        embed.add_field(name="🎭 今日角色", value=str(post_text.get("character_intro") or "今天小俠挑了一個新的角色靈感。")[:1024], inline=False)
+        embed.add_field(name="✨ 小俠版詮釋", value=str(post_text.get("xiaoxia_interpretation") or "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
+        embed.add_field(name="📸 今日畫面", value=str(post_text.get("scene_caption") or context.get("composition") or "小俠在角色世界的一個瞬間。")[:1024], inline=False)
+        embed.add_field(name="💌 小俠給大俠", value=str(post_text.get("message_to_daxia") or context.get("message") or "大俠，這張是我只想給你看的樣子。")[:1024], inline=False)
+    else:
+        embed.add_field(name="💌 專屬留言", value=str(context.get("message") or "大俠，這張你喜歡嗎？")[:1024], inline=False)
+    embed.set_footer(text=f"{context.get('source_mode', 'cosplay')} | Seedream v4.5 | v1475")
+    return embed
+
+
+async def _generate_cosplay_same_topic_context(context, msg=None):
+    """骰子取代：主題/角色/內文不變，只把同題照片重新生一張並原地取代。"""
+    original = dict(context or {})
+    story = _cosplay_story_from_context(original)
+    vibe = _default_cosplay_vibe(original.get("vibe_request") or {"zh": original.get("vibe_target_zh") or "魅", "en": "alluring-max", "level": 6})
+    cosplay_state, visual = await create_cosplay_visual(
+        story,
+        force_half_body=False,
+        alternative=True,
+        vibe_request=vibe,
+        user_outfit_hints=story.get("user_outfit_hints"),
+    )
+    scene_prompt = visual["image_prompt"]
+    generated_image_url, visual = await execute_safe_generation(
+        discord_image_url=None,
+        base_filename="base_xiaoxia.jpg",
+        mode="cosplay",
+        initial_prompt=scene_prompt,
+        visual_dict=visual,
+        msg=msg,
+    )
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+    post_text = dict(original.get("post_text") or {})
+    if post_text and visual.get("composition"):
+        # 同題重畫只更新畫面描述，不重寫角色介紹與情書，避免內文跟同題重畫割裂。
+        post_text["scene_caption"] = visual.get("composition")
+    updated = dict(original)
+    updated.update({
+        "id": str(uuid.uuid4()),
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "composition": visual.get("composition", original.get("composition", "")),
+        "mood": visual.get("mood", original.get("mood", "")),
+        "mood_summary": visual.get("mood", original.get("mood_summary", "")),
+        "message": post_text.get("message_to_daxia") or visual.get("message", original.get("message", "")),
+        "post_text": post_text or original.get("post_text"),
+        "prompt_base": scene_prompt,
+        "source_mode": "cosplay",
+        "type": "cosplay",
+        "vibe_request": vibe,
+        "vibe_target_zh": (cosplay_state or {}).get("vibe_target_zh", "魅"),
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return updated
+
+
+async def _generate_cosplay_full_reroll_context(msg=None, mode="auto"):
+    """重擲：重新抽 family/作品/角色，重新寫內文，重新生圖。"""
+    vibe = _default_cosplay_vibe(_extract_vibe_mode(str(mode or "")))
+    story_mode = "每日動態選角"
+    story = await generate_story(story_mode)
+    story["user_mode_request"] = mode or "auto"
+    story["user_outfit_hints"] = _extract_user_outfit_hints(str(mode or ""))
+    cosplay_state, visual = await create_cosplay_visual(
+        story,
+        force_half_body=False,
+        alternative=False,
+        vibe_request=vibe,
+        user_outfit_hints=story.get("user_outfit_hints"),
+    )
+    scene_prompt = visual["image_prompt"]
+    generated_image_url, visual = await execute_safe_generation(
+        discord_image_url=None,
+        base_filename="base_xiaoxia.jpg",
+        mode="cosplay",
+        initial_prompt=scene_prompt,
+        visual_dict=visual,
+        msg=msg,
+    )
+    post_text = await write_cosplay_post_text(story, visual=visual, cosplay_state=cosplay_state)
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+    payload = {
+        "id": str(uuid.uuid4()),
+        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": story["topic"],
+        "event": story["event"],
+        "composition": visual.get("composition", ""),
+        "mood": visual.get("mood", ""),
+        "mood_summary": visual.get("mood", ""),
+        "message": post_text.get("message_to_daxia") or visual.get("message", ""),
+        "post_text": post_text,
+        "cosplay_topic_candidate": story.get("cosplay_topic_candidate", {}),
+        "cosplay_family": story.get("family"),
+        "cosplay_family_label": story.get("family_label"),
+        "cosplay_work_title": story.get("work_title"),
+        "cosplay_character_name": story.get("character_name"),
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "type": "cosplay",
+        "source_mode": "cosplay",
+        "prompt_base": scene_prompt,
+        "vibe_request": vibe,
+        "vibe_target_zh": (cosplay_state or {}).get("vibe_target_zh", "魅"),
+    }
+    candidate_for_history = dict(story.get("cosplay_topic_candidate") or {})
+    if candidate_for_history:
+        candidate_for_history.update({
+            "date": datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
+            "timestamp": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "daily_auto_reroll",
+            "topic": story.get("topic"),
+            "charm_level": str((cosplay_state or {}).get("vibe_target_zh") or "魅"),
+            "image_url": local_url,
+        })
+        append_cosplay_topic_history(candidate_for_history)
+    return payload
 
 async def handle_unified_photo_command(message, user_input):
     """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
@@ -9574,12 +9782,28 @@ class PhotoResultView(discord.ui.View):
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         context = dict(self.context)
-        context["prompt_base"] = (
-            context.get("prompt_base", "")
-            + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
-        )
         try:
             old_url = context.get("local_url") or context.get("image_url")
+            if _is_cosplay_context(context):
+                status = await interaction.followup.send("🎲 同題重畫中：主題、角色與內文保留，只重新生這張 Cosplay 圖…", wait=True)
+                new_context = await _generate_cosplay_same_topic_context(context, msg=status)
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override="cosplay"))
+                _safe_delete_vault_image(old_url)
+                self.context = new_context
+                if interaction.message:
+                    new_context["message_id"] = interaction.message.id
+                    photo_generation_contexts[interaction.message.id] = new_context
+                    await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="🎲 同題重畫")
+                return
+
+            context["prompt_base"] = (
+                context.get("prompt_base", "")
+                + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
+            )
             new_context = await _generate_photo_from_context(context)
             _replace_photo_db_record(old_url, _photo_db_payload(new_context))
             _safe_delete_vault_image(old_url)
@@ -9592,6 +9816,41 @@ class PhotoResultView(discord.ui.View):
                 await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="📸 骰子取代")
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 骰子取代失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+    @discord.ui.button(label="🔄 重擲", style=discord.ButtonStyle.secondary)
+    async def full_reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        context = dict(self.context)
+        try:
+            old_url = context.get("local_url") or context.get("image_url")
+            if _is_cosplay_context(context):
+                status = await interaction.followup.send("🔄 重新抽題中：主題、角色、內文與圖片全部重來…", wait=True)
+                new_context = await _generate_cosplay_full_reroll_context(msg=status, mode=context.get("user_mode_request") or "auto")
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override="cosplay"))
+                _safe_delete_vault_image(old_url)
+                self.context = new_context
+                if interaction.message:
+                    new_context["message_id"] = interaction.message.id
+                    photo_generation_contexts[interaction.message.id] = new_context
+                    await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="🔄 重擲")
+                return
+
+            # 非 cosplay 目前維持舊語意：重新生成並取代原圖。
+            context["prompt_base"] = (context.get("prompt_base", "") + "\nCreate a fresh new version with stronger composition and a renewed visual idea while respecting the original request.")
+            new_context = await _generate_photo_from_context(context)
+            _replace_photo_db_record(old_url, _photo_db_payload(new_context))
+            _safe_delete_vault_image(old_url)
+            self.context = new_context
+            if interaction.message:
+                new_context["message_id"] = interaction.message.id
+                photo_generation_contexts[interaction.message.id] = new_context
+                await _edit_photo_message_with_file(interaction.message, new_context, view=self, title_prefix="🔄 重擲")
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
     @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -11834,64 +12093,48 @@ async def on_raw_reaction_add(payload):
                     await temp_msg.delete()
 
             else:
-                # Cosplay：加洗新增；重擲原地取代。
-                topic = str(source_embed.title or "").replace("【加洗】", "")
-                event = source_embed.description
-                story_hint = {"topic": topic, "event": event, "persona": "重新構圖"}
+                # Cosplay：➕ 加洗 = 同題另拍新增；🎲 重擲 = 主題/角色/內文/圖片全部重來並原地取代。
+                context = dict(photo_generation_contexts.get(msg.id) or {})
+                if not context:
+                    # Bot 重啟後若沒有記憶體 context，至少從 embed 反推基本資料，避免完全失效。
+                    context = {
+                        "message_id": msg.id,
+                        "topic": str(source_embed.title or "【今日 Cosplay】小俠"),
+                        "event": str(source_embed.description or "小俠的 Cosplay 照片"),
+                        "message": str(source_embed.description or ""),
+                        "image_url": old_image_url,
+                        "local_url": old_image_url,
+                        "type": "cosplay",
+                        "source_mode": "cosplay",
+                    }
 
-                _cosplay_state, visual = await create_cosplay_visual(
-                    story_hint, True, alternative=True
-                )
-                generated_image_url, visual = await execute_safe_generation(
-                    discord_image_url=None,
-                    base_filename="base_xiaoxia.jpg",
-                    mode="cosplay",
-                    initial_prompt=visual["image_prompt"],
-                    visual_dict=visual,
-                    msg=temp_msg,
-                )
-
-                local_filename = await save_to_vault(generated_image_url)
-                local_url = (
-                    f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}"
-                    if local_filename else generated_image_url
-                )
-
-                title_str = topic if is_reroll else f"【加洗】{topic}"
-                photo_payload = {
-                    "id": str(uuid.uuid4()),
-                    "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                    "topic": title_str,
-                    "event": event,
-                    "composition": visual["composition"],
-                    "mood": visual["mood"],
-                    "message": visual["message"],
-                    "image_url": generated_image_url,
-                    "local_url": local_url,
-                }
-                embed = discord.Embed(title=title_str, color=0xffb6c1)
-                embed.set_image(url=local_url)
-                embed.add_field(
-                    name="💌 專屬留言",
-                    value=visual["message"],
-                    inline=False,
-                )
-                embed.set_footer(
-                    text=f"{emoji_name} Emoji 快捷{action_name}完成 | Seedream v4.5"
-                )
-
+                old_url = context.get("local_url") or context.get("image_url") or old_image_url
                 if is_reroll:
-                    _replace_photo_db_record(old_image_url, photo_payload)
-                    await msg.edit(embed=embed)
-                    _safe_delete_vault_image(old_image_url)
-                    await temp_msg.edit(content="✅ 重擲完成：新照片已原地取代舊照片。")
+                    new_context = await _generate_cosplay_full_reroll_context(msg=temp_msg, mode=context.get("user_mode_request") or "auto")
+                    _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override="cosplay"))
+                    _safe_delete_vault_image(old_url)
+                    new_context["message_id"] = msg.id
+                    photo_generation_contexts[msg.id] = new_context
+                    view = PhotoResultView(new_context)
+                    await _edit_photo_message_with_file(msg, new_context, view=view, title_prefix="🔄 重擲")
+                    await temp_msg.edit(content="✅ 重擲完成：主題、內文與照片都已重新來過並原地取代。")
                     await asyncio.sleep(3)
                     await temp_msg.delete()
                 else:
+                    new_context = await _generate_cosplay_same_topic_context(context, msg=temp_msg)
                     db = load_memory()
-                    db.insert(0, photo_payload)
+                    db.insert(0, _photo_db_payload(new_context, type_override="cosplay"))
                     save_memory(db)
-                    new_msg = await channel.send(embed=embed)
+                    view = PhotoResultView(new_context)
+                    file, filename = _photo_discord_file(new_context)
+                    embed = _build_cosplay_embed(new_context, title_prefix="【加洗】", attachment_filename=filename if file else None)
+                    if file:
+                        new_msg = await channel.send(embed=embed, file=file, view=view)
+                    else:
+                        new_msg = await channel.send(embed=embed, view=view)
+                    new_context["message_id"] = new_msg.id
+                    photo_generation_contexts[new_msg.id] = new_context
+                    view.context = new_context
                     await new_msg.add_reaction("➕")
                     await new_msg.add_reaction("🎲")
                     await new_msg.add_reaction("🗑️")
