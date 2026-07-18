@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.76"
+LOBSTER_VERSION = "1.4.79"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -557,6 +557,40 @@ def get_diary_wardrobe_pref(target_date=None):
         save_diary_wardrobe_prefs(data)
     pref = data.get(date_key)
     return pref if isinstance(pref, dict) else None
+
+
+def get_latest_diary_scene_pref(max_age_hours=36):
+    """
+    v1479 safety net:
+    If the diary entry date and the command date do not match exactly because of timing,
+    still use the latest explicit /交換日記 scene request within a short window.
+    """
+    data = _prune_diary_wardrobe_prefs(load_diary_wardrobe_prefs())
+    latest = None
+    latest_dt = None
+    now = datetime.now(TZ_TPE)
+    for date_key, pref in data.items():
+        if not isinstance(pref, dict):
+            continue
+        scene = str(pref.get("scene_request") or "").strip()
+        if not scene:
+            continue
+        updated_raw = str(pref.get("updated_at") or "").strip()
+        try:
+            dt = datetime.strptime(updated_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_TPE)
+        except Exception:
+            try:
+                dt = datetime.strptime(str(date_key), "%Y-%m-%d").replace(tzinfo=TZ_TPE)
+            except Exception:
+                continue
+        if latest_dt is None or dt > latest_dt:
+            latest = pref
+            latest_dt = dt
+    if not latest or not latest_dt:
+        return None
+    if (now - latest_dt).total_seconds() > max_age_hours * 3600:
+        return None
+    return latest
 
 
 def _compact_wardrobe_brief(item):
@@ -6059,7 +6093,7 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 1. visual_mode 僅能從 quiet_intimacy, playful_closeness, gentle_longing, tired_comfort, cheerful_daily_life, romantic_seduction 選一個。
 1A. 不管日記文字多浪漫，畫面都只能安排小俠一人；大俠、男友、伴侶、第二人、外來手、倒影、影子、前景肩膀或身體殘件都不得被規劃進任何欄位。所有親密感必須由小俠單人的眼神、姿態、道具、燈光、空間留白呈現。
 2. 預設 setting_anchor 必須是「當代台灣日常生活空間」，例如臥室、浴室、客廳、餐桌等私密空間。
-2A. 若「大俠指定場景」有內容，setting_anchor、activity、environment_trace、scenario_tw 都必須明確反映該場景／活動，不可忽略；服裝與小動作可自由發揮，但畫面場景必須被保留。
+2A. 若「大俠指定場景」有內容，這是硬條件且優先於日記預設居家世界觀：setting_anchor、activity、environment_trace、scenario_tw 都必須明確反映該場景／活動，不可忽略，不可改回家中、客廳、臥室或居家睡衣自拍；服裝與小動作可自由發揮，但畫面場景必須被保留。
 3. time_anchor 必須反映台灣當下合理的時段氛圍，例如夜晚微光、沐浴後的熱氣、清晨慵懶等。
 4. activity 必須是居家或日常可自然發生的一件事。
 5. primary_action 只能有一個主要行為；micro_action 只能有一個細微動作。
@@ -6140,7 +6174,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 
 【轉譯限制】
 - 第一個句子先描述她正在做的事情。
-- 若【大俠指定場景】有內容，整段提示詞必須把該場景／活動當成硬條件保留下來；可自然轉譯，但不可忽略或改成完全不同的地點。
+- 若【大俠指定場景】有內容，整段提示詞必須把該場景／活動當成硬條件保留下來；可自然轉譯，但不可忽略或改成完全不同的地點。尤其不可退回 home living room, bedroom, sofa, bed, pajamas, loungewear 等居家預設，除非大俠指定場景本身就是居家。
 - 明確保留 setting_anchor 與 time_anchor，讓畫面看起來像發生在當代台灣私密空間裡。
 - 僅保留 1 個主行為與 1 個微動作；視線落在 gaze_target。如果 camera_awareness 是 aware，請盡情描繪充滿愛意或誘惑的眼神接觸 (deep eye contact)。
 - 保留生活痕跡 environment_trace，大膽使用戲劇性光影、微光或燭光來烘托氛圍。
@@ -10384,6 +10418,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # /cosplay 的時尚攝影 prompt 完全不會混入這條路線。
             diary_state = None
             diary_pref = get_diary_wardrobe_pref(target_date=entry_date) or {}
+            # v1479: 如果 entry_date 與實際下指令日期錯開，仍抓最近 36 小時內的大俠場景指定。
+            if not _clean_text_compact((diary_pref or {}).get("scene_request") or ""):
+                latest_scene_pref = get_latest_diary_scene_pref(max_age_hours=36)
+                if latest_scene_pref:
+                    diary_pref = latest_scene_pref
             diary_forced_scene = _clean_text_compact((diary_pref or {}).get("scene_request") or "")
             diary_visual = {
                 "composition": result.get("scenario_tw", "與大俠分享今天的一個自然生活瞬間"),
@@ -10410,9 +10449,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 scene_hard_note = ""
                 if diary_forced_scene:
                     scene_hard_note = (
-                        "\n\n【本篇場景強制要求】"
+                        "\n\n【本篇場景強制要求｜硬條件】"
                         f"\n- 大俠指定場景：{diary_forced_scene}"
-                        "\n- 本篇交換日記照片必須優先在這個場景／活動下規劃；服裝可自由發揮或依衣櫃設定，但場景不可忽略。"
+                        "\n- 本篇交換日記照片必須在這個場景／活動下規劃。"
+                        "\n- 不可忽略此場景，不可自動改成家中、客廳、臥室、沙發、床邊或居家睡衣自拍，除非大俠場景本身就是居家。"
+                        "\n- 服裝可自由發揮或依衣櫃設定，但場景必須清楚可見。"
                     )
                 if diary_wardrobe:
                     wardrobe_item = diary_wardrobe.get("item", {})
@@ -10911,7 +10952,7 @@ async def _handle_diary_wardrobe_message_direct(message):
         set_diary_wardrobe_pref("scene_only", wardrobe_id="", target_date=today, scene_request=scene_request)
         await message.channel.send(
             f"✅ 已設定 **{today}** 的交換日記場景：{scene_request}\n"
-            "今晚小俠會保留這個場景內容；服裝則由她自由發揮，不受衣櫃限制。"
+            "今晚小俠會把這個場景當成硬條件；服裝則由她自由發揮，不受衣櫃限制。"
         )
         return True
 
