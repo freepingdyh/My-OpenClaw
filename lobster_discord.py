@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.87"
+LOBSTER_VERSION = "1.4.88"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -641,7 +641,7 @@ def _format_trace_for_discord(trace):
     lines = []
     lines.append(f"kind={trace.get('kind')} trace_id={trace.get('trace_id')}")
     lines.append(f"time={trace.get('created_at')} → {trace.get('updated_at')}")
-    for key in ["action", "source_mode", "photo_mode_override", "pose_critical", "raw_seedream_mode", "user_input", "scene_seed_text", "scene_summary", "action_summary", "wardrobe_id", "wardrobe_mode", "used_pending_wardrobe", "current_outfit_for_seedream", "result_url", "final_level", "error"]:
+    for key in ["action", "source_mode", "photo_mode_override", "pose_critical", "raw_seedream_mode", "allow_background_bystanders", "diary_allow_background_bystanders", "user_input", "scene_seed_text", "scene_summary", "action_summary", "wardrobe_id", "wardrobe_mode", "used_pending_wardrobe", "current_outfit_for_seedream", "result_url", "final_level", "error"]:
         val = trace.get(key)
         if val not in (None, "", [], {}):
             lines.append(f"{key}: {_trace_preview(val, 180)}")
@@ -3933,6 +3933,28 @@ B. 同一段今日聊天中，小俠明確答應、承諾、說會補上或會�
         return None
 
 
+def _diary_scene_allows_background_bystanders(*texts):
+    """v1.4.88: 公共/旅遊/園區場景允許遠景、模糊、非互動路人；私密居家場景不允許。"""
+    raw = " ".join(str(t or "") for t in texts).lower()
+    private_keywords = [
+        "臥室", "卧室", "床上", "床邊", "床边", "睡衣", "內衣", "内衣",
+        "浴室", "更衣", "私密", "閨房", "闺房", "home bedroom",
+        "bedroom", "bathroom", "sleepwear", "lingerie",
+    ]
+    if any(k.lower() in raw for k in private_keywords):
+        return False
+    public_keywords = [
+        "文創", "文创", "園區", "园区", "老街", "夜市", "市集", "街",
+        "咖啡", "咖啡廳", "咖啡厅", "展覽", "展览", "美術館", "美术馆",
+        "博物館", "博物馆", "車站", "车站", "機場", "机场", "旅行",
+        "旅遊", "旅游", "戶外", "户外", "公園", "公园", "海邊", "海边",
+        "步道", "商店", "街區", "街区", "廣場", "广场",
+        "cultural park", "creative park", "street", "market", "museum",
+        "gallery", "cafe", "outdoor", "travel", "tourist", "public",
+    ]
+    return any(k.lower() in raw for k in public_keywords)
+
+
 def build_committed_diary_visual_from_task(task, season_rule="", wardrobe_hint=""):
     task = task or {}
     visual_request = _clean_text_compact(task.get("visual_request_zh") or task.get("source_promise") or "小俠今天的一張單人生活照")
@@ -3940,6 +3962,19 @@ def build_committed_diary_visual_from_task(task, season_rule="", wardrobe_hint="
     action = _clean_text_compact(task.get("action") or visual_request)
     outfit = _clean_text_compact(task.get("outfit") or "符合場景與季節的自然完整穿搭")
     selfie_rule = "The image must clearly read as a selfie taken by Xiaoxia herself, with a close handheld/selfie feeling. " if task.get("is_selfie") or re.search(r"自拍|selfie", visual_request, re.I) else ""
+    allow_background_bystanders = _diary_scene_allows_background_bystanders(visual_request, scene, action)
+    if allow_background_bystanders:
+        solo_rule = (
+            "Xiaoxia must be the only primary subject. Incidental distant or blurred background bystanders are allowed in this public/travel scene, "
+            "but they must not interact with Xiaoxia, stand beside her like a companion, appear as a male partner, or replace Daxia."
+        )
+        no_people_rule = (
+            "No male partner, no companion, no foreground second person, no external hands, no viewer body parts, "
+            "no cropped head/arm/shoulder, and no reflection/shadow of a person interacting with Xiaoxia."
+        )
+    else:
+        solo_rule = "Xiaoxia must be the only human figure."
+        no_people_rule = "No man, no second person, no external hands, no viewer body parts, no reflection/shadow of another person."
     no_home = ""
     if scene and not _scene_is_explicit_home_scene(scene):
         no_home = "Do not turn this into a bedroom, bed, sofa, living room, window-reading, sleepwear, or generic home scene. "
@@ -3965,9 +4000,9 @@ Season boundary: {season_rule}
 {wardrobe_line}
 
 Mandatory rules:
-- {selfie_rule}Xiaoxia must be the only human figure.
+- {selfie_rule}{solo_rule}
 - The requested scene and action must be clearly visible.
-- {no_home}No man, no second person, no external hands, no viewer body parts, no reflection/shadow of another person.
+- {no_home}{no_people_rule}
 - Natural anatomy, plausible hands, candid photorealistic lifestyle photo.
 """.strip()
     return {
@@ -3977,6 +4012,7 @@ Mandatory rules:
         "message": "大俠，這張是今天答應你的那一刻。",
         "__diary_photo_task": task,
         "__anchor_mode": "diary_committed_photo_minimal",
+        "__allow_background_bystanders": allow_background_bystanders,
     }
 
 
@@ -6870,7 +6906,7 @@ async def _download_image_bytes_for_vision(image_url, max_bytes=8_000_000):
         return None, None
 
 
-async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo"):
+async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_background_bystanders=False):
     """
     出圖後的輕量驗圖 gate：只檢查是否混入第二人/男人/外來手腳。
     失敗時回傳 (False, reason)；無法檢查時為避免誤殺，回傳 (True, reason)。
@@ -6882,23 +6918,35 @@ async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo"):
     if not data:
         return True, "vision skipped: cannot download generated image"
 
-    prompt = """
+    bystander_rule = (
+        "In this public/travel/outdoor scene, incidental distant or blurred background bystanders are allowed. "
+        "They must be clearly secondary, not interacting with Xiaoxia, not foreground subjects, not companions, "
+        "not a male partner, and not a substitute for Daxia."
+        if allow_background_bystanders else
+        "No additional real human figures are allowed."
+    )
+    prompt = f"""
 You are an image QA checker for a solo character generation pipeline.
-Check the image strictly for unwanted additional people.
+Check the image for unwanted additional people while respecting the scene type.
 
 Return JSON only:
-{
+{{
   "solo_xiaoxia_only": true/false,
+  "xiaoxia_is_only_primary_subject": true/false,
   "human_count": number,
+  "has_incidental_background_bystanders": true/false,
   "has_male_or_partner": true/false,
+  "has_foreground_second_person": true/false,
+  "has_interacting_second_person": true/false,
   "has_external_hands_or_body_parts": true/false,
   "has_second_person_reflection_shadow_or_partial": true/false,
   "reason": "short explanation"
-}
+}}
 
 Rules:
-- Pass only if the image contains exactly one visible human figure and that person is the female subject Xiaoxia.
-- Fail if there is any man, second person, partner, external hand/arm/leg/shoulder, cropped body part, reflection/shadow of another person, or foreground viewer body part.
+- Xiaoxia must be the only primary subject.
+- {bystander_rule}
+- Always fail if there is a male partner, companion, photographer-like person, interacting second person, foreground second person, external hand/arm/leg/shoulder, cropped body part, viewer body part, or reflection/shadow of another person interacting with Xiaoxia.
 - A printed photo, painting, statue, mannequin, or decorative object is not a person unless it appears as a real human in the scene.
 """
     try:
@@ -6913,7 +6961,17 @@ Rules:
         result = _safe_json_from_text(resp.text, {})
         if not isinstance(result, dict):
             return True, "vision skipped: invalid JSON"
-        ok = bool(result.get("solo_xiaoxia_only")) and int(result.get("human_count", 1) or 1) <= 1 and not bool(result.get("has_male_or_partner")) and not bool(result.get("has_external_hands_or_body_parts")) and not bool(result.get("has_second_person_reflection_shadow_or_partial"))
+        blocking_people = (
+            bool(result.get("has_male_or_partner"))
+            or bool(result.get("has_foreground_second_person"))
+            or bool(result.get("has_interacting_second_person"))
+            or bool(result.get("has_external_hands_or_body_parts"))
+            or bool(result.get("has_second_person_reflection_shadow_or_partial"))
+        )
+        if allow_background_bystanders:
+            ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and not blocking_people
+        else:
+            ok = bool(result.get("solo_xiaoxia_only")) and int(result.get("human_count", 1) or 1) <= 1 and not blocking_people
         reason = str(result.get("reason") or result)
         return ok, reason[:300]
     except Exception as exc:
@@ -7142,17 +7200,38 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
         _trace_stage(trace_context, f"generation_result_L{level}", data={"ok": True, "result_url": generated_image_url})
 
         if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
-            solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode=mode)
-            _trace_stage(trace_context, f"solo_gate_L{level}", data={"solo_ok": solo_ok, "reason": solo_reason})
-            trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason}
+            allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
+            solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(
+                generated_image_url,
+                mode=mode,
+                allow_background_bystanders=allow_background_bystanders,
+            )
+            _trace_stage(trace_context, f"solo_gate_L{level}", data={"solo_ok": solo_ok, "reason": solo_reason, "allow_background_bystanders": allow_background_bystanders})
+            trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason, "allow_background_bystanders": allow_background_bystanders}
             if not solo_ok:
                 print(f"⚠️ [SOLO_GATE_REJECTED] mode={mode} reason={solo_reason}")
                 if msg:
                     await msg.edit(content=f"⚠️ 小俠發現這張混入了不該出現的人物/肢體，正在自動重拍（原因：{solo_reason[:120]}）...")
                 if isinstance(visual_dict, dict):
                     visual_dict["__solo_gate_violation"] = solo_reason
-                    visual_dict["composition"] = str(visual_dict.get("composition", "")) + "\n*(Solo gate rejected previous output: regenerate as Xiaoxia-only, no second person, no external body parts.)*"
-                initial_prompt = SOLO_SCENE_REWRITE_GUARD.strip() + "\n\n" + str(initial_prompt)
+                    if allow_background_bystanders:
+                        retry_note = (
+                            "\n*(Solo gate rejected previous output: regenerate with Xiaoxia as the only primary subject. "
+                            "Distant blurred background bystanders may remain in the public scene, but no companion, "
+                            "no male partner, no foreground second person, no interacting person, no external body parts.)*"
+                        )
+                    else:
+                        retry_note = "\n*(Solo gate rejected previous output: regenerate as Xiaoxia-only, no second person, no external body parts.)*"
+                    visual_dict["composition"] = str(visual_dict.get("composition", "")) + retry_note
+                if allow_background_bystanders:
+                    initial_prompt = (
+                        "SOLO PRIMARY SUBJECT GUARD:\n"
+                        "Xiaoxia must remain the only primary subject. Incidental distant/blurred background bystanders may remain in public scenes, "
+                        "but no companion, no male partner, no foreground second person, no interacting person, and no external body parts.\n\n"
+                        + str(initial_prompt)
+                    )
+                else:
+                    initial_prompt = SOLO_SCENE_REWRITE_GUARD.strip() + "\n\n" + str(initial_prompt)
                 continue
 
             adherence_ok, adherence_reason, adherence_detail = await _vision_check_instruction_adherence_image_url(
@@ -7203,7 +7282,8 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
     if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
-        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode)
+        allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
+        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode, allow_background_bystanders=allow_background_bystanders)
         if not solo_ok:
             raise Exception(f"最終保底仍混入第二人/男人/外來肢體：{solo_reason}")
     if isinstance(visual_dict, dict):
@@ -7557,6 +7637,8 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
 def _seedream_diary_prompt(custom_prompt):
     raw = str(custom_prompt or "").strip()
     if "FIGURE ROLE MAP" in raw and "TEXT REQUEST" in raw:
+        if re.search(r"background bystanders|public/travel|public scene|路人|背景", raw, re.I):
+            return raw + "\n\nFinal safety: Xiaoxia must be the only primary subject. Incidental distant/blurred background bystanders may remain only in public scenes, but no companion, no male partner, no foreground second person, no interacting person, no external hands, natural anatomy."
         return raw + "\n\nFinal safety: strictly only Xiaoxia appears; no man, no second person, no external hands, natural anatomy."
     return (
         "FIGURE ROLE MAP — obey these roles strictly.\n\n"
@@ -9982,7 +10064,7 @@ async def handle_photo_raw_command(message, user_input):
         if not generated_image_url or not str(generated_image_url).startswith("http"):
             raise Exception(str(generated_image_url))
         _trace_stage(trace_context, "photo_raw_generation_result", data={"result_url": generated_image_url})
-        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode="photo_scene")
+        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode="photo_scene", allow_background_bystanders=False)
         adherence_ok, adherence_reason, adherence_detail = await _vision_check_instruction_adherence_image_url(generated_image_url, final_prompt, mode="photo_scene", trace_context=trace_context)
         trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason}
         trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason}
@@ -11378,6 +11460,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "raw_seedream_mode": "diary_committed_photo_minimal" if committed_diary_photo_task else "diary_minimal",
                     "force_minimal_prompt": True,
                     "figure10_present": bool(diary_reference_path),
+                    "allow_background_bystanders": bool(diary_visual.get("__allow_background_bystanders")),
+                    "diary_allow_background_bystanders": bool(diary_visual.get("__allow_background_bystanders")),
                     "diary_photo_single_slot": True,
                     "committed_diary_photo_task": committed_diary_photo_task,
                     "due_promises": due_promises,
