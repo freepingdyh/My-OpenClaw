@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.85"
+LOBSTER_VERSION = "1.4.86"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6839,7 +6839,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
     return "\n".join(lines).strip()
 
 
-def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason=""):
+def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True):
     user_request = _clean_text_compact(user_request or "")
     retry_reason = _clean_text_compact(retry_reason or "")
     lines = [
@@ -6851,13 +6851,16 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
         "Only Xiaoxia appears. No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person.",
-        "",
-        "Figure 10 is a wardrobe garment or accessory reference only.",
-        "If Figure 10 is clothing, replace Xiaoxia's outfit with the garment from Figure 10. This is mandatory.",
-        "If Figure 10 is an accessory, add that accessory to Xiaoxia and keep it clearly visible.",
-        "Preserve Figure 10's item category, color, silhouette, cut, length, material feeling, pattern, and key decorative details.",
-        "Do NOT let Figure 10 control the final scene, pose, background, camera angle, or composition.",
     ]
+    if has_figure10:
+        lines += [
+            "",
+            "Figure 10 is a wardrobe garment or accessory reference only.",
+            "If Figure 10 is clothing, replace Xiaoxia's outfit with the garment from Figure 10. This is mandatory.",
+            "If Figure 10 is an accessory, add that accessory to Xiaoxia and keep it clearly visible.",
+            "Preserve Figure 10's item category, color, silhouette, cut, length, material feeling, pattern, and key decorative details.",
+            "Do NOT let Figure 10 control the final scene, pose, background, camera angle, or composition.",
+        ]
     if current_outfit:
         lines += ["", f"Current outfit continuity, clothing only: {str(current_outfit).strip()}. It must not override the text-request scene or pose."]
     if retry_reason:
@@ -6880,7 +6883,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.85: strict scene / pose / outfit adherence gate."""
+    """v1.4.86: strict scene / pose / outfit adherence gate."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -6939,7 +6942,9 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
     pose_user_request = _extract_pose_user_request(initial_prompt, visual_dict)
     pose_critical = _is_pose_critical_request(pose_user_request)
-    reference_minimal = str(mode or "").lower() == "photo_reference"
+    force_minimal_prompt = bool(trace_context.get("force_minimal_prompt")) if isinstance(trace_context, dict) else False
+    has_figure10 = bool(trace_context.get("figure10_present")) if isinstance(trace_context, dict) else bool(discord_image_url)
+    reference_minimal = str(mode or "").lower() == "photo_reference" or force_minimal_prompt
     if pose_critical:
         trace_context["pose_critical"] = True
         trace_context["pose_user_request"] = pose_user_request
@@ -6960,8 +6965,9 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 pose_user_request or initial_prompt,
                 current_outfit=current_outfit,
                 retry_reason=last_adherence_reason if level > 0 else "",
+                has_figure10=has_figure10,
             )
-            trace_context["raw_seedream_mode"] = "photo_reference_minimal"
+            trace_context["raw_seedream_mode"] = "photo_reference_minimal" if has_figure10 else "photo_scene_minimal_current_outfit"
         else:
             current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
         _trace_stage(trace_context, f"compose_prompt_L{level}", prompt=current_prompt, data={"level": level, "mode": mode, "pose_critical": pose_critical})
@@ -7614,6 +7620,26 @@ def _pending_wardrobe_has_usable_reference(item):
     if ref_url.startswith("http"):
         return True
     return False
+
+
+def _extract_current_outfit_reference(outfit_state):
+    """延續今日穿著時，盡量保留原本的 wardrobe_id 與 Figure 10 參考圖。"""
+    if not isinstance(outfit_state, dict):
+        return None
+    ref_path = str(outfit_state.get("reference_item_path") or "").strip()
+    ref_url = str(outfit_state.get("reference_item_url") or "").strip()
+    wardrobe_id = str(outfit_state.get("wardrobe_id") or "").strip().upper() or None
+    if ref_path and not os.path.exists(ref_path):
+        ref_path = ""
+    if not ref_path and ref_url:
+        ref_path = ref_url
+    if not ref_path and not ref_url and not wardrobe_id:
+        return None
+    return {
+        "reference_item_path": ref_path or None,
+        "reference_item_url": ref_url or None,
+        "wardrobe_id": wardrobe_id,
+    }
 
 
 def _set_pending_wardrobe_state(item):
@@ -9261,7 +9287,7 @@ async def _seedream_upload_single_file(path):
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
-    """v1.4.85: concise Figure role map; pass through playground-style raw prompts."""
+    """v1.4.86: concise Figure role map; pass through playground-style raw prompts."""
     custom_prompt = str(custom_prompt or "").strip()
     if custom_prompt.startswith("FIGURE ROLE MAP") and "TEXT REQUEST" in custom_prompt:
         return custom_prompt
@@ -9736,6 +9762,9 @@ async def _generate_photo_from_context(context, msg=None):
         "wardrobe_id": context.get("wardrobe_id"),
         "used_pending_wardrobe": context.get("used_pending_wardrobe"),
         "current_outfit_for_seedream": context.get("current_outfit_for_seedream"),
+        "generation_mode": context.get("generation_mode") or context.get("source_mode", "photo_scene"),
+        "force_minimal_prompt": bool(context.get("force_minimal_prompt")),
+        "figure10_present": bool(context.get("reference_item_path")),
     }
     trace_context.setdefault("kind", "photo")
     trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
@@ -9756,11 +9785,13 @@ async def _generate_photo_from_context(context, msg=None):
         user_scene_hardlock=context.get("scene_text", ""),
     )
     _trace_stage(trace_context, "photo_visual_dict", data=visual)
-    print(f"🎬 [PHOTO_SEEDREAM_START] mode={context.get('source_mode', 'photo_scene')} trace_id={trace_context.get('trace_id')}")
+    generation_mode = context.get("generation_mode") or context.get("source_mode", "photo_scene")
+    trace_context["figure10_present"] = bool(context.get("reference_item_path"))
+    print(f"🎬 [PHOTO_SEEDREAM_START] mode={generation_mode} source_mode={context.get('source_mode', 'photo_scene')} trace_id={trace_context.get('trace_id')}")
     generated_image_url, visual = await execute_safe_generation(
         discord_image_url=context.get("reference_item_path"),
         base_filename="base_xiaoxia.jpg",
-        mode=context.get("source_mode", "photo_scene"),
+        mode=generation_mode,
         initial_prompt=context.get("prompt_base", ""),
         visual_dict=visual,
         msg=msg,
@@ -9789,6 +9820,7 @@ async def _generate_photo_from_context(context, msg=None):
     })
     trace_context.update({
         "source_mode": context.get("source_mode"),
+        "generation_mode": generation_mode,
         "scene_summary": context.get("scene_summary"),
         "action_summary": context.get("action_summary"),
         "outfit_summary": context.get("outfit_summary"),
@@ -9801,7 +9833,7 @@ async def _generate_photo_from_context(context, msg=None):
 
 
 async def handle_photo_raw_command(message, user_input):
-    """v1.4.85: playground-equivalent Seedream test mode. Uses 9 base refs and the user prompt with minimal wrapping."""
+    """v1.4.86: playground-equivalent Seedream test mode. Uses 9 base refs and the user prompt with minimal wrapping."""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/photo_raw` 先只開放在女友小俠的私人頻道使用喔。")
         return None
@@ -9904,6 +9936,19 @@ async def handle_unified_photo_command(message, user_input):
         wardrobe_id = None
 
     keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change and photo_mode_override == "normal")
+    carried_outfit_ref = _extract_current_outfit_reference(current_outfit_state) if keep_today_outfit else None
+    current_outfit_reference_reused = False
+    if keep_today_outfit and carried_outfit_ref:
+        if not wardrobe_id and carried_outfit_ref.get("wardrobe_id"):
+            wardrobe_id = carried_outfit_ref.get("wardrobe_id")
+        if not reference_item_url and carried_outfit_ref.get("reference_item_url"):
+            reference_item_url = carried_outfit_ref.get("reference_item_url")
+        if not reference_item_path and carried_outfit_ref.get("reference_item_path"):
+            reference_item_path = carried_outfit_ref.get("reference_item_path")
+        current_outfit_reference_reused = bool(reference_item_path or reference_item_url or wardrobe_id)
+
+    force_minimal_prompt = bool(keep_today_outfit and source_mode == "photo_scene")
+    generation_mode = "photo_reference" if (source_mode == "photo_reference" or current_outfit_reference_reused) else source_mode
 
     status = await message.channel.send(
         "📸 小俠正在整理這一刻的畫面，準備用 Seedream v4.5 拍一張照片..."
@@ -9966,7 +10011,10 @@ async def handle_unified_photo_command(message, user_input):
         "scene_seed_text": scene_seed_text,
         "photo_mode_override": photo_mode_override,
         "pose_critical": pose_critical,
-        "raw_seedream_mode": "pose_critical_minimal" if pose_critical else ("photo_reference_minimal" if source_mode == "photo_reference" else "normal_photo_pipeline"),
+        "generation_mode": generation_mode,
+        "force_minimal_prompt": force_minimal_prompt,
+        "current_outfit_reference_reused": current_outfit_reference_reused,
+        "raw_seedream_mode": "pose_critical_minimal" if pose_critical else ("photo_reference_minimal" if generation_mode == "photo_reference" else ("photo_scene_minimal_current_outfit" if force_minimal_prompt else "normal_photo_pipeline")),
         "has_attachment": bool(attachment),
         "used_pending_wardrobe": bool(pending_wardrobe),
         "wardrobe_mode": "wardrobe_free" if photo_mode_override == "wardrobe_free" else ("pending_fixed" if pending_wardrobe else "none"),
@@ -9996,6 +10044,9 @@ async def handle_unified_photo_command(message, user_input):
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
+        "generation_mode": generation_mode,
+        "force_minimal_prompt": force_minimal_prompt,
+        "current_outfit_reference_reused": current_outfit_reference_reused,
         "current_outfit_for_seedream": (current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
         "used_pending_wardrobe": bool(pending_wardrobe),
         "photo_mode_override": photo_mode_override,
