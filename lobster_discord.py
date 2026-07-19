@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.84"
+LOBSTER_VERSION = "1.4.85"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -6839,8 +6839,48 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
     return "\n".join(lines).strip()
 
 
+def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason=""):
+    user_request = _clean_text_compact(user_request or "")
+    retry_reason = _clean_text_compact(retry_reason or "")
+    lines = [
+        "FIGURE ROLE MAP — obey these roles strictly.",
+        "",
+        "Figures 1-9 are identity-only reference images of Xiaoxia.",
+        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.",
+        "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.",
+        "",
+        "Create a new solo photorealistic lifestyle image of Xiaoxia.",
+        "Only Xiaoxia appears. No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person.",
+        "",
+        "Figure 10 is a wardrobe garment or accessory reference only.",
+        "If Figure 10 is clothing, replace Xiaoxia's outfit with the garment from Figure 10. This is mandatory.",
+        "If Figure 10 is an accessory, add that accessory to Xiaoxia and keep it clearly visible.",
+        "Preserve Figure 10's item category, color, silhouette, cut, length, material feeling, pattern, and key decorative details.",
+        "Do NOT let Figure 10 control the final scene, pose, background, camera angle, or composition.",
+    ]
+    if current_outfit:
+        lines += ["", f"Current outfit continuity, clothing only: {str(current_outfit).strip()}. It must not override the text-request scene or pose."]
+    if retry_reason:
+        lines += ["", "PREVIOUS OUTPUT WAS REJECTED:", retry_reason, "Correct the failure now. The text-request scene and action must be obeyed before beauty, fashion display, or flattering framing."]
+    lines += [
+        "",
+        "TEXT REQUEST — this controls the final scene, pose, action, and composition:",
+        "",
+        user_request,
+        "",
+        "Mandatory obedience rules:",
+        "- The requested main scene, furniture/location, and body pose/action must be visually clear.",
+        "- Follow explicit actions literally, such as sitting, standing, lying, kneeling, hugging a pillow, holding an object, cooking, or cycling.",
+        "- Do not replace the requested scene/action with a generic fashion pose or a different location.",
+        "- If the request says sofa or bed, show that furniture clearly.",
+        "- If the request says to hold or hug a pillow or prop, show that action clearly.",
+        "- Natural anatomy, single person only, candid lifestyle photo.",
+    ]
+    return "\n".join(lines).strip()
+
+
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.84: strict scene / pose / outfit adherence gate."""
+    """v1.4.85: strict scene / pose / outfit adherence gate."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -6899,9 +6939,12 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
     pose_user_request = _extract_pose_user_request(initial_prompt, visual_dict)
     pose_critical = _is_pose_critical_request(pose_user_request)
+    reference_minimal = str(mode or "").lower() == "photo_reference"
     if pose_critical:
         trace_context["pose_critical"] = True
         trace_context["pose_user_request"] = pose_user_request
+    if reference_minimal:
+        trace_context["reference_minimal"] = True
     last_adherence_reason = ""
     for level in range(5):
         if pose_critical and str(mode or "").lower() in {"photo_scene", "photo_reference"}:
@@ -6912,6 +6955,13 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 retry_reason=last_adherence_reason if level > 0 else "",
             )
             trace_context["raw_seedream_mode"] = "pose_critical_minimal"
+        elif reference_minimal:
+            current_prompt = _build_photo_reference_minimal_seedream_prompt(
+                pose_user_request or initial_prompt,
+                current_outfit=current_outfit,
+                retry_reason=last_adherence_reason if level > 0 else "",
+            )
+            trace_context["raw_seedream_mode"] = "photo_reference_minimal"
         else:
             current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
         _trace_stage(trace_context, f"compose_prompt_L{level}", prompt=current_prompt, data={"level": level, "mode": mode, "pose_critical": pose_critical})
@@ -9211,7 +9261,7 @@ async def _seedream_upload_single_file(path):
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
-    """v1.4.84: concise Figure role map; pass through playground-style raw prompts."""
+    """v1.4.85: concise Figure role map; pass through playground-style raw prompts."""
     custom_prompt = str(custom_prompt or "").strip()
     if custom_prompt.startswith("FIGURE ROLE MAP") and "TEXT REQUEST" in custom_prompt:
         return custom_prompt
@@ -9751,7 +9801,7 @@ async def _generate_photo_from_context(context, msg=None):
 
 
 async def handle_photo_raw_command(message, user_input):
-    """v1.4.84: playground-equivalent Seedream test mode. Uses 9 base refs and the user prompt with minimal wrapping."""
+    """v1.4.85: playground-equivalent Seedream test mode. Uses 9 base refs and the user prompt with minimal wrapping."""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/photo_raw` 先只開放在女友小俠的私人頻道使用喔。")
         return None
@@ -9916,7 +9966,7 @@ async def handle_unified_photo_command(message, user_input):
         "scene_seed_text": scene_seed_text,
         "photo_mode_override": photo_mode_override,
         "pose_critical": pose_critical,
-        "raw_seedream_mode": "pose_critical_minimal" if pose_critical else "normal_photo_pipeline",
+        "raw_seedream_mode": "pose_critical_minimal" if pose_critical else ("photo_reference_minimal" if source_mode == "photo_reference" else "normal_photo_pipeline"),
         "has_attachment": bool(attachment),
         "used_pending_wardrobe": bool(pending_wardrobe),
         "wardrobe_mode": "wardrobe_free" if photo_mode_override == "wardrobe_free" else ("pending_fixed" if pending_wardrobe else "none"),
