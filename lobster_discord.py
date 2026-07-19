@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.81"
+LOBSTER_VERSION = "1.4.82"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -495,6 +495,15 @@ WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 # 🎴 今晚命運牌 v2：卡面圖與 cosplay 角色宇宙，皆放在 Zeabur persistent volume。
 COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
 WARDROBE_USAGE_LOG_PATH = os.path.join(MEMORY_DIR, "wardrobe_usage_log.json")
+GENERATION_TRACE_DIR = os.path.join(MEMORY_DIR, "generation_trace")  # 🧭 v1.4.82：生圖決策鏈追溯
+GENERATION_TRACE_LATEST_PATH = os.path.join(GENERATION_TRACE_DIR, "latest.json")
+GENERATION_TRACE_ALL_PATH = os.path.join(GENERATION_TRACE_DIR, "all_trace.jsonl")
+GENERATION_TRACE_KIND_PATHS = {
+    "photo": os.path.join(GENERATION_TRACE_DIR, "photo_trace.jsonl"),
+    "diary": os.path.join(GENERATION_TRACE_DIR, "diary_trace.jsonl"),
+    "cosplay": os.path.join(GENERATION_TRACE_DIR, "cosplay_trace.jsonl"),
+    "repair": os.path.join(GENERATION_TRACE_DIR, "repair_trace.jsonl"),
+}
 COSPLAY_TOPIC_HISTORY_PATH = os.path.join(MEMORY_DIR, "cosplay_topic_history.json") # 🎭 v1474：每日 cosplay 動態選角與去重紀錄
 FATE_CARD_DIR = os.path.join(MEMORY_DIR, "fate_cards")
 FATE_CARD_BACK = "card_06_back.png"
@@ -505,9 +514,162 @@ os.makedirs(BROADCAST_AUDIO_DIR, exist_ok=True)
 os.makedirs(SEEDREAM_V45_REF_DIR, exist_ok=True)
 os.makedirs(WARDROBE_DIR, exist_ok=True)
 os.makedirs(WARDROBE_IMPORT_DIR, exist_ok=True)
+os.makedirs(GENERATION_TRACE_DIR, exist_ok=True)
 os.makedirs(FATE_CARD_DIR, exist_ok=True)
 PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
 os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
+
+# ==========================================
+# 🧭 v1.4.82：Generation Trace Framework
+# ==========================================
+def _new_generation_trace_id(kind="gen"):
+    safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(kind or "gen")).strip("_") or "gen"
+    return f"{safe_kind}_{datetime.now(TZ_TPE).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
+def _trace_preview(value, limit=1200):
+    text = str(value or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
+def _trace_sanitize(value, *, depth=0, max_str=5000):
+    """避免 trace 把超長 prompt / 大型 dict 撐爆；完整 final prompt 仍會保留到 5000 字。"""
+    if depth > 5:
+        return _trace_preview(value, 800)
+    if isinstance(value, str):
+        return value if len(value) <= max_str else value[:max_str] + "…[TRUNCATED]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        cleaned = {}
+        for k, v in list(value.items())[:80]:
+            key = str(k)
+            if key in {"__trace_context"}:
+                continue
+            cleaned[key] = _trace_sanitize(v, depth=depth + 1, max_str=max_str)
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        return [_trace_sanitize(v, depth=depth + 1, max_str=max_str) for v in list(value)[:80]]
+    return _trace_preview(value, 1000)
+
+
+def _trace_stage(trace_context, stage, data=None, prompt=None, note=""):
+    if not isinstance(trace_context, dict):
+        return None
+    trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind") or "gen"))
+    trace_context.setdefault("created_at", datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"))
+    trace_context["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+    history = trace_context.setdefault("prompt_history", [])
+    entry = {
+        "time": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": str(stage or "stage"),
+    }
+    if note:
+        entry["note"] = str(note)
+    if prompt is not None:
+        entry["prompt"] = _trace_sanitize(str(prompt), max_str=8000)
+        entry["prompt_preview"] = _trace_preview(prompt, 500)
+    if data is not None:
+        entry["data"] = _trace_sanitize(data)
+    history.append(entry)
+    # 保留最後 40 個階段，避免 More / 重試反覆後過長。
+    if len(history) > 40:
+        del history[:-40]
+    return entry
+
+
+def _write_generation_trace(kind, trace_context, extra=None):
+    if not isinstance(trace_context, dict):
+        return None
+    try:
+        os.makedirs(GENERATION_TRACE_DIR, exist_ok=True)
+        kind = str(kind or trace_context.get("kind") or "generation").strip().lower()
+        trace_context["kind"] = kind
+        trace_context["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        payload = _trace_sanitize(trace_context)
+        if isinstance(extra, dict):
+            payload.update(_trace_sanitize(extra))
+        line = json.dumps(payload, ensure_ascii=False)
+        for path in (GENERATION_TRACE_ALL_PATH, GENERATION_TRACE_KIND_PATHS.get(kind)):
+            if path:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        latest = _load_json_file_or_default(GENERATION_TRACE_LATEST_PATH, {}) if os.path.exists(GENERATION_TRACE_LATEST_PATH) else {}
+        if not isinstance(latest, dict):
+            latest = {}
+        latest[kind] = payload
+        latest["last"] = payload
+        with open(GENERATION_TRACE_LATEST_PATH, "w", encoding="utf-8") as f:
+            json.dump(latest, f, ensure_ascii=False, indent=2)
+        print(f"🧭 [GENERATION_TRACE_WRITTEN] kind={kind} trace_id={payload.get('trace_id')} path={GENERATION_TRACE_KIND_PATHS.get(kind)}")
+        return payload
+    except Exception as exc:
+        print(f"⚠️ [GENERATION_TRACE_WRITE_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+
+def _load_recent_generation_traces(kind=None, limit=3):
+    kind = str(kind or "all").strip().lower()
+    path = GENERATION_TRACE_ALL_PATH if kind in {"", "all", "最近", "latest"} else GENERATION_TRACE_KIND_PATHS.get(kind, GENERATION_TRACE_ALL_PATH)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-max(1, int(limit or 3)):]
+        rows = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+        return rows
+    except Exception as exc:
+        print(f"⚠️ [GENERATION_TRACE_READ_FAILED] {type(exc).__name__}: {exc}")
+        return []
+
+
+def _format_trace_for_discord(trace):
+    if not isinstance(trace, dict):
+        return "（trace 格式錯誤）"
+    lines = []
+    lines.append(f"kind={trace.get('kind')} trace_id={trace.get('trace_id')}")
+    lines.append(f"time={trace.get('created_at')} → {trace.get('updated_at')}")
+    for key in ["action", "source_mode", "photo_mode_override", "user_input", "scene_seed_text", "scene_summary", "action_summary", "wardrobe_id", "wardrobe_mode", "used_pending_wardrobe", "current_outfit_for_seedream", "result_url", "error"]:
+        val = trace.get(key)
+        if val not in (None, "", [], {}):
+            lines.append(f"{key}: {_trace_preview(val, 180)}")
+    stages = trace.get("prompt_history") or []
+    if stages:
+        lines.append("stages:")
+        for st in stages[-10:]:
+            stage = st.get("stage")
+            preview = st.get("prompt_preview") or _trace_preview(st.get("prompt") or st.get("data"), 220)
+            lines.append(f"- {stage}: {preview}")
+    text = "\n".join(lines)
+    return text[:1800]
+
+
+def _wardrobe_visual_summary_only(item_or_text):
+    """衣櫃文字進入穿搭連續狀態時，只保留視覺資訊，移除『適合夜景/居家』等場景建議。"""
+    if isinstance(item_or_text, dict):
+        text = str(item_or_text.get("style_summary") or item_or_text.get("name") or "")
+    else:
+        text = str(item_or_text or "")
+    text = _clean_text_compact(text)
+    if not text:
+        return ""
+    # 移除常見「適合...場景」句段；避免 W096 這類衣櫃摘要在第二次 /photo 把場景拉回夜景。
+    text = re.sub(r"(?:，|。|；|;)?\s*整體風格[^。；;]*適合[^。；;]*[。；;]?", "", text)
+    text = re.sub(r"(?:，|。|；|;)?\s*適合[^。；;]*[。；;]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ，。；;")
+    return text
+
 
 def load_diary_override():
     if os.path.exists(DIARY_OVERRIDE_PATH):
@@ -6623,14 +6785,27 @@ Rules:
 
 
 
-async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None):
+async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
     seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference", "travel", "shopping"}
     engine_name = "Seedream v4.5"
+    if not isinstance(trace_context, dict):
+        trace_context = {"kind": "cosplay" if str(mode).lower() == "cosplay" else ("diary" if str(mode).lower() == "diary" else "photo")}
+    trace_context.setdefault("kind", "cosplay" if str(mode).lower() == "cosplay" else ("diary" if str(mode).lower() == "diary" else "photo"))
+    trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
+    trace_context.setdefault("mode", mode)
+    _trace_stage(trace_context, "execute_safe_generation_input", data={
+        "mode": mode,
+        "base_filename": base_filename,
+        "discord_image_url": discord_image_url,
+        "current_outfit": current_outfit,
+        "visual_dict": visual_dict,
+    }, prompt=initial_prompt)
     gpt_image2_is_fallback_only = os.environ.get("ENABLE_GPT_IMAGE2_FALLBACK", "false").lower() in {"1", "true", "yes"}
 
     for level in range(5):
         current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
+        _trace_stage(trace_context, f"compose_prompt_L{level}", prompt=current_prompt, data={"level": level, "mode": mode})
         # Seedream v4.5 交由 fal safety checker 處理，不再先被 OpenAI Moderation 擋住；
         # 仍保留 L0→L4 的提示詞安全化重試。
         if mode == "gpt_image_2_fallback" and gpt_image2_is_fallback_only:
@@ -6651,9 +6826,11 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             mode=mode,
             custom_prompt=current_prompt,
             current_outfit=current_outfit,
+            trace_context=trace_context,
         )
 
         if not generated_image_url or not str(generated_image_url).startswith("http"):
+            _trace_stage(trace_context, f"generation_result_L{level}", data={"ok": False, "result": str(generated_image_url)[:1500]})
             error_str = str(generated_image_url).lower()
             if _seedream_error_is_retryable(error_str) or any(token in error_str for token in ("moderation", "sexual", "safety_violations")):
                 if msg:
@@ -6663,8 +6840,11 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 continue
             raise Exception(f"攝影機異常：{generated_image_url}")
 
+        _trace_stage(trace_context, f"generation_result_L{level}", data={"ok": True, "result_url": generated_image_url})
+
         if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
             solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode=mode)
+            _trace_stage(trace_context, f"solo_gate_L{level}", data={"solo_ok": solo_ok, "reason": solo_reason})
             if not solo_ok:
                 print(f"⚠️ [SOLO_GATE_REJECTED] mode={mode} reason={solo_reason}")
                 if msg:
@@ -6677,15 +6857,20 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
         if isinstance(visual_dict, dict):
             visual_dict["engine"] = engine_name
+            visual_dict["trace_id"] = trace_context.get("trace_id")
+        trace_context["result_url"] = generated_image_url
+        trace_context["final_level"] = level
+        _write_generation_trace(trace_context.get("kind"), trace_context)
         return generated_image_url, visual_dict
 
     if msg:
         await msg.edit(content=f"🚨 警告：連續五級脫敏皆遭攔截，啟動最終【保留場景骨架的絕對安全保底】...")
     ultimate_safe_prompt = _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt)
+    _trace_stage(trace_context, "ultimate_safe_prompt", prompt=ultimate_safe_prompt, data={"mode": mode})
     if isinstance(visual_dict, dict):
         visual_dict["composition"] += "\n*(⚠️ 神祕審查力量過於強大，小俠已自動換上最安全造型，但仍盡力保留場景骨架)*"
 
-    final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt, current_outfit=current_outfit)
+    final_url = await generate_world_composite(discord_image_url, base_filename, mode, ultimate_safe_prompt, current_outfit=current_outfit, trace_context=trace_context)
     if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
@@ -6695,6 +6880,10 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             raise Exception(f"最終保底仍混入第二人/男人/外來肢體：{solo_reason}")
     if isinstance(visual_dict, dict):
         visual_dict["engine"] = engine_name
+        visual_dict["trace_id"] = trace_context.get("trace_id")
+    trace_context["result_url"] = final_url
+    trace_context["final_level"] = "ultimate"
+    _write_generation_trace(trace_context.get("kind"), trace_context)
     return final_url, visual_dict
 
 @girlfriend_bot.command(name='cosplay')
@@ -6727,6 +6916,18 @@ async def cosplay(ctx, *, mode: str = "auto"):
         await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
         _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"))
         scene_prompt = visual['image_prompt']
+        trace_context = {
+            "kind": "cosplay",
+            "action": "cosplay_initial",
+            "user_input": ctx.message.content,
+            "user_mode_request": mode,
+            "story_mode": story_mode,
+            "vibe_mode": vibe_mode,
+            "story": story,
+            "cosplay_state": _cosplay_state,
+            "visual": visual,
+        }
+        _trace_stage(trace_context, "cosplay_visual_planned", data={"story": story, "cosplay_state": _cosplay_state, "visual": visual}, prompt=scene_prompt)
 
         # 👇 替換為以下這一行呼叫：自動執行 1~5 級安檢與重試！
         generated_image_url, visual = await execute_safe_generation(
@@ -6735,7 +6936,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
             mode="cosplay", 
             initial_prompt=scene_prompt, 
             visual_dict=visual, 
-            msg=msg
+            msg=msg,
+            trace_context=trace_context
         )
 
         post_text = await write_cosplay_post_text(story, visual=visual, cosplay_state=_cosplay_state)
@@ -6771,6 +6973,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "user_mode_request": mode,
             "vibe_mode": vibe_mode,
             "cosplay_state": _cosplay_state,
+            "trace_id": trace_context.get("trace_id"),
         }
         db = load_memory()
         db.insert(0, payload)
@@ -6976,11 +7179,12 @@ def _seedream_error_is_retryable(value):
     ))
 
 
-async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True):
+async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True, trace_context=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
     fal_client = _get_fal_client()
     image_urls = await _seedream_upload_reference_images()
     final_prompt = _seedream_cosplay_prompt(custom_prompt)
+    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     def _subscribe():
         def on_queue_update(update):
@@ -7250,7 +7454,7 @@ def _build_outfit_state_from_context(context):
         return None
     return {
         "date": _today_str_tpe(),
-        "description": _clean_text_compact(context.get("outfit_summary") or "自然日常穿搭"),
+        "description": _wardrobe_visual_summary_only(context.get("outfit_summary") or "自然日常穿搭") or _clean_text_compact(context.get("outfit_summary") or "自然日常穿搭"),
         "source": context.get("source_mode", "photo_scene"),
         "scene_summary": _clean_text_compact(context.get("scene_summary") or ""),
         "reference_item_path": context.get("reference_item_path"),
@@ -8902,10 +9106,11 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
     return base + "\n\nPHOTO REQUEST:\n" + str(custom_prompt or "").strip()
 
 
-async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None):
+async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None, trace_context=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     fal_client = _get_fal_client()
     final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit)
+    _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     async def _build_image_urls(force_reference_refresh=False):
         urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
@@ -8979,7 +9184,7 @@ def _seedream_repair_prompt(custom_prompt):
     )
 
 
-async def generate_seedream_v45_repair(original_image_path, repair_request, enable_safety_checker=True):
+async def generate_seedream_v45_repair(original_image_path, repair_request, enable_safety_checker=True, trace_context=None):
     """Seedream v4.5 修正版：Image 10 是要修的原圖，只改指定瑕疵，保留構圖與氛圍。"""
     if not original_image_path:
         raise RuntimeError("REPAIR_IMAGE_PATH_NONE：沒有可修正的原圖。")
@@ -8988,6 +9193,7 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
     image_urls.append(await _seedream_upload_single_file(original_image_path))
     image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     final_prompt = _seedream_repair_prompt(repair_request)
+    _trace_stage(trace_context, "seedream_repair_final_prompt", prompt=final_prompt, data={"original_image_path": original_image_path, "model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     def _subscribe():
         def on_queue_update(update):
@@ -9038,10 +9244,19 @@ async def _ensure_context_local_path(context):
 
 
 async def _repair_photo_context(context, repair_request, msg=None):
+    trace_context = {
+        "kind": "repair",
+        "action": "photo_repair",
+        "source_mode": context.get("source_mode") or context.get("type") or "photo",
+        "original_trace_id": context.get("trace_id"),
+        "repair_request": str(repair_request or "").strip(),
+        "original_context": context,
+    }
+    _trace_stage(trace_context, "repair_context_input", data=context, prompt=repair_request)
     source_path = await _ensure_context_local_path(context)
     if msg:
         await msg.edit(content="🩹 小俠正在保留原本構圖與氛圍，只修大俠指定的地方…")
-    generated_image_url = await generate_seedream_v45_repair(source_path, repair_request, enable_safety_checker=True)
+    generated_image_url = await generate_seedream_v45_repair(source_path, repair_request, enable_safety_checker=True, trace_context=trace_context)
     if not generated_image_url or not str(generated_image_url).startswith("http"):
         raise RuntimeError(f"修圖失敗：{generated_image_url}")
 
@@ -9057,6 +9272,7 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "local_filename": local_filename,
         "local_path": local_path,
         "repair_request": str(repair_request or "").strip(),
+        "trace_id": trace_context.get("trace_id"),
         "repaired_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "composition": context.get("composition") or context.get("scene_summary") or "修正版照片",
         "mood_summary": context.get("mood_summary") or context.get("mood") or "保留原本氛圍的修正版",
@@ -9064,6 +9280,8 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "source_mode": context.get("source_mode", context.get("type", "photo_repair")),
         "type": context.get("type", context.get("source_mode", "photo")),
     })
+    trace_context["result_url"] = local_url
+    _write_generation_trace("repair", trace_context)
     return repaired
 
 
@@ -9180,6 +9398,7 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "local_url": context.get("local_url", context.get("image_url", "")),
         "type": type_override,
         "source_mode": context.get("source_mode", "photo_scene"),
+        "trace_id": context.get("trace_id"),
         "reference_item_path": context.get("reference_item_path"),
         "reference_item_url": context.get("reference_item_url"),
     }
@@ -9310,6 +9529,20 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
 
 
 async def _generate_photo_from_context(context, msg=None):
+    trace_context = context.get("__trace_context") if isinstance(context.get("__trace_context"), dict) else {
+        "kind": "photo",
+        "action": context.get("trace_action") or "photo_generate",
+        "source_mode": context.get("source_mode", "photo_scene"),
+        "user_input": context.get("user_input") or context.get("scene_text") or "",
+        "scene_seed_text": context.get("scene_text") or "",
+        "photo_mode_override": context.get("photo_mode_override"),
+        "wardrobe_id": context.get("wardrobe_id"),
+        "used_pending_wardrobe": context.get("used_pending_wardrobe"),
+        "current_outfit_for_seedream": context.get("current_outfit_for_seedream"),
+    }
+    trace_context.setdefault("kind", "photo")
+    trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
+    _trace_stage(trace_context, "photo_context_input", data=context, prompt=context.get("prompt_base", ""))
     visual = _photo_visual_dict(
         {
             "scene_summary": context.get("scene_summary", ""),
@@ -9325,7 +9558,8 @@ async def _generate_photo_from_context(context, msg=None):
         reference_item_url=context.get("reference_item_url"),
         user_scene_hardlock=context.get("scene_text", ""),
     )
-    print(f"🎬 [PHOTO_SEEDREAM_START] mode={context.get('source_mode', 'photo_scene')}")
+    _trace_stage(trace_context, "photo_visual_dict", data=visual)
+    print(f"🎬 [PHOTO_SEEDREAM_START] mode={context.get('source_mode', 'photo_scene')} trace_id={trace_context.get('trace_id')}")
     generated_image_url, visual = await execute_safe_generation(
         discord_image_url=context.get("reference_item_path"),
         base_filename="base_xiaoxia.jpg",
@@ -9334,6 +9568,7 @@ async def _generate_photo_from_context(context, msg=None):
         visual_dict=visual,
         msg=msg,
         current_outfit=context.get("current_outfit_for_seedream"),
+        trace_context=trace_context,
     )
     print(f"🌱 [PHOTO_SEEDREAM_RESULT_URL] {generated_image_url}")
     local_filename = await save_to_vault(generated_image_url)
@@ -9353,7 +9588,17 @@ async def _generate_photo_from_context(context, msg=None):
         "mood_summary": visual.get("mood", context.get("mood_summary", "")),
         "message": visual.get("message", context.get("message", "")),
         "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "trace_id": trace_context.get("trace_id"),
     })
+    trace_context.update({
+        "source_mode": context.get("source_mode"),
+        "scene_summary": context.get("scene_summary"),
+        "action_summary": context.get("action_summary"),
+        "outfit_summary": context.get("outfit_summary"),
+        "wardrobe_id": context.get("wardrobe_id"),
+        "result_url": context.get("local_url") or context.get("image_url"),
+    })
+    _write_generation_trace("photo", trace_context)
     return context
 
 
@@ -9443,7 +9688,7 @@ async def handle_unified_photo_command(message, user_input):
     if pending_wardrobe:
         wardrobe_hint = _wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=photo_mode_override == "wardrobe_free")
         scene_data["outfit_summary"] = (
-            (pending_wardrobe.get("style_summary") or "")
+            _wardrobe_visual_summary_only(pending_wardrobe)
             or f"{pending_wardrobe.get('name')}（{pending_wardrobe.get('main_category')}/{pending_wardrobe.get('sub_category')}）"
         )
     else:
@@ -9464,6 +9709,30 @@ async def handle_unified_photo_command(message, user_input):
             + wardrobe_hint
             + "\nDo not let a text label override the garment category shown in Image 10."
         )
+    trace_context = {
+        "kind": "photo",
+        "action": "photo_initial",
+        "source_mode": source_mode,
+        "user_input": raw_input,
+        "raw_scene_text": raw_scene_text,
+        "scene_seed_text": scene_seed_text,
+        "photo_mode_override": photo_mode_override,
+        "has_attachment": bool(attachment),
+        "used_pending_wardrobe": bool(pending_wardrobe),
+        "wardrobe_mode": "wardrobe_free" if photo_mode_override == "wardrobe_free" else ("pending_fixed" if pending_wardrobe else "none"),
+        "wardrobe_id": wardrobe_id,
+        "wardrobe_name": pending_wardrobe.get("name") if pending_wardrobe else "",
+        "wardrobe_style_summary_raw": pending_wardrobe.get("style_summary") if pending_wardrobe else "",
+        "wardrobe_visual_summary_used": _wardrobe_visual_summary_only(pending_wardrobe) if pending_wardrobe else "",
+        "wardrobe_hint_used": wardrobe_hint,
+        "wardrobe_scene_hint_allowed": wardrobe_scene_hint_allowed,
+        "current_outfit_state": current_outfit_state,
+        "keep_today_outfit": keep_today_outfit,
+        "explicit_outfit_change": explicit_outfit_change,
+        "scene_data": scene_data,
+    }
+    _trace_stage(trace_context, "photo_scene_data", data=scene_data, prompt=prompt_base)
+
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
@@ -9480,6 +9749,8 @@ async def handle_unified_photo_command(message, user_input):
         "current_outfit_for_seedream": (current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
         "used_pending_wardrobe": bool(pending_wardrobe),
         "photo_mode_override": photo_mode_override,
+        "user_input": raw_input,
+        "__trace_context": trace_context,
     }
 
     try:
@@ -9788,6 +10059,18 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         user_outfit_hints=story.get("user_outfit_hints"),
     )
     scene_prompt = visual["image_prompt"]
+    trace_context = {
+        "kind": "cosplay",
+        "action": "cosplay_full_reroll",
+        "user_input": f"重擲 cosplay from mode={raw_mode}",
+        "user_mode_request": raw_mode,
+        "story_mode": story_mode,
+        "vibe_mode": vibe_mode,
+        "story": story,
+        "cosplay_state": cosplay_state,
+        "visual": visual,
+    }
+    _trace_stage(trace_context, "cosplay_reroll_visual_planned", data={"story": story, "cosplay_state": cosplay_state, "visual": visual}, prompt=scene_prompt)
     generated_image_url, visual = await execute_safe_generation(
         discord_image_url=None,
         base_filename="base_xiaoxia.jpg",
@@ -9795,6 +10078,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         initial_prompt=scene_prompt,
         visual_dict=visual,
         msg=msg,
+        trace_context=trace_context,
     )
     post_text = await write_cosplay_post_text(story, visual=visual, cosplay_state=cosplay_state)
     local_filename = await save_to_vault(generated_image_url)
@@ -9839,6 +10123,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "user_mode_request": raw_mode,
         "vibe_mode": vibe_mode,
         "cosplay_state": cosplay_state,
+        "trace_id": trace_context.get("trace_id"),
     }
 
 class PhotoResultView(discord.ui.View):
@@ -9850,6 +10135,9 @@ class PhotoResultView(discord.ui.View):
     async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
+        context.pop("__trace_context", None)
+        context["trace_action"] = "photo_more"
+        context["user_input"] = "More button from previous photo"
         context["prompt_base"] = (
             context.get("prompt_base", "")
             + "\nCreate a new variation of the same moment: same scene, same outfit/accessory reference, same mood, but with a different natural pose, camera angle, facial expression, and composition."
@@ -9880,6 +10168,9 @@ class PhotoResultView(discord.ui.View):
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         context = dict(self.context)
+        context.pop("__trace_context", None)
+        context["trace_action"] = "photo_reroll_replace"
+        context["user_input"] = "骰子取代 from previous photo"
         context["prompt_base"] = (
             context.get("prompt_base", "")
             + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
@@ -10015,7 +10306,7 @@ async def _generate_gpt_image2_fallback(discord_image_url=None, base_filename="b
                 pass
 
 
-async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="photo_scene", custom_prompt="", current_outfit=None):
+async def generate_world_composite(discord_image_url=None, base_filename="base_xiaoxia.jpg", mode="photo_scene", custom_prompt="", current_outfit=None, trace_context=None):
     """
     影像總入口：
     - 除小朋友說故事等獨立模組外，預設一律優先 Seedream v4.5。
@@ -10023,7 +10314,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
     """
     try:
         if mode == "cosplay":
-            return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True)
+            return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True, trace_context=trace_context)
         if mode == "diary":
             if discord_image_url:
                 return await generate_seedream_v45_photo(
@@ -10031,12 +10322,13 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
                     reference_image_path=discord_image_url,
                     enable_safety_checker=True,
                     current_outfit=current_outfit,
+                    trace_context=trace_context,
                 )
             return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
         if mode == "photo_scene":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit, trace_context=trace_context)
         if mode == "photo_reference":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True, current_outfit=current_outfit)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True, current_outfit=current_outfit, trace_context=trace_context)
 
         # 舊 travel / shopping / 未分類圖片模式也先轉 Seedream v4.5，避免回到 gpt-image-2 舊路徑。
         if mode in {"travel", "shopping", "default", "world", "scene"} or mode != "gpt_image_2_fallback":
@@ -10052,6 +10344,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
                 reference_image_path=reference_path,
                 enable_safety_checker=True,
                 current_outfit=current_outfit,
+                trace_context=trace_context,
             )
 
         if mode == "gpt_image_2_fallback" and os.environ.get("ENABLE_GPT_IMAGE2_FALLBACK", "false").lower() in {"1", "true", "yes"}:
@@ -10937,6 +11230,35 @@ async def _send_wardrobe_browse_message(ctx, query="", page=0):
         lines.append("\n可用 `/衣櫃看 Wxxx` 查看單件大圖，或 `/衣櫃穿 Wxxx` 套用到下一張 `/photo`。")
         await ctx.send("\n".join(lines)[:1900], view=view if total else None)
 
+
+
+@girlfriend_bot.command(name='trace')
+async def generation_trace_command(ctx, *, args: str = "最近"):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel):
+        await ctx.send("大俠，`/trace` 先只開放在女友小俠的私人頻道使用喔。")
+        return
+    raw = str(args or "最近").strip()
+    parts = raw.split()
+    kind = "all"
+    limit = 1
+    if parts:
+        if parts[0] in {"最近", "latest", "last"}:
+            kind = "all"
+            if len(parts) > 1 and parts[1].isdigit():
+                limit = int(parts[1])
+        else:
+            kind = parts[0].lower()
+            if len(parts) > 1 and parts[1].isdigit():
+                limit = int(parts[1])
+    aliases = {"照片": "photo", "修圖": "repair", "修正": "repair", "交換日記": "diary", "日記": "diary", "角色": "cosplay"}
+    kind = aliases.get(kind, kind)
+    rows = _load_recent_generation_traces(kind=kind, limit=max(1, min(limit, 5)))
+    if not rows:
+        await ctx.send("🧭 目前還沒有可讀的 generation trace。先跑一次 `/photo`、`/cosplay` 或修正圖後再查。")
+        return
+    # 最舊到最新讀入，顯示時最新優先。
+    for row in reversed(rows):
+        await ctx.send("🧭 **Generation Trace**\n```\n" + _format_trace_for_discord(row) + "\n```")
 
 @girlfriend_bot.command(name='衣櫃')
 async def wardrobe_command(ctx, *, args: str = ""):
