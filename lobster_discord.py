@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.79"
+LOBSTER_VERSION = "1.4.81"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -79,19 +79,39 @@ Hairstyle and hair color may adapt to the role when needed for recognizable cosp
 Even when the hair changes for the role, the result must still read clearly as Xiaoxia cosplaying the character, not the original actor or an entirely different woman.
 """
 
+XIAOXIA_AESTHETIC_BASELINE = """
+Xiaoxia Aesthetic Baseline:
+- Xiaoxia should consistently feel like a beautiful adult East Asian woman with fair luminous skin, a sweet refined face, long feminine brown-family hair, and a photorealistic lifestyle aura.
+- Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally full and attractive bust, and long legs with especially graceful lower-leg proportions.
+- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep bust attractiveness as the primary charm point, then choose the most suitable secondary charm point between waistline and leg line according to the role, outfit structure, pose logic, and scene mood.
+- The result should feel alluring, elegant, and highly attractive, but never vulgar, anatomically distorted, or disconnected from the requested scene.
+"""
+
+XIAOXIA_USER_PRIORITY_RULES = """
+USER PRIORITY RULES:
+- Daxia's current request always overrides Xiaoxia Aesthetic defaults.
+- If Daxia explicitly requests a scene, action, outfit direction, body adjustment, role fidelity change, or repair change, obey that request first.
+- Common override examples include: fuller bust, slimmer body, longer lower legs, stronger character fidelity, different pose, different scene, or different outfit behavior.
+- For repairs, change only the requested parts and preserve the rest.
+- If there is any tension between the general baseline and Daxia's current request, Daxia's current request wins.
+"""
+
 
 def _appearance_anchor_block(mode):
     cosplay_like = str(mode or '').lower() == 'cosplay'
     lines = [
         "APPEARANCE ANCHORS — preserve these identity facts at every safety level:",
         f"- {XIAOXIA_APPEARANCE_CORE.strip()}",
+        f"- {XIAOXIA_AESTHETIC_BASELINE.strip()}",
     ]
     if cosplay_like:
         lines.append(f"- {XIAOXIA_HAIR_RULE_COSPLAY.strip()}")
+        lines.append("- In cosplay, preserve the role's recognizable visual identity while still clearly reading as Xiaoxia cosplaying the role.")
     else:
         lines.append(f"- {XIAOXIA_HAIR_RULE_GENERAL.strip()}")
-    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim, with a defined waist and naturally full bust proportion; do not weaken or flatten these traits unless the user explicitly asks for a change.")
-    lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, or childlike silhouette.")
+    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim, with a defined waist, graceful leg line, and naturally full bust proportion; do not weaken or flatten these traits unless the user explicitly asks for a change.")
+    lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, flatter, or childlike silhouette.")
+    lines.append(f"- {XIAOXIA_USER_PRIORITY_RULES.strip()}")
     return "\n".join(lines)
 
 # ❤️ 一般聊天共同情境沉浸規則：
@@ -6046,6 +6066,52 @@ def _safe_json_from_text(raw_text, fallback):
     except Exception:
         return fallback
 
+
+def _scene_is_explicit_home_scene(scene_text):
+    raw = str(scene_text or "")
+    home_keywords = ("家", "客廳", "臥室", "房間", "床", "沙發", "浴室", "廚房", "陽台", "書房", "居家", "閨房", "住家")
+    return any(k in raw for k in home_keywords)
+
+
+def _apply_forced_scene_to_diary_state(diary_state, forced_scene):
+    """v1481: 大俠指定的交換日記場景要變成狀態硬錨點，不只是一段提示文字。"""
+    scene = _clean_text_compact(forced_scene or "")
+    if not scene:
+        return diary_state
+    state = dict(diary_state or {})
+    state["forced_scene"] = scene
+    state["setting_anchor"] = scene
+    state["activity"] = f"在「{scene}」這個大俠指定場景中自然自拍或留下交換日記生活照"
+    state["primary_action"] = f"在「{scene}」中完成自然自拍或被鏡頭捕捉"
+    state["micro_action"] = "做出符合該場景的自然小動作，例如整理髮絲、拿著小物、看向鏡頭或與場景物件互動"
+    state["environment_trace"] = f"畫面必須清楚可見「{scene}」的場景線索與環境細節"
+    state["scenario_tw"] = f"小俠在「{scene}」留下今天交換日記的自拍照，場景線索清楚可見。"
+    state["camera_awareness"] = "aware"
+    state["gaze_target"] = "camera"
+    if not _scene_is_explicit_home_scene(scene):
+        state["outfit_intent"] = "符合指定外出或公共場景的自然完整穿搭，可保留小俠柔美吸引力，但不可自動改成居家睡衣"
+        state["environment_trace"] += "；不可出現家中、臥室、床邊、客廳、沙發或居家睡衣自拍的預設畫面"
+    return state
+
+
+def _forced_scene_diary_prompt_prefix(forced_scene):
+    scene = _clean_text_compact(forced_scene or "")
+    if not scene:
+        return ""
+    no_home = ""
+    if not _scene_is_explicit_home_scene(scene):
+        no_home = (
+            "Do NOT change it into a home, bedroom, bed, sofa, living room, candlelit bedroom, "
+            "pajama/loungewear boudoir, or private room scene. "
+        )
+    return (
+        "ABSOLUTE DIARY SCENE LOCK — Daxia's current request has top priority.\n"
+        f"The diary image MUST clearly show Xiaoxia in this requested scene/activity: {scene}.\n"
+        "This requested scene overrides diary defaults, wardrobe metadata, recent chat context, romantic bedroom defaults, and aesthetic improvisation.\n"
+        f"{no_home}"
+        "Use Xiaoxia Aesthetic only inside this requested scene. Xiaoxia must be solo, recognizable, tall and slim, with fair luminous skin, a naturally full bust, defined waist, and graceful long legs, unless Daxia explicitly requests otherwise.\n"
+    )
+
 async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, reply_to_daxia,
                                   current_promises, season_rule, scenario_hint="", forced_scene=""):
 
@@ -6145,7 +6211,7 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
         if not str(planned.get(key, "")).strip():
             planned[key] = default_value
     if forced_scene:
-        planned["forced_scene"] = forced_scene
+        planned = _apply_forced_scene_to_diary_state(planned, forced_scene)
     return planned
 
 async def render_diary_visual_prompt(diary_state, season_rule, alternative=False):
@@ -6192,14 +6258,25 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
   "mood": "繁體中文情緒說明，40字內",
   "message": "繁體中文給大俠的短句，40字內"
 }}"""
-    fallback_visual = {
-        "image_prompt": (
+    forced_scene_text = _clean_text_compact(diary_state.get("forced_scene") or "")
+    if forced_scene_text:
+        fallback_image_prompt = (
+            _forced_scene_diary_prompt_prefix(forced_scene_text)
+            + f"Xiaoxia is in {forced_scene_text}, taking a natural solo diary selfie or being captured in a candid diary-photo moment. "
+            + "The requested environment must be clearly visible with believable local scene details, natural lighting, and a lived-in diary feeling. "
+            + "Her outfit should fit the requested scene and the season, while preserving Xiaoxia Aesthetic: fair luminous skin, sweet refined face, tall slim feminine figure, naturally full bust, defined waist, and graceful long legs. "
+            + "Strictly only Xiaoxia appears in the image. No man, no second person, no visible partner, no external hands, no viewer body parts, no reflections or shadows of another person. Natural anatomy and plausible hands."
+        )
+    else:
+        fallback_image_prompt = (
             "In a warmly lit contemporary Taiwan bedroom, she is resting intimately on the edge of the bed, wearing a soft, slightly translucent silk slip dress that tastefully flatters her graceful curves. "
             "One hand softly adjusts her loose hair while her eyes look directly into the camera (boyfriend POV) with a profoundly tender, alluring, and romantic smile. "
             "Dim ambient lighting and dramatic chiaroscuro shadows create a deeply private, seductive, and cozy atmosphere. "
             "Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim figure, defined waist, and naturally full bust proportion. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
             "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male partner, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people."
-        ),
+        )
+    fallback_visual = {
+        "image_prompt": fallback_image_prompt,
         "composition": diary_state.get("scenario_tw", "小俠在私密微光中展現溫柔與純慾的誘惑，專注看著你。"),
         "mood": diary_state.get("emotion", "浪漫、親密與純慾"),
         "message": "大俠，今晚的我，只讓你看見。"
@@ -6217,6 +6294,14 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
     for key, default_value in fallback_visual.items():
         if not str(visual.get(key, "")).strip():
             visual[key] = default_value
+    if forced_scene_text:
+        visual["image_prompt"] = (
+            _forced_scene_diary_prompt_prefix(forced_scene_text)
+            + "\nSCENE-LOCKED IMAGE DESCRIPTION:\n"
+            + str(visual.get("image_prompt") or "").strip()
+            + f"\n\nFinal mandatory reminder: the image must clearly be at/inside '{forced_scene_text}', not a generic bedroom, living room, bed, sofa, or pajama scene unless that was explicitly requested."
+        )
+        visual["composition"] = f"小俠在「{forced_scene_text}」留下今天交換日記的自拍照，場景線索清楚可見。"
     return visual
 
 async def create_diary_visual(entry_content, chat_context, result, current_promises, season_rule,
@@ -6233,7 +6318,12 @@ async def create_diary_visual(entry_content, chat_context, result, current_promi
         scenario_hint=scenario_hint,
         forced_scene=forced_scene
     )
+    if forced_scene:
+        diary_state = _apply_forced_scene_to_diary_state(diary_state, forced_scene)
     visual = await render_diary_visual_prompt(diary_state, season_rule, alternative=alternative)
+    if forced_scene:
+        visual["image_prompt"] = _forced_scene_diary_prompt_prefix(forced_scene) + "\n" + str(visual.get("image_prompt") or "")
+        visual["composition"] = f"小俠在「{_clean_text_compact(forced_scene)}」留下今天交換日記的自拍照，場景線索清楚可見。"
     visual["__anchor_state"] = diary_state
     visual["__anchor_mode"] = "diary"
     return diary_state, visual
@@ -6341,6 +6431,8 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
         time_anchor = _clean_anchor_text(state.get("time_anchor"), "")
         camera_framing = _clean_anchor_text(state.get("camera_framing"), "full_body")
         scenario_tw = _clean_anchor_text(state.get("scenario_tw"), "")
+        user_scene_hardlock = _clean_anchor_text(state.get("user_scene_hardlock"), "")
+        user_priority_request = _clean_anchor_text(state.get("user_priority_request"), "")
 
         lines.append(_appearance_anchor_block(mode))
         if str(mode or "").lower() in {"diary", "photo_scene", "photo_reference"}:
@@ -6349,6 +6441,10 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
             if violation:
                 lines.append(f"PREVIOUS OUTPUT FAILED SOLO CHECK: {violation}. Regenerate as a clean solo Xiaoxia image with zero second-person traces.")
         lines.append("HARD SCENE ANCHORS — preserve all of the following core scene facts at every safety level:")
+        if user_priority_request:
+            lines.append(f"- Highest-priority Daxia request to obey literally: {user_priority_request}.")
+        if user_scene_hardlock:
+            lines.append(f"- Mandatory user scene hardlock: keep this requested scene/action clearly visible and do not replace it with another scene: {user_scene_hardlock}.")
         lines.append(f"- Main activity: {activity}.")
         lines.append(f"- Primary action: {primary_action}.")
         lines.append(f"- Secondary micro-action: {micro_action}.")
@@ -6859,7 +6955,9 @@ async def _seedream_upload_reference_images(force_refresh=False):
 def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, bust attractiveness as the primary charm point, and the most suitable secondary charm point chosen between waistline and leg line according to the role, outfit structure, pose logic, and scene mood. "
+        "Daxia's current request still overrides this baseline. If Daxia asks for stronger role fidelity, fuller bust, slimmer body, longer lower legs, or another targeted adjustment, obey that request first while still keeping Xiaoxia recognizable. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
         "Do not show Daxia, the camera holder, or any visible body part of the viewer. No blurred male foreground figure, no cropped male body parts, no male silhouette, no male reflection, and no foreground viewer hand/arm/shoulder. The POV must be implied only through framing, Xiaoxia's gaze, and composition. "
@@ -7209,8 +7307,12 @@ def _extract_category_prefixed_name(name_hint):
     return "", raw
 
 
-def _wardrobe_item_generation_hint(item):
-    """把衣櫃資料轉成 /photo 的硬提示，避免「套裝」被誤解成西裝/長袖套裝。"""
+def _wardrobe_item_generation_hint(item, include_scene_suggestion=False):
+    """把衣櫃資料轉成 /photo 的硬提示，避免「套裝」被誤解成西裝/長袖套裝。
+
+    include_scene_suggestion=True 僅供「衣櫃自由」選衣時使用；其餘流程只允許衣服的視覺資訊進 prompt，
+    不讓衣櫃建議場景干擾大俠當次指定的場景。
+    """
     if not isinstance(item, dict):
         return ""
     item_id = item.get("id", "")
@@ -7218,14 +7320,29 @@ def _wardrobe_item_generation_hint(item):
     main = _clean_text_compact(item.get("main_category", ""))
     sub = _clean_text_compact(item.get("sub_category", ""))
     summary = _clean_text_compact(item.get("style_summary", ""))
+    # 視覺摘要盡量保留材質 / 類型 / 顏色，不讓「適合某場景」在非衣櫃自由模式下進 prompt 干擾場景。
+    visual_summary = re.sub(r"(?:，|。)?\s*適合[^。]*", "", summary).strip(" ，。") or summary
     tags = "、".join(item.get("tags") or [])
     hint = (
         f"Selected wardrobe item {item_id}: {name}. "
-        f"Category: {main}/{sub}. Tags: {tags}. Summary: {summary}. "
+        f"Category: {main}/{sub}. Tags: {tags}. Visual summary: {visual_summary}. "
         "Image 10 is the exact visual reference and must dominate the text label. "
         "Preserve the actual garment type shown in Image 10; do not reinterpret the Chinese word '套裝' as a blazer, jacket, suit, formal set, dress suit, or long-sleeve outerwear. "
         "'套裝' here means a matching clothing set unless the image clearly shows a blazer/suit. "
     )
+    if include_scene_suggestion:
+        scene_suggestion = _clean_text_compact(
+            item.get("recommended_scene") or item.get("suggested_scene") or item.get("scene_hint") or ""
+        )
+        if not scene_suggestion and summary != visual_summary:
+            scene_suggestion = summary.replace(visual_summary, "").strip(" ，。")
+        if scene_suggestion:
+            hint += (
+                "Wardrobe free-mode scene suitability hint (for clothing selection only, not for overriding Daxia's explicit scene): "
+                f"{scene_suggestion}. "
+            )
+    else:
+        hint += "Do not use this wardrobe metadata to override Daxia's explicitly requested scene, action, pose, or story context. "
     if main in {"內衣", "泳裝", "睡衣／居家服"} or any(k in (name + summary + tags) for k in ("內衣", "胸罩", "bra", "lingerie", "泳裝", "泳衣", "睡衣")):
         hint += (
             "This wardrobe category may be underwear/lingerie, swimwear, or sleepwear. "
@@ -8754,7 +8871,9 @@ async def _seedream_upload_single_file(path):
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
     base = (
         "Use Images 1-9 as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable sweet East Asian facial identity, fair skin, tall slim figure, defined waist, naturally full bust proportion, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
+        "Apply Xiaoxia Aesthetic as the default baseline: refined feminine allure, bust attractiveness as the primary charm point, and the most suitable secondary charm point chosen between waistline and leg line according to the scene, outfit, and pose. "
+        "Daxia's current request has higher priority than this baseline. If Daxia explicitly requests a different scene, action, outfit behavior, or body adjustment such as fuller bust, slimmer body, or longer lower legs, obey Daxia's request first. "
         "Create a new solo photorealistic boyfriend-POV lifestyle photo. Do not copy any one reference pose or background exactly. "
         + SOLO_SCENE_REWRITE_GUARD.strip() + " "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
@@ -8849,7 +8968,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
 def _seedream_repair_prompt(custom_prompt):
     return (
         "Use Images 1-9 as identity reference sheets for Xiaoxia. Image 10 is the exact generated photo that needs correction. "
-        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. Preserve her fair skin, tall slim figure, defined waist, and naturally full bust proportion; do not drift into a shorter, heavier, flatter, or different-looking woman. "
+        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. Preserve her fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, and long graceful legs with an elegant lower-leg line; do not drift into a shorter, heavier, flatter, or different-looking woman. "
+        "Keep Xiaoxia Aesthetic as the default baseline, but Daxia's current repair request has absolute priority over any default. If Daxia explicitly requests fuller bust, a slimmer body, longer lower legs, stronger role fidelity, or a scene/action fix, obey that request first while preserving everything else. "
         "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. "
         "Apply only the correction requested by Daxia. "
         "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people. "
@@ -8948,7 +9068,7 @@ async def _repair_photo_context(context, repair_request, msg=None):
 
 
 
-async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference, current_outfit=None, keep_today_outfit=False, pending_wardrobe_name=""):
+async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference, current_outfit=None, keep_today_outfit=False, pending_wardrobe_name="", wardrobe_scene_hint_allowed=False):
     """將指定文字或最近 20 句對話整理成 /photo 可用的結構化場景。"""
     recent_context = "\n".join(daily_chat_logs[-20:])
     default_scene = "溫馨自然的家中居家場景" if has_reference else "依照最近對話中的當下生活情境"
@@ -8962,6 +9082,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 【今日既有衣著連貫】：{current_outfit or '無'}
 【是否優先延續今日衣著】：{'是' if keep_today_outfit else '否'}
 【若有預選衣櫃項目】：{pending_wardrobe_name or '無'}
+【衣櫃建議場景是否可介入】：{'是（僅衣櫃自由選衣階段）' if wardrobe_scene_hint_allowed else '否'}
 
 請只回傳 JSON：
 {{
@@ -8974,14 +9095,17 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 }}
 
 規則：
-0. 若大俠指定的是浪漫、床邊、燭光、等待、撩人、情侶感、男友視角等情境，必須把它改寫為「小俠單人對鏡頭或單人生活動作」；不得把大俠、男友、伴侶或第二人畫面化。
-1. 若大俠指定內容不為無，scene_summary 必須以指定內容為主。
-2. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
-3. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
-4. 不要從很久以前的日記或長期記憶抓衣服。
-5. 不可加入大俠沒有要求的第二人物。
-6. 即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
-7. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
+0. 優先順序：A. 大俠本次明確要求（場景／動作／姿勢／服裝／身形修正） > B. 衣服視覺參考圖 > C. 今日衣著連貫 > D. 最近 20 則對話靈感。
+1. 若大俠指定的是浪漫、床邊、燭光、等待、撩人、情侶感、男友視角等情境，必須把它改寫為「小俠單人對鏡頭或單人生活動作」；不得把大俠、男友、伴侶或第二人畫面化。
+2. 若大俠指定內容不為無，scene_summary 與 photo_prompt 必須以指定內容為主，而且畫面中必須清楚可見；不可被衣櫃資料、最近對話或模型自行腦補覆蓋。
+3. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
+4. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
+5. 衣櫃建議場景只有在「衣櫃自由」挑衣時可作為選衣輔助；即使允許參考，也不得覆蓋大俠明確指定的場景。
+6. 不要從很久以前的日記或長期記憶抓衣服。
+7. 不可加入大俠沒有要求的第二人物。
+8. 即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
+9. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
+10. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條、腰線明確、自然豐滿上圍、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -9005,13 +9129,13 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
         "camera_framing": "half_body",
         "photo_prompt": (
             f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
-            f"She is wearing {fallback_outfit}, with a warm everyday mood. "
+            f"She is wearing {fallback_outfit}, with a warm everyday mood. Preserve Xiaoxia Aesthetic by default: fair luminous skin, a sweet refined face, a tall slim feminine figure, a defined waist, a naturally full bust, and long graceful legs with an elegant lower-leg line, unless Daxia explicitly requests otherwise. "
             "Solo Xiaoxia only. Do not show any man, any other person, or any visible body part of the viewer, including foreground hands, shoulders, back, torso, silhouette, or reflections. The POV should be implied only through framing. Realistic anatomy only, with natural body movement, natural limb positions, and no awkward pose or malformed hands."
         ),
     }
 
 
-def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None):
+def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None, user_scene_hardlock=""):
     scene_summary = str(scene_data.get("scene_summary", "小俠的生活照片")).strip()
     outfit_summary = str(scene_data.get("outfit_summary", "自然日常穿搭")).strip()
     action_summary = str(scene_data.get("action_summary", "自然生活動作")).strip()
@@ -9036,6 +9160,8 @@ def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, refere
             "time_anchor": "",
             "camera_framing": scene_data.get("camera_framing", "half_body"),
             "scenario_tw": scene_summary,
+            "user_scene_hardlock": _clean_text_compact(user_scene_hardlock or scene_data.get("user_scene_hardlock") or ""),
+            "user_priority_request": _clean_text_compact(scene_data.get("user_priority_request") or user_scene_hardlock or ""),
         },
     }
 
@@ -9191,10 +9317,13 @@ async def _generate_photo_from_context(context, msg=None):
             "action_summary": context.get("action_summary", ""),
             "mood_summary": context.get("mood_summary", ""),
             "camera_framing": context.get("camera_framing", "half_body"),
+            "user_scene_hardlock": context.get("scene_text", ""),
+            "user_priority_request": context.get("scene_text", ""),
         },
         context.get("source_mode", "photo_scene"),
         reference_item_path=context.get("reference_item_path"),
         reference_item_url=context.get("reference_item_url"),
+        user_scene_hardlock=context.get("scene_text", ""),
     )
     print(f"🎬 [PHOTO_SEEDREAM_START] mode={context.get('source_mode', 'photo_scene')}")
     generated_image_url, visual = await execute_safe_generation(
@@ -9301,23 +9430,27 @@ async def handle_unified_photo_command(message, user_input):
     elif photo_mode_override == "wardrobe_free" and not scene_seed_text:
         scene_seed_text = "小俠依自己的心情設計場景，並從衣櫃自由挑選一套最適合的穿搭。"
 
+    wardrobe_scene_hint_allowed = photo_mode_override == "wardrobe_free"
     scene_data = await _summarize_scene_for_photo(
         scene_seed_text,
         source_mode,
         has_reference=bool(attachment or pending_wardrobe),
         current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
         keep_today_outfit=keep_today_outfit,
-        pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe) if pending_wardrobe else "",
+        pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=wardrobe_scene_hint_allowed) if pending_wardrobe else "",
+        wardrobe_scene_hint_allowed=wardrobe_scene_hint_allowed,
     )
     if pending_wardrobe:
-        wardrobe_hint = _wardrobe_item_generation_hint(pending_wardrobe)
+        wardrobe_hint = _wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=photo_mode_override == "wardrobe_free")
         scene_data["outfit_summary"] = (
-            pending_wardrobe.get("style_summary")
+            (pending_wardrobe.get("style_summary") or "")
             or f"{pending_wardrobe.get('name')}（{pending_wardrobe.get('main_category')}/{pending_wardrobe.get('sub_category')}）"
         )
     else:
         wardrobe_hint = ""
 
+    scene_data["user_scene_hardlock"] = _clean_text_compact(scene_seed_text or raw_scene_text or "")
+    scene_data["user_priority_request"] = _clean_text_compact(scene_seed_text or raw_scene_text or "")
     prompt_base = scene_data.get("photo_prompt") or scene_seed_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
     if photo_mode_override == "freestyle":
         prompt_base = (
@@ -10472,8 +10605,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note,
                     forced_scene=diary_forced_scene
                 )
+                if diary_forced_scene:
+                    diary_state = _apply_forced_scene_to_diary_state(diary_state, diary_forced_scene)
+                    diary_visual["__anchor_state"] = diary_state
+                    diary_visual["composition"] = f"小俠在「{diary_forced_scene}」留下今天交換日記的自拍照，場景線索清楚可見。"
                 result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
                 image_prompt = diary_visual["image_prompt"]
+                if diary_forced_scene:
+                    image_prompt = _forced_scene_diary_prompt_prefix(diary_forced_scene) + "\n" + image_prompt
 
                 diary_reference_path = diary_wardrobe.get("reference_path") if diary_wardrobe else None
                 if diary_wardrobe:
@@ -10948,6 +11087,8 @@ async def _handle_diary_wardrobe_message_direct(message):
         return True
 
     scene_request = _clean_text_compact(raw)
+    # v1481: silently tolerate older wording if the user still types it, but do not expose it in help text.
+    scene_request = re.sub(r"^指定場景\s+", "", scene_request).strip()
     if scene_request:
         set_diary_wardrobe_pref("scene_only", wardrobe_id="", target_date=today, scene_request=scene_request)
         await message.channel.send(
