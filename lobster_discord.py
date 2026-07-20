@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.94"
+LOBSTER_VERSION = "1.4.95"
 
 
 def _normalize_generation_level(level):
@@ -7868,6 +7868,31 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     _write_generation_trace(trace_context.get("kind"), trace_context)
     return final_url, visual_dict
 
+def _ctx_message_content(ctx, fallback=""):
+    """Return ctx.message.content when available; scheduled tasks may pass a TextChannel."""
+    msg = getattr(ctx, "message", None)
+    content = getattr(msg, "content", None)
+    if content:
+        return str(content)
+    return str(fallback or "")
+
+
+def _normalize_command_date(value):
+    """Normalize user date inputs like 2026-7-20 / 2026.07.20 / 2026/7/20 to YYYY-MM-DD."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # Keep only a date-like token if the whole command content was accidentally passed.
+    m = re.search(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})", raw)
+    if not m:
+        return ""
+    y, mo, d = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    try:
+        return datetime(y, mo, d).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
 @girlfriend_bot.command(name='cosplay')
 async def cosplay(ctx, *, mode: str = "auto"):
     if not check_daily_limit():
@@ -7901,7 +7926,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         trace_context = {
             "kind": "cosplay",
             "action": "cosplay_initial",
-            "user_input": ctx.message.content,
+            "user_input": _ctx_message_content(ctx, f"[auto_cosplay_task] /cosplay {mode}"),
             "user_mode_request": mode,
             "story_mode": story_mode,
             "vibe_mode": vibe_mode,
@@ -12906,31 +12931,51 @@ async def clear_today_outfit_command(ctx):
 @girlfriend_bot.command(name='cosplay_delete')
 async def cosplay_delete(ctx, date_str: str = None):
     db = load_memory()
-    if not db: 
+    if not db:
         await ctx.send("❓ 金庫目前是空的！")
         return
-    
-    if date_str:
-        search_date = date_str.replace(".", "-")
-        matching_records = [(idx, rec) for idx, rec in enumerate(db) if rec["publish_date"].startswith(search_date)]
-        msg_prefix = f"📅 找到 {date_str} 的紀錄："
+
+    # v1.4.95: accept 2026-7-20, 2026.07.20, 2026/07/20, and recover from raw command content.
+    raw_content = _ctx_message_content(ctx, "")
+    raw_date = date_str
+    if not raw_date and raw_content:
+        m = re.search(r"/cosplay_delete\s+([^\s]+)", raw_content)
+        if m:
+            raw_date = m.group(1)
+
+    if raw_date:
+        search_date = _normalize_command_date(raw_date)
+        if not search_date:
+            await ctx.send("⚠️ 日期格式錯誤。請使用：`/cosplay_delete 2026.07.20` 或 `/cosplay_delete 2026-7-20`")
+            return
+        matching_records = [
+            (idx, rec)
+            for idx, rec in enumerate(db)
+            if str(rec.get("publish_date") or "").startswith(search_date)
+        ]
+        msg_prefix = f"📅 找到 {search_date} 的紀錄："
     else:
-        matching_records = [(idx, rec) for idx, rec in enumerate(db[:5])]
+        # Show latest records first. Preserve original indices so deletion removes the correct item.
+        latest = list(enumerate(db))[-5:]
+        matching_records = list(reversed(latest))
         msg_prefix = f"📅 這是金庫最新的 {len(matching_records)} 筆紀錄："
 
     if not matching_records:
-        await ctx.send(f"找不到符合的紀錄喔！(格式範例: /cosplay_delete 2026.05.01)")
+        await ctx.send("找不到符合的紀錄喔！(格式範例: `/cosplay_delete 2026.07.20` 或 `/cosplay_delete 2026-7-20`)")
         return
 
     msg_content = f"{msg_prefix}\n大俠，你要刪除哪一組圖文？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
     for i, (original_idx, record) in enumerate(matching_records):
-        msg_content += f"**{i+1}.** {record['topic']} *(時間: {record['publish_date']})*\n"
+        topic = str(record.get('topic') or record.get('event') or '未命名 cosplay')
+        publish_date = str(record.get('publish_date') or '')
+        msg_content += f"**{i+1}.** {topic} *(時間: {publish_date})*\n"
 
     await ctx.send(msg_content)
 
-    def check(m): return m.author == ctx.author and m.channel == ctx.channel
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
 
-    pending_inputs.add(ctx.author.id) 
+    pending_inputs.add(ctx.author.id)
     try:
         msg = await girlfriend_bot.wait_for('message', timeout=60.0, check=check)
     except asyncio.TimeoutError:
@@ -12939,24 +12984,24 @@ async def cosplay_delete(ctx, date_str: str = None):
     finally:
         pending_inputs.discard(ctx.author.id)
 
-    if msg.content.lower() == 'c':
+    if str(msg.content or "").strip().lower() == 'c':
         await ctx.send("✅ 已取消刪除。")
         return
 
     try:
-        choice = int(msg.content) - 1
+        choice = int(str(msg.content or "").strip()) - 1
         if 0 <= choice < len(matching_records):
             target_idx = matching_records[choice][0]
             deleted_record = db.pop(target_idx)
             save_memory(db)
-            
-            local_url = deleted_record.get("local_url", "")
+
+            local_url = str(deleted_record.get("local_url") or "")
             if local_url:
                 filename = local_url.split("/")[-1]
                 filepath = os.path.join(OUTPUT_DIR, filename)
                 if os.path.exists(filepath):
                     os.remove(filepath)
-            await ctx.send(f"🗑️ 成功銷毀：**{deleted_record['topic']}** (文字紀錄與圖片檔案均已徹底抹除)")
+            await ctx.send(f"🗑️ 成功銷毀：**{deleted_record.get('topic') or deleted_record.get('event') or '未命名 cosplay'}** (文字紀錄與圖片檔案均已徹底抹除)")
         else:
             await ctx.send("⚠️ 輸入的數字不在選項內，操作已取消。")
     except ValueError:
