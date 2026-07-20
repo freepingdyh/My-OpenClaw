@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.92"
+LOBSTER_VERSION = "1.4.93"
 
 
 def _normalize_generation_level(level):
@@ -4537,8 +4537,27 @@ def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
     return planned
 
 
+def _text_demands_hard_sexy(text_value: str):
+    hay = str(text_value or "").lower()
+    hard_keywords = [
+        "性感版", "性感", "開胸", "露胸", "低胸", "胸口", "深v", "深 v", "v領", "v 领", "v-neck",
+        "open neckline", "open-neckline", "open chest", "open-chest", "cleavage", "décolletage",
+        "low-cut", "low cut", "低領", "低领", "領口打開", "领口打开", "胸線", "胸线", "上圍", "丰滿", "豐滿"
+    ]
+    return any(k.lower() in hay for k in hard_keywords)
+
+
+def _hard_sexy_vibe_mode():
+    cfg = VIBE_LEVEL_MAP.get("魅", {})
+    return {"zh": "魅", "en": cfg.get("en", "alluring-max"), "level": int(cfg.get("level", 6) or 6)}
+
+
 def _extract_vibe_mode(text_value: str):
     hay = str(text_value or "").strip().lower()
+    # v1.4.93: explicit sexy/open-neckline wording has priority over softer words like 優雅/雅.
+    # We still start from L0 and let the existing L1/L2/L3... safety ladder soften only when generation is blocked.
+    if _text_demands_hard_sexy(text_value):
+        return _hard_sexy_vibe_mode()
     alias_pairs = sorted(VIBE_ALIAS_TO_CANONICAL.items(), key=lambda kv: len(kv[0]), reverse=True)
     for alias, canonical in alias_pairs:
         if alias.lower() in hay:
@@ -7104,7 +7123,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.92: strict scene / pose / outfit/cosplay adherence gate + visible L level badge."""
+    """v1.4.93: strict scene / pose / outfit/cosplay adherence gate + visible L level badge + hard sexy lock."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -7116,18 +7135,19 @@ async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, 
 You are an image QA checker for a cosplay generation pipeline.
 Judge whether the generated image obeys the requested cosplay character, source-world scene, costume, props, and main action.
 Return JSON only:
-{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"character_anchor_ok":true,"prop_ok":true,"overall_ok":true,"failure_reason":"","violations":[]}}
+{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"character_anchor_ok":true,"prop_ok":true,"sexy_ok":true,"overall_ok":true,"failure_reason":"","violations":[]}}
 Final Seedream prompt to check against:
 {prompt_text[:7000]}
 Rules:
 - Canon-first sexy cosplay: sexy styling is allowed and desired when requested, but it must remain inside the source character's recognizable costume system.
 - Be strict about mandatory character anchors such as hair color/style, costume main color palette, costume silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
 - Do not fail only because the outfit is more sensual, fitted, low-cut, open-neckline, cleavage-emphasizing, or mature; fail only if sensual styling replaces the required character anchors.
+- If the prompt explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, set sexy_ok=false when the outfit is fully closed-collar, fully buttoned, conservative, or only slim-fit without a visibly open neckline / visible upper-chest or cleavage emphasis.
 - Fail character_anchor_ok if the image only captures a vague mood but misses the recognizable role anchors.
 - Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume instead of a sexy adaptation of the requested character costume.
 - Fail scene_ok if the prompt requests a nightclub/stage/starship/fantasy journey/future city/etc. but the image shows an unrelated library, cafe, bedroom, tea room, garden, or generic portrait setting.
 - Fail prop_ok if a named prop such as microphone, datapad, staff, sword, tambourine, or book is required but absent or replaced by an unrelated prop.
-- overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, or prop_ok is clearly false.
+- overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, prop_ok, or an explicitly requested sexy/open-neckline requirement is clearly false.
 """
     else:
         qa_prompt = f"""
@@ -7158,8 +7178,9 @@ Rules:
         if str(mode or "").lower() == "cosplay":
             character_ok = bool(result.get("character_anchor_ok", True))
             prop_ok = bool(result.get("prop_ok", True))
-            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and character_ok and prop_ok))
-            ok = bool(overall and scene_ok and pose_ok and outfit_ok and character_ok and prop_ok)
+            sexy_ok = bool(result.get("sexy_ok", True))
+            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok))
+            ok = bool(overall and scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok)
         else:
             overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok))
             ok = bool(overall and scene_ok and pose_ok and outfit_ok)
@@ -7202,6 +7223,9 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
 
     user_request = str(trace_context.get("user_input") or story.get("user_mode_request") or initial_prompt or "").strip()
+    user_requested_hard_sexy = _text_demands_hard_sexy(user_request) or _text_demands_hard_sexy(story.get("user_mode_request"))
+    if user_requested_hard_sexy:
+        trace_context["user_requested_hard_sexy"] = True
     work_title = str(story.get("work_title") or candidate.get("work_title") or user_request or "the requested source work").strip()
     character_name = str(story.get("character_name") or candidate.get("character_name") or user_request or "the requested character").strip()
     family_label = str(story.get("family_label") or candidate.get("family_label") or "cosplay").strip()
@@ -7229,6 +7253,13 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
         "sensual but still character-faithful tailoring: deeper open neckline, visible cleavage, defined waist, body-hugging silhouette",
         "elegant alluring proportions while preserving the source character's main costume color palette, hairstyle/hair color, props, and world setting",
     ]
+    if user_requested_hard_sexy:
+        sexy_adaptation = [
+            "USER EXPLICIT SEXY LOCK: the sexy adaptation is a hard requirement at L0, not optional flavor text.",
+            "If Daxia requested open neckline / open chest / low-cut / visible cleavage, the neckline must be visibly open and cannot be rendered as a closed collar, fully buttoned blouse, conservative suit, or merely slim-fit outfit.",
+            "Keep the role recognizable, but do not let canon conservatism erase the requested mature sensual neckline and cleavage emphasis.",
+        ] + sexy_adaptation
+
     forbidden = [
         "Do not replace the source character with a generic glamour model or generic fantasy woman.",
         "Do not let sexy styling change the character's main color palette, hairstyle/hair color, signature costume, prop, or source-world scene.",
@@ -7285,6 +7316,27 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
             scene_seed = "a quiet fantasy mage journey scene, ancient ruins, forest path, or magical meadow with subtle spell light; not a modern library or tea room"
         if not action:
             action = "standing calmly with a staff or gentle magical spell effect, looking toward the camera with Frieren's quiet mage presence"
+
+    if "mary poppins" in key or "瑪麗" in key or "包萍" in key or "魔法保姆" in key:
+        work_title = "Mary Poppins / 魔法保姆瑪麗・包萍"
+        character_name = "Mary Poppins / 瑪麗・包萍"
+        anchors = [
+            "black wide-brim hat, clearly visible",
+            "red bow tie or red ribbon at the collar",
+            "black umbrella held by Xiaoxia",
+            "British Edwardian nanny-inspired jacket and skirt silhouette",
+            "misty London street with vintage lampposts, cobblestone road, British buildings, and light rain",
+        ] + anchors
+        sexy_adaptation = [
+            "sexy Mary Poppins adaptation is required: keep the black hat, red bow, umbrella, and British nanny silhouette, but make the blouse/jacket neckline visibly open",
+            "the collar must not be fully closed or fully buttoned; show an elegant open V neckline and visible upper chest / cleavage while staying Mary-Poppins-coded",
+            "use a strongly fitted waist and body-hugging skirt; this must not become only a conservative closed-collar suit",
+        ] + sexy_adaptation
+        forbidden += [
+            "Do not render Mary Poppins as a fully buttoned, closed-collar conservative nanny suit when Daxia requested sexy/open-neckline styling.",
+            "Do not remove the black hat, red bow tie, or umbrella.",
+            "Do not replace the London street with an unrelated indoor room, cafe, garden, or generic portrait.",
+        ]
 
     # de-duplicate anchors while preserving order
     dedup = []
@@ -7347,6 +7399,7 @@ NEGATIVE ROLE-DRIFT RULES:
 Mandatory obedience rules:
 - Character recognizability is mandatory: hair/hair color, costume color/silhouette, props, and environment must match the selected role.
 - Sexy adaptation is mandatory, but it must not change the role into a different costume, different color palette, or generic glamour/fantasy fashion.
+- If Daxia explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, those elements are hard requirements at L0. Do not downgrade them into a fully closed collar, buttoned blouse, conservative uniform, or merely slim-fit silhouette.
 - If a specific prop is listed, show it clearly.
 - If a specific source-world scene is listed, show it clearly.
 - Xiaoxia remains recognizable as Xiaoxia cosplaying the role; hairstyle and hair color may adapt only to improve role recognizability.
