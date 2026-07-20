@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.93"
+LOBSTER_VERSION = "1.4.94"
 
 
 def _normalize_generation_level(level):
@@ -675,7 +675,7 @@ def _format_trace_for_discord(trace):
     lines = []
     lines.append(f"kind={trace.get('kind')} trace_id={trace.get('trace_id')}")
     lines.append(f"time={trace.get('created_at')} → {trace.get('updated_at')}")
-    for key in ["action", "source_mode", "photo_mode_override", "pose_critical", "raw_seedream_mode", "allow_background_bystanders", "diary_allow_background_bystanders", "user_input", "scene_seed_text", "scene_summary", "action_summary", "wardrobe_id", "wardrobe_mode", "used_pending_wardrobe", "current_outfit_for_seedream", "result_url", "final_level", "error"]:
+    for key in ["action", "source_mode", "photo_mode_override", "pose_critical", "raw_seedream_mode", "allow_background_bystanders", "diary_allow_background_bystanders", "user_input", "scene_seed_text", "scene_summary", "action_summary", "wardrobe_id", "wardrobe_mode", "used_pending_wardrobe", "current_outfit_for_seedream", "result_url", "seedream_model_label", "seedream_model_id", "final_level", "people_policy", "strict_solo_required", "specified_character_interaction", "error"]:
         val = trace.get(key)
         if val not in (None, "", [], {}):
             lines.append(f"{key}: {_trace_preview(val, 180)}")
@@ -6959,25 +6959,33 @@ async def _download_image_bytes_for_vision(image_url, max_bytes=8_000_000):
         return None, None
 
 
-async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_background_bystanders=False):
+async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_background_bystanders=False, visual_checklist=None):
     """
     出圖後的輕量驗圖 gate：只檢查是否混入第二人/男人/外來手腳。
     失敗時回傳 (False, reason)；無法檢查時為避免誤殺，回傳 (True, reason)。
     """
-    if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary"}:
+    if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "mode not checked"
 
     data, mime = await _download_image_bytes_for_vision(image_url)
     if not data:
         return True, "vision skipped: cannot download generated image"
 
-    bystander_rule = (
-        "In this public/travel/outdoor scene, incidental distant or blurred background bystanders are allowed. "
-        "They must be clearly secondary, not interacting with Xiaoxia, not foreground subjects, not companions, "
-        "not a male partner, and not a substitute for Daxia."
-        if allow_background_bystanders else
-        "No additional real human figures are allowed."
-    )
+    visual_checklist = visual_checklist if isinstance(visual_checklist, dict) else {}
+    specified_character_interaction = bool(visual_checklist.get("specified_character_interaction"))
+    if specified_character_interaction:
+        bystander_rule = (
+            "Daxia explicitly requested interaction with a specific character. Allow that specified character interaction, "
+            "but do not add unrequested companions or a Daxia/viewer substitute."
+        )
+    elif allow_background_bystanders:
+        bystander_rule = (
+            "In this public/travel/outdoor scene, incidental distant or blurred background bystanders are allowed. "
+            "They must be clearly secondary, not interacting with Xiaoxia, not foreground subjects, not companions, "
+            "not a male partner, and not a substitute for Daxia."
+        )
+    else:
+        bystander_rule = "No additional real human figures are allowed."
     prompt = f"""
 You are an image QA checker for a solo character generation pipeline.
 Check the image for unwanted additional people while respecting the scene type.
@@ -6999,7 +7007,8 @@ Return JSON only:
 Rules:
 - Xiaoxia must be the only primary subject.
 - {bystander_rule}
-- Always fail if there is a male partner, companion, photographer-like person, interacting second person, foreground second person, external hand/arm/leg/shoulder, cropped body part, viewer body part, or reflection/shadow of another person interacting with Xiaoxia.
+- Always fail if Daxia/the viewer is visualized as a man, head, hand, shoulder, back, reflection, shadow, cropped body part, or photographer-like person.
+- If a specific character interaction was requested, do not fail merely because that requested character appears/interacts; fail only if extra unrequested people appear, a Daxia/viewer substitute appears, or external body parts appear.
 - A printed photo, painting, statue, mannequin, or decorative object is not a person unless it appears as a real human in the scene.
 """
     try:
@@ -7014,14 +7023,19 @@ Rules:
         result = _safe_json_from_text(resp.text, {})
         if not isinstance(result, dict):
             return True, "vision skipped: invalid JSON"
+        external_or_viewer_block = (
+            bool(result.get("has_external_hands_or_body_parts"))
+            or bool(result.get("has_second_person_reflection_shadow_or_partial"))
+        )
         blocking_people = (
             bool(result.get("has_male_or_partner"))
             or bool(result.get("has_foreground_second_person"))
             or bool(result.get("has_interacting_second_person"))
-            or bool(result.get("has_external_hands_or_body_parts"))
-            or bool(result.get("has_second_person_reflection_shadow_or_partial"))
+            or external_or_viewer_block
         )
-        if allow_background_bystanders:
+        if specified_character_interaction:
+            ok = bool(result.get("xiaoxia_is_only_primary_subject", True)) and not external_or_viewer_block
+        elif allow_background_bystanders:
             ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and not blocking_people
         else:
             ok = bool(result.get("solo_xiaoxia_only")) and int(result.get("human_count", 1) or 1) <= 1 and not blocking_people
@@ -7055,7 +7069,214 @@ def _extract_pose_user_request(initial_prompt, visual_dict=None):
     return text.strip()
 
 
-def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason=""):
+
+
+# ==========================================
+# 🧭 v1.4.94：Thin Prompt / Visual Checklist / People Policy
+# ==========================================
+def _contains_any_keyword(text, keywords):
+    raw = str(text or "").lower()
+    return any(str(k).lower() in raw for k in keywords)
+
+
+def _visual_policy_source_text(mode="photo", user_text="", visual_dict=None, current_outfit=None, trace_context=None):
+    parts = [str(mode or ""), str(user_text or ""), str(current_outfit or "")]
+    if isinstance(visual_dict, dict):
+        for key in ("composition", "scene", "scene_summary", "action", "activity", "outfit", "outfit_summary"):
+            if visual_dict.get(key):
+                parts.append(str(visual_dict.get(key)))
+        state = visual_dict.get("__anchor_state") if isinstance(visual_dict.get("__anchor_state"), dict) else {}
+        for key in ("user_scene_hardlock", "user_priority_request", "primary_action", "activity", "setting_anchor"):
+            if state.get(key):
+                parts.append(str(state.get(key)))
+    if isinstance(trace_context, dict):
+        for key in ("user_input", "scene_seed_text", "scene_summary", "action_summary", "outfit_summary", "user_mode_request"):
+            if trace_context.get(key):
+                parts.append(str(trace_context.get(key)))
+        story = trace_context.get("story") if isinstance(trace_context.get("story"), dict) else {}
+        for key in ("user_mode_request", "topic", "event", "work_title", "character_name"):
+            if story.get(key):
+                parts.append(str(story.get(key)))
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _is_private_scene_text(text):
+    private_keywords = [
+        "家中", "在家", "家裡", "家里", "客廳", "客厅", "臥室", "卧室", "房間", "房间", "床上", "床邊", "床边",
+        "廚房", "厨房", "浴室", "洗澡", "泡澡", "淋浴", "更衣室", "旅館房間", "旅馆房间", "飯店房間", "饭店房间",
+        "hotel room", "hotel bathroom", "bathroom", "bedroom", "living room", "home", "private room", "民宿房間", "套房",
+    ]
+    return _contains_any_keyword(text, private_keywords)
+
+
+def _explicit_solo_or_empty_scene_requested(text):
+    keywords = ["空景", "完全獨照", "完全独照", "獨照", "独照", "不要路人", "沒有路人", "无路人", "no bystanders", "no people", "solo only"]
+    return _contains_any_keyword(text, keywords)
+
+
+def _explicit_character_interaction_requested(text):
+    raw = str(text or "")
+    patterns = [
+        r"(?:與|和|跟)\s*[^，。,.、\n]{1,30}\s*(?:互動|合照|對話|並肩|一起|牽手|打鬥|戰鬥|跳舞|握手|擁抱)",
+        r"(?:with|interacting with|posing with|standing with)\s+[A-Za-z][A-Za-z0-9 _'\-]{1,40}",
+    ]
+    return any(re.search(p, raw, flags=re.I) for p in patterns)
+
+
+def _allow_background_bystanders_from_text(text, mode="photo"):
+    # 私密空間永遠小俠獨照；使用者明確要求空景/完全獨照時也不允許路人。
+    if _is_private_scene_text(text) or _explicit_solo_or_empty_scene_requested(text):
+        return False
+    # 其他場景可有不互動、不搶主體的背景路人；若使用者明確要求與某角色互動，允許該指定角色，不把它當路人錯殺。
+    public_keywords = [
+        "街", "景點", "文創", "園區", "夜市", "市集", "車站", "捷運", "機場", "老街", "展覽", "博物館", "咖啡街",
+        "旅行", "旅遊", "戶外", "公園", "海邊", "沙灘", "山", "街頭", "廣場", "餐廳", "酒吧", "舞台", "宮殿", "神殿",
+        "street", "station", "airport", "market", "museum", "exhibition", "park", "travel", "tourist", "outdoor", "plaza", "bar", "stage",
+    ]
+    if _contains_any_keyword(text, public_keywords):
+        return True
+    return str(mode or "").lower() == "cosplay"
+
+
+def _extract_visual_must_have(text, mode="photo", visual_dict=None, trace_context=None):
+    raw = str(text or "")
+    low = raw.lower()
+    items = []
+    def add(label, *keys):
+        if any(k.lower() in low for k in keys):
+            items.append(label)
+    add("requested main scene/location", "文創", "園區", "老街", "夜市", "街", "景點", "客廳", "臥室", "房間", "旅館", "飯店", "浴室", "廚房", "sofa", "bed", "street", "hotel", "bathroom", "kitchen")
+    add("requested body pose/action", "趴", "俯臥", "俯卧", "躺", "側躺", "坐", "站", "跪", "抱枕", "拿", "端", "走", "做菜", "煮", "自拍", "prone", "face-down", "lying", "sitting", "standing", "holding", "cooking")
+    add("requested outfit color/material/cut", "白色", "黑色", "紅色", "藍色", "無袖", "短袖", "低胸", "開胸", "短版", "短裙", "長靴", "手套", "帽", "雨傘", "sleeveless", "short-sleeve", "low-cut", "crop top", "mini skirt", "gloves", "boots")
+    add("requested prop/accessory", "雨傘", "手套", "項鍊", "帽", "劍", "法杖", "麥克風", "抱枕", "umbrella", "gloves", "hat", "sword", "staff", "microphone", "pillow")
+    if str(mode or "").lower() == "cosplay":
+        anchors = []
+        if isinstance(trace_context, dict):
+            anchors += [str(x) for x in (trace_context.get("cosplay_anchor_lines") or []) if str(x).strip()]
+        if anchors:
+            items.extend(["cosplay anchor: " + x[:120] for x in anchors[:8]])
+        else:
+            items.append("recognizable requested cosplay character and source-world visual anchors")
+    return _dedupe_keep_order(items)[:12]
+
+
+def _extract_visual_must_not_have(text, mode="photo", visual_dict=None, trace_context=None):
+    raw = str(text or "")
+    low = raw.lower()
+    items = [
+        "Daxia/viewer visually depicted as a man, head, hand, shoulder, back, reflection, shadow, or cropped body part",
+        "unrequested foreground second person or interacting companion",
+    ]
+    if _is_private_scene_text(raw):
+        items.append("any additional person in a private home/hotel/bathroom/room scene")
+    if "無袖" in raw or "sleeveless" in low:
+        items.append("short-sleeve or covered shoulders if sleeveless was explicitly requested")
+    if any(k in low for k in ["低胸", "開胸", "open neckline", "open chest", "low-cut", "cleavage"]):
+        items.append("closed collar or fully buttoned conservative neckline if open neckline/low-cut was requested")
+    if str(mode or "").lower() == "cosplay":
+        items += ["generic glamour outfit replacing role costume", "unrelated indoor room/cafe/bedroom when source-world scene was requested"]
+    return _dedupe_keep_order(items)[:12]
+
+
+def _dedupe_keep_order(seq):
+    out, seen = [], set()
+    for item in seq or []:
+        text = _clean_text_compact(str(item or ""))
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key); out.append(text)
+    return out
+
+
+def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, current_outfit=None, trace_context=None):
+    source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
+    private = _is_private_scene_text(source)
+    explicit_solo = _explicit_solo_or_empty_scene_requested(source)
+    character_interaction = (not private) and _explicit_character_interaction_requested(source)
+    allow_bystanders = (not private) and (not explicit_solo) and _allow_background_bystanders_from_text(source, mode=mode)
+    checklist = {
+        "mode": str(mode or "photo"),
+        "private_scene": bool(private),
+        "strict_solo_required": bool(private or explicit_solo),
+        "allow_background_bystanders": bool(allow_bystanders),
+        "specified_character_interaction": bool(character_interaction),
+        "people_policy": (
+            "private_strict_solo" if private or explicit_solo else
+            "specified_character_interaction_allowed" if character_interaction else
+            "public_background_bystanders_allowed" if allow_bystanders else "solo_primary_subject"
+        ),
+        "must_have": _extract_visual_must_have(source, mode=mode, visual_dict=visual_dict, trace_context=trace_context),
+        "must_not_have": _extract_visual_must_not_have(source, mode=mode, visual_dict=visual_dict, trace_context=trace_context),
+    }
+    if current_outfit:
+        checklist.setdefault("outfit_lock", str(current_outfit)[:500])
+    return checklist
+
+
+def _visual_checklist_brief(checklist, max_items=10):
+    if not isinstance(checklist, dict):
+        return "{}"
+    compact = {
+        "people_policy": checklist.get("people_policy"),
+        "strict_solo_required": checklist.get("strict_solo_required"),
+        "allow_background_bystanders": checklist.get("allow_background_bystanders"),
+        "specified_character_interaction": checklist.get("specified_character_interaction"),
+        "must_have": (checklist.get("must_have") or [])[:max_items],
+        "must_not_have": (checklist.get("must_not_have") or [])[:max_items],
+    }
+    try:
+        return json.dumps(compact, ensure_ascii=False)
+    except Exception:
+        return str(compact)
+
+
+def _seedream_people_policy_line(checklist=None):
+    checklist = checklist if isinstance(checklist, dict) else {}
+    if checklist.get("strict_solo_required"):
+        return "People rule: private/solo scene. Xiaoxia must be the only human figure. No other people, no external hands, no visible viewer body parts."
+    if checklist.get("specified_character_interaction"):
+        return "People rule: allow the specific character interaction explicitly requested by Daxia; do not add unrequested companions. Never visualize Daxia/viewer as a male head, hand, shoulder, back, reflection, shadow, or body part."
+    if checklist.get("allow_background_bystanders"):
+        return "People rule: Xiaoxia is the only primary subject. Distant non-interacting background bystanders may exist for public-scene realism, but no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
+    return "People rule: Xiaoxia is the only primary subject. No male stand-in, no external hands, no visible viewer body parts."
+
+
+def _context_seedream_model_id(context=None, trace_context=None):
+    for src in (trace_context, context):
+        if isinstance(src, dict):
+            mid = src.get("seedream_model_id_override") or src.get("seedream_model_id") or src.get("model_id")
+            if mid:
+                return str(mid)
+    return SEEDREAM_V45_MODEL_ID
+
+
+def _seedream_model_label_from_id(model_id):
+    mid = str(model_id or "")
+    if "v5" in mid or "/v5/" in mid:
+        return "Seedream v5.0 Pro"
+    return "Seedream v4.5"
+
+
+def _context_seedream_model_label(context=None):
+    if isinstance(context, dict) and context.get("seedream_model_label"):
+        return str(context.get("seedream_model_label"))
+    return _seedream_model_label_from_id(_context_seedream_model_id(context=context))
+
+
+def _seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=True):
+    args = {
+        "prompt": final_prompt,
+        "image_urls": image_urls,
+        "image_size": SEEDREAM_V45_IMAGE_SIZE,
+        "num_images": 1,
+        "enable_safety_checker": bool(enable_safety_checker),
+    }
+    # v4.5 舊 endpoint 可吃 max_images；v5 Pro 文件未列此參數，避免多傳。
+    if str(model_id) == str(SEEDREAM_V45_MODEL_ID):
+        args["max_images"] = 1
+    return args
+
+def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason="", visual_checklist=None):
     user_request = _clean_text_compact(user_request or "")
     retry_reason = _clean_text_compact(retry_reason or "")
     lines = [
@@ -7066,6 +7287,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
+        _seedream_people_policy_line(visual_checklist),
     ]
     if has_reference:
         lines += ["", "Figure 10 is a wardrobe garment or accessory reference only.", "If Figure 10 is clothing, replace Xiaoxia's outfit with the garment from Figure 10 while preserving the text-request pose and scene.", "Do not let Figure 10 control the pose, background, camera angle, or composition."]
@@ -7079,7 +7301,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
     return "\n".join(lines).strip()
 
 
-def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True):
+def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True, visual_checklist=None):
     user_request = _clean_text_compact(user_request or "")
     retry_reason = _clean_text_compact(retry_reason or "")
     lines = [
@@ -7090,7 +7312,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
-        "Only Xiaoxia appears. No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person.",
+        _seedream_people_policy_line(visual_checklist),
     ]
     if has_figure10:
         lines += [
@@ -7130,12 +7352,16 @@ async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, 
     if not data:
         return True, "adherence skipped: cannot download image", {}
     prompt_text = str(prompt_text or "")
+    checklist = (trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None
+    checklist_brief = _visual_checklist_brief(checklist)
     if str(mode or "").lower() == "cosplay":
         qa_prompt = f"""
 You are an image QA checker for a cosplay generation pipeline.
 Judge whether the generated image obeys the requested cosplay character, source-world scene, costume, props, and main action.
 Return JSON only:
-{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"character_anchor_ok":true,"prop_ok":true,"sexy_ok":true,"overall_ok":true,"failure_reason":"","violations":[]}}
+{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"character_anchor_ok":true,"prop_ok":true,"sexy_ok":true,"must_have_ok":true,"must_not_have_ok":true,"overall_ok":true,"failure_reason":"","violations":[],"must_have_failures":[],"must_not_have_violations":[]}}
+Visual checklist to check first:
+{checklist_brief}
 Final Seedream prompt to check against:
 {prompt_text[:7000]}
 Rules:
@@ -7147,14 +7373,18 @@ Rules:
 - Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume instead of a sexy adaptation of the requested character costume.
 - Fail scene_ok if the prompt requests a nightclub/stage/starship/fantasy journey/future city/etc. but the image shows an unrelated library, cafe, bedroom, tea room, garden, or generic portrait setting.
 - Fail prop_ok if a named prop such as microphone, datapad, staff, sword, tambourine, or book is required but absent or replaced by an unrelated prop.
-- overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, prop_ok, or an explicitly requested sexy/open-neckline requirement is clearly false.
+- Check every visual_checklist.must_have item. Set must_have_ok=false and list failures when a concrete required item is missing (for example sleeveless rendered as short sleeves).
+- Check every visual_checklist.must_not_have item. Set must_not_have_ok=false and list violations when forbidden elements appear.
+- overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, prop_ok, must_have_ok, must_not_have_ok, or an explicitly requested sexy/open-neckline requirement is clearly false.
 """
     else:
         qa_prompt = f"""
 You are an image QA checker for a photo generation pipeline.
 Judge whether the generated image obeys the user's requested scene, pose/action, and outfit.
 Return JSON only:
-{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"overall_ok":true,"failure_reason":"","violations":[]}}
+{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"must_have_ok":true,"must_not_have_ok":true,"overall_ok":true,"failure_reason":"","violations":[],"must_have_failures":[],"must_not_have_violations":[]}}
+Visual checklist to check first:
+{checklist_brief}
 User / final prompt to check against:
 {prompt_text[:6000]}
 Rules:
@@ -7163,7 +7393,11 @@ Rules:
 - If the request says sofa or bed, fail scene_ok if the furniture/location is visibly different.
 - If a wardrobe reference is requested, judge whether the main garment reasonably matches; ignore tiny tailoring differences.
 - If there are no explicit outfit constraints, outfit_ok should be true.
-- overall_ok must be false if a clearly requested main scene or main pose is wrong.
+- Check every visual_checklist.must_have item. Set must_have_ok=false and list failures when a concrete required item is missing.
+- Check every visual_checklist.must_not_have item. Set must_not_have_ok=false and list violations when forbidden elements appear.
+- For private home/hotel/bathroom/room scenes, any additional real human figure must fail.
+- For public scenes, distant non-interacting background bystanders are acceptable unless the checklist requests strict solo.
+- overall_ok must be false if a clearly requested main scene, main pose, must_have item, or must_not_have rule is wrong.
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -7175,15 +7409,19 @@ Rules:
         if not isinstance(result, dict) or not result:
             return True, "adherence skipped: invalid JSON", {"raw": str(getattr(resp, 'text', ''))[:500]}
         scene_ok = bool(result.get("scene_ok", True)); pose_ok = bool(result.get("pose_ok", True)); outfit_ok = bool(result.get("outfit_ok", True))
+        must_have_ok = bool(result.get("must_have_ok", True)); must_not_have_ok = bool(result.get("must_not_have_ok", True))
         if str(mode or "").lower() == "cosplay":
             character_ok = bool(result.get("character_anchor_ok", True))
             prop_ok = bool(result.get("prop_ok", True))
             sexy_ok = bool(result.get("sexy_ok", True))
-            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok))
-            ok = bool(overall and scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok)
+            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok and must_have_ok and must_not_have_ok))
+            ok = bool(overall and scene_ok and pose_ok and outfit_ok and character_ok and prop_ok and sexy_ok and must_have_ok and must_not_have_ok)
         else:
-            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok))
-            ok = bool(overall and scene_ok and pose_ok and outfit_ok)
+            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and must_have_ok and must_not_have_ok))
+            ok = bool(overall and scene_ok and pose_ok and outfit_ok and must_have_ok and must_not_have_ok)
+        if isinstance(trace_context, dict):
+            trace_context["must_have_failures"] = result.get("must_have_failures") or []
+            trace_context["must_not_have_violations"] = result.get("must_not_have_violations") or []
         return ok, str(result.get("failure_reason") or result)[:800], result
     except Exception as exc:
         print(f"⚠️ [ADHERENCE_GATE_FAILED] {type(exc).__name__}: {exc}")
@@ -7414,7 +7652,7 @@ Mandatory obedience rules:
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
     seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference", "travel", "shopping"}
-    engine_name = "Seedream v4.5"
+    engine_name = _seedream_model_label_from_id(_context_seedream_model_id(trace_context=trace_context))
     if not isinstance(trace_context, dict):
         trace_context = {"kind": "cosplay" if str(mode).lower() == "cosplay" else ("diary" if str(mode).lower() == "diary" else "photo")}
     trace_context.setdefault("kind", "cosplay" if str(mode).lower() == "cosplay" else ("diary" if str(mode).lower() == "diary" else "photo"))
@@ -7431,9 +7669,14 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
     pose_user_request = _extract_pose_user_request(initial_prompt, visual_dict)
     pose_critical = _is_pose_critical_request(pose_user_request)
+    visual_checklist = _build_visual_checklist(mode=mode, user_text=pose_user_request or initial_prompt, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
+    trace_context["visual_checklist"] = visual_checklist
+    trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
+    trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
+    trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
     force_minimal_prompt = bool(trace_context.get("force_minimal_prompt")) if isinstance(trace_context, dict) else False
     has_figure10 = bool(trace_context.get("figure10_present")) if isinstance(trace_context, dict) else bool(discord_image_url)
-    reference_minimal = str(mode or "").lower() == "photo_reference" or force_minimal_prompt
+    reference_minimal = str(mode or "").lower() in {"photo_scene", "photo_reference", "travel", "shopping", "world", "scene"} or force_minimal_prompt
     if pose_critical:
         trace_context["pose_critical"] = True
         trace_context["pose_user_request"] = pose_user_request
@@ -7447,6 +7690,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 has_reference=bool(discord_image_url),
                 current_outfit=current_outfit,
                 retry_reason=last_adherence_reason if level > 0 else "",
+                visual_checklist=visual_checklist,
             )
             trace_context["raw_seedream_mode"] = "pose_critical_minimal"
         elif str(mode or "").lower() == "cosplay":
@@ -7456,9 +7700,14 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 trace_context=trace_context,
                 retry_reason=last_adherence_reason if level > 0 else "",
             )
+            visual_checklist = _build_visual_checklist(mode=mode, user_text=pose_user_request or initial_prompt, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
+            trace_context["visual_checklist"] = visual_checklist
+            trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
+            trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
+            trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
             trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
         elif str(mode or "").lower() == "diary":
-            current_prompt = _seedream_diary_prompt(pose_user_request or initial_prompt)
+            current_prompt = _seedream_diary_prompt(pose_user_request or initial_prompt, visual_checklist=visual_checklist)
             if last_adherence_reason and level > 0:
                 current_prompt += "\n\nPREVIOUS OUTPUT WAS REJECTED:\n" + str(last_adherence_reason)[:800] + "\nCorrect the failure now. The selected diary photo task must be obeyed literally."
             trace_context["raw_seedream_mode"] = trace_context.get("raw_seedream_mode") or "diary_minimal"
@@ -7468,11 +7717,12 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 current_outfit=current_outfit,
                 retry_reason=last_adherence_reason if level > 0 else "",
                 has_figure10=has_figure10,
+                visual_checklist=visual_checklist,
             )
             trace_context["raw_seedream_mode"] = "photo_reference_minimal" if has_figure10 else "photo_scene_minimal_current_outfit"
         else:
             current_prompt = _compose_prompt_with_anchors(initial_prompt, mode, visual_dict, level)
-        _trace_stage(trace_context, f"compose_prompt_L{level}", prompt=current_prompt, data={"level": level, "mode": mode, "pose_critical": pose_critical})
+        _trace_stage(trace_context, f"compose_prompt_L{level}", prompt=current_prompt, data={"level": level, "mode": mode, "pose_critical": pose_critical, "visual_checklist": trace_context.get("visual_checklist")})
         # Seedream v4.5 交由 fal safety checker 處理，不再先被 OpenAI Moderation 擋住；
         # 仍保留 L0→L4 的提示詞安全化重試。
         if mode == "gpt_image_2_fallback" and gpt_image2_is_fallback_only:
@@ -7515,6 +7765,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 generated_image_url,
                 mode=mode,
                 allow_background_bystanders=allow_background_bystanders,
+                visual_checklist=trace_context.get("visual_checklist"),
             )
             _trace_stage(trace_context, f"solo_gate_L{level}", data={"solo_ok": solo_ok, "reason": solo_reason, "allow_background_bystanders": allow_background_bystanders})
             trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason, "allow_background_bystanders": allow_background_bystanders}
@@ -7556,6 +7807,11 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason}
             if isinstance(adherence_detail, dict) and adherence_detail.get("violations"):
                 trace_context["adherence_gate_violation"] = adherence_detail.get("violations")
+            if isinstance(adherence_detail, dict):
+                if adherence_detail.get("must_have_failures"):
+                    trace_context["must_have_failures"] = adherence_detail.get("must_have_failures")
+                if adherence_detail.get("must_not_have_violations"):
+                    trace_context["must_not_have_violations"] = adherence_detail.get("must_not_have_violations")
             if not adherence_ok:
                 print(f"⚠️ [ADHERENCE_GATE_REJECTED] mode={mode} L{level} reason={adherence_reason}")
                 last_adherence_reason = adherence_reason
@@ -7574,6 +7830,8 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
         if isinstance(visual_dict, dict):
             visual_dict["engine"] = engine_name
+            visual_dict["seedream_model_id"] = trace_context.get("seedream_model_id") or _context_seedream_model_id(trace_context=trace_context)
+            visual_dict["seedream_model_label"] = trace_context.get("seedream_model_label") or _seedream_model_label_from_id(visual_dict.get("seedream_model_id"))
             visual_dict["trace_id"] = trace_context.get("trace_id")
             visual_dict["final_level"] = trace_context.get("final_level") or f"L{level}"
             visual_dict["generation_level"] = visual_dict.get("final_level")
@@ -7595,11 +7853,13 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
     if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
-        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode, allow_background_bystanders=allow_background_bystanders)
+        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode, allow_background_bystanders=allow_background_bystanders, visual_checklist=trace_context.get("visual_checklist"))
         if not solo_ok:
             raise Exception(f"最終保底仍混入第二人/男人/外來肢體：{solo_reason}")
     if isinstance(visual_dict, dict):
         visual_dict["engine"] = engine_name
+        visual_dict["seedream_model_id"] = trace_context.get("seedream_model_id") or _context_seedream_model_id(trace_context=trace_context)
+        visual_dict["seedream_model_label"] = trace_context.get("seedream_model_label") or _seedream_model_label_from_id(visual_dict.get("seedream_model_id"))
         visual_dict["trace_id"] = trace_context.get("trace_id")
         visual_dict["final_level"] = trace_context.get("final_level") or "L4+ULT"
         visual_dict["generation_level"] = visual_dict.get("final_level")
@@ -7698,6 +7958,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "trace_id": trace_context.get("trace_id"),
             "final_level": trace_context.get("final_level") or visual.get("final_level"),
             "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
+            "seedream_model_id": trace_context.get("seedream_model_id") or visual.get("seedream_model_id"),
+            "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
+            "visual_checklist": trace_context.get("visual_checklist"),
         }
         db = load_memory()
         db.insert(0, payload)
@@ -7906,12 +8169,17 @@ def _seedream_error_is_retryable(value):
 async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True, trace_context=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
     fal_client = _get_fal_client()
+    model_id = _context_seedream_model_id(trace_context=trace_context)
+    model_label = _seedream_model_label_from_id(model_id)
+    if isinstance(trace_context, dict):
+        trace_context["seedream_model_id"] = model_id
+        trace_context["seedream_model_label"] = model_label
     image_urls = await _seedream_upload_reference_images()
     if str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
         final_prompt = str(custom_prompt or "").strip()
     else:
         final_prompt = _seedream_cosplay_prompt(custom_prompt)
-    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE, "raw_seedream_mode": (trace_context or {}).get("raw_seedream_mode")})
+    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "raw_seedream_mode": (trace_context or {}).get("raw_seedream_mode")})
 
     def _subscribe():
         def on_queue_update(update):
@@ -7922,15 +8190,8 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
             except Exception:
                 pass
         return fal_client.subscribe(
-            SEEDREAM_V45_MODEL_ID,
-            arguments={
-                "prompt": final_prompt,
-                "image_urls": image_urls,
-                "image_size": SEEDREAM_V45_IMAGE_SIZE,
-                "num_images": 1,
-                "max_images": 1,
-                "enable_safety_checker": bool(enable_safety_checker),
-            },
+            model_id,
+            arguments=_seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=enable_safety_checker),
             with_logs=True,
             on_queue_update=on_queue_update,
         )
@@ -7946,14 +8207,14 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
         raise
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
-        return f"Seedream v4.5 沒有回傳圖片：{result}"
+        return f"{model_label} 沒有回傳圖片：{result}"
     first = images[0]
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
-    return f"Seedream v4.5 圖片欄位格式異常：{result}"
+    return f"{model_label} 圖片欄位格式異常：{result}"
 
 
-def _seedream_diary_prompt(custom_prompt):
+def _seedream_diary_prompt(custom_prompt, visual_checklist=None):
     raw = str(custom_prompt or "").strip()
     if "FIGURE ROLE MAP" in raw and "TEXT REQUEST" in raw:
         if re.search(r"background bystanders|public/travel|public scene|路人|背景", raw, re.I):
@@ -7965,15 +8226,20 @@ def _seedream_diary_prompt(custom_prompt):
         "Do NOT copy pose, background, room, outfit, lighting setup, or composition from Figures 1-9.\n\n"
         "DIARY VISUAL REQUEST — this controls the final scene, action, outfit, mood, and composition. Keep it as one single visual moment. Do not mix in other diary scenes or optional promises.\n\n"
         f"{raw}\n\n"
-        "Mandatory rules: exactly one human figure, Xiaoxia only. No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person. Natural anatomy, plausible hands, candid photorealistic lifestyle photo."
+        "Mandatory people rule: " + _seedream_people_policy_line(visual_checklist) + " Natural anatomy, plausible hands, candid photorealistic lifestyle photo."
     )
 
 
-async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True):
+async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True, trace_context=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做交換日記 image-to-image。"""
     fal_client = _get_fal_client()
+    model_id = _context_seedream_model_id(trace_context=trace_context)
+    model_label = _seedream_model_label_from_id(model_id)
+    if isinstance(trace_context, dict):
+        trace_context["seedream_model_id"] = model_id
+        trace_context["seedream_model_label"] = model_label
     image_urls = await _seedream_upload_reference_images()
-    final_prompt = _seedream_diary_prompt(custom_prompt)
+    final_prompt = _seedream_diary_prompt(custom_prompt, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
 
     def _subscribe():
         def on_queue_update(update):
@@ -7984,15 +8250,8 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
             except Exception:
                 pass
         return fal_client.subscribe(
-            SEEDREAM_V45_MODEL_ID,
-            arguments={
-                "prompt": final_prompt,
-                "image_urls": image_urls,
-                "image_size": SEEDREAM_V45_IMAGE_SIZE,
-                "num_images": 1,
-                "max_images": 1,
-                "enable_safety_checker": bool(enable_safety_checker),
-            },
+            model_id,
+            arguments=_seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=enable_safety_checker),
             with_logs=True,
             on_queue_update=on_queue_update,
         )
@@ -8000,11 +8259,11 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
     result = await asyncio.to_thread(_subscribe)
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
-        return f"Seedream v4.5 沒有回傳交換日記圖片：{result}"
+        return f"{model_label} 沒有回傳交換日記圖片：{result}"
     first = images[0]
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
-    return f"Seedream v4.5 交換日記圖片欄位格式異常：{result}"
+    return f"{model_label} 交換日記圖片欄位格式異常：{result}"
 
 
 
@@ -9818,7 +10077,7 @@ async def _seedream_upload_single_file(path):
     return await asyncio.to_thread(fal_client.upload_file, upload_path)
 
 
-def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None):
+def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
     """v1.4.86: concise Figure role map; pass through playground-style raw prompts."""
     custom_prompt = str(custom_prompt or "").strip()
     if custom_prompt.startswith("FIGURE ROLE MAP") and "TEXT REQUEST" in custom_prompt:
@@ -9849,11 +10108,14 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
 async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None, trace_context=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     fal_client = _get_fal_client()
-    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit)
+    model_id = _context_seedream_model_id(trace_context=trace_context)
+    model_label = _seedream_model_label_from_id(model_id)
+    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
     if isinstance(trace_context, dict):
-        trace_context["seedream_model_id"] = SEEDREAM_V45_MODEL_ID
+        trace_context["seedream_model_id"] = model_id
+        trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-    _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
+    _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     async def _build_image_urls(force_reference_refresh=False):
         urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
@@ -9871,15 +10133,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             except Exception:
                 pass
         return fal_client.subscribe(
-            SEEDREAM_V45_MODEL_ID,
-            arguments={
-                "prompt": final_prompt,
-                "image_urls": image_urls,
-                "image_size": SEEDREAM_V45_IMAGE_SIZE,
-                "num_images": 1,
-                "max_images": 1,
-                "enable_safety_checker": bool(enable_safety_checker),
-            },
+            model_id,
+            arguments=_seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=enable_safety_checker),
             with_logs=True,
             on_queue_update=on_queue_update,
         )
@@ -9888,7 +10143,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     if isinstance(trace_context, dict):
         trace_context["seedream_input_images"] = list(image_urls)
         trace_context["seedream_request_payload"] = {
-            "model": SEEDREAM_V45_MODEL_ID,
+            "model": model_id,
+            "model_label": model_label,
             "prompt": final_prompt,
             "image_urls": list(image_urls),
             "image_size": SEEDREAM_V45_IMAGE_SIZE,
@@ -9919,11 +10175,11 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
 
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
-        return f"Seedream v4.5 沒有回傳 /photo 圖片：{result}"
+        return f"{model_label} 沒有回傳 /photo 圖片：{result}"
     first = images[0]
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
-    return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
+    return f"{model_label} /photo 圖片欄位格式異常：{result}"
 
 def _repair_context_mode(context):
     return str((context or {}).get("source_mode") or (context or {}).get("type") or "photo").strip().lower()
@@ -10049,11 +10305,16 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
     if not original_image_path:
         raise RuntimeError("REPAIR_IMAGE_PATH_NONE：沒有可修正的原圖。")
     fal_client = _get_fal_client()
+    model_id = _context_seedream_model_id(context=source_context, trace_context=trace_context)
+    model_label = _seedream_model_label_from_id(model_id)
+    if isinstance(trace_context, dict):
+        trace_context["seedream_model_id"] = model_id
+        trace_context["seedream_model_label"] = model_label
     image_urls = await _seedream_upload_reference_images()
     image_urls.append(await _seedream_upload_single_file(original_image_path))
     image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     final_prompt = _seedream_repair_prompt(repair_request, context=source_context)
-    _trace_stage(trace_context, "seedream_repair_final_prompt", prompt=final_prompt, data={"original_image_path": original_image_path, "model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
+    _trace_stage(trace_context, "seedream_repair_final_prompt", prompt=final_prompt, data={"original_image_path": original_image_path, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     def _subscribe():
         def on_queue_update(update):
@@ -10064,15 +10325,8 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
             except Exception:
                 pass
         return fal_client.subscribe(
-            SEEDREAM_V45_MODEL_ID,
-            arguments={
-                "prompt": final_prompt,
-                "image_urls": image_urls,
-                "image_size": SEEDREAM_V45_IMAGE_SIZE,
-                "num_images": 1,
-                "max_images": 1,
-                "enable_safety_checker": bool(enable_safety_checker),
-            },
+            model_id,
+            arguments=_seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=enable_safety_checker),
             with_logs=True,
             on_queue_update=on_queue_update,
         )
@@ -10080,11 +10334,11 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
     result = await asyncio.to_thread(_subscribe)
     images = result.get("images") if isinstance(result, dict) else None
     if not images:
-        return f"Seedream v4.5 修圖沒有回傳圖片：{result}"
+        return f"{model_label} 修圖沒有回傳圖片：{result}"
     first = images[0]
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
-    return f"Seedream v4.5 修圖圖片欄位格式異常：{result}"
+    return f"{model_label} 修圖圖片欄位格式異常：{result}"
 
 
 async def _ensure_context_local_path(context):
@@ -10268,6 +10522,9 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "source_mode": context.get("source_mode", "photo_scene"),
         "trace_id": context.get("trace_id"),
         "final_level": context.get("final_level") or context.get("generation_level"),
+        "seedream_model_id": context.get("seedream_model_id"),
+        "seedream_model_label": context.get("seedream_model_label"),
+        "visual_checklist": context.get("visual_checklist"),
         "reference_item_path": context.get("reference_item_path"),
         "reference_item_url": context.get("reference_item_url"),
     }
@@ -10331,7 +10588,7 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
         embed.add_field(name="服裝／搭配", value=str(context.get("outfit_summary"))[:900], inline=False)
-    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | Seedream v4.5{_generation_level_footer(context)}")
+    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | {_context_seedream_model_label(context)}{_generation_level_footer(context)}")
     return embed
 
 def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
@@ -10359,7 +10616,7 @@ def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_fi
         for name, value in fields:
             if str(value or "").strip():
                 embed.add_field(name=name, value=str(value)[:1024], inline=False)
-        embed.set_footer(text=f"cosplay | Seedream v4.5 | v{LOBSTER_VERSION.replace('.', '')}{_generation_level_footer(context)}")
+        embed.set_footer(text=f"cosplay | {_context_seedream_model_label(context)} | v{LOBSTER_VERSION.replace('.', '')}{_generation_level_footer(context)}")
         return embed
     return _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=attachment_filename)
 
@@ -10411,7 +10668,20 @@ async def _generate_photo_from_context(context, msg=None):
         "generation_mode": context.get("generation_mode") or context.get("source_mode", "photo_scene"),
         "force_minimal_prompt": bool(context.get("force_minimal_prompt")),
         "figure10_present": bool(context.get("reference_item_path")),
+        "seedream_model_id_override": context.get("seedream_model_id_override"),
+        "seedream_model_label": context.get("seedream_model_label"),
     }
+    if str(context.get("source_mode") or context.get("type") or "").lower() == "cosplay":
+        trace_context["kind"] = "cosplay"
+        trace_context.setdefault("story", {
+            "work_title": context.get("cosplay_work_title"),
+            "character_name": context.get("cosplay_character_name"),
+            "family_label": context.get("cosplay_family_label") or context.get("cosplay_family"),
+            "user_mode_request": context.get("user_mode_request") or context.get("prompt_base"),
+            "cosplay_topic_candidate": context.get("cosplay_topic_candidate") or {},
+        })
+        if context.get("cosplay_state"):
+            trace_context.setdefault("cosplay_state", context.get("cosplay_state"))
     trace_context.setdefault("kind", "photo")
     trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
     _trace_stage(trace_context, "photo_context_input", data=context, prompt=context.get("prompt_base", ""))
@@ -10465,6 +10735,9 @@ async def _generate_photo_from_context(context, msg=None):
         "trace_id": trace_context.get("trace_id"),
         "final_level": trace_context.get("final_level") or visual.get("final_level"),
         "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
+        "seedream_model_id": trace_context.get("seedream_model_id") or visual.get("seedream_model_id"),
+        "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
+        "visual_checklist": trace_context.get("visual_checklist"),
     })
     trace_context.update({
         "source_mode": context.get("source_mode"),
@@ -11075,6 +11348,9 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "trace_id": trace_context.get("trace_id"),
         "final_level": trace_context.get("final_level") or visual.get("final_level"),
         "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
+        "seedream_model_id": trace_context.get("seedream_model_id") or visual.get("seedream_model_id"),
+        "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
+        "visual_checklist": trace_context.get("visual_checklist"),
     }
 
 class PhotoResultView(discord.ui.View):
@@ -11173,6 +11449,68 @@ class PhotoResultView(discord.ui.View):
                 except Exception:
                     pass
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+
+    @discord.ui.button(label="🧪 v5.0 試跑", style=discord.ButtonStyle.secondary)
+    async def try_seedream_v5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        context = dict(self.context)
+        context.pop("__trace_context", None)
+        context["trace_action"] = "seedream_v5_tryout"
+        context["user_input"] = "Seedream v5.0 Pro tryout from previous image"
+        context["seedream_model_id_override"] = SEEDREAM_V5_PRO_MODEL_ID
+        context["seedream_model_label"] = "Seedream v5.0 Pro"
+        context["v5_replace_target_url"] = context.get("local_url") or context.get("image_url")
+        context["v5_replace_target_message_id"] = getattr(interaction.message, "id", None)
+        context["prompt_base"] = (
+            context.get("prompt_base", "")
+            + "\nRegenerate this same requested image using Seedream v5.0 Pro. Keep the same scene, pose/action, outfit/reference, role anchors, and visual checklist; only the model changes."
+        )
+        try:
+            new_context = await _generate_photo_from_context(context)
+            db = load_memory()
+            db_type = "cosplay" if str(new_context.get("source_mode") or new_context.get("type") or "").lower() == "cosplay" else "photo"
+            db.insert(0, _photo_db_payload(new_context, type_override=db_type))
+            save_memory(db)
+            view = PhotoResultView(new_context)
+            file, filename = _photo_discord_file(new_context)
+            embed = _build_result_embed(new_context, title_prefix="🧪 v5.0 試跑", attachment_filename=filename if file else None)
+            if file:
+                sent = await interaction.followup.send(embed=embed, file=file, view=view)
+            else:
+                sent = await interaction.followup.send(embed=embed, view=view)
+            new_context["message_id"] = sent.id
+            photo_generation_contexts[sent.id] = new_context
+            view.context = new_context
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ v5.0 試跑失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+
+    @discord.ui.button(label="✅ 採用取代來源", style=discord.ButtonStyle.success)
+    async def adopt_v5_source(self, interaction: discord.Interaction, button: discord.ui.Button):
+        context = dict(self.context)
+        target_url = context.get("v5_replace_target_url")
+        target_mid = context.get("v5_replace_target_message_id")
+        if not target_url:
+            await interaction.response.send_message("這張不是 v5.0 試跑來源圖，沒有可取代的原圖。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            db_type = "cosplay" if str(context.get("source_mode") or context.get("type") or "").lower() == "cosplay" else "photo"
+            _replace_photo_db_record(target_url, _photo_db_payload(context, type_override=db_type))
+            _safe_delete_vault_image(target_url)
+            if target_mid and interaction.channel:
+                try:
+                    target_message = await interaction.channel.fetch_message(int(target_mid))
+                    adopted_context = dict(context)
+                    adopted_context["message_id"] = target_message.id
+                    photo_generation_contexts[target_message.id] = adopted_context
+                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0")
+                except Exception as edit_exc:
+                    print(f"⚠️ [V5_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
+            await interaction.followup.send("✅ 已採用這張 v5.0 結果並取代來源紀錄。", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"⚠️ 採用 v5.0 取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
     @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -11275,7 +11613,7 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
                     current_outfit=current_outfit,
                     trace_context=trace_context,
                 )
-            return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True)
+            return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True, trace_context=trace_context)
         if mode == "photo_scene":
             return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit, trace_context=trace_context)
         if mode == "photo_reference":
