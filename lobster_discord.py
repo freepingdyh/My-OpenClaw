@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.90"
+LOBSTER_VERSION = "1.4.91"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -7070,7 +7070,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.90: strict scene / pose / outfit/cosplay adherence gate."""
+    """v1.4.91: strict scene / pose / outfit/cosplay adherence gate."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -7632,7 +7632,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1490 canon-first sexy cosplay")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1491 canon-first sexy cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
@@ -9832,21 +9832,126 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         return first["url"]
     return f"Seedream v4.5 /photo 圖片欄位格式異常：{result}"
 
-def _seedream_repair_prompt(custom_prompt):
+def _repair_context_mode(context):
+    return str((context or {}).get("source_mode") or (context or {}).get("type") or "photo").strip().lower()
+
+
+def _repair_clean_line(value, limit=260):
+    text = _clean_text_compact(str(value or ""))
+    return text[:limit] if limit and len(text) > limit else text
+
+
+def _repair_collect_history(context, latest_request="", limit=4):
+    items = []
+    existing = (context or {}).get("repair_history")
+    if isinstance(existing, list):
+        items.extend([_repair_clean_line(x, 220) for x in existing if str(x or "").strip()])
+    prior = _repair_clean_line((context or {}).get("repair_request"), 220)
+    if prior:
+        items.append(prior)
+    latest = _repair_clean_line(latest_request, 220)
+    if latest:
+        items.append(latest)
+    deduped = []
+    seen = set()
+    for item in items:
+        key = item.strip().lower()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped[-max(1, int(limit or 4)):]
+
+
+def _seedream_repair_mode_block(context):
+    context = context or {}
+    mode = _repair_context_mode(context)
+    lines = []
+
+    scene_summary = _repair_clean_line(context.get("scene_summary") or context.get("composition") or context.get("scene_text"), 220)
+    action_summary = _repair_clean_line(context.get("action_summary"), 220)
+    outfit_summary = _repair_clean_line(context.get("outfit_summary"), 220)
+    mood_summary = _repair_clean_line(context.get("mood_summary") or context.get("mood"), 220)
+    prompt_base = _repair_clean_line(context.get("prompt_base"), 320)
+
+    if mode == "cosplay":
+        state = context.get("cosplay_state") if isinstance(context.get("cosplay_state"), dict) else {}
+        role_name = _repair_clean_line(context.get("cosplay_character_name") or state.get("character_name") or state.get("role_name"), 120)
+        work_title = _repair_clean_line(context.get("cosplay_work_title") or state.get("work_title") or state.get("source_title"), 120)
+        role_label = " / ".join([x for x in [role_name, work_title] if x]) or "the requested cosplay role"
+        lines.extend([
+            "COSPLAY CHARACTER LOCK:",
+            f"- Role identity to preserve or restore: {role_label}.",
+            "- Xiaoxia must still read clearly as Xiaoxia cosplaying the role, not the original actor/character and not a generic glamour model.",
+            "- Restore and preserve all signature role-defining features that are already present or were originally requested, including hair color/style, elf ears or other fantasy traits, key costume silhouette, and core prop language.",
+            "- Sexy reinterpretation is allowed and required when Daxia requested it. Preserve the sexy adaptation if it already exists, but do not let sexiness erase role recognizability.",
+        ])
+        costume_direction = _repair_clean_line(state.get("costume_direction") or state.get("outfit_intent"), 260)
+        scenario_tw = _repair_clean_line(state.get("scenario_tw") or scene_summary, 220)
+        primary_action = _repair_clean_line(state.get("primary_action") or action_summary, 220)
+        environment_trace = _repair_clean_line(state.get("environment_trace"), 220)
+        if costume_direction:
+            lines.append(f"- Costume direction lock: {costume_direction}.")
+        if scenario_tw:
+            lines.append(f"- Scene/world lock: {scenario_tw}.")
+        if environment_trace:
+            lines.append(f"- Environment details to preserve: {environment_trace}.")
+        if primary_action:
+            lines.append(f"- Main action / pose intent: {primary_action}.")
+        lines.append("- Unless Daxia explicitly asks otherwise, do not recolor the hair, do not remove elf ears or species traits, and do not replace the costume with a generic dress.")
+        lines.append("- Keep cosplay repairs local when possible: fix the defect without drifting character identity, costume system, or world setting.")
+        lines.append("- Cosplay output remains strictly solo Xiaoxia only. No second character, no companion, and no external body parts.")
+        return "\n".join(lines)
+
+    public_scene_allowed = bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders"))
+    block_title = "DIARY / PHOTO SCENE LOCK:" if mode == "diary" else "PHOTO SCENE LOCK:"
+    lines.append(block_title)
+    if scene_summary:
+        lines.append(f"- Preserve or restore this requested scene: {scene_summary}.")
+    if action_summary:
+        lines.append(f"- Preserve or restore this requested action / pose: {action_summary}.")
+    if outfit_summary:
+        lines.append(f"- Preserve or restore this outfit direction: {outfit_summary}.")
+    if mood_summary:
+        lines.append(f"- Preserve or restore this lighting / mood: {mood_summary}.")
+    if prompt_base:
+        lines.append(f"- Original request reminder: {prompt_base}.")
+    if public_scene_allowed:
+        lines.append("- Xiaoxia must remain the only primary subject. Incidental distant or blurred background bystanders are allowed only when needed for public-scene realism, but they must stay clearly secondary, non-interacting, and must not replace Daxia.")
+        lines.append("- Never introduce a male partner stand-in, no foreground extra person, no companion interaction, and no external hands, head, shoulder, or body part standing in for Daxia.")
+    else:
+        lines.append("- Strictly solo Xiaoxia only. No other people, no companion, and no external body parts, unless Daxia explicitly asked to keep harmless public bystanders.")
+    lines.append("- Keep repairs local whenever possible: fix the defect while preserving the scene, pose, outfit, and mood.")
+    return "\n".join(lines)
+
+
+def _seedream_repair_prompt(custom_prompt, context=None):
+    context = context or {}
+    repair_history = _repair_collect_history(context, custom_prompt, limit=4)
+    history_block = ""
+    if repair_history:
+        history_lines = [f"- {item}" for item in repair_history]
+        history_block = "\nPREVIOUS REPAIR INTENT HISTORY (latest requests remain active unless superseded):\n" + "\n".join(history_lines) + "\n"
+    mode_block = _seedream_repair_mode_block(context)
     return (
         "Use Images 1-9 as identity reference sheets for Xiaoxia. Image 10 is the exact generated photo that needs correction. "
-        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. Preserve her fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, and long graceful legs with an elegant lower-leg line; do not drift into a shorter, heavier, flatter, or different-looking woman. "
-        "Keep Xiaoxia Aesthetic as the default baseline, but Daxia's current repair request has absolute priority over any default. If Daxia explicitly requests fuller bust, a slimmer body, longer lower legs, stronger role fidelity, or a scene/action fix, obey that request first while preserving everything else. "
+        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. "
+        "Preserve her fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, and long graceful legs with an elegant lower-leg line; do not drift into a shorter, heavier, flatter, or different-looking woman. "
+        "Keep Xiaoxia Aesthetic as the default baseline, but Daxia's current repair request has absolute priority over any default. "
+        "If Daxia explicitly requests fuller bust, a slimmer body, longer lower legs, stronger role fidelity, or a scene/action fix, obey that request first while preserving everything else. "
         "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. "
-        "Apply only the correction requested by Daxia. "
-        "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people. "
+        "Apply only the correction requested by Daxia. If the request is local (for example extra hand, bad fingers, awkward anatomy, missing ear, wrong hair color, or missing prop), fix that local defect first and preserve all other correct elements. "
         "If correcting anatomy, keep exactly two arms and two hands only, connected naturally to the correct wrists and arms. No duplicate hands, no extra limbs, no malformed fingers. "
-        "\n\nDAIXA REPAIR REQUEST:\n"
+        "Avoid repair drift: do not solve one defect by breaking another key requirement. "
+        "Preserve the identity locks, scene locks, and mode-specific requirements below as hard constraints.\n\n"
+        + mode_block
+        + history_block
+        + "\nCURRENT DAXIA REPAIR REQUEST:\n"
         + str(custom_prompt or "").strip()
     )
 
 
-async def generate_seedream_v45_repair(original_image_path, repair_request, enable_safety_checker=True, trace_context=None):
+async def generate_seedream_v45_repair(original_image_path, repair_request, enable_safety_checker=True, trace_context=None, source_context=None):
     """Seedream v4.5 修正版：Image 10 是要修的原圖，只改指定瑕疵，保留構圖與氛圍。"""
     if not original_image_path:
         raise RuntimeError("REPAIR_IMAGE_PATH_NONE：沒有可修正的原圖。")
@@ -9854,7 +9959,7 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
     image_urls = await _seedream_upload_reference_images()
     image_urls.append(await _seedream_upload_single_file(original_image_path))
     image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
-    final_prompt = _seedream_repair_prompt(repair_request)
+    final_prompt = _seedream_repair_prompt(repair_request, context=source_context)
     _trace_stage(trace_context, "seedream_repair_final_prompt", prompt=final_prompt, data={"original_image_path": original_image_path, "model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     def _subscribe():
@@ -9906,19 +10011,22 @@ async def _ensure_context_local_path(context):
 
 
 async def _repair_photo_context(context, repair_request, msg=None):
+    repair_history = _repair_collect_history(context, repair_request, limit=4)
     trace_context = {
         "kind": "repair",
         "action": "photo_repair",
         "source_mode": context.get("source_mode") or context.get("type") or "photo",
         "original_trace_id": context.get("trace_id"),
         "repair_request": str(repair_request or "").strip(),
+        "repair_history": repair_history,
+        "allow_background_bystanders": bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders")),
         "original_context": context,
     }
     _trace_stage(trace_context, "repair_context_input", data=context, prompt=repair_request)
     source_path = await _ensure_context_local_path(context)
     if msg:
         await msg.edit(content="🩹 小俠正在保留原本構圖與氛圍，只修大俠指定的地方…")
-    generated_image_url = await generate_seedream_v45_repair(source_path, repair_request, enable_safety_checker=True, trace_context=trace_context)
+    generated_image_url = await generate_seedream_v45_repair(source_path, repair_request, enable_safety_checker=True, trace_context=trace_context, source_context=context)
     if not generated_image_url or not str(generated_image_url).startswith("http"):
         raise RuntimeError(f"修圖失敗：{generated_image_url}")
 
@@ -9934,6 +10042,7 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "local_filename": local_filename,
         "local_path": local_path,
         "repair_request": str(repair_request or "").strip(),
+        "repair_history": repair_history,
         "trace_id": trace_context.get("trace_id"),
         "repaired_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "composition": context.get("composition") or context.get("scene_summary") or "修正版照片",
@@ -9941,6 +10050,8 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "message": context.get("message") or "大俠，這張我保留原本氣氛，悄悄整理得更好了。",
         "source_mode": context.get("source_mode", context.get("type", "photo_repair")),
         "type": context.get("type", context.get("source_mode", "photo")),
+        "allow_background_bystanders": bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders")),
+        "diary_allow_background_bystanders": bool(context.get("diary_allow_background_bystanders")),
     })
     trace_context["result_url"] = local_url
     _write_generation_trace("repair", trace_context)
