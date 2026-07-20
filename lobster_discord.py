@@ -9,7 +9,41 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.91"
+LOBSTER_VERSION = "1.4.92"
+
+
+def _normalize_generation_level(level):
+    if isinstance(level, bool):
+        return ""
+    if isinstance(level, (int, float)):
+        try:
+            return f"L{int(level)}"
+        except Exception:
+            return ""
+    raw = str(level or "").strip()
+    if not raw:
+        return ""
+    if re.fullmatch(r"[Ll]\d+", raw):
+        return raw.upper()
+    if raw.isdigit():
+        return f"L{raw}"
+    if raw.lower() == "ultimate":
+        return "L4+ULT"
+    return raw
+
+
+def _generation_level_text(context):
+    ctx = context or {}
+    level = _normalize_generation_level(ctx.get("final_level") or ctx.get("generation_level") or ctx.get("safety_level"))
+    return level
+
+
+def _generation_level_footer(context, prefix="防護等級"):
+    level = _generation_level_text(context)
+    if not level:
+        return ""
+    return f" | {prefix}: {level}"
+
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -7070,7 +7104,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.91: strict scene / pose / outfit/cosplay adherence gate."""
+    """v1.4.92: strict scene / pose / outfit/cosplay adherence gate + visible L level badge."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -7481,15 +7515,17 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                     continue
                 trace_context["error"] = f"ADHERENCE_GATE_FINAL_REJECTED: {adherence_reason}"
                 trace_context["result_url"] = generated_image_url
-                trace_context["final_level"] = level
+                trace_context["final_level"] = f"L{level}"
                 _write_generation_trace(trace_context.get("kind"), trace_context)
                 raise Exception(f"ADHERENCE_GATE_FINAL_REJECTED：重拍後仍不符合大俠指令，所以不發錯圖。原因：{adherence_reason}")
 
         if isinstance(visual_dict, dict):
             visual_dict["engine"] = engine_name
             visual_dict["trace_id"] = trace_context.get("trace_id")
+            visual_dict["final_level"] = trace_context.get("final_level") or f"L{level}"
+            visual_dict["generation_level"] = visual_dict.get("final_level")
         trace_context["result_url"] = generated_image_url
-        trace_context["final_level"] = level
+        trace_context["final_level"] = f"L{level}"
         _write_generation_trace(trace_context.get("kind"), trace_context)
         return generated_image_url, visual_dict
 
@@ -7512,8 +7548,10 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     if isinstance(visual_dict, dict):
         visual_dict["engine"] = engine_name
         visual_dict["trace_id"] = trace_context.get("trace_id")
+        visual_dict["final_level"] = trace_context.get("final_level") or "L4+ULT"
+        visual_dict["generation_level"] = visual_dict.get("final_level")
     trace_context["result_url"] = final_url
-    trace_context["final_level"] = "ultimate"
+    trace_context["final_level"] = "L4+ULT"
     _write_generation_trace(trace_context.get("kind"), trace_context)
     return final_url, visual_dict
 
@@ -7605,6 +7643,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "vibe_mode": vibe_mode,
             "cosplay_state": _cosplay_state,
             "trace_id": trace_context.get("trace_id"),
+            "final_level": trace_context.get("final_level") or visual.get("final_level"),
+            "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
         }
         db = load_memory()
         db.insert(0, payload)
@@ -7632,7 +7672,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1491 canon-first sexy cosplay")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image{_generation_level_footer(payload)} | v{LOBSTER_VERSION.replace('.', '')} canon-first sexy cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
@@ -10050,6 +10090,8 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "message": context.get("message") or "大俠，這張我保留原本氣氛，悄悄整理得更好了。",
         "source_mode": context.get("source_mode", context.get("type", "photo_repair")),
         "type": context.get("type", context.get("source_mode", "photo")),
+        "final_level": context.get("final_level") or context.get("generation_level") or "REPAIR",
+        "generation_level": context.get("final_level") or context.get("generation_level") or "REPAIR",
         "allow_background_bystanders": bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders")),
         "diary_allow_background_bystanders": bool(context.get("diary_allow_background_bystanders")),
     })
@@ -10172,6 +10214,7 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "type": type_override,
         "source_mode": context.get("source_mode", "photo_scene"),
         "trace_id": context.get("trace_id"),
+        "final_level": context.get("final_level") or context.get("generation_level"),
         "reference_item_path": context.get("reference_item_path"),
         "reference_item_url": context.get("reference_item_url"),
     }
@@ -10235,7 +10278,7 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
         embed.add_field(name="服裝／搭配", value=str(context.get("outfit_summary"))[:900], inline=False)
-    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | Seedream v4.5")
+    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | Seedream v4.5{_generation_level_footer(context)}")
     return embed
 
 def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
@@ -10263,7 +10306,7 @@ def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_fi
         for name, value in fields:
             if str(value or "").strip():
                 embed.add_field(name=name, value=str(value)[:1024], inline=False)
-        embed.set_footer(text=f"cosplay | Seedream v4.5 | v1489")
+        embed.set_footer(text=f"cosplay | Seedream v4.5 | v{LOBSTER_VERSION.replace('.', '')}{_generation_level_footer(context)}")
         return embed
     return _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=attachment_filename)
 
@@ -10367,6 +10410,8 @@ async def _generate_photo_from_context(context, msg=None):
         "message": visual.get("message", context.get("message", "")),
         "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "trace_id": trace_context.get("trace_id"),
+        "final_level": trace_context.get("final_level") or visual.get("final_level"),
+        "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
     })
     trace_context.update({
         "source_mode": context.get("source_mode"),
@@ -10410,7 +10455,7 @@ async def handle_photo_raw_command(message, user_input):
         _trace_stage(trace_context, "photo_raw_gates", data={"solo_ok":solo_ok,"solo_reason":solo_reason,"adherence_ok":adherence_ok,"adherence_reason":adherence_reason,"adherence_detail":adherence_detail})
         local_filename = await save_to_vault(generated_image_url)
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
-        context = {"mode":"photo_scene","source_mode":"photo_raw","scene_text":raw_prompt[:120],"scene_summary":"photo_raw playground 等價測試","outfit_summary":"依原始 prompt","mood_summary":"Seedream raw test","message":"大俠用 `/photo_raw` 直接測 Seedream，不經過 planner / 衣櫃 / 美感包裝。","image_url":generated_image_url,"local_url":local_url,"local_filename":local_filename,"local_path":os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,"created_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),"trace_id":trace_context.get("trace_id")}
+        context = {"mode":"photo_scene","source_mode":"photo_raw","scene_text":raw_prompt[:120],"scene_summary":"photo_raw playground 等價測試","outfit_summary":"依原始 prompt","mood_summary":"Seedream raw test","message":"大俠用 `/photo_raw` 直接測 Seedream，不經過 planner / 衣櫃 / 美感包裝。","image_url":generated_image_url,"local_url":local_url,"local_filename":local_filename,"local_path":os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,"created_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),"trace_id":trace_context.get("trace_id"),"final_level":"RAW","generation_level":"RAW"}
         trace_context["result_url"] = local_url
         _write_generation_trace("photo", trace_context)
         await status.delete()
@@ -10975,6 +11020,8 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "vibe_mode": vibe_mode,
         "cosplay_state": cosplay_state,
         "trace_id": trace_context.get("trace_id"),
+        "final_level": trace_context.get("final_level") or visual.get("final_level"),
+        "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
     }
 
 class PhotoResultView(discord.ui.View):
@@ -11860,6 +11907,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "type": "diary",
                 "source_mode": "diary",
                 "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
+                "final_level": (diary_trace_context.get("final_level") if not custom_diary else None),
+                "generation_level": (diary_trace_context.get("final_level") if not custom_diary else None),
                 "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id") if not custom_diary else None,
                 "reference_item_path": (diary_wardrobe or {}).get("reference_path") if not custom_diary else None,
                 "reference_item_url": (diary_wardrobe or {}).get("reference_url") if not custom_diary else None,
@@ -11909,7 +11958,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 embed = discord.Embed(title=title, description=combined_message, color=0xffb6c1)
                 embed.set_image(url=local_url)
                 embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
-                embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}")
+                embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}{_generation_level_footer(diary_photo_payload)}")
                 # 🌟 修改這裡：綁定 msg 變數並加上三個按鈕
                 result_view = PhotoResultView(diary_photo_payload)
                 diary_msg = await channel.send(f"✅ 已完成 **{entry_date}** 的交換日記！", embed=embed, view=result_view)
@@ -12101,7 +12150,9 @@ async def more(ctx):
             "mood": visual["mood"],
             "message": visual["message"],
             "image_url": generated_image_url,
-            "local_url": local_url
+            "local_url": local_url,
+            "final_level": visual.get("final_level"),
+            "generation_level": visual.get("generation_level") or visual.get("final_level")
         }
         db = load_memory()
         db.insert(0, payload)
@@ -12110,7 +12161,7 @@ async def more(ctx):
         embed = discord.Embed(title=f"【加洗】{story['topic']}", color=0xffb6c1)
         embed.set_image(url=local_url)
         embed.add_field(name="💌 專屬留言", value=visual["message"], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image{_generation_level_footer(payload)}")
 
         await msg.delete()
         new_msg = await ctx.send(embed=embed)
