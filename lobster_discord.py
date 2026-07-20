@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.88"
+LOBSTER_VERSION = "1.4.89"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -7070,14 +7070,31 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.86: strict scene / pose / outfit adherence gate."""
-    if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary"}:
+    """v1.4.89: strict scene / pose / outfit/cosplay adherence gate."""
+    if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
     if not data:
         return True, "adherence skipped: cannot download image", {}
     prompt_text = str(prompt_text or "")
-    qa_prompt = f"""
+    if str(mode or "").lower() == "cosplay":
+        qa_prompt = f"""
+You are an image QA checker for a cosplay generation pipeline.
+Judge whether the generated image obeys the requested cosplay character, source-world scene, costume, props, and main action.
+Return JSON only:
+{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"character_anchor_ok":true,"prop_ok":true,"overall_ok":true,"failure_reason":"","violations":[]}}
+Final Seedream prompt to check against:
+{prompt_text[:7000]}
+Rules:
+- Be strict about mandatory character anchors such as hair color/style, costume color/silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
+- Fail character_anchor_ok if the image only captures a vague mood but misses the recognizable role anchors.
+- Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume.
+- Fail scene_ok if the prompt requests a nightclub/stage/starship/fantasy journey/future city/etc. but the image shows an unrelated library, cafe, bedroom, tea room, garden, or generic portrait setting.
+- Fail prop_ok if a named prop such as microphone, datapad, staff, sword, tambourine, or book is required but absent or replaced by an unrelated prop.
+- overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, or prop_ok is clearly false.
+"""
+    else:
+        qa_prompt = f"""
 You are an image QA checker for a photo generation pipeline.
 Judge whether the generated image obeys the user's requested scene, pose/action, and outfit.
 Return JSON only:
@@ -7102,12 +7119,152 @@ Rules:
         if not isinstance(result, dict) or not result:
             return True, "adherence skipped: invalid JSON", {"raw": str(getattr(resp, 'text', ''))[:500]}
         scene_ok = bool(result.get("scene_ok", True)); pose_ok = bool(result.get("pose_ok", True)); outfit_ok = bool(result.get("outfit_ok", True))
-        overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok))
-        ok = bool(overall and scene_ok and pose_ok and outfit_ok)
+        if str(mode or "").lower() == "cosplay":
+            character_ok = bool(result.get("character_anchor_ok", True))
+            prop_ok = bool(result.get("prop_ok", True))
+            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and character_ok and prop_ok))
+            ok = bool(overall and scene_ok and pose_ok and outfit_ok and character_ok and prop_ok)
+        else:
+            overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok))
+            ok = bool(overall and scene_ok and pose_ok and outfit_ok)
         return ok, str(result.get("failure_reason") or result)[:800], result
     except Exception as exc:
         print(f"⚠️ [ADHERENCE_GATE_FAILED] {type(exc).__name__}: {exc}")
         return True, "adherence skipped: checker error", {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _flatten_cosplay_anchors(value, limit=10):
+    items = []
+    if isinstance(value, (list, tuple)):
+        for x in value:
+            s = str(x or "").strip()
+            if s:
+                items.append(s)
+    elif value:
+        s = str(value or "").strip()
+        if s:
+            # split only coarse separators; keep Chinese phrases intact
+            for part in re.split(r"[\n;；]+", s):
+                part = part.strip(" -•,，")
+                if part:
+                    items.append(part)
+    out = []
+    for item in items:
+        if item not in out:
+            out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, trace_context=None, retry_reason=""):
+    """v1.4.89: Cosplay-specific minimal prompt. Text/story layer remains rich; Seedream receives only role anchors + scene/action/costume."""
+    visual_dict = visual_dict if isinstance(visual_dict, dict) else {}
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    story = trace_context.get("story") if isinstance(trace_context.get("story"), dict) else {}
+    state = trace_context.get("cosplay_state") if isinstance(trace_context.get("cosplay_state"), dict) else {}
+    candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
+
+    work_title = str(story.get("work_title") or candidate.get("work_title") or "the requested source work").strip()
+    character_name = str(story.get("character_name") or candidate.get("character_name") or "the requested character").strip()
+    family_label = str(story.get("family_label") or candidate.get("family_label") or "cosplay").strip()
+    role_archetype = str(candidate.get("role_archetype") or "").strip()
+
+    canonical = _flatten_cosplay_anchors(candidate.get("canonical_visual_anchors"), limit=8)
+    visual_tags = _flatten_cosplay_anchors(candidate.get("visual_tags"), limit=8)
+    scene_seed = str(candidate.get("scene_seed") or state.get("setting_anchor") or state.get("scene_design") or visual_dict.get("composition") or "").strip()
+    costume_focus = str(candidate.get("costume_focus") or state.get("outfit_intent") or state.get("costume_direction") or "").strip()
+    setting = str(state.get("setting_anchor") or state.get("scene_design") or "").strip()
+    action = str(state.get("primary_action") or state.get("activity") or state.get("action_direction") or "").strip()
+    micro = str(state.get("micro_action") or "").strip()
+    prop = ""
+    for token in canonical + visual_tags + [costume_focus, scene_seed, action, micro]:
+        if re.search(r"prop|道具|手持|麥克風|麦克风|microphone|手鼓|tambourine|數據板|数据板|datapad|刀|sword|book|書|书", token, re.I):
+            prop = token
+            break
+    lighting = str(state.get("lighting_mood") or state.get("lighting_direction") or "cinematic lighting matching the source world").strip()
+    camera = str(state.get("camera_direction") or "photorealistic cinematic cosplay still").strip()
+    mood = str(state.get("mood_tw") or state.get("emotion") or candidate.get("mood") or "role-faithful cinematic mood").strip()
+    vibe = str(state.get("vibe_target_zh") or (trace_context.get("vibe_mode") or {}).get("zh") or "自然").strip()
+
+    anchors = canonical[:]
+    # Character-specific hardening for common roles that are easy to wash into generic glamour.
+    key = (work_title + " " + character_name).lower()
+    if "jessica rabbit" in key or "潔西卡" in key or "杰西卡" in key:
+        anchors = [
+            "long vivid red wavy hair",
+            "sparkling red form-fitting evening gown or mermaid dress",
+            "long purple opera gloves",
+            "old jazz nightclub or cabaret stage",
+            "vintage microphone or stage-performance cue",
+        ] + anchors
+    if "gaal" in key or "蓋爾" in key or "盖尔" in key or "foundation" in key or "基地" in key:
+        anchors = [
+            "streamlined futuristic robe or jumpsuit",
+            "handheld glowing datapad or futuristic data device",
+            "starship interior with a giant observation window",
+            "deep starfield, nebula, or futuristic city beyond the window",
+            "calm intellectual sci-fi atmosphere",
+        ] + anchors
+    if "frieren" in key or "芙莉蓮" in key or "芙莉莲" in key:
+        anchors = [
+            "long white or silver hair",
+            "elf-like ears or subtle elven silhouette",
+            "white mage cloak with gold trim or fantasy mage outfit",
+            "staff or magical spell effect",
+            "quiet fantasy journey atmosphere",
+        ] + anchors
+    # de-duplicate
+    dedup=[]
+    for a in anchors:
+        s=str(a or "").strip()
+        if s and s not in dedup:
+            dedup.append(s)
+    anchors=dedup[:10]
+
+    anchor_lines = "\n".join(f"- {a}" for a in anchors) if anchors else "- Preserve at least 3 concrete visual anchors from the source character: costume silhouette, color palette, hairstyle/hair color, prop, emblem/motif, and source-world environment."
+    visual_request = str(initial_prompt or visual_dict.get("image_prompt") or "").strip()
+    retry = str(retry_reason or "").strip()
+    retry_block = ""
+    if retry:
+        retry_block = f"\n\nPREVIOUS OUTPUT WAS REJECTED:\n{retry[:900]}\nCorrect the failure now. Character anchors, costume, prop, and source-world scene are mandatory. Do not create a generic glamour portrait."
+
+    prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
+
+Figures 1-9 are identity-only reference images of Xiaoxia.
+Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, long brown hair base identity, tall slim feminine body, defined waist, and overall Xiaoxia look.
+Do NOT copy pose, background, outfit, lighting setup, or composition from Figures 1-9.
+
+COSPLAY TASK — create Xiaoxia's cosplay reinterpretation, not the original actor/character.
+Source category: {family_label}
+Source work: {work_title}
+Character: {character_name}
+Role archetype: {role_archetype or 'source-faithful role identity'}
+Target vibe: {vibe}
+
+MANDATORY CHARACTER VISUAL ANCHORS — preserve these visibly in the image:
+{anchor_lines}
+
+COSPLAY VISUAL REQUEST — this controls the final image:
+- Outfit/costume: {costume_focus or state.get('costume_direction') or 'source-faithful recognizable cosplay outfit based on the character anchors'}
+- Scene/world: {scene_seed or setting or 'a source-world appropriate setting, not a generic bedroom, cafe, library, or fashion portrait'}
+- Main action/pose: {action or 'one clear role-appropriate story action'}
+- Hand/prop action: {micro or prop or 'hands are purposeful and support the role or prop'}
+- Mood/expression: {mood}
+- Lighting/camera: {lighting}; {camera}
+
+USER/VISUAL PROMPT CONTEXT, only if consistent with the hard anchors above:
+{visual_request[:1400]}{retry_block}
+
+Mandatory obedience rules:
+- Character recognizability is mandatory: hair/hair color, costume color/silhouette, props, and environment must match the selected role.
+- Do NOT replace the role with a generic glamour dress, generic white dress, generic black outfit, library portrait, tea-room portrait, bedroom portrait, or unrelated fashion photo.
+- If a specific prop is listed, show it clearly.
+- If a specific source-world scene is listed, show it clearly.
+- Xiaoxia remains recognizable as Xiaoxia cosplaying the role; hairstyle and hair color may adapt only to improve role recognizability.
+- Natural anatomy, natural hands, one primary subject, photorealistic cinematic cosplay image.
+- No male partner, no companion, no foreground second person, no external hands, no viewer body parts."""
+    return prompt.strip()
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
@@ -7199,7 +7356,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
         _trace_stage(trace_context, f"generation_result_L{level}", data={"ok": True, "result_url": generated_image_url})
 
-        if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
+        if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
             allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
             solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(
                 generated_image_url,
@@ -7281,7 +7438,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
-    if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
+    if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
         solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode, allow_background_bystanders=allow_background_bystanders)
         if not solo_ok:
@@ -7409,7 +7566,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1476 dynamic cosplay")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1489 cosplay minimal")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
@@ -7591,8 +7748,11 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
     fal_client = _get_fal_client()
     image_urls = await _seedream_upload_reference_images()
-    final_prompt = _seedream_cosplay_prompt(custom_prompt)
-    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE})
+    if str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
+        final_prompt = str(custom_prompt or "").strip()
+    else:
+        final_prompt = _seedream_cosplay_prompt(custom_prompt)
+    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": SEEDREAM_V45_MODEL_ID, "image_size": SEEDREAM_V45_IMAGE_SIZE, "raw_seedream_mode": (trace_context or {}).get("raw_seedream_mode")})
 
     def _subscribe():
         def on_queue_update(update):
@@ -9926,7 +10086,7 @@ def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_fi
         for name, value in fields:
             if str(value or "").strip():
                 embed.add_field(name=name, value=str(value)[:1024], inline=False)
-        embed.set_footer(text=f"cosplay | Seedream v4.5 | v1476")
+        embed.set_footer(text=f"cosplay | Seedream v4.5 | v1489")
         return embed
     return _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=attachment_filename)
 
