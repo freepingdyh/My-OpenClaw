@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.96"
+LOBSTER_VERSION = "1.4.98"
 
 
 def _normalize_generation_level(level):
@@ -12929,6 +12929,74 @@ async def clear_today_outfit_command(ctx):
 
 
 
+async def _send_discord_chunks(send_target, content, *, prefix="", limit=1900):
+    """Send long Discord text safely, keeping each message under 2000 chars."""
+    text = str(content or "")
+    if not text:
+        return []
+    sent = []
+    max_len = max(500, min(int(limit or 1900), 1900))
+    chunks = []
+    current = ""
+    for line in text.splitlines(True):
+        if len(line) > max_len:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(line), max_len):
+                chunks.append(line[i:i+max_len])
+            continue
+        if len(current) + len(line) > max_len:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+    for idx, chunk in enumerate(chunks):
+        body = (prefix if idx == 0 else "") + chunk
+        if len(body) > 1990:
+            body = body[:1980] + "…"
+        sent.append(await send_target.send(body))
+    return sent
+
+
+def _cosplay_record_time_key(record):
+    """v1.4.98: sort cosplay records by actual timestamp, not list insertion order."""
+    if not isinstance(record, dict):
+        return datetime.min.replace(tzinfo=TZ_TPE)
+    candidates = [
+        record.get("publish_date"),
+        record.get("created_at"),
+        record.get("updated_at"),
+        record.get("timestamp"),
+        record.get("date"),
+    ]
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        normalized = text.replace("/", "-").replace(".", "-")
+        normalized = re.sub(r"\s+", " ", normalized)
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(normalized[:19] if fmt.endswith('%S') else normalized[:16] if fmt.endswith('%M') else normalized[:10], fmt)
+                return dt.replace(tzinfo=TZ_TPE)
+            except Exception:
+                pass
+        m = re.search(r"(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?", text)
+        if m:
+            try:
+                year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                hour = int(m.group(4) or 0)
+                minute = int(m.group(5) or 0)
+                second = int(m.group(6) or 0)
+                return datetime(year, month, day, hour, minute, second, tzinfo=TZ_TPE)
+            except Exception:
+                pass
+    return datetime.min.replace(tzinfo=TZ_TPE)
+
+
 async def _cosplay_delete_flow(send_target, author, channel, date_str: str = None, raw_content: str = ""):
     """v1.4.96: shared implementation for prefix command and direct on_message fallback."""
     db = load_memory()
@@ -12952,11 +13020,13 @@ async def _cosplay_delete_flow(send_target, author, channel, date_str: str = Non
             for idx, rec in enumerate(db)
             if str(rec.get("publish_date") or "").startswith(search_date)
         ]
-        msg_prefix = f"📅 找到 {search_date} 的紀錄："
+        matching_records.sort(key=lambda pair: _cosplay_record_time_key(pair[1]), reverse=True)
+        msg_prefix = f"📅 找到 {search_date} 的紀錄（新到舊）："
     else:
-        latest = list(enumerate(db))[-5:]
-        matching_records = list(reversed(latest))
-        msg_prefix = f"📅 這是金庫最新的 {len(matching_records)} 筆紀錄："
+        matching_records = list(enumerate(db))
+        matching_records.sort(key=lambda pair: _cosplay_record_time_key(pair[1]), reverse=True)
+        matching_records = matching_records[:5]
+        msg_prefix = f"📅 這是金庫最新的 {len(matching_records)} 筆紀錄（新到舊）："
 
     if not matching_records:
         await send_target.send("找不到符合的紀錄喔！(格式範例: `/cosplay_delete 2026.07.20` 或 `/cosplay_delete 2026-7-20`)")
@@ -12968,7 +13038,7 @@ async def _cosplay_delete_flow(send_target, author, channel, date_str: str = Non
         publish_date = str(record.get('publish_date') or '')
         msg_content += f"**{i+1}.** {topic} *(時間: {publish_date})*\n"
 
-    await send_target.send(msg_content)
+    await _send_discord_chunks(send_target, msg_content)
 
     def check(m):
         return m.author == author and m.channel == channel
