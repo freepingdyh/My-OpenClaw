@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.89"
+LOBSTER_VERSION = "1.4.90"
 
 SOLO_XIAOXIA_VISUAL_RULES = """
 Strictly solo Xiaoxia only.
@@ -7070,7 +7070,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
-    """v1.4.89: strict scene / pose / outfit/cosplay adherence gate."""
+    """v1.4.90: strict scene / pose / outfit/cosplay adherence gate."""
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         return True, "adherence skipped: mode not checked", {}
     data, mime = await _download_image_bytes_for_vision(image_url)
@@ -7086,9 +7086,11 @@ Return JSON only:
 Final Seedream prompt to check against:
 {prompt_text[:7000]}
 Rules:
-- Be strict about mandatory character anchors such as hair color/style, costume color/silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
+- Canon-first sexy cosplay: sexy styling is allowed and desired when requested, but it must remain inside the source character's recognizable costume system.
+- Be strict about mandatory character anchors such as hair color/style, costume main color palette, costume silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
+- Do not fail only because the outfit is more sensual, fitted, low-cut, open-neckline, cleavage-emphasizing, or mature; fail only if sensual styling replaces the required character anchors.
 - Fail character_anchor_ok if the image only captures a vague mood but misses the recognizable role anchors.
-- Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume.
+- Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume instead of a sexy adaptation of the requested character costume.
 - Fail scene_ok if the prompt requests a nightclub/stage/starship/fantasy journey/future city/etc. but the image shows an unrelated library, cafe, bedroom, tea room, garden, or generic portrait setting.
 - Fail prop_ok if a named prop such as microphone, datapad, staff, sword, tambourine, or book is required but absent or replaced by an unrelated prop.
 - overall_ok must be false if character_anchor_ok, outfit_ok, scene_ok, or prop_ok is clearly false.
@@ -7158,15 +7160,16 @@ def _flatten_cosplay_anchors(value, limit=10):
 
 
 def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, trace_context=None, retry_reason=""):
-    """v1.4.89: Cosplay-specific minimal prompt. Text/story layer remains rich; Seedream receives only role anchors + scene/action/costume."""
+    """v1.4.90: Canon-first sexy cosplay minimal prompt. Keep character anchors first; apply sexy adaptation without replacing the role."""
     visual_dict = visual_dict if isinstance(visual_dict, dict) else {}
     trace_context = trace_context if isinstance(trace_context, dict) else {}
     story = trace_context.get("story") if isinstance(trace_context.get("story"), dict) else {}
     state = trace_context.get("cosplay_state") if isinstance(trace_context.get("cosplay_state"), dict) else {}
     candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
 
-    work_title = str(story.get("work_title") or candidate.get("work_title") or "the requested source work").strip()
-    character_name = str(story.get("character_name") or candidate.get("character_name") or "the requested character").strip()
+    user_request = str(trace_context.get("user_input") or story.get("user_mode_request") or initial_prompt or "").strip()
+    work_title = str(story.get("work_title") or candidate.get("work_title") or user_request or "the requested source work").strip()
+    character_name = str(story.get("character_name") or candidate.get("character_name") or user_request or "the requested character").strip()
     family_label = str(story.get("family_label") or candidate.get("family_label") or "cosplay").strip()
     role_archetype = str(candidate.get("role_archetype") or "").strip()
 
@@ -7177,93 +7180,148 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     setting = str(state.get("setting_anchor") or state.get("scene_design") or "").strip()
     action = str(state.get("primary_action") or state.get("activity") or state.get("action_direction") or "").strip()
     micro = str(state.get("micro_action") or "").strip()
-    prop = ""
-    for token in canonical + visual_tags + [costume_focus, scene_seed, action, micro]:
-        if re.search(r"prop|道具|手持|麥克風|麦克风|microphone|手鼓|tambourine|數據板|数据板|datapad|刀|sword|book|書|书", token, re.I):
-            prop = token
-            break
     lighting = str(state.get("lighting_mood") or state.get("lighting_direction") or "cinematic lighting matching the source world").strip()
     camera = str(state.get("camera_direction") or "photorealistic cinematic cosplay still").strip()
     mood = str(state.get("mood_tw") or state.get("emotion") or candidate.get("mood") or "role-faithful cinematic mood").strip()
-    vibe = str(state.get("vibe_target_zh") or (trace_context.get("vibe_mode") or {}).get("zh") or "自然").strip()
+    vibe = str(state.get("vibe_target_zh") or (trace_context.get("vibe_mode") or {}).get("zh") or "魅").strip()
 
+    key = (work_title + " " + character_name + " " + user_request).lower()
+    explicit_hint = str(story.get("user_outfit_hints") or "").strip()
+
+    # Canonical role anchors must not be replaced by allure styling. 角色辨識優先；性感是附著在角色服裝上。
     anchors = canonical[:]
-    # Character-specific hardening for common roles that are easy to wash into generic glamour.
-    key = (work_title + " " + character_name).lower()
+    sexy_adaptation = [
+        "adult glamorous Xiaoxia version of the character, not a conservative school/event costume",
+        "sensual but still character-faithful tailoring: deeper open neckline, visible cleavage, defined waist, body-hugging silhouette",
+        "elegant alluring proportions while preserving the source character's main costume color palette, hairstyle/hair color, props, and world setting",
+    ]
+    forbidden = [
+        "Do not replace the source character with a generic glamour model or generic fantasy woman.",
+        "Do not let sexy styling change the character's main color palette, hairstyle/hair color, signature costume, prop, or source-world scene.",
+        "Do not output an unrelated library, tea room, bedroom, cafe, garden, or generic portrait unless the role request explicitly asks for it.",
+    ]
+
     if "jessica rabbit" in key or "潔西卡" in key or "杰西卡" in key:
         anchors = [
             "long vivid red wavy hair",
-            "sparkling red form-fitting evening gown or mermaid dress",
+            "sparkling deep red form-fitting evening gown or mermaid dress",
             "long purple opera gloves",
-            "old jazz nightclub or cabaret stage",
+            "old jazz nightclub, cabaret stage, or vintage Hollywood performance environment",
             "vintage microphone or stage-performance cue",
         ] + anchors
+        sexy_adaptation = [
+            "very glamorous femme-fatale styling is desired, but it must stay Jessica-Rabbit-coded",
+            "low neckline and hourglass silhouette are allowed and desired, while keeping the red gown and purple gloves mandatory",
+        ] + sexy_adaptation
+        forbidden += ["Do not change the red gown into a white floral dress or ordinary evening dress.", "Do not replace the nightclub/stage with a library or bookshelf scene."]
+
     if "gaal" in key or "蓋爾" in key or "盖尔" in key or "foundation" in key or "基地" in key:
         anchors = [
-            "streamlined futuristic robe or jumpsuit",
+            "streamlined futuristic robe or sci-fi jumpsuit",
             "handheld glowing datapad or futuristic data device",
             "starship interior with a giant observation window",
             "deep starfield, nebula, or futuristic city beyond the window",
             "calm intellectual sci-fi atmosphere",
         ] + anchors
-    if "frieren" in key or "芙莉蓮" in key or "芙莉莲" in key:
+        sexy_adaptation += ["use sleek tailored sci-fi lines, subtle open neckline, defined waist, and elegant futuristic allure without becoming a tea-room or palace portrait"]
+        forbidden += ["Do not replace the starship/data scene with a tea room, bedroom, garden, or classical dress portrait."]
+
+    if "frieren" in key or "芙莉蓮" in key or "芙莉莲" in key or "葬送" in key:
+        work_title = "葬送的芙莉蓮 / Frieren: Beyond Journey's End"
+        character_name = "芙莉蓮 / Frieren"
         anchors = [
-            "long white or silver hair",
-            "elf-like ears or subtle elven silhouette",
-            "white mage cloak with gold trim or fantasy mage outfit",
-            "staff or magical spell effect",
-            "quiet fantasy journey atmosphere",
+            "long white or silver hair, clearly not brown or black hair",
+            "visible elf ears or clear elven silhouette",
+            "predominantly white mage robe / white mage dress system with black and gold trim, clearly not a blue robe",
+            "Frieren-like fantasy mage identity, not a generic sorceress",
+            "staff, magical aura, spell effect, or quiet fantasy journey cue",
         ] + anchors
-    # de-duplicate
-    dedup=[]
-    for a in anchors:
-        s=str(a or "").strip()
+        sexy_adaptation = [
+            "sexy Frieren adaptation is desired: keep the white mage robe concept, but reinterpret it as a sensual mature version",
+            "the white robe may have a deeper open neckline, visible cleavage, chest-opening design, fitted waist, body-hugging bodice, elegant slit, or bare-shoulder detail",
+            "the outfit must still read as a white Frieren-like mage robe, not a blue sexy mage robe or unrelated fantasy dress",
+        ] + sexy_adaptation
+        forbidden += [
+            "Do not use a deep blue main robe for Frieren.",
+            "Do not remove white/silver hair or elf ears.",
+            "Do not make the image a generic white nature dress, ordinary lingerie/fashion portrait, or random flower-garden woman.",
+            "Do not use stiletto heels or modern nightclub styling as the main character cue.",
+        ]
+        if not scene_seed or "圖書" in scene_seed or "library" in scene_seed.lower():
+            scene_seed = "a quiet fantasy mage journey scene, ancient ruins, forest path, or magical meadow with subtle spell light; not a modern library or tea room"
+        if not action:
+            action = "standing calmly with a staff or gentle magical spell effect, looking toward the camera with Frieren's quiet mage presence"
+
+    # de-duplicate anchors while preserving order
+    dedup = []
+    for a in anchors + visual_tags:
+        s = str(a or "").strip()
         if s and s not in dedup:
             dedup.append(s)
-    anchors=dedup[:10]
+    anchors = dedup[:12]
 
-    anchor_lines = "\n".join(f"- {a}" for a in anchors) if anchors else "- Preserve at least 3 concrete visual anchors from the source character: costume silhouette, color palette, hairstyle/hair color, prop, emblem/motif, and source-world environment."
-    visual_request = str(initial_prompt or visual_dict.get("image_prompt") or "").strip()
+    anchor_lines = "\n".join(f"- {a}" for a in anchors) if anchors else "- Preserve at least 3 concrete visual anchors from the source character: hairstyle/hair color, costume color palette, costume silhouette, prop, emblem/motif, and source-world environment."
+    sexy_lines = "\n".join(f"- {a}" for a in sexy_adaptation[:8])
+    forbidden_lines = "\n".join(f"- {a}" for a in forbidden[:10])
+
+    # Avoid feeding the old long LLM image prompt back into Seedream; it often contains aesthetic drift.
+    user_block = user_request[:600]
+    if explicit_hint:
+        user_block += f"\nExplicit user outfit hint: {explicit_hint[:400]}"
+
     retry = str(retry_reason or "").strip()
     retry_block = ""
     if retry:
-        retry_block = f"\n\nPREVIOUS OUTPUT WAS REJECTED:\n{retry[:900]}\nCorrect the failure now. Character anchors, costume, prop, and source-world scene are mandatory. Do not create a generic glamour portrait."
+        retry_block = f"\n\nPREVIOUS OUTPUT WAS REJECTED:\n{retry[:900]}\nCorrect the failure now. Keep canon anchors first and apply sexy adaptation only inside the canon costume system."
 
     prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
 
 Figures 1-9 are identity-only reference images of Xiaoxia.
-Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, long brown hair base identity, tall slim feminine body, defined waist, and overall Xiaoxia look.
+Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, tall slim feminine body, defined waist, and overall Xiaoxia look.
 Do NOT copy pose, background, outfit, lighting setup, or composition from Figures 1-9.
 
-COSPLAY TASK — create Xiaoxia's cosplay reinterpretation, not the original actor/character.
+COSPLAY TASK — create Xiaoxia's sexy but canon-recognizable cosplay reinterpretation, not the original actor/character and not a generic glamour portrait.
 Source category: {family_label}
 Source work: {work_title}
 Character: {character_name}
 Role archetype: {role_archetype or 'source-faithful role identity'}
-Target vibe: {vibe}
+Target vibe: alluring / sexy / mature, while preserving canon recognizability.
 
-MANDATORY CHARACTER VISUAL ANCHORS — preserve these visibly in the image:
+CANON-FIRST RULE:
+The role must be recognizable BEFORE the sexy adaptation. Sexy styling is required, but it must attach to the character's canon costume system instead of replacing it.
+
+MANDATORY CHARACTER VISUAL ANCHORS — these are hard requirements:
 {anchor_lines}
 
+ALLOWED AND DESIRED SEXY ADAPTATION — do this without breaking the anchors:
+{sexy_lines}
+
 COSPLAY VISUAL REQUEST — this controls the final image:
-- Outfit/costume: {costume_focus or state.get('costume_direction') or 'source-faithful recognizable cosplay outfit based on the character anchors'}
-- Scene/world: {scene_seed or setting or 'a source-world appropriate setting, not a generic bedroom, cafe, library, or fashion portrait'}
+- Outfit/costume: {costume_focus or state.get('costume_direction') or 'canon-faithful recognizable cosplay outfit, sexier and more fitted but still based on the character anchors'}
+- Scene/world: {scene_seed or setting or 'a source-world appropriate setting, not a generic bedroom, cafe, library, tea room, garden, or fashion portrait'}
 - Main action/pose: {action or 'one clear role-appropriate story action'}
-- Hand/prop action: {micro or prop or 'hands are purposeful and support the role or prop'}
+- Hand/prop action: {micro or 'hands are purposeful and support the character prop or role identity'}
 - Mood/expression: {mood}
 - Lighting/camera: {lighting}; {camera}
 
-USER/VISUAL PROMPT CONTEXT, only if consistent with the hard anchors above:
-{visual_request[:1400]}{retry_block}
+USER REQUEST CONTEXT:
+{user_block}{retry_block}
+
+NEGATIVE ROLE-DRIFT RULES:
+{forbidden_lines}
 
 Mandatory obedience rules:
 - Character recognizability is mandatory: hair/hair color, costume color/silhouette, props, and environment must match the selected role.
-- Do NOT replace the role with a generic glamour dress, generic white dress, generic black outfit, library portrait, tea-room portrait, bedroom portrait, or unrelated fashion photo.
+- Sexy adaptation is mandatory, but it must not change the role into a different costume, different color palette, or generic glamour/fantasy fashion.
 - If a specific prop is listed, show it clearly.
 - If a specific source-world scene is listed, show it clearly.
 - Xiaoxia remains recognizable as Xiaoxia cosplaying the role; hairstyle and hair color may adapt only to improve role recognizability.
 - Natural anatomy, natural hands, one primary subject, photorealistic cinematic cosplay image.
 - No male partner, no companion, no foreground second person, no external hands, no viewer body parts."""
+    trace_context["cosplay_canon_first"] = True
+    trace_context["cosplay_sexy_adaptation_required"] = True
+    trace_context["cosplay_anchor_lines"] = anchors
+    trace_context["cosplay_forbidden_lines"] = forbidden[:10]
     return prompt.strip()
 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
@@ -7304,6 +7362,14 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 retry_reason=last_adherence_reason if level > 0 else "",
             )
             trace_context["raw_seedream_mode"] = "pose_critical_minimal"
+        elif str(mode or "").lower() == "cosplay":
+            current_prompt = _build_cosplay_minimal_seedream_prompt(
+                initial_prompt,
+                visual_dict=visual_dict,
+                trace_context=trace_context,
+                retry_reason=last_adherence_reason if level > 0 else "",
+            )
+            trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
         elif str(mode or "").lower() == "diary":
             current_prompt = _seedream_diary_prompt(pose_user_request or initial_prompt)
             if last_adherence_reason and level > 0:
@@ -7566,7 +7632,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1489 cosplay minimal")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image | v1490 canon-first sexy cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
