@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.98"
+LOBSTER_VERSION = "1.4.99"
 
 
 def _normalize_generation_level(level):
@@ -7221,6 +7221,8 @@ def _visual_checklist_brief(checklist, max_items=10):
         "strict_solo_required": checklist.get("strict_solo_required"),
         "allow_background_bystanders": checklist.get("allow_background_bystanders"),
         "specified_character_interaction": checklist.get("specified_character_interaction"),
+        "diary_user_constraints": checklist.get("diary_user_constraints"),
+        "future_event_constraints": checklist.get("future_event_constraints"),
         "must_have": (checklist.get("must_have") or [])[:max_items],
         "must_not_have": (checklist.get("must_not_have") or [])[:max_items],
     }
@@ -7382,7 +7384,7 @@ Rules:
 You are an image QA checker for a photo generation pipeline.
 Judge whether the generated image obeys the user's requested scene, pose/action, and outfit.
 Return JSON only:
-{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"must_have_ok":true,"must_not_have_ok":true,"overall_ok":true,"failure_reason":"","violations":[],"must_have_failures":[],"must_not_have_violations":[]}}
+{{"scene_ok":true,"pose_ok":true,"outfit_ok":true,"future_event_boundary_ok":true,"outfit_matches_diary_text":true,"modesty_boundary_ok":true,"constraint_ok":true,"must_have_ok":true,"must_not_have_ok":true,"overall_ok":true,"failure_reason":"","violations":[],"must_have_failures":[],"must_not_have_violations":[]}}
 Visual checklist to check first:
 {checklist_brief}
 User / final prompt to check against:
@@ -7395,9 +7397,13 @@ Rules:
 - If there are no explicit outfit constraints, outfit_ok should be true.
 - Check every visual_checklist.must_have item. Set must_have_ok=false and list failures when a concrete required item is missing.
 - Check every visual_checklist.must_not_have item. Set must_not_have_ok=false and list violations when forbidden elements appear.
+- Diary mode: if future_event_constraints says the aquarium is a future plan, set future_event_boundary_ok=false when the image shows the current location as an aquarium, fish tank hall, underwater tunnel, ocean exhibition, or blue aquarium display background.
+- Diary mode: if diary_text_outfit_spec is present, set outfit_matches_diary_text=false when the outfit clearly contradicts that specification.
+- Diary mode: if diary_user_constraints.not_too_spicy is true, set modesty_boundary_ok=false when the image is lingerie-like, bikini-like, overly revealing, or focused on cleavage/exposed body parts rather than the diary outfit look.
+- constraint_ok must be false if any diary explicit user constraint or future-event boundary is violated.
 - For private home/hotel/bathroom/room scenes, any additional real human figure must fail.
 - For public scenes, distant non-interacting background bystanders are acceptable unless the checklist requests strict solo.
-- overall_ok must be false if a clearly requested main scene, main pose, must_have item, or must_not_have rule is wrong.
+- overall_ok must be false if a clearly requested main scene, main pose, must_have item, must_not_have rule, diary future-event boundary, diary outfit match, or modesty boundary is wrong.
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -7407,7 +7413,9 @@ Rules:
         )
         result = _safe_json_from_text(resp.text, {})
         if not isinstance(result, dict) or not result:
-            return True, "adherence skipped: invalid JSON", {"raw": str(getattr(resp, 'text', ''))[:500]}
+            if isinstance(trace_context, dict):
+                trace_context["adherence_gate_json_valid"] = False
+            return False, "ADHERENCE_GATE_INVALID_JSON", {"raw": str(getattr(resp, 'text', ''))[:500]}
         scene_ok = bool(result.get("scene_ok", True)); pose_ok = bool(result.get("pose_ok", True)); outfit_ok = bool(result.get("outfit_ok", True))
         must_have_ok = bool(result.get("must_have_ok", True)); must_not_have_ok = bool(result.get("must_not_have_ok", True))
         if str(mode or "").lower() == "cosplay":
@@ -7419,13 +7427,22 @@ Rules:
         else:
             overall = bool(result.get("overall_ok", scene_ok and pose_ok and outfit_ok and must_have_ok and must_not_have_ok))
             ok = bool(overall and scene_ok and pose_ok and outfit_ok and must_have_ok and must_not_have_ok)
+        if str(mode or "").lower() == "diary":
+            future_ok = bool(result.get("future_event_boundary_ok", True))
+            diary_outfit_ok = bool(result.get("outfit_matches_diary_text", True))
+            modesty_ok = bool(result.get("modesty_boundary_ok", True))
+            constraint_ok = bool(result.get("constraint_ok", future_ok and diary_outfit_ok and modesty_ok))
+            ok = bool(ok and future_ok and diary_outfit_ok and modesty_ok and constraint_ok)
         if isinstance(trace_context, dict):
+            trace_context["adherence_gate_json_valid"] = True
             trace_context["must_have_failures"] = result.get("must_have_failures") or []
             trace_context["must_not_have_violations"] = result.get("must_not_have_violations") or []
         return ok, str(result.get("failure_reason") or result)[:800], result
     except Exception as exc:
         print(f"⚠️ [ADHERENCE_GATE_FAILED] {type(exc).__name__}: {exc}")
-        return True, "adherence skipped: checker error", {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(trace_context, dict):
+            trace_context["adherence_gate_json_valid"] = False
+        return False, "ADHERENCE_GATE_CHECKER_ERROR", {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _flatten_cosplay_anchors(value, limit=10):
@@ -7707,10 +7724,16 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
             trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
         elif str(mode or "").lower() == "diary":
-            current_prompt = _seedream_diary_prompt(pose_user_request or initial_prompt, visual_checklist=visual_checklist)
-            if last_adherence_reason and level > 0:
-                current_prompt += "\n\nPREVIOUS OUTPUT WAS REJECTED:\n" + str(last_adherence_reason)[:800] + "\nCorrect the failure now. The selected diary photo task must be obeyed literally."
-            trace_context["raw_seedream_mode"] = trace_context.get("raw_seedream_mode") or "diary_minimal"
+            current_prompt = _build_diary_guarded_minimal_prompt(
+                pose_user_request or initial_prompt,
+                visual_dict=visual_dict,
+                trace_context=trace_context,
+                visual_checklist=visual_checklist,
+                retry_reason=last_adherence_reason if level > 0 else "",
+            )
+            visual_checklist = _augment_diary_visual_checklist(visual_checklist, trace_context=trace_context)
+            trace_context["visual_checklist"] = visual_checklist
+            trace_context["raw_seedream_mode"] = trace_context.get("raw_seedream_mode") or "diary_guarded_minimal"
         elif reference_minimal:
             current_prompt = _build_photo_reference_minimal_seedream_prompt(
                 pose_user_request or initial_prompt,
@@ -7804,7 +7827,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 "detail": adherence_detail,
                 "retry_used": level > 0,
             })
-            trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason}
+            trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason, "detail": adherence_detail}
             if isinstance(adherence_detail, dict) and adherence_detail.get("violations"):
                 trace_context["adherence_gate_violation"] = adherence_detail.get("violations")
             if isinstance(adherence_detail, dict):
@@ -8237,6 +8260,207 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
     if isinstance(first, dict) and first.get("url"):
         return first["url"]
     return f"{model_label} 圖片欄位格式異常：{result}"
+
+
+
+def _diary_guard_source_blob(initial_prompt="", visual_dict=None, trace_context=None):
+    parts = [str(initial_prompt or "")]
+    if isinstance(visual_dict, dict):
+        for key in ("composition", "mood", "message", "image_prompt"):
+            if visual_dict.get(key):
+                parts.append(str(visual_dict.get(key)))
+        task = visual_dict.get("__diary_photo_task")
+        if isinstance(task, dict):
+            parts.append(json.dumps(task, ensure_ascii=False))
+        anchor = visual_dict.get("__anchor_state")
+        if isinstance(anchor, dict):
+            parts.append(json.dumps(anchor, ensure_ascii=False))
+    if isinstance(trace_context, dict):
+        for key in ("user_input", "scene_seed_text", "diary_forced_scene"):
+            if trace_context.get(key):
+                parts.append(str(trace_context.get(key)))
+        for key in ("committed_diary_photo_task", "due_promises"):
+            if trace_context.get(key):
+                try:
+                    parts.append(json.dumps(trace_context.get(key), ensure_ascii=False))
+                except Exception:
+                    parts.append(str(trace_context.get(key)))
+    return "\n".join(parts)
+
+
+def _diary_extract_prompt_line(label, text):
+    m = re.search(rf"(?im)^\s*{re.escape(label)}\s*:\s*(.+?)\s*$", str(text or ""))
+    return _clean_text_compact(m.group(1)) if m else ""
+
+
+def _diary_contains_any(text, keywords):
+    hay = str(text or "").lower()
+    return any(str(k).lower() in hay for k in keywords)
+
+
+def _diary_build_visual_guard_context(initial_prompt="", visual_dict=None, trace_context=None):
+    """v1.4.99: keep diary photo constraints alive after minimalization."""
+    visual_dict = visual_dict if isinstance(visual_dict, dict) else {}
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    task = visual_dict.get("__diary_photo_task")
+    if not isinstance(task, dict):
+        task = trace_context.get("committed_diary_photo_task") if isinstance(trace_context.get("committed_diary_photo_task"), dict) else {}
+    anchor = visual_dict.get("__anchor_state") if isinstance(visual_dict.get("__anchor_state"), dict) else {}
+
+    source = _diary_guard_source_blob(initial_prompt, visual_dict, trace_context)
+    scene = _clean_text_compact(task.get("scene") or anchor.get("setting_anchor") or _diary_extract_prompt_line("Scene", initial_prompt) or visual_dict.get("composition") or "")
+    action = _clean_text_compact(task.get("action") or anchor.get("primary_action") or _diary_extract_prompt_line("Action", initial_prompt) or visual_dict.get("composition") or initial_prompt)
+    outfit = _clean_text_compact(task.get("outfit") or anchor.get("outfit_intent") or _diary_extract_prompt_line("Outfit", initial_prompt) or "")
+    visual_request = _clean_text_compact(task.get("visual_request_zh") or trace_context.get("diary_forced_scene") or visual_dict.get("composition") or action)
+
+    # Future event guard: "準備/預告/週末/未來" + a location keyword must not become current location.
+    aquarium_terms = ["水族館", "aquarium", "fish tank", "underwater tunnel", "海生館"]
+    future_terms = ["週末", "本週末", "下週", "明天", "之後", "未來", "預告", "準備", "約會前", "行程", "到時候", "future", "upcoming", "prepare"]
+    has_aquarium = _diary_contains_any(source, aquarium_terms)
+    future_boundary = bool(has_aquarium and _diary_contains_any(source, future_terms))
+    forbidden_locations = []
+    if has_aquarium and future_boundary:
+        forbidden_locations = [
+            "aquarium interior",
+            "fish tank background",
+            "underwater tunnel",
+            "ocean exhibition hall",
+            "blue aquarium display background",
+            "inside an aquarium visit",
+        ]
+
+    not_too_spicy = _diary_contains_any(source, [
+        "不要太辣", "別太辣", "不能太辣", "不要穿太辣", "日常", "適合日常生活",
+        "不要以裸露", "不要以身體部位", "not too spicy", "not too sexy",
+        "avoid exposed body parts", "daily life",
+    ])
+    # Diary fallback: if this is an outfit-preparation/date look and no explicit spicy request exists, keep it daily-life safe.
+    if (not not_too_spicy) and _diary_contains_any(source, ["穿搭", "look", "約會穿搭", "準備"]):
+        if not _diary_contains_any(source, ["性感版", "開胸", "低胸", "露胸", "比基尼", "內衣"]):
+            not_too_spicy = True
+
+    if not scene:
+        scene = "小俠家中或試衣間"
+    if future_boundary and _diary_contains_any(scene, aquarium_terms):
+        scene = "小俠家中或試衣間"
+
+    if not outfit or outfit in {"水族館約會穿搭", "約會穿搭", "穿搭look", "look"}:
+        outfit_spec = "pretty, feminine, date-ready daily-life outfit prepared for the future aquarium date; not swimwear, not lingerie, not overly spicy"
+    else:
+        outfit_spec = outfit
+
+    if not_too_spicy:
+        outfit_spec = (
+            f"{outfit_spec}; keep it pretty, feminine, date-ready, and suitable for daily life; "
+            "do not make cleavage, exposed body parts, lingerie-like styling, bikini-like styling, or overly sexy posing the visual focus"
+        )
+
+    constraints = {
+        "not_too_spicy": bool(not_too_spicy),
+        "forbid_current_aquarium_scene": bool(future_boundary),
+        "aquarium_is_future_plan": bool(future_boundary),
+    }
+    future_event_constraints = {
+        "future_event": "水族館約會" if has_aquarium else "",
+        "time_hint": "future/週末/準備" if future_boundary else "",
+        "forbidden_current_locations": forbidden_locations,
+    }
+    return {
+        "visual_request": visual_request,
+        "scene": scene,
+        "action": action,
+        "outfit_spec": outfit_spec,
+        "user_constraints": constraints,
+        "future_event_constraints": future_event_constraints,
+        "forbidden_locations": forbidden_locations,
+        "source_preview": _trace_preview(source, 1200),
+    }
+
+
+def _build_diary_guarded_minimal_prompt(initial_prompt="", visual_dict=None, trace_context=None, visual_checklist=None, retry_reason=""):
+    """v1.4.99: diary minimal prompt that preserves scene, future-event boundary, outfit, and modesty constraints."""
+    guard = _diary_build_visual_guard_context(initial_prompt, visual_dict=visual_dict, trace_context=trace_context)
+    if isinstance(trace_context, dict):
+        trace_context["diary_text_outfit_spec"] = guard.get("outfit_spec")
+        trace_context["diary_user_constraints"] = guard.get("user_constraints")
+        trace_context["future_event_constraints"] = guard.get("future_event_constraints")
+        trace_context["diary_minimal_anchor_preserved"] = True
+    lines = [
+        "FIGURE ROLE MAP — obey these roles strictly.",
+        "",
+        "Figures 1-9 are identity-only reference images of Xiaoxia.",
+        "Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall Xiaoxia look.",
+        "Do NOT copy pose, background, room, outfit, lighting setup, or composition from Figures 1-9.",
+        "",
+        "DIARY VISUAL REQUEST — obey literally. This controls the final scene, action, outfit, mood, and composition.",
+        "Keep it as one single visual moment. Do not mix in other diary scenes, optional promises, bedroom defaults, or unrelated romantic diary imagery.",
+        "",
+        f"Actual scene/location: {guard.get('scene')}",
+    ]
+    if guard.get("user_constraints", {}).get("forbid_current_aquarium_scene"):
+        lines += [
+            "",
+            "FUTURE EVENT BOUNDARY — critical:",
+            "The aquarium is only the future weekend plan, NOT today's photo location.",
+            "Do NOT place Xiaoxia inside an aquarium, underwater tunnel, aquarium hall, fish tank corridor, ocean exhibition, or blue aquarium display background.",
+        ]
+    lines += [
+        "",
+        f"Action: {guard.get('action')}",
+        f"Outfit: Use the same outfit specification intended by today's diary/photo promise: {guard.get('outfit_spec')}",
+    ]
+    if guard.get("user_constraints", {}).get("not_too_spicy"):
+        lines += [
+            "",
+            "MODESTY / STYLE BOUNDARY — critical:",
+            "Daxia explicitly wants this not too spicy. The outfit should be pretty, feminine, date-ready, and suitable for daily life.",
+            "Do not make cleavage, exposed body parts, lingerie-like styling, bikini-like styling, or overly sexy posing the focus.",
+        ]
+    if retry_reason:
+        lines += [
+            "",
+            "PREVIOUS OUTPUT WAS REJECTED:",
+            str(retry_reason)[:900],
+            "Correct the failure now. The diary photo promise, actual scene/location, future-event boundary, outfit specification, and modesty boundary must all be obeyed.",
+        ]
+    lines += [
+        "",
+        "Mandatory people rule: " + _seedream_people_policy_line(visual_checklist),
+        "Natural anatomy, plausible hands, candid photorealistic lifestyle photo.",
+    ]
+    return "\n".join(lines).strip()
+
+
+def _augment_diary_visual_checklist(checklist, trace_context=None):
+    if not isinstance(checklist, dict):
+        checklist = {}
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    constraints = trace_context.get("diary_user_constraints") if isinstance(trace_context.get("diary_user_constraints"), dict) else {}
+    future = trace_context.get("future_event_constraints") if isinstance(trace_context.get("future_event_constraints"), dict) else {}
+    must_have = list(checklist.get("must_have") or [])
+    must_not = list(checklist.get("must_not_have") or [])
+    if trace_context.get("diary_text_outfit_spec"):
+        must_have.append("outfit must match diary_text_outfit_spec: " + str(trace_context.get("diary_text_outfit_spec"))[:300])
+    if constraints.get("forbid_current_aquarium_scene"):
+        must_have.append("actual current photo location must be home / fitting room / dressing area, not the future aquarium visit")
+        must_not += [
+            "aquarium interior as current location",
+            "fish tank background",
+            "underwater tunnel",
+            "ocean exhibition hall",
+            "blue aquarium display background",
+        ]
+    if constraints.get("not_too_spicy"):
+        must_not += [
+            "overly spicy or lingerie-like styling",
+            "bikini-like styling",
+            "image focused on cleavage or exposed body parts instead of the diary outfit look",
+        ]
+    checklist["must_have"] = [x for i, x in enumerate(must_have) if x and x not in must_have[:i]][:14]
+    checklist["must_not_have"] = [x for i, x in enumerate(must_not) if x and x not in must_not[:i]][:18]
+    checklist["diary_user_constraints"] = constraints
+    checklist["future_event_constraints"] = future
+    return checklist
 
 
 def _seedream_diary_prompt(custom_prompt, visual_checklist=None):
