@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.01"
+LOBSTER_VERSION = "1.5.02"
 
 
 def _normalize_generation_level(level):
@@ -3369,8 +3369,10 @@ TEMP_CHAT：
     else: entries.insert(0,item)
     save_life_events_doc(doc); return item
 
+MEMORY_REVIEW_PAGE_SIZE = 5
+
 def memory_monthly_review_reminder_text():
-    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 1 個月，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除，不需要手動處理。"
+    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 1 個月，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶 2`（看第2頁）\n`/回憶 搜尋 關鍵字`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除，不需要手動處理。"
 
 def due_memory_review_items(now_dt=None):
     now_dt=now_dt or datetime.now(TZ_TPE); rows=[]
@@ -3382,13 +3384,44 @@ def due_memory_review_items(now_dt=None):
     return rows
 
 
-def _memory_review_candidates(mode="all", now_dt=None):
+def _memory_event_search_blob(ev):
+    if not isinstance(ev, dict):
+        return ""
+    return _clean_text_compact(" ".join([
+        str(ev.get("id") or ""), str(ev.get("title") or ""), str(ev.get("type") or ""),
+        str(ev.get("summary") or ev.get("archive_summary") or ""), " ".join(ev.get("facts") or []),
+        " ".join(ev.get("retrieval_keywords") or []), str(ev.get("anchor_date") or ""),
+    ]))
+
+
+def _memory_review_candidates(mode="all", now_dt=None, query=""):
     doc = load_life_events_doc()
     events = [ev for ev in doc.get("major_life_events", []) or [] if isinstance(ev, dict)]
     if mode in {"待整理", "review"}:
         allowed_ids = {ev.get("id") for ev in due_memory_review_items(now_dt)}
         events = [ev for ev in events if ev.get("id") in allowed_ids]
+    q = _clean_text_compact(query or "")
+    if q:
+        q_lower = q.lower()
+        events = [ev for ev in events if q_lower in _memory_event_search_blob(ev).lower()]
+    events.sort(key=lambda ev: str(ev.get("anchor_date") or ev.get("created_at") or ""), reverse=True)
     return events
+
+
+def _parse_page_arg(raw, default=1):
+    raw = str(raw or "").strip()
+    m = re.search(r"(?:第\s*)?(\d+)\s*(?:頁|$)", raw)
+    if not m: return max(1, int(default or 1))
+    try: return max(1, int(m.group(1)))
+    except Exception: return max(1, int(default or 1))
+
+
+def _memory_paginate(items, page=1, page_size=MEMORY_REVIEW_PAGE_SIZE):
+    total = len(items)
+    total_pages = max(1, math.ceil(total / max(1, page_size)))
+    page = max(1, min(int(page or 1), total_pages))
+    start = (page - 1) * page_size
+    return items[start:start + page_size], page, total_pages, total
 
 
 def _format_memory_event_item(ev, idx=None):
@@ -3400,26 +3433,36 @@ def _format_memory_event_item(ev, idx=None):
     return f"{prefix}**{ev.get('id')}｜{title}**\n   日期：{date}｜保留狀態：{status}\n   {summary[:220]}"
 
 
-async def _memory_review_send_list(ctx, mode="all"):
-    items = _memory_review_candidates(mode)
+async def _memory_review_send_list(ctx, mode="all", page=1, query=""):
+    items = _memory_review_candidates(mode, query=query)
+    page_items, page, total_pages, total = _memory_paginate(items, page)
     title = "📚 待整理回憶" if mode in {"待整理", "review"} else "📚 回憶清單"
+    if query:
+        title += f"｜搜尋：{query}"
     if not items:
         await ctx.send(title + "\n\n目前沒有符合條件的回憶。")
         return
-    lines = [title, ""]
-    for idx, ev in enumerate(items[:20], 1): lines.append(_format_memory_event_item(ev, idx))
-    lines.append("\n可用：`/回憶 待整理`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`")
+    lines = [f"{title}｜共 {total} 筆｜第 {page}/{total_pages} 頁", ""]
+    base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
+    for idx, ev in enumerate(page_items, base_index + 1):
+        lines.append(_format_memory_event_item(ev, idx))
+    lines.append("\n可用：`/回憶 2`、`/回憶 待整理 2`、`/回憶 搜尋 關鍵字`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`")
     await ctx.send("\n".join(lines)[:1900])
 
 
-async def _memory_review_start_select_flow(ctx, action="刪除", mode="all"):
-    items = _memory_review_candidates("待整理" if action in {"保留", "升級紀念日"} else "all")
+async def _memory_review_start_select_flow(ctx, action="刪除", mode="all", page=1, query=""):
+    mode_for_items = "待整理" if action in {"保留", "升級紀念日"} else mode
+    items = _memory_review_candidates(mode_for_items, query=query)
+    page_items, page, total_pages, total = _memory_paginate(items, page)
     if not items:
         await ctx.send("目前沒有可處理的回憶。")
         return True
-    pending_memory_review_inputs[getattr(ctx.author, "id", None)] = {"action": action, "stage": "choose", "mode": mode, "started_at": _board_now()}
-    lines = [f"請輸入要{action}的回憶編號：", ""]
-    for idx, ev in enumerate(items[:20], 1): lines.append(_format_memory_event_item(ev, idx))
+    pending_memory_review_inputs[getattr(ctx.author, "id", None)] = {"action": action, "stage": "choose", "mode": mode_for_items, "page": page, "query": query, "started_at": _board_now()}
+    lines = [f"請輸入要{action}的回憶編號（目前第 {page}/{total_pages} 頁，共 {total} 筆）：", ""]
+    base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
+    for idx, ev in enumerate(page_items, base_index + 1):
+        lines.append(_format_memory_event_item(ev, idx))
+    lines.append("\n可輸入上方全域編號，或輸入「取消」。")
     await ctx.send("\n".join(lines)[:1900])
     return True
 
@@ -3431,7 +3474,9 @@ async def _handle_pending_memory_review_input(message):
     if content in {"取消", "cancel", "Cancel"}:
         pending_memory_review_inputs.pop(uid, None); await message.channel.send("已取消回憶整理操作。"); return True
     action = sess.get("action")
-    items = _memory_review_candidates("待整理" if action in {"保留", "升級紀念日"} else "all")[:20]
+    mode = sess.get("mode") or ("待整理" if action in {"保留", "升級紀念日"} else "all")
+    query = sess.get("query") or ""
+    items = _memory_review_candidates(mode, query=query)
     m = re.search(r"\d+", content)
     if not m:
         await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
@@ -3467,13 +3512,32 @@ async def _handle_pending_memory_review_input(message):
 async def _handle_memory_review_command(ctx, args=""):
     raw = str(args or "").strip()
     if not raw:
-        await _memory_review_send_list(ctx, mode="all"); return
-    if raw == "待整理":
-        await _memory_review_send_list(ctx, mode="待整理"); return
+        await _memory_review_send_list(ctx, mode="all", page=1); return
+    if raw.startswith("搜尋"):
+        payload = raw[len("搜尋"):].strip()
+        page = 1
+        m = re.search(r"\s+(\d+)\s*$", payload)
+        if m:
+            page = int(m.group(1)); payload = payload[:m.start()].strip()
+        await _memory_review_send_list(ctx, mode="all", page=page, query=payload); return
+    if raw.startswith("待整理"):
+        payload = raw[len("待整理"):].strip()
+        await _memory_review_send_list(ctx, mode="待整理", page=_parse_page_arg(payload, 1)); return
+    if re.fullmatch(r"(?:第\s*)?\d+\s*(?:頁)?", raw):
+        await _memory_review_send_list(ctx, mode="all", page=_parse_page_arg(raw, 1)); return
     for action in ("刪除", "保留", "升級紀念日"):
         if raw == action or raw.startswith(action + " "):
-            await _memory_review_start_select_flow(ctx, action=action); return
-    await ctx.send("指令格式：`/回憶`、`/回憶 待整理`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`。")
+            payload = raw[len(action):].strip()
+            page = _parse_page_arg(payload, 1) if payload else 1
+            query = ""
+            if payload.startswith("搜尋"):
+                qraw = payload[len("搜尋"):].strip()
+                m = re.search(r"\s+(\d+)\s*$", qraw)
+                if m:
+                    page = int(m.group(1)); qraw = qraw[:m.start()].strip()
+                query = qraw
+            await _memory_review_start_select_flow(ctx, action=action, page=page, query=query); return
+    await ctx.send("指令格式：`/回憶`、`/回憶 2`、`/回憶 待整理 2`、`/回憶 搜尋 關鍵字`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`。")
 
 
 async def _handle_memory_review_message_direct(message):
@@ -4478,24 +4542,23 @@ def _promise_text_key(text):
     return value.lower()[:90]
 
 def _promise_duplicate_exists(board, item, source="xiaoxia"):
-    item_blob = " ".join([str(item.get("title") or ""), str(item.get("description") or ""), " ".join(item.get("requirements") or [])])
-    ikey = _promise_text_key(item_blob)
-    if not ikey: return None
-    for key in ("daxia_promises", "xiaoxia_promises"):
-        for existing in board.get(key) or []:
-            if str(existing.get("status") or PROMISE_STATUS_ACTIVE) != PROMISE_STATUS_ACTIVE: continue
-            blob = " ".join([str(existing.get("title") or ""), str(existing.get("description") or ""), " ".join(existing.get("requirements") or [])])
-            ekey = _promise_text_key(blob)
-            if ekey and (ikey in ekey or ekey in ikey): return existing
-    return None
+    dup, _reason = _promise_find_duplicate(board, item, include_daxia=True, include_xiaoxia=True)
+    return dup
 
 def add_promise_to_board(text, *, source="daxia", origin="manual_command", source_context="", allow_duplicate=False):
     board = load_promise_board()
     item = _promise_item_from_text(text, source=("manual_daxia" if _promise_collection_key(source) == "daxia_promises" else "auto_xiaoxia"), origin=origin, source_context=source_context)
     if not allow_duplicate:
-        dup = _promise_duplicate_exists(board, item, source=source)
+        dup, reason = _promise_find_duplicate(board, item, include_daxia=True, include_xiaoxia=True)
         if dup:
-            dup.setdefault("notes", []).append({"time": _promise_now(), "note": f"偵測到近似承諾，未重複新增。來源：{origin}", "source_context": _trace_preview(source_context, 500)})
+            note = f"偵測到近似承諾，未重複新增。來源：{origin}"
+            if reason:
+                note += f"；原因：{reason}"
+            if _promise_collection_key(source) == "xiaoxia_promises" and str(dup.get("id") or "").startswith("P"):
+                note = f"小俠再次表示會履行相同主題；已併入大俠手動承諾，未新增 /小俠承諾。來源：{origin}"
+                if reason:
+                    note += f"；原因：{reason}"
+            dup.setdefault("notes", []).append({"time": _promise_now(), "note": note, "source_context": _trace_preview(source_context, 500)})
             dup["updated_at"] = _promise_now()
             save_promise_board(board)
             return False, dup
@@ -4758,8 +4821,101 @@ def is_concrete_xiaoxia_promise_text(text):
     if re.search(r"(已經|剛剛|完成了|交付了|已完成|不用再|不必再)", value) and not re.search(r"(下次|下一篇|明天|今天|今晚|之後)", value): return False
     return True
 
+# 🤝 v1.5.02：/小俠承諾 強化去重與測試題防誤登記
+XIAOXIA_PROMISE_RULE_QUESTION_RE = re.compile(
+    r"(應該新增|需要新增|該不該|要不要新增|新增到\s*/?小俠承諾|如果\s*/?承諾\s*已經有|已經列在\s*/?承諾|測試|分清楚|判斷|規則)"
+)
+PROMISE_TOPIC_TOKEN_RE = re.compile(
+    r"(xpark|XPark|水族館|文創園區|交換日記|日記|穿搭|預估照|預估照片|照片|圖片|寫真|太辣|不辣|背景|約會|週末|今天|今晚|交照|補交|補一張|重交|準備照|衣服|服裝)",
+    flags=re.IGNORECASE,
+)
+
+def _promise_blob(item_or_text):
+    if isinstance(item_or_text, dict):
+        return _clean_text_compact(" ".join([
+            str(item_or_text.get("id") or ""),
+            str(item_or_text.get("title") or ""),
+            str(item_or_text.get("description") or ""),
+            " ".join(item_or_text.get("requirements") or []),
+            str(item_or_text.get("source_context") or ""),
+        ]))
+    return _clean_text_compact(item_or_text)
+
+
+def _promise_topic_tokens(text):
+    value = str(text or "")
+    tokens = {m.group(1).lower() for m in PROMISE_TOPIC_TOKEN_RE.finditer(value)}
+    aliases = [
+        ("xpark", ["xpark", "水族館", "約會"]),
+        ("aquarium", ["水族館", "xpark"]),
+        ("photo", ["照片", "圖片", "寫真", "預估照", "預估照片", "交照", "補一張", "準備照"]),
+        ("outfit", ["穿搭", "衣服", "服裝", "準備照"]),
+        ("diary", ["交換日記", "日記"]),
+        ("modesty", ["太辣", "不辣"]),
+    ]
+    for canonical, keys in aliases:
+        if any(k.lower() in tokens or k in value for k in keys):
+            tokens.add(canonical)
+    return tokens
+
+
+def _promise_similarity_reason(a, b):
+    ta = _promise_topic_tokens(_promise_blob(a))
+    tb = _promise_topic_tokens(_promise_blob(b))
+    common = ta & tb
+    if not common:
+        return ""
+    if {"xpark", "photo"}.issubset(common) or {"xpark", "outfit"}.issubset(common):
+        return "同為 XPark 約會穿搭／照片主題"
+    if {"aquarium", "photo"}.issubset(common) and ("outfit" in common or "diary" in common):
+        return "同為水族館約會穿搭照主題"
+    if {"diary", "photo", "outfit"}.issubset(common):
+        return "同為交換日記穿搭照片交付"
+    if len(common) >= 4:
+        return "承諾關鍵主題高度重疊：" + "、".join(sorted(common)[:6])
+    return ""
+
+
+def _promise_auto_capture_should_skip(user_text, source_text="", origin="chat"):
+    if str(origin or "").startswith("diary:"):
+        return False
+    user = _clean_text_compact(user_text or "")
+    source = _clean_text_compact(source_text or "")
+    if XIAOXIA_PROMISE_RULE_QUESTION_RE.search(user):
+        return True
+    if re.search(r"/小俠承諾|/承諾", user) and re.search(r"應該|需要|新增|重複|同一", user):
+        return True
+    if re.search(r"不需要.*新增|不應.*新增|不用.*新增", source):
+        return True
+    return False
+
+
+def _promise_find_duplicate(board, item, *, include_daxia=True, include_xiaoxia=True):
+    item_blob = _promise_blob(item)
+    ikey = _promise_text_key(item_blob)
+    keys = []
+    if include_daxia:
+        keys.append("daxia_promises")
+    if include_xiaoxia:
+        keys.append("xiaoxia_promises")
+    for key in keys:
+        for existing in board.get(key) or []:
+            if str(existing.get("status") or PROMISE_STATUS_ACTIVE) != PROMISE_STATUS_ACTIVE:
+                continue
+            blob = _promise_blob(existing)
+            ekey = _promise_text_key(blob)
+            if ikey and ekey and (ikey in ekey or ekey in ikey):
+                return existing, "文字內容近似"
+            reason = _promise_similarity_reason(item_blob, blob)
+            if reason:
+                return existing, reason
+    return None, ""
+
 async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="chat", user_text="", max_items=3):
     source_text = str(source_text or "")
+    if _promise_auto_capture_should_skip(user_text, source_text, origin=origin):
+        print("🤝 [XIAOXIA_PROMISE_CAPTURE_SKIPPED] rule/test question; no auto promise created")
+        return []
     if not (DIARY_PROMISE_SIGNAL_RE.search(source_text) and DIARY_DELIVERABLE_RE.search(source_text)): return []
     prompt = f"""
 你是小俠單方面承諾登記員。只登記小俠自己明確承諾未來要交付的具體事項；不可登記情緒、撒嬌、泛泛努力或已完成事項。
@@ -4769,8 +4925,10 @@ async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="ch
 小俠文字：
 {source_text[-1800:]}
 
-只登記有具體交付物的承諾，例如照片、穿搭照、日記文字說明、清單、菜單、行程安排、整理好的內容。
-不要登記：我會一直愛你、我會陪你、我會努力、我會珍惜、只是期待或情緒表達、已經正在本篇完成的內容。
+規則：
+1. 只登記有具體交付物的承諾，例如照片、穿搭照、日記文字說明、清單、菜單、行程安排、整理好的內容。
+2. 不要登記：我會一直愛你、我會陪你、我會努力、我會珍惜、只是期待或情緒表達、已經正在本篇完成的內容。
+3. 如果大俠是在問「這應不應該新增到 /小俠承諾」或是在測試規則，完全不要登記。
 只回傳 JSON：{{"promises":["一句可驗收承諾", "..."]}}
 """
     try:
@@ -4786,6 +4944,7 @@ async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="ch
         if not text_value or not is_concrete_xiaoxia_promise_text(text_value): continue
         ok, item = add_promise_to_board(text_value, source="xiaoxia", origin=origin, source_context=source_text, allow_duplicate=False)
         if ok: added.append(item)
+        else: print(f"🤝 [XIAOXIA_PROMISE_DEDUPED] merged_into={item.get('id') if isinstance(item, dict) else ''} text={text_value[:80]}")
     return added
 
 async def capture_xiaoxia_promises_from_diary_result(result, entry_content="", entry_date=""):
@@ -4983,12 +5142,15 @@ Mandatory rules:
 
 async def capture_diary_promises_from_chat(user_text, xiaoxia_reply):
     reply = str(xiaoxia_reply or "")
+    if _promise_auto_capture_should_skip(user_text, reply, origin="chat"):
+        return []
     if not (DIARY_PROMISE_SIGNAL_RE.search(reply) and DIARY_DELIVERABLE_RE.search(reply)):
         return []
     prompt = f"""
 妳是承諾登記員。只登記小俠明確答應在未來交換日記中實際交付的內容或照片；不可登記模糊期待或已完成事項。
 大俠訊息：{str(user_text or '')[-600:]}
 小俠回覆：{reply[-1000:]}
+規則：如果大俠是在問規則、測試是否應新增、或問「已在 /承諾 的同件事是否還要新增 /小俠承諾」，請回傳空陣列。
 將承諾寫成可驗收格式，例如：
 - 交換日記履約（文字）：在下一篇交換日記中提供今晚晚宴的具體菜單內容。
 - 交換日記履約（照片）：在下一篇交換日記中提供一張外出生活照。
