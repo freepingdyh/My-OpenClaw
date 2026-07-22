@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.4.99"
+LOBSTER_VERSION = "1.5.00"
 
 
 def _normalize_generation_level(level):
@@ -509,6 +509,7 @@ PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 �
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
 DIARY_WARDROBE_PREFS_PATH = os.path.join(MEMORY_DIR, "diary_wardrobe_prefs.json") # 👗 今日交換日記衣櫃模式
+PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
 MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
@@ -2064,6 +2065,7 @@ _migrate_v1421_chat_and_profile_once()
 daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
+pending_promise_board_inputs = {}  # 🤝 v1.5.00：/承諾 與 /小俠承諾 的編號修改/刪除/完成流程
 photo_generation_contexts = {}
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
@@ -3857,19 +3859,415 @@ def infer_diary_promise_kind(promise_text):
     written = bool(re.search(r"(菜單|餐點|晚宴|晚餐|早餐|午餐|食譜|清單|心得|說明|告訴|寫下|回覆)", value))
     return "both" if photo and written else ("photo" if photo else "text")
 
-def get_due_diary_promises(profile, max_items=4):
-    bucket = profile.get("xiaoxia_self", {}).get("promises", [])
-    selected, seen = [], set()
-    for item in reversed(bucket):
-        value = item.get("text", "") if isinstance(item, dict) else str(item)
-        value = narrative_safe_text(value, max_len=180)
-        key = value.rstrip("。")
-        if key and key not in seen:
-            seen.add(key)
-            selected.append({"text": value, "kind": infer_diary_promise_kind(value)})
-            if len(selected) >= max_items:
+
+# ==========================================
+# 🤝 v1.5.00 Promise Board：大俠手動承諾 / 小俠單方面承諾
+# ==========================================
+
+PROMISE_BOARD_VERSION = 1
+PROMISE_STATUS_ACTIVE = "active"
+PROMISE_STATUS_PAUSED = "paused"
+PROMISE_STATUS_DONE = "done"
+PROMISE_STATUS_DELETED = "deleted"
+
+def _promise_now():
+    return datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+
+def _default_promise_board():
+    return {"version": PROMISE_BOARD_VERSION, "updated_at": _promise_now(), "daxia_promises": [], "xiaoxia_promises": [], "archive": []}
+
+def load_promise_board():
+    data = _load_json_file_or_default(PROMISE_BOARD_PATH, _default_promise_board())
+    if not isinstance(data, dict):
+        data = _default_promise_board()
+    for key, fallback in _default_promise_board().items():
+        data.setdefault(key, fallback)
+    if not isinstance(data.get("daxia_promises"), list): data["daxia_promises"] = []
+    if not isinstance(data.get("xiaoxia_promises"), list): data["xiaoxia_promises"] = []
+    if not isinstance(data.get("archive"), list): data["archive"] = []
+    return data
+
+def save_promise_board(board):
+    if not isinstance(board, dict): board = _default_promise_board()
+    board["version"] = PROMISE_BOARD_VERSION
+    board["updated_at"] = _promise_now()
+    _atomic_write_json(PROMISE_BOARD_PATH, board)
+    return board
+
+def _promise_collection_key(source="daxia"):
+    return "xiaoxia_promises" if str(source or "").lower() in {"xiaoxia", "小俠", "auto_xiaoxia", "xiaoxia_promises"} else "daxia_promises"
+
+def _promise_prefix(source="daxia"):
+    return "XP" if _promise_collection_key(source) == "xiaoxia_promises" else "P"
+
+def _promise_next_id(board, source="daxia"):
+    prefix = _promise_prefix(source)
+    nums = []
+    for key in ("daxia_promises", "xiaoxia_promises", "archive"):
+        for item in board.get(key, []) or []:
+            raw = str(item.get("id") or "")
+            m = re.fullmatch(prefix + r"(\d{4,})", raw)
+            if m: nums.append(int(m.group(1)))
+    return f"{prefix}{(max(nums) + 1 if nums else 1):04d}"
+
+def _promise_type_from_text(text):
+    value = str(text or "")
+    if re.search(r"(照片|圖片|寫真|自拍|穿搭照|交照|生圖|拍給你|放一張)", value): return "photo"
+    if re.search(r"(菜單|清單|說明|心得|文字|日記|回覆|整理|告訴|寫清楚)", value): return "text"
+    return "general"
+
+def _promise_split_title_description(text):
+    raw = _clean_text_compact(text)
+    if not raw: return "", ""
+    parts = re.split(r"[:：]\s*", raw, maxsplit=1)
+    if len(parts) == 2 and len(parts[0]) <= 40:
+        return parts[0].strip(), parts[1].strip()
+    title = raw[:38].strip() + ("…" if len(raw) > 38 else "")
+    return title, raw
+
+def _promise_requirements_from_text(text):
+    raw = str(text or "")
+    chunks = re.split(r"[；;。.\n]+", raw)
+    reqs = []
+    for chunk in chunks:
+        chunk = _clean_text_compact(chunk)
+        if not chunk: continue
+        if len(chunk) > 120: chunk = chunk[:117] + "…"
+        if chunk not in reqs: reqs.append(chunk)
+        if len(reqs) >= 8: break
+    return reqs
+
+def _promise_item_from_text(text, *, source="manual_daxia", origin="manual_command", source_context=""):
+    title, desc = _promise_split_title_description(text)
+    ptype = _promise_type_from_text(text)
+    return {
+        "id": "", "title": title or "未命名承諾", "type": ptype, "status": PROMISE_STATUS_ACTIVE,
+        "source": source, "origin": origin, "created_at": _promise_now(), "updated_at": _promise_now(),
+        "description": desc or title, "requirements": _promise_requirements_from_text(desc or title),
+        "photo_required": ptype == "photo", "diary_eligible": True,
+        "last_attempt_at": "", "last_attempt_photo_id": "", "last_attempt_note": "",
+        "source_context": _trace_preview(source_context, 800), "notes": [],
+    }
+
+def _promise_active_items(board, source="daxia", *, include_paused=False):
+    statuses = {PROMISE_STATUS_ACTIVE}
+    if include_paused: statuses.add(PROMISE_STATUS_PAUSED)
+    return [p for p in (board.get(_promise_collection_key(source)) or []) if isinstance(p, dict) and str(p.get("status") or PROMISE_STATUS_ACTIVE) in statuses]
+
+def _promise_text_key(text):
+    value = _clean_text_compact(text)
+    value = re.sub(r"[，。！？!?,；;：:\s]+", "", value)
+    return value.lower()[:90]
+
+def _promise_duplicate_exists(board, item, source="xiaoxia"):
+    item_blob = " ".join([str(item.get("title") or ""), str(item.get("description") or ""), " ".join(item.get("requirements") or [])])
+    ikey = _promise_text_key(item_blob)
+    if not ikey: return None
+    for key in ("daxia_promises", "xiaoxia_promises"):
+        for existing in board.get(key) or []:
+            if str(existing.get("status") or PROMISE_STATUS_ACTIVE) != PROMISE_STATUS_ACTIVE: continue
+            blob = " ".join([str(existing.get("title") or ""), str(existing.get("description") or ""), " ".join(existing.get("requirements") or [])])
+            ekey = _promise_text_key(blob)
+            if ekey and (ikey in ekey or ekey in ikey): return existing
+    return None
+
+def add_promise_to_board(text, *, source="daxia", origin="manual_command", source_context="", allow_duplicate=False):
+    board = load_promise_board()
+    item = _promise_item_from_text(text, source=("manual_daxia" if _promise_collection_key(source) == "daxia_promises" else "auto_xiaoxia"), origin=origin, source_context=source_context)
+    if not allow_duplicate:
+        dup = _promise_duplicate_exists(board, item, source=source)
+        if dup:
+            dup.setdefault("notes", []).append({"time": _promise_now(), "note": f"偵測到近似承諾，未重複新增。來源：{origin}", "source_context": _trace_preview(source_context, 500)})
+            dup["updated_at"] = _promise_now()
+            save_promise_board(board)
+            return False, dup
+    key = _promise_collection_key(source)
+    item["id"] = _promise_next_id(board, source=source)
+    board[key].append(item)
+    save_promise_board(board)
+    return True, item
+
+def _promise_format_item(item, index=None):
+    ptype = {"photo": "照片", "text": "文字", "general": "一般"}.get(str(item.get("type") or ""), str(item.get("type") or "一般"))
+    prefix = f"{index}. " if index is not None else ""
+    desc = _clean_text_compact(item.get("description") or "")
+    created = str(item.get("created_at") or "")[:16]
+    line = f"{prefix}[{ptype}] **{item.get('id')} {item.get('title')}**"
+    extras = []
+    if created: extras.append(f"建立：{created}")
+    if item.get("last_attempt_at"): extras.append(f"上次嘗試：{str(item.get('last_attempt_at'))[:16]}")
+    if extras: line += "\n   " + "｜".join(extras)
+    if desc: line += "\n   " + desc[:220]
+    return line
+
+def promise_board_summary_for_prompt(max_items=6):
+    board = load_promise_board()
+    daxia = _promise_active_items(board, "daxia")[-max_items:]
+    xiaoxia = _promise_active_items(board, "xiaoxia")[-max_items:]
+    lines = []
+    if daxia:
+        lines.append("【大俠手動承諾｜最高優先】")
+        for p in reversed(daxia): lines.append(f"- {p.get('id')} [{p.get('type')}] {p.get('title')}：{p.get('description')}")
+    if xiaoxia:
+        lines.append("【小俠單方面承諾｜次優先】")
+        for p in reversed(xiaoxia): lines.append(f"- {p.get('id')} [{p.get('type')}] {p.get('title')}：{p.get('description')}")
+    return "\n".join(lines) if lines else "目前沒有 active 承諾。"
+
+def _promise_item_to_diary_promise(item, source_list):
+    ptype = str(item.get("type") or _promise_type_from_text(item.get("description")))
+    kind = "photo" if ptype == "photo" else ("text" if ptype == "text" else infer_diary_promise_kind(item.get("description") or item.get("title")))
+    text = _clean_text_compact(item.get("description") or item.get("title")) or str(item.get("title") or "未命名承諾")
+    label = "大俠承諾" if source_list == "daxia_promises" else "小俠承諾"
+    return {"text": f"{label}（{item.get('id')}）：{text}", "kind": kind, "promise_board_id": item.get("id"), "promise_board_source": source_list, "promise_title": item.get("title"), "photo_required": bool(item.get("photo_required"))}
+
+def get_due_promises_from_board(max_items=4):
+    board = load_promise_board()
+    result = []
+    for key in ("daxia_promises", "xiaoxia_promises"):
+        active = [p for p in (board.get(key) or []) if isinstance(p, dict) and str(p.get("status") or PROMISE_STATUS_ACTIVE) == PROMISE_STATUS_ACTIVE and bool(p.get("diary_eligible", True))]
+        active.sort(key=lambda p: str(p.get("created_at") or ""), reverse=True)
+        for item in active:
+            result.append(_promise_item_to_diary_promise(item, key))
+            if len(result) >= max_items: return result
+        if result: return result[:max_items]
+    return result[:max_items]
+
+def select_diary_photo_promise_from_board():
+    board = load_promise_board()
+    for key in ("daxia_promises", "xiaoxia_promises"):
+        active = [p for p in (board.get(key) or []) if isinstance(p, dict) and str(p.get("status") or PROMISE_STATUS_ACTIVE) == PROMISE_STATUS_ACTIVE and bool(p.get("diary_eligible", True)) and bool(p.get("photo_required", False))]
+        if active:
+            active.sort(key=lambda p: str(p.get("created_at") or ""), reverse=True)
+            return _promise_item_to_diary_promise(active[0], key), active[0]
+    return None, None
+
+def mark_promise_attempt(promise_id, source_key, *, photo_id="", note=""):
+    if not promise_id or not source_key: return False
+    board = load_promise_board()
+    for item in board.get(source_key, []) or []:
+        if str(item.get("id")) == str(promise_id):
+            item["last_attempt_at"] = _promise_now()
+            item["last_attempt_photo_id"] = str(photo_id or "")
+            item["last_attempt_note"] = note or "交換日記已嘗試履約，待大俠確認。"
+            item["updated_at"] = _promise_now()
+            save_promise_board(board)
+            return True
+    return False
+
+def archive_completed_promise_to_life_event(item, source_key, actor_name="大俠"):
+    events = load_life_events()
+    now = _promise_now()
+    date_str = now[:10]
+    event_id = f"promise_completed_{item.get('id')}_{date_str.replace('-', '')}"
+    for ev in events:
+        if ev.get("id") == event_id: return ev
+    ev = {
+        "id": event_id, "title": f"承諾完成：{item.get('title')}", "type": "promise_completed",
+        "status": "archived", "importance": "normal", "participants": ["大俠", "小俠"],
+        "anchor_date": date_str, "derived_dates": {"completed_at": date_str}, "current_phase": "completed",
+        "facts": [f"{actor_name}已確認此承諾完成。", f"承諾來源：{'大俠手動承諾' if source_key == 'daxia_promises' else '小俠單方面承諾'}。", f"原承諾內容：{item.get('description') or item.get('title')}"],
+        "reply_guidance": ["此承諾已由大俠確認完成，只有大俠主動提到時才可作為回憶背景，不得再當作待履約事項。"],
+        "created_at": now, "updated_at": now, "archive_summary": f"{actor_name}確認承諾已完成，已從承諾清單移出。",
+        "promise_board_id": item.get("id"), "promise_board_source": source_key, "do_not_proactively_raise": True,
+        "promise_status_source": "promise_board_completed", "event_score": 3,
+    }
+    events.insert(0, ev)
+    save_life_events(events)
+    return ev
+
+def move_promise_to_archive(source_key, item, status, reason="", actor_name="大俠"):
+    board = load_promise_board()
+    kept, moved = [], None
+    for cur in board.get(source_key, []) or []:
+        if str(cur.get("id")) == str(item.get("id")): moved = dict(cur)
+        else: kept.append(cur)
+    if not moved: return False, None
+    moved["status"] = status
+    moved["updated_at"] = _promise_now()
+    moved["closed_at"] = _promise_now()
+    moved["closed_reason"] = reason
+    moved["closed_by"] = actor_name
+    board[source_key] = kept
+    board.setdefault("archive", []).insert(0, moved)
+    board["archive"] = board["archive"][:300]
+    save_promise_board(board)
+    if status == PROMISE_STATUS_DONE:
+        archive_completed_promise_to_life_event(moved, source_key, actor_name=actor_name)
+    return True, moved
+
+def _promise_parse_command(content, command_name):
+    raw = re.sub(rf"^/{re.escape(command_name)}(?:\s+|$)", "", str(content or "").strip(), flags=re.IGNORECASE).strip()
+    if not raw: return "list", ""
+    for action in ("新增", "修改", "刪除", "完成", "暫停", "恢復"):
+        if raw == action or raw.startswith(action + " "): return action, raw[len(action):].strip()
+    return "list", raw
+
+async def _promise_send_list(ctx, source="daxia", title=None):
+    board = load_promise_board()
+    key = _promise_collection_key(source)
+    active = _promise_active_items(board, source)
+    label = title or ("📌 大俠在意的承諾清單" if key == "daxia_promises" else "🌸 小俠單方面承諾清單")
+    if not active:
+        await ctx.send(label + "\n\n目前沒有 active 承諾。")
+        return
+    active_sorted = list(reversed(active))
+    lines = [label, ""]
+    for idx, item in enumerate(active_sorted, 1): lines.append(_promise_format_item(item, idx))
+    lines.append("")
+    lines.append("可用：`/承諾 新增 ...`、`/承諾 修改`、`/承諾 完成`、`/承諾 刪除`" if key == "daxia_promises" else "可用：`/小俠承諾 修改`、`/小俠承諾 完成`、`/小俠承諾 刪除`")
+    await ctx.send("\n".join(lines)[:1900])
+
+async def _promise_start_select_flow(ctx, source="daxia", action="修改"):
+    board = load_promise_board()
+    key = _promise_collection_key(source)
+    active = list(reversed(_promise_active_items(board, source)))
+    if not active:
+        await ctx.send("目前沒有可處理的承諾。")
+        return True
+    pending_promise_board_inputs[getattr(ctx.author, "id", None)] = {"source": key, "action": action, "stage": "choose", "started_at": _promise_now()}
+    lines = [f"請輸入要{action}的編號：", ""]
+    for idx, item in enumerate(active, 1): lines.append(_promise_format_item(item, idx))
+    if action == "修改": lines.append("\n選完後，下一則請輸入新的完整內容。")
+    elif action == "完成": lines.append("\n選完代表大俠審核完成；會移出承諾清單並歸檔到 life_events.json。")
+    elif action == "刪除": lines.append("\n選完會移出清單；通常不寫入 life_events.json。")
+    await ctx.send("\n".join(lines)[:1900])
+    return True
+
+async def _handle_pending_promise_board_input(message):
+    user_id = getattr(message.author, "id", None)
+    session = pending_promise_board_inputs.get(user_id)
+    if not session: return False
+    content = str(getattr(message, "content", "") or "").strip()
+    if content in {"取消", "cancel", "Cancel"}:
+        pending_promise_board_inputs.pop(user_id, None)
+        await message.channel.send("已取消承諾操作。")
+        return True
+    board = load_promise_board()
+    source_key = session.get("source")
+    source_name = "xiaoxia" if source_key == "xiaoxia_promises" else "daxia"
+    active = list(reversed(_promise_active_items(board, source_name)))
+    if session.get("stage") == "choose":
+        m = re.search(r"\d+", content)
+        if not m:
+            await message.channel.send("請輸入清單編號，或輸入「取消」。")
+            return True
+        idx = int(m.group(0)) - 1
+        if idx < 0 or idx >= len(active):
+            await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。")
+            return True
+        item = active[idx]
+        action = session.get("action")
+        if action == "修改":
+            session["stage"] = "edit"; session["target_id"] = item.get("id")
+            pending_promise_board_inputs[user_id] = session
+            await message.channel.send(f"請輸入 **{item.get('id')} {item.get('title')}** 的新內容。")
+            return True
+        if action == "刪除":
+            ok, _ = move_promise_to_archive(source_key, item, PROMISE_STATUS_DELETED, reason="大俠手動刪除")
+            pending_promise_board_inputs.pop(user_id, None)
+            await message.channel.send(f"🗑️ 已刪除：**{item.get('id')} {item.get('title')}**。小俠不會再把它列為待履約事項。" if ok else "刪除失敗，找不到該承諾。")
+            return True
+        if action == "完成":
+            ok, _ = move_promise_to_archive(source_key, item, PROMISE_STATUS_DONE, reason="大俠審核完成")
+            pending_promise_board_inputs.pop(user_id, None)
+            await message.channel.send(f"✅ 已完成並歸檔：**{item.get('id')} {item.get('title')}**\n已從承諾清單移出，並寫入 life_events.json；之後除非大俠主動提起，不會再當待履約事項。" if ok else "完成歸檔失敗，找不到該承諾。")
+            return True
+    if session.get("stage") == "edit":
+        target_id = session.get("target_id")
+        title, desc = _promise_split_title_description(content)
+        ptype = _promise_type_from_text(content)
+        edited = None
+        for item in board.get(source_key, []) or []:
+            if str(item.get("id")) == str(target_id):
+                item["title"] = title or item.get("title")
+                item["description"] = desc or title or item.get("description")
+                item["type"] = ptype
+                item["photo_required"] = ptype == "photo"
+                item["requirements"] = _promise_requirements_from_text(desc or title)
+                item["updated_at"] = _promise_now()
+                edited = item
                 break
-    return selected
+        pending_promise_board_inputs.pop(user_id, None)
+        if edited:
+            save_promise_board(board)
+            await message.channel.send(f"✅ 已修改：**{edited.get('id')} {edited.get('title')}**\n{edited.get('description')}")
+        else:
+            await message.channel.send("修改失敗，找不到該承諾。")
+        return True
+    return False
+
+async def _handle_promise_board_command(ctx, command_name, args="", source="daxia"):
+    key = _promise_collection_key(source)
+    if key == "xiaoxia_promises" and str(args or "").strip().startswith("新增"):
+        await ctx.send("`/小俠承諾` 沒有新增功能；這份清單只收小俠自己在聊天或交換日記裡主動說出口的承諾。大俠在意的事項請用 `/承諾 新增 ...`。")
+        return
+    action, payload = _promise_parse_command(f"/{command_name} {args}".strip(), command_name)
+    if action == "list":
+        await _promise_send_list(ctx, source=source); return
+    if action == "新增" and key == "daxia_promises":
+        if not payload:
+            await ctx.send("請在 `/承諾 新增` 後面寫承諾內容。"); return
+        added, item = add_promise_to_board(payload, source="daxia", origin="manual_command", source_context=payload)
+        await ctx.send(f"✅ 已新增到 `/承諾`：**{item.get('id')} {item.get('title')}**\n{item.get('description')}" if added else f"ℹ️ 偵測到相近承諾，未重複新增：**{item.get('id')} {item.get('title')}**")
+        return
+    if action in {"修改", "刪除", "完成"}:
+        await _promise_start_select_flow(ctx, source=source, action=action); return
+    await ctx.send("指令格式：`/承諾`、`/承諾 新增 ...`、`/承諾 修改`、`/承諾 完成`、`/承諾 刪除`。")
+
+async def _handle_promise_board_message_direct(message):
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/(承諾|小俠承諾)(?:\s+|$)", content, flags=re.IGNORECASE): return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，承諾清單先只開放在女友小俠的私人頻道使用喔。"); return True
+    cmd = "小俠承諾" if content.startswith("/小俠承諾") else "承諾"
+    raw = re.sub(rf"^/{cmd}(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    ctx = _WardrobeMessageCtxAdapter(message)
+    await _handle_promise_board_command(ctx, cmd, raw, source=("xiaoxia" if cmd == "小俠承諾" else "daxia"))
+    return True
+
+async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="chat", user_text="", max_items=3):
+    source_text = str(source_text or "")
+    if not (DIARY_PROMISE_SIGNAL_RE.search(source_text) and DIARY_DELIVERABLE_RE.search(source_text)): return []
+    prompt = f"""
+你是小俠單方面承諾登記員。只登記小俠自己明確承諾未來要交付的具體事項；不可登記情緒、撒嬌、泛泛努力或已完成事項。
+
+來源：{origin}
+大俠當時內容：{str(user_text or '')[-800:]}
+小俠文字：
+{source_text[-1800:]}
+
+只登記有具體交付物的承諾，例如照片、穿搭照、日記文字說明、清單、菜單、行程安排、整理好的內容。
+不要登記：我會一直愛你、我會陪你、我會努力、我會珍惜、只是期待或情緒表達、已經正在本篇完成的內容。
+只回傳 JSON：{{"promises":["一句可驗收承諾", "..."]}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
+        data = _extract_json_object(getattr(response, "text", "") or "")
+        raw_items = data.get("promises", []) if isinstance(data, dict) else []
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_PROMISE_BOARD_CAPTURE_FAILED] {type(exc).__name__}: {exc}")
+        raw_items = []
+    added = []
+    for value in raw_items[:max_items]:
+        text_value = narrative_safe_text(value, max_len=220)
+        if not text_value: continue
+        ok, item = add_promise_to_board(text_value, source="xiaoxia", origin=origin, source_context=source_text, allow_duplicate=False)
+        if ok: added.append(item)
+    return added
+
+async def capture_xiaoxia_promises_from_diary_result(result, entry_content="", entry_date=""):
+    parts = []
+    if isinstance(result, dict):
+        for key in ("reply_to_daxia", "xiaoxia_daily_scene", "inner_monologue", "promise_delivery", "xiaoxia_diary"):
+            if result.get(key): parts.append(str(result.get(key)))
+    blob = "\n".join(parts)
+    if not blob.strip(): return []
+    return await capture_xiaoxia_promises_to_board_from_text(blob, origin=f"diary:{entry_date or _today_str_tpe()}", user_text=entry_content, max_items=4)
+
+def get_due_diary_promises(profile=None, max_items=4):
+    """v1.5.00：交換日記待履約來源改為 promise_board；不再從 daxia_profile.xiaoxia_self.promises 主動撈舊承諾。"""
+    return get_due_promises_from_board(max_items=max_items)
+
 
 def format_diary_promise_requirements(due_promises):
     if not due_promises:
@@ -8841,32 +9239,11 @@ def _wardrobe_reference_for_generation(item):
 
 def _diary_promises_for_entry(profile, entry_date, max_items=4):
     """
-    交換日記履約只抓「本篇日期」的承諾。
-    尤其照片/穿搭承諾不可跨日自動延續；隔天沒有明講就回到場景自動穿搭。
+    v1.5.00：交換日記履約只讀 promise_board active 清單。
+    /承諾 最高優先，清空後才處理 /小俠承諾；同清單採後進先出。
     """
-    bucket = profile.get("xiaoxia_self", {}).get("promises", [])
-    selected, seen = [], set()
-    for item in reversed(bucket):
-        value = item.get("text", "") if isinstance(item, dict) else str(item)
-        value = narrative_safe_text(value, max_len=180)
-        if not value:
-            continue
-        added_at = str(item.get("added_at", "") if isinstance(item, dict) else "").strip()
-        kind = infer_diary_promise_kind(value)
-        is_outfit_or_photo = bool(re.search(r"(W\d{3,4}|衣櫃|穿|穿搭|服裝|照片|外出照|生活照|圖片|寫真)", value, re.I))
-        # 有日期的穿搭/照片承諾只能在當日履約；舊日記重跑則以該 entry_date 為準。
-        if is_outfit_or_photo and added_at and added_at != entry_date:
-            continue
-        # 無日期的舊承諾只允許文字，不讓它長期綁住照片穿搭。
-        if is_outfit_or_photo and not added_at:
-            continue
-        key = value.rstrip("。")
-        if key and key not in seen:
-            seen.add(key)
-            selected.append({"text": value, "kind": kind})
-            if len(selected) >= max_items:
-                break
-    return selected
+    return get_due_promises_from_board(max_items=max_items)
+
 
 
 async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=None, target_date=None):
@@ -12105,12 +12482,29 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # 🤝 提取待履約清單：本篇日記必須實際交付，而不只是回想承諾。
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
             current_promise_texts = _memory_text_values(promises_list)
-            current_promises = "、".join(current_promise_texts) if current_promise_texts else "無特殊承諾"
+            legacy_promises_summary = "、".join(current_promise_texts) if current_promise_texts else "無舊版 profile 承諾"
+            current_promises = promise_board_summary_for_prompt(max_items=8)
             due_promises = _diary_promises_for_entry(profile, entry_date, max_items=4)
             promise_requirements = format_diary_promise_requirements(due_promises)
-            committed_diary_photo_task = await select_today_committed_diary_photo_task(chat_context, due_promises, entry_date)
-            if committed_diary_photo_task:
-                print(f"📌 [{entry_date}] 交換日記單圖履約優先：{committed_diary_photo_task.get('visual_request_zh')}")
+            board_photo_promise, board_photo_item = select_diary_photo_promise_from_board()
+            committed_diary_photo_task = None
+            if board_photo_promise and board_photo_item:
+                committed_diary_photo_task = {
+                    "source_promise": board_photo_promise.get("text", ""),
+                    "visual_request_zh": board_photo_item.get("description") or board_photo_item.get("title", ""),
+                    "scene": board_photo_item.get("description") or board_photo_item.get("title", ""),
+                    "action": "依承諾內容完成照片履約",
+                    "outfit": board_photo_item.get("description") or board_photo_item.get("title", ""),
+                    "is_selfie": False,
+                    "reason": "v1.5.00 promise_board LIFO：先處理 /承諾 active 照片任務，清空後才處理 /小俠承諾。",
+                    "promise_board_id": board_photo_item.get("id"),
+                    "promise_board_source": board_photo_promise.get("promise_board_source"),
+                }
+                print(f"📌 [{entry_date}] promise_board 單圖履約優先：{committed_diary_photo_task.get('visual_request_zh')}")
+            else:
+                committed_diary_photo_task = await select_today_committed_diary_photo_task(chat_context, due_promises, entry_date)
+                if committed_diary_photo_task:
+                    print(f"📌 [{entry_date}] 交換日記單圖履約優先：{committed_diary_photo_task.get('visual_request_zh')}")
 
             # 🌟 檢查是否有大俠準備好的「交換日記指定圖」
             overrides = load_diary_override()
@@ -12556,6 +12950,16 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             db = load_memory()
             db.insert(0, diary_photo_payload)
             save_memory(db)
+            # v1.5.00：交換日記只記錄「嘗試履約」，不自動完成；需大俠用 /承諾 完成 或 /小俠承諾 完成 審核。
+            for p in due_promises or []:
+                if p.get("promise_board_id"):
+                    mark_promise_attempt(
+                        p.get("promise_board_id"),
+                        p.get("promise_board_source"),
+                        photo_id=diary_photo_payload.get("id"),
+                        note=f"交換日記 {entry_date} 已嘗試履約，待大俠確認。",
+                    )
+
             if diary_wardrobe and diary_wardrobe.get("item"):
                 _log_wardrobe_usage(
                     diary_wardrobe.get("item"),
@@ -12585,14 +12989,16 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             with open(DIARY_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
 
-            # 🤝 只有日記文字、圖片與資料均成功後，承諾才結案。
-            closed_promises = close_fulfilled_diary_promises(
-                profile, result.get("fulfilled_promises", []), entry_date
+                        # 🤝 v1.5.00：小俠或 LLM 不得自動結案。完成需由大俠執行 `/承諾 完成` 或 `/小俠承諾 完成`。
+            closed_promises = []
+            new_xiaoxia_promises = await capture_xiaoxia_promises_from_diary_result(
+                result,
+                entry_content=entry_content,
+                entry_date=entry_date,
             )
-            if closed_promises:
-                save_profile(profile)
-                print(f"✅ [{entry_date}] 已履行並結案承諾：{closed_promises}")
-                
+            if new_xiaoxia_promises:
+                print(f"🤝 [{entry_date}] 已從交換日記登記小俠單方面承諾：{[p.get('id') for p in new_xiaoxia_promises]}")
+
             if channel:
                 title = f"💖 小俠的交換日記 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的交換日記 [{entry_date}]"
                 embed = discord.Embed(title=title, description=combined_message, color=0xffb6c1)
@@ -13127,6 +13533,23 @@ async def _handle_wardrobe_message_direct(message):
         return True
 
 
+
+@girlfriend_bot.command(name='承諾')
+async def promise_board_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel):
+        await ctx.send("大俠，`/承諾` 先只開放在女友小俠的私人頻道使用喔。")
+        return
+    await _handle_promise_board_command(ctx, "承諾", args, source="daxia")
+
+
+@girlfriend_bot.command(name='小俠承諾')
+async def xiaoxia_promise_board_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel):
+        await ctx.send("大俠，`/小俠承諾` 先只開放在女友小俠的私人頻道使用喔。")
+        return
+    await _handle_promise_board_command(ctx, "小俠承諾", args, source="xiaoxia")
+
+
 @girlfriend_bot.command(name='今日衣著')
 async def today_outfit_command(ctx):
     outfit = _get_current_outfit_state()
@@ -13556,6 +13979,8 @@ async def on_message(message):
 
     # 1. 基礎過濾
     if message.author.bot: return
+    if await _handle_pending_promise_board_input(message):
+        return
     if message.author.id in pending_inputs: return
 
     # 🎴 今晚命運牌：
@@ -13621,6 +14046,10 @@ async def on_message(message):
     if message.content.startswith('/') and not inline_intimate_text:
         # 🎭 /cosplay_delete 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_cosplay_delete_message_direct(message):
+            return
+
+        # 🤝 /承諾、/小俠承諾：承諾清單由大俠手動審核，避免小夏自動誤判。
+        if await _handle_promise_board_message_direct(message):
             return
 
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
@@ -14025,13 +14454,19 @@ async def on_message(message):
                         xiaoxia_reply,
                     )
                 if captured_promises:
-                    added_count = append_safe_memories(
-                        profile, "promises", captured_promises,
-                        added_at=datetime.now(TZ_TPE).strftime("%Y-%m-%d"),
-                    )
-                    if added_count:
-                        save_profile(profile)
-                        print(f"🤝 已立即登記 {added_count} 項交換日記承諾：{captured_promises}")
+                    added_items = []
+                    for promise_text in captured_promises:
+                        ok, item = add_promise_to_board(
+                            promise_text,
+                            source="xiaoxia",
+                            origin="chat",
+                            source_context=xiaoxia_reply,
+                            allow_duplicate=False,
+                        )
+                        if ok:
+                            added_items.append(item)
+                    if added_items:
+                        print(f"🤝 已立即登記 {len(added_items)} 項 /小俠承諾：{[it.get('id') for it in added_items]}")
 
                 # 🎭 小俠已選擇的視覺資產在此真正執行：
                 # - Emoji 會嵌進正文。
@@ -16284,3 +16719,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
