@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.00"
+LOBSTER_VERSION = "1.5.01"
 
 
 def _normalize_generation_level(level):
@@ -505,7 +505,10 @@ os.makedirs(MEMORY_DIR, exist_ok=True)
 DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photos.json")
 DIARY_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_diary.json")
 STATE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_state.json")       # 🌟 新增：狀態與愛意值
-PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 🌟 新增：長期記憶大俠圖鑑
+PROFILE_DATA_PATH = os.path.join(MEMORY_DIR, "daxia_profile.json")     # 大俠人設：v1.5.01 起只允許大俠用指令維護
+XIAOXIA_PROFILE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_profile.json") # 小俠人設：v1.5.01 起只允許大俠用指令維護
+EVENT_BOARD_PATH = os.path.join(MEMORY_DIR, "event_board.json") # 📍 v1.5.01：近期事件板，僅大俠手動新增
+ANNIVERSARY_BOARD_PATH = os.path.join(MEMORY_DIR, "anniversary_board.json") # 🎂 v1.5.01：紀念日板，僅大俠手動新增
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
 DIARY_WARDROBE_PREFS_PATH = os.path.join(MEMORY_DIR, "diary_wardrobe_prefs.json") # 👗 今日交換日記衣櫃模式
@@ -2066,6 +2069,10 @@ daily_chat_logs = load_temp_chat()
 last_captured_image = None # 🌟 新增：暫存最後一次看見的圖片像素
 pending_inputs = set()
 pending_promise_board_inputs = {}  # 🤝 v1.5.00：/承諾 與 /小俠承諾 的編號修改/刪除/完成流程
+pending_profile_board_inputs = {}  # 👤 v1.5.01：/大俠人設、/小俠人設 的編號修改/刪除流程
+pending_event_board_inputs = {}  # 📍 v1.5.01：/事件 的編號修改/刪除/完成流程
+pending_anniversary_board_inputs = {}  # 🎂 v1.5.01：/紀念日 的編號修改/刪除流程
+pending_memory_review_inputs = {}  # 📚 v1.5.01：/回憶 的刪除/保留/升級紀念日流程
 photo_generation_contexts = {}
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
@@ -2369,6 +2376,7 @@ def load_profile():
         try:
             with open(PROFILE_DATA_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                # v1.5.01 clean profile 可能使用 items/identity 架構；為舊 prompt 相容補空欄位，但不自動寫入。
                 data.setdefault("daxia_traits", [])
                 data.setdefault("xiaoxia_traits", []) # 確保陣列存在
                 data.setdefault("shared_knowledge", []) # 確保陣列存在
@@ -2428,10 +2436,14 @@ def _profile_memory_bucket(profile, category):
     return node.setdefault(path[-1], [])
 
 def append_safe_memory(profile, category, raw_text, added_at=None, refresh_existing=True):
-    """新記憶的唯一入庫入口：敘事化、去重、保留日期後寫入 profile 物件。"""
+    """v1.5.01：profile 只允許大俠透過 /大俠人設、/小俠人設 指令維護；舊自動寫入入口全部降權封存。"""
+    print(f"🔒 [PROFILE_AUTO_WRITE_BLOCKED] category={category} text={_trace_preview(raw_text, 120)}")
+    return False
+
+
+def _legacy_append_safe_memory_disabled(profile, category, raw_text, added_at=None, refresh_existing=True):
     safe_text = narrative_safe_text(raw_text)
-    if not safe_text:
-        return False
+    if not safe_text: return False
     added_at = added_at or datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     bucket = _profile_memory_bucket(profile, category)
     safe_key = safe_text.rstrip("。")
@@ -2439,8 +2451,7 @@ def append_safe_memory(profile, category, raw_text, added_at=None, refresh_exist
         existing_text = item.get("text", "") if isinstance(item, dict) else str(item)
         if narrative_safe_text(existing_text).rstrip("。") == safe_key:
             if refresh_existing and isinstance(item, dict):
-                item["text"] = safe_text
-                item["added_at"] = added_at
+                item["text"] = safe_text; item["added_at"] = added_at
             return False
     bucket.append({"text": safe_text, "added_at": added_at})
     return True
@@ -2923,19 +2934,56 @@ def scan_profile_for_life_events(profile, now_dt=None, horizon_days=45):
 
     return events, changed
 
-def load_life_events():
+def _default_life_events_doc():
+    return {
+        "version": 2,
+        "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "authority_policy": {
+            "purpose": "歷史庫，不是待辦、不是主動提醒引擎。",
+            "daily_life_log_retention_days": 21,
+            "monthly_review_reminder": {"day": 25, "time": "08:00", "behavior": "只提醒整理與指令，不自動列清單"},
+        },
+        "major_life_events": [],
+        "daily_life_log": [],
+        "deleted_archive": [],
+    }
+
+
+def load_life_events_doc():
+    """v1.5.01：支援新版 life_events.json dict，同時相容舊版 list。"""
     if os.path.exists(LIFE_EVENTS_PATH):
         try:
             with open(LIFE_EVENTS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+            if isinstance(data, dict):
+                doc = _default_life_events_doc(); doc.update(data)
+                if not isinstance(doc.get("major_life_events"), list): doc["major_life_events"] = []
+                if not isinstance(doc.get("daily_life_log"), list): doc["daily_life_log"] = []
+                if not isinstance(doc.get("deleted_archive"), list): doc["deleted_archive"] = []
+                return doc
+            if isinstance(data, list):
+                doc = _default_life_events_doc(); doc["major_life_events"] = data; doc["legacy_list_source"] = True; return doc
         except Exception as exc:
             print(f"⚠️ life_events.json 讀取失敗：{exc}")
-    return []
+    return _default_life_events_doc()
+
+
+def save_life_events_doc(doc):
+    if not isinstance(doc, dict): doc = _default_life_events_doc()
+    doc.setdefault("major_life_events", []); doc.setdefault("daily_life_log", []); doc.setdefault("deleted_archive", [])
+    doc["version"] = max(int(doc.get("version") or 2), 2)
+    doc["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+    _atomic_write_json(LIFE_EVENTS_PATH, doc)
+
+
+def load_life_events():
+    return list(load_life_events_doc().get("major_life_events") or [])
+
 
 def save_life_events(events):
-    with open(LIFE_EVENTS_PATH, "w", encoding="utf-8") as f:
-        json.dump(events or [], f, ensure_ascii=False, indent=2)
+    doc = load_life_events_doc()
+    doc["major_life_events"] = events or []
+    save_life_events_doc(doc)
 
 def load_memory_directives():
     default = {
@@ -2966,6 +3014,476 @@ def _atomic_write_json(path, data):
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(temp_path, path)
+
+# ==========================================
+# 👤📍🎂 v1.5.01 Memory Authority Boards
+# ==========================================
+def _board_now():
+    return datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _manual_item_text_key(value):
+    value = _clean_text_compact(value)
+    value = re.sub(r"[，。！？!?,；;：:\s]+", "", value)
+    return value.lower()[:120]
+
+
+def _next_prefixed_id(items, prefix, width=4):
+    nums=[]
+    for item in items or []:
+        raw = str(item.get("id") or "") if isinstance(item, dict) else ""
+        m = re.fullmatch(re.escape(prefix)+r"(\d{4,})", raw)
+        if m: nums.append(int(m.group(1)))
+    return f"{prefix}{(max(nums)+1 if nums else 1):0{width}d}"
+
+
+def _load_board_file(path, default):
+    data = _load_json_file_or_default(path, default)
+    return data if isinstance(data, dict) else default
+
+
+def _save_board_file(path, data):
+    if isinstance(data, dict): data["updated_at"] = _board_now()
+    _atomic_write_json(path, data)
+
+
+def _default_xiaoxia_profile():
+    return {"version":2,"profile_type":"xiaoxia_profile","updated_at":_board_now(),"managed_by":"daxia_manual_command","identity":{},"items":[],"capabilities":[]}
+
+
+def load_xiaoxia_profile():
+    data = _load_board_file(XIAOXIA_PROFILE_PATH, _default_xiaoxia_profile())
+    data.setdefault("identity", {}); data.setdefault("items", []); data.setdefault("capabilities", [])
+    return data
+
+
+def save_xiaoxia_profile(data): _save_board_file(XIAOXIA_PROFILE_PATH, data)
+
+
+def _profile_board_config(kind):
+    if kind == "xiaoxia":
+        return {"loader":load_xiaoxia_profile,"saver":save_xiaoxia_profile,"prefix":"XP","title":"🌸 小俠人設","command":"小俠人設","category_default":"manual_profile"}
+    return {"loader":load_profile,"saver":save_profile,"prefix":"DP","title":"👤 大俠人設","command":"大俠人設","category_default":"manual_profile"}
+
+
+def _profile_items(data):
+    if not isinstance(data, dict): return []
+    if isinstance(data.get("items"), list): return data.get("items")
+    out=[]
+    for key in ("daxia_traits","xiaoxia_traits","shared_knowledge"):
+        for old in data.get(key, []) or []:
+            if isinstance(old, dict) and old.get("text"):
+                out.append({"id":"LEGACY","category":key,"text":old.get("text"),"created_at":old.get("added_at","legacy")})
+    return out
+
+
+def _profile_prompt_from_clean(data, max_items=10, max_chars=1200):
+    if not isinstance(data, dict): return ""
+    parts=[]; identity=data.get("identity") if isinstance(data.get("identity"), dict) else {}
+    for v in identity.values():
+        if isinstance(v, str) and v.strip(): parts.append(v.strip())
+    for item in _profile_items(data)[:max_items]:
+        if isinstance(item, dict) and item.get("text"): parts.append(str(item.get("text")).strip())
+    return "；".join(parts)[:max_chars]
+
+
+def daxia_profile_context_for_prompt(max_items=12, max_chars=1400):
+    return _profile_prompt_from_clean(load_profile(), max_items, max_chars) or "大俠重視小俠、承諾與真誠互動。"
+
+
+def xiaoxia_profile_context_for_prompt(max_items=12, max_chars=1600):
+    xp=load_xiaoxia_profile(); core=_profile_prompt_from_clean(xp, max_items, max_chars)
+    caps=safe_memory_join(xp.get("capabilities", []), max_items=5, max_chars=360) if isinstance(xp.get("capabilities"), list) else ""
+    return (core + ("；能力：" + caps if caps else "")).strip("；") or XIAOXIA_CORE_IDENTITY.strip()
+
+
+def _parse_manual_text(raw, default_category="manual"):
+    raw=_clean_text_compact(raw)
+    if not raw: return default_category,""
+    m=re.match(r"^([A-Za-z0-9_\-\u4e00-\u9fff]{2,24})\s*[:：]\s*(.+)$", raw)
+    return (m.group(1).strip(), m.group(2).strip()) if m else (default_category, raw)
+
+
+def _format_manual_item(item, idx=None):
+    prefix=f"{idx}. " if idx is not None else ""; txt=_clean_text_compact(item.get("text") or item.get("description") or item.get("title") or "")
+    return f"{prefix}**{item.get('id','')}** [{item.get('category','')}] {txt[:260]}"
+
+
+async def _profile_send_list(ctx, kind="daxia"):
+    cfg=_profile_board_config(kind); data=cfg["loader"](); items=_profile_items(data)
+    if not items: await ctx.send(cfg["title"]+"\n\n目前沒有手動人設項目。"); return
+    lines=[cfg["title"],""]+[ _format_manual_item(it,i) for i,it in enumerate(items,1)]
+    lines.append(f"\n可用：`/{cfg['command']} 新增 分類：內容`、`/{cfg['command']} 修改`、`/{cfg['command']} 刪除`")
+    await ctx.send("\n".join(lines)[:1900])
+
+
+def _profile_add_item(kind, text):
+    cfg=_profile_board_config(kind); data=cfg["loader"](); items=data.setdefault("items", [])
+    cat,body=_parse_manual_text(text, cfg["category_default"])
+    if not body: return False,None,"內容空白"
+    k=_manual_item_text_key(body)
+    for item in items:
+        if _manual_item_text_key(item.get("text")) == k:
+            item["updated_at"]=_board_now(); cfg["saver"](data); return False,item,"已有相同人設，未重複新增"
+    item={"id":_next_prefixed_id(items,cfg["prefix"]),"category":cat,"text":body,"source":"manual_command","created_at":_board_now(),"updated_at":_board_now()}
+    items.append(item); cfg["saver"](data); return True,item,"已新增"
+
+
+async def _profile_start_select_flow(ctx, kind="daxia", action="修改"):
+    cfg=_profile_board_config(kind); data=cfg["loader"](); items=list(_profile_items(data))
+    if not items: await ctx.send("目前沒有可處理的人設項目。"); return True
+    pending_profile_board_inputs[getattr(ctx.author,"id",None)]={"kind":kind,"action":action,"stage":"choose","started_at":_board_now()}
+    lines=[f"請輸入要{action}的編號：",""]+[_format_manual_item(it,i) for i,it in enumerate(items,1)]
+    if action=="修改": lines.append("\n選完後，下一則請輸入新的完整內容，可用 `分類：內容`。")
+    await ctx.send("\n".join(lines)[:1900]); return True
+
+
+async def _handle_pending_profile_input(message):
+    uid=getattr(message.author,"id",None); sess=pending_profile_board_inputs.get(uid)
+    if not sess: return False
+    content=str(getattr(message,"content","") or "").strip()
+    if content in {"取消","cancel","Cancel"}: pending_profile_board_inputs.pop(uid,None); await message.channel.send("已取消人設操作。"); return True
+    cfg=_profile_board_config(sess.get("kind") or "daxia"); data=cfg["loader"](); items=data.setdefault("items", _profile_items(data))
+    if sess.get("stage")=="choose":
+        m=re.search(r"\d+", content)
+        if not m: await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
+        idx=int(m.group(0))-1
+        if idx<0 or idx>=len(items): await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。"); return True
+        if sess.get("action")=="刪除":
+            removed=items.pop(idx); cfg["saver"](data); pending_profile_board_inputs.pop(uid,None); await message.channel.send(f"🗑️ 已刪除：**{removed.get('id')}** {str(removed.get('text',''))[:120]}"); return True
+        sess["stage"]="edit"; sess["target_index"]=idx; pending_profile_board_inputs[uid]=sess; await message.channel.send(f"請輸入 **{items[idx].get('id')}** 的新內容，可用 `分類：內容`。"); return True
+    if sess.get("stage")=="edit":
+        idx=int(sess.get("target_index",-1))
+        if idx<0 or idx>=len(items): pending_profile_board_inputs.pop(uid,None); await message.channel.send("修改失敗，找不到該人設項目。"); return True
+        cat,body=_parse_manual_text(content, items[idx].get("category") or cfg["category_default"])
+        if not body: await message.channel.send("內容空白，請重新輸入，或輸入「取消」。"); return True
+        items[idx]["category"]=cat; items[idx]["text"]=body; items[idx]["updated_at"]=_board_now(); cfg["saver"](data); pending_profile_board_inputs.pop(uid,None); await message.channel.send(f"✅ 已修改：**{items[idx].get('id')}**\n{body}"); return True
+    return False
+
+
+async def _handle_profile_board_command(ctx, command_name, args="", kind="daxia"):
+    raw=str(args or "").strip(); action,payload="list",""
+    for a in ("新增","修改","刪除"):
+        if raw==a or raw.startswith(a+" "): action,payload=a,raw[len(a):].strip(); break
+    if not raw: action="list"
+    if action=="list": await _profile_send_list(ctx, kind); return
+    if action=="新增":
+        added,item,msg=_profile_add_item(kind, payload)
+        await ctx.send("請在新增後面寫內容。" if not item else (("✅" if added else "ℹ️")+f" {msg}：**{item.get('id')}**\n{item.get('text')}")); return
+    if action in {"修改","刪除"}: await _profile_start_select_flow(ctx, kind, action); return
+    await ctx.send(f"指令格式：`/{command_name}`、`/{command_name} 新增 分類：內容`、`/{command_name} 修改`、`/{command_name} 刪除`。")
+
+
+async def _handle_profile_board_message_direct(message):
+    content=str(getattr(message,"content","") or "").strip()
+    if not re.match(r"^/(大俠人設|小俠人設)(?:\s+|$)", content): return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return True
+    cmd="小俠人設" if content.startswith("/小俠人設") else "大俠人設"; raw=re.sub(rf"^/{cmd}(?:\s+|$)","",content).strip()
+    await _handle_profile_board_command(_WardrobeMessageCtxAdapter(message), cmd, raw, kind=("xiaoxia" if cmd=="小俠人設" else "daxia")); return True
+
+
+def _default_event_board(): return {"version":1,"updated_at":_board_now(),"managed_by":"daxia_manual_command","active_events":[],"archive":[],"authority_policy":{"write_permission":"daxia_only"}}
+def load_event_board():
+    data=_load_board_file(EVENT_BOARD_PATH,_default_event_board()); data.setdefault("active_events",[]); data.setdefault("archive",[]); return data
+def save_event_board(data): _save_board_file(EVENT_BOARD_PATH,data)
+def _event_item_from_text(text):
+    title,desc=_promise_split_title_description(text)
+    return {"id":"","title":title or "未命名事件","status":"active","importance":"normal","created_at":_board_now(),"updated_at":_board_now(),"description":desc or title,"xiaoxia_attention":True,"daily_reminder":False,"notes":[]}
+def event_board_summary_for_prompt(max_items=5):
+    board=load_event_board(); active=[e for e in board.get("active_events",[]) if isinstance(e,dict) and str(e.get("status") or "active")=="active"]
+    if not active: return "目前沒有 active 近期事件。"
+    return "\n".join(["【近期事件｜只有大俠手動新增才算】"]+[f"- {e.get('id')} {e.get('title')}：{e.get('description','')}" for e in active[-max_items:]])
+def _archive_completed_event_to_life_event(item):
+    doc=load_life_events_doc(); events=doc.setdefault("major_life_events",[]); now=_board_now(); date_str=now[:10]
+    ev={"id":f"event_completed_{item.get('id')}_{date_str.replace('-','')}","title":f"事件完成：{item.get('title')}","type":"event_completed","memory_zone":"major_life_event","status":"archived","importance":item.get("importance","normal"),"participants":["大俠","小俠"],"anchor_date":date_str,"current_phase":"completed","summary":item.get("description") or item.get("title"),"facts":["大俠已確認此事件完成。",f"原事件內容：{item.get('description') or item.get('title')}"],"do_not_proactively_raise":True,"created_at":now,"updated_at":now,"event_board_id":item.get("id"),"retention_status":"pending_review"}
+    events.insert(0,ev); save_life_events_doc(doc); return ev
+def _format_event_item(item,idx=None): return f"{f'{idx}. ' if idx is not None else ''}**{item.get('id')} {item.get('title')}**\n   {str(item.get('description') or '')[:240]}"
+async def _event_send_list(ctx):
+    board=load_event_board(); active=[e for e in board.get("active_events",[]) if isinstance(e,dict) and str(e.get("status") or "active")=="active"]
+    if not active: await ctx.send("📍 近期事件清單\n\n目前沒有 active 事件。"); return
+    await ctx.send(("\n".join(["📍 近期事件清單",""]+[_format_event_item(it,i) for i,it in enumerate(active,1)]+["\n可用：`/事件 新增 ...`、`/事件 修改`、`/事件 完成`、`/事件 刪除`"]))[:1900])
+async def _event_start_select_flow(ctx, action="修改"):
+    board=load_event_board(); active=[e for e in board.get("active_events",[]) if isinstance(e,dict) and str(e.get("status") or "active")=="active"]
+    if not active: await ctx.send("目前沒有可處理的事件。"); return True
+    pending_event_board_inputs[getattr(ctx.author,"id",None)]={"action":action,"stage":"choose","started_at":_board_now()}
+    lines=[f"請輸入要{action}的事件編號：",""]+[_format_event_item(it,i) for i,it in enumerate(active,1)]
+    if action=="修改": lines.append("\n選完後，下一則請輸入新的完整事件內容。")
+    elif action=="完成": lines.append("\n選完會移出近期事件，歸檔到 life_events.json。")
+    await ctx.send("\n".join(lines)[:1900]); return True
+async def _handle_pending_event_input(message):
+    uid=getattr(message.author,"id",None); sess=pending_event_board_inputs.get(uid)
+    if not sess: return False
+    content=str(getattr(message,"content","") or "").strip()
+    if content in {"取消","cancel","Cancel"}: pending_event_board_inputs.pop(uid,None); await message.channel.send("已取消事件操作。"); return True
+    board=load_event_board(); active=board.setdefault("active_events",[])
+    if sess.get("stage")=="choose":
+        m=re.search(r"\d+", content)
+        if not m: await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
+        idx=int(m.group(0))-1
+        if idx<0 or idx>=len(active): await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。"); return True
+        item=active[idx]; action=sess.get("action")
+        if action=="修改": sess["stage"]="edit"; sess["target_index"]=idx; pending_event_board_inputs[uid]=sess; await message.channel.send(f"請輸入 **{item.get('id')} {item.get('title')}** 的新內容。"); return True
+        removed=active.pop(idx); removed.update({"updated_at":_board_now(),"closed_at":_board_now(),"closed_by":"大俠","status":"done" if action=="完成" else "deleted"}); board.setdefault("archive",[]).insert(0,removed); board["archive"]=board["archive"][:300]; save_event_board(board); pending_event_board_inputs.pop(uid,None)
+        if action=="完成": _archive_completed_event_to_life_event(removed); await message.channel.send(f"✅ 已完成並歸檔事件：**{removed.get('id')} {removed.get('title')}**")
+        else: await message.channel.send(f"🗑️ 已刪除事件：**{removed.get('id')} {removed.get('title')}**")
+        return True
+    if sess.get("stage")=="edit":
+        idx=int(sess.get("target_index",-1))
+        if 0<=idx<len(active): new_item=_event_item_from_text(content); active[idx].update({k:v for k,v in new_item.items() if k not in {"id","created_at"}}); active[idx]["updated_at"]=_board_now(); save_event_board(board); await message.channel.send(f"✅ 已修改事件：**{active[idx].get('id')} {active[idx].get('title')}**")
+        else: await message.channel.send("修改失敗，找不到該事件。")
+        pending_event_board_inputs.pop(uid,None); return True
+    return False
+async def _handle_event_board_command(ctx,args=""):
+    raw=str(args or "").strip(); action,payload="list",""
+    for a in ("新增","修改","刪除","完成"):
+        if raw==a or raw.startswith(a+" "): action,payload=a,raw[len(a):].strip(); break
+    if not raw: action="list"
+    if action=="list": await _event_send_list(ctx); return
+    if action=="新增":
+        if not payload: await ctx.send("請在 `/事件 新增` 後面寫事件內容。"); return
+        board=load_event_board(); active=board.setdefault("active_events",[]); item=_event_item_from_text(payload); item["id"]=_next_prefixed_id(active+board.get("archive",[]),"E"); active.append(item); save_event_board(board); await ctx.send(f"✅ 已新增到 `/事件`：**{item.get('id')} {item.get('title')}**\n{item.get('description')}"); return
+    if action in {"修改","刪除","完成"}: await _event_start_select_flow(ctx,action); return
+    await ctx.send("指令格式：`/事件`、`/事件 新增 ...`、`/事件 修改`、`/事件 完成`、`/事件 刪除`。")
+async def _handle_event_board_message_direct(message):
+    content=str(getattr(message,"content","") or "").strip()
+    if not re.match(r"^/事件(?:\s+|$)", content): return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，事件板先只開放在女友小俠的私人頻道使用喔。"); return True
+    await _handle_event_board_command(_WardrobeMessageCtxAdapter(message), re.sub(r"^/事件(?:\s+|$)","",content).strip()); return True
+
+
+def _default_anniversary_board(): return {"version":1,"updated_at":_board_now(),"managed_by":"daxia_manual_command","anniversaries":[],"daily_attention_policy":{"read_every_day":True}}
+def load_anniversary_board():
+    data=_load_board_file(ANNIVERSARY_BOARD_PATH,_default_anniversary_board()); data.setdefault("anniversaries",[]); return data
+def save_anniversary_board(data): _save_board_file(ANNIVERSARY_BOARD_PATH,data)
+def _anniv_item_from_text(text):
+    raw=_clean_text_compact(text); title,desc=_promise_split_title_description(raw); m=re.search(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})",raw) or re.search(r"(\d{1,2})[-/月.](\d{1,2})",raw)
+    item={"id":"","title":title or raw[:30] or "未命名紀念日","type":"anniversary","active":True,"repeat":"yearly","importance":"normal","description":desc or raw,"created_at":_board_now(),"updated_at":_board_now(),"remind_days_before":[30,14,7,3,1,0]}
+    if m and len(m.groups())==3: item.update({"date_type":"full_date","year":int(m.group(1)),"month":int(m.group(2)),"day":int(m.group(3))})
+    elif m: item.update({"date_type":"month_day","month":int(m.group(1)),"day":int(m.group(2))})
+    else: item.update({"date_type":"text","date_text":"待補日期"})
+    return item
+def anniversary_upcoming_summary(now_dt=None, days_ahead=30):
+    now_dt=now_dt or datetime.now(TZ_TPE); today=now_dt.date(); rows=[]
+    for item in load_anniversary_board().get("anniversaries",[]) or []:
+        if not isinstance(item,dict) or item.get("active") is False: continue
+        try:
+            month,day=int(item.get("month")),int(item.get("day")); target=datetime(today.year,month,day,tzinfo=TZ_TPE).date()
+            if target<today: target=datetime(today.year+1,month,day,tzinfo=TZ_TPE).date()
+            delta=(target-today).days; remind=item.get("remind_days_before") or []
+            if delta<=days_ahead or delta in remind: rows.append((delta,item,target))
+        except Exception: pass
+    rows.sort(key=lambda x:x[0])
+    if not rows: return "近期沒有需要主動提醒的紀念日。"
+    return "\n".join(["【近期紀念日｜每日留意】"]+[f"- {it.get('id')} {it.get('title')}：{target.strftime('%Y-%m-%d')}（{delta}天後）" for delta,it,target in rows[:6]])
+def _format_anniv_item(item,idx=None): return f"{f'{idx}. ' if idx is not None else ''}**{item.get('id')} {item.get('title')}**｜{item.get('date_text') or (str(item.get('month'))+'/'+str(item.get('day')) if item.get('month') else '待補日期')}\n   {str(item.get('description') or '')[:220]}"
+async def _anniv_send_list(ctx):
+    items=[a for a in load_anniversary_board().get("anniversaries",[]) if isinstance(a,dict) and a.get("active") is not False]
+    if not items: await ctx.send("🎂 紀念日清單\n\n目前沒有紀念日。"); return
+    await ctx.send(("\n".join(["🎂 紀念日清單",""]+[_format_anniv_item(it,i) for i,it in enumerate(items,1)]+["\n可用：`/紀念日 新增 ...`、`/紀念日 修改`、`/紀念日 刪除` "]))[:1900])
+async def _anniv_start_select_flow(ctx, action="修改"):
+    items=[a for a in load_anniversary_board().get("anniversaries",[]) if isinstance(a,dict) and a.get("active") is not False]
+    if not items: await ctx.send("目前沒有可處理的紀念日。"); return True
+    pending_anniversary_board_inputs[getattr(ctx.author,"id",None)]={"action":action,"stage":"choose","started_at":_board_now()}
+    lines=[f"請輸入要{action}的紀念日編號：",""]+[_format_anniv_item(it,i) for i,it in enumerate(items,1)]
+    if action=="修改": lines.append("\n選完後，下一則請輸入新的完整內容。")
+    await ctx.send("\n".join(lines)[:1900]); return True
+async def _handle_pending_anniv_input(message):
+    uid=getattr(message.author,"id",None); sess=pending_anniversary_board_inputs.get(uid)
+    if not sess: return False
+    content=str(getattr(message,"content","") or "").strip()
+    if content in {"取消","cancel","Cancel"}: pending_anniversary_board_inputs.pop(uid,None); await message.channel.send("已取消紀念日操作。"); return True
+    board=load_anniversary_board(); items=board.setdefault("anniversaries",[])
+    if sess.get("stage")=="choose":
+        m=re.search(r"\d+", content)
+        if not m: await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
+        idx=int(m.group(0))-1
+        if idx<0 or idx>=len(items): await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。"); return True
+        if sess.get("action")=="刪除": items[idx]["active"]=False; items[idx]["updated_at"]=_board_now(); save_anniversary_board(board); pending_anniversary_board_inputs.pop(uid,None); await message.channel.send(f"🗑️ 已刪除紀念日：**{items[idx].get('id')} {items[idx].get('title')}**"); return True
+        sess["stage"]="edit"; sess["target_index"]=idx; pending_anniversary_board_inputs[uid]=sess; await message.channel.send(f"請輸入 **{items[idx].get('id')} {items[idx].get('title')}** 的新內容。"); return True
+    if sess.get("stage")=="edit":
+        idx=int(sess.get("target_index",-1))
+        if 0<=idx<len(items):
+            ni=_anniv_item_from_text(content); keep=items[idx].get("id"); items[idx].update({k:v for k,v in ni.items() if k not in {"id","created_at"}}); items[idx]["id"]=keep; items[idx]["updated_at"]=_board_now(); save_anniversary_board(board); await message.channel.send(f"✅ 已修改紀念日：**{items[idx].get('id')} {items[idx].get('title')}**")
+        else: await message.channel.send("修改失敗，找不到該紀念日。")
+        pending_anniversary_board_inputs.pop(uid,None); return True
+    return False
+async def _handle_anniversary_board_command(ctx,args=""):
+    raw=str(args or "").strip(); action,payload="list",""
+    for a in ("新增","修改","刪除"):
+        if raw==a or raw.startswith(a+" "): action,payload=a,raw[len(a):].strip(); break
+    if not raw: action="list"
+    if action=="list": await _anniv_send_list(ctx); return
+    if action=="新增":
+        if not payload: await ctx.send("請在 `/紀念日 新增` 後面寫紀念日內容。"); return
+        board=load_anniversary_board(); items=board.setdefault("anniversaries",[]); item=_anniv_item_from_text(payload); item["id"]=_next_prefixed_id(items,"A"); items.append(item); save_anniversary_board(board); await ctx.send(f"✅ 已新增到 `/紀念日`：**{item.get('id')} {item.get('title')}**"); return
+    if action in {"修改","刪除"}: await _anniv_start_select_flow(ctx,action); return
+    await ctx.send("指令格式：`/紀念日`、`/紀念日 新增 ...`、`/紀念日 修改`、`/紀念日 刪除`。")
+async def _handle_anniversary_board_message_direct(message):
+    content=str(getattr(message,"content","") or "").strip()
+    if not re.match(r"^/紀念日(?:\s+|$)", content): return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，紀念日先只開放在女友小俠的私人頻道使用喔。"); return True
+    await _handle_anniversary_board_command(_WardrobeMessageCtxAdapter(message), re.sub(r"^/紀念日(?:\s+|$)","",content).strip()); return True
+
+
+def prune_daily_life_log(now_dt=None, retention_days=21):
+    now_dt=now_dt or datetime.now(TZ_TPE); cutoff=now_dt.date()-timedelta(days=retention_days); doc=load_life_events_doc(); logs=doc.setdefault("daily_life_log",[]); kept=[]; removed=0
+    for item in logs:
+        dt=_parse_memory_date((item or {}).get("anchor_date") or (item or {}).get("date") or (item or {}).get("created_at")) if isinstance(item,dict) else None
+        if dt and dt.date()<cutoff: removed+=1; continue
+        kept.append(item)
+    doc["daily_life_log"]=kept
+    if removed: save_life_events_doc(doc)
+    return removed
+
+def _recent_diary_plain_summary(limit=1):
+    try:
+        data=_load_json_file_or_default(DIARY_DATA_PATH,[])
+        if not isinstance(data,list) or not data: return ""
+        return "\n".join([f"{e.get('date','')}："+re.sub(r"<[^>]+>","",str(e.get('content','')))[:700] for e in data[-limit:] if isinstance(e,dict)])
+    except Exception: return ""
+
+async def upsert_daily_life_log_from_today(now_dt=None):
+    now_dt=now_dt or datetime.now(TZ_TPE); date_key=now_dt.strftime("%Y-%m-%d"); logs=load_temp_chat(); chat_blob="\n".join([str(x) for x in logs[-80:]])[-5000:]; diary_blob=_recent_diary_plain_summary(1)
+    if not chat_blob.strip() and not diary_blob.strip(): return None
+    prompt=f"""
+你是生活摘要整理員。請把今天 temp_chat 與交換日記整理成『柴米油鹽區』摘要。
+只記錄今天聊過或發生過的大意，不新增承諾、事件、人設、紀念日，不判定任務完成。
+每點要短，避免成人細節，只保留含蓄生活脈絡。
+日期：{date_key}
+TEMP_CHAT：
+{chat_blob}
+最近交換日記：
+{diary_blob}
+只回 JSON：{{"summary":["..."],"possible_xiaoxia_promises":["小俠明確具體承諾候選，可空陣列"]}}
+"""
+    try:
+        resp=await gemini_client.aio.models.generate_content(model="gemini-2.5-flash",contents=prompt,config=types.GenerateContentConfig(response_mime_type="application/json",temperature=0.1)); data=_extract_json_object(getattr(resp,"text","") or "")
+    except Exception as exc:
+        print(f"⚠️ [DAILY_LIFE_LOG_LLM_FAILED] {type(exc).__name__}: {exc}"); data={"summary":[narrative_safe_text(x,max_len=160) for x in logs[-6:]]}
+    facts=[narrative_safe_text(x,max_len=220) for x in (data.get("summary",[]) if isinstance(data,dict) else []) if narrative_safe_text(x,max_len=220)]
+    candidates=[narrative_safe_text(x,max_len=180) for x in (data.get("possible_xiaoxia_promises",[]) if isinstance(data,dict) else []) if narrative_safe_text(x,max_len=180)]
+    doc=load_life_events_doc(); entries=doc.setdefault("daily_life_log",[])
+    item={"id":f"daily_life_{date_key.replace('-','')}","title":f"{date_key} 柴米油鹽摘要","memory_zone":"daily_life_log","type":"daily_summary","status":"archived","anchor_date":date_key,"facts":facts[:8],"possible_xiaoxia_promises":candidates[:5],"importance":"low","do_not_proactively_raise":True,"auto_delete_after_days":21,"source":["temp_chat","xiaoxia_diary"],"updated_at":_board_now()}
+    for i,old in enumerate(entries):
+        if isinstance(old,dict) and old.get("id")==item["id"]: entries[i]=item; break
+    else: entries.insert(0,item)
+    save_life_events_doc(doc); return item
+
+def memory_monthly_review_reminder_text():
+    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 1 個月，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除，不需要手動處理。"
+
+def due_memory_review_items(now_dt=None):
+    now_dt=now_dt or datetime.now(TZ_TPE); rows=[]
+    for ev in load_life_events_doc().get("major_life_events",[]) or []:
+        if not isinstance(ev,dict) or ev.get("memory_zone")=="daily_life_log": continue
+        if str(ev.get("retention_status") or "pending_review") not in {"pending_review",""}: continue
+        dt=_parse_memory_date(ev.get("anchor_date") or ev.get("created_at"))
+        if dt and 30 <= (now_dt.date()-dt.date()).days < 60: rows.append(ev)
+    return rows
+
+
+def _memory_review_candidates(mode="all", now_dt=None):
+    doc = load_life_events_doc()
+    events = [ev for ev in doc.get("major_life_events", []) or [] if isinstance(ev, dict)]
+    if mode in {"待整理", "review"}:
+        allowed_ids = {ev.get("id") for ev in due_memory_review_items(now_dt)}
+        events = [ev for ev in events if ev.get("id") in allowed_ids]
+    return events
+
+
+def _format_memory_event_item(ev, idx=None):
+    prefix = f"{idx}. " if idx is not None else ""
+    title = str(ev.get("title") or ev.get("id") or "未命名回憶")
+    date = str(ev.get("anchor_date") or ev.get("created_at") or "")[:10]
+    summary = _clean_text_compact(ev.get("summary") or ev.get("archive_summary") or "；".join(ev.get("facts") or []))
+    status = str(ev.get("retention_status") or "pending_review")
+    return f"{prefix}**{ev.get('id')}｜{title}**\n   日期：{date}｜保留狀態：{status}\n   {summary[:220]}"
+
+
+async def _memory_review_send_list(ctx, mode="all"):
+    items = _memory_review_candidates(mode)
+    title = "📚 待整理回憶" if mode in {"待整理", "review"} else "📚 回憶清單"
+    if not items:
+        await ctx.send(title + "\n\n目前沒有符合條件的回憶。")
+        return
+    lines = [title, ""]
+    for idx, ev in enumerate(items[:20], 1): lines.append(_format_memory_event_item(ev, idx))
+    lines.append("\n可用：`/回憶 待整理`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`")
+    await ctx.send("\n".join(lines)[:1900])
+
+
+async def _memory_review_start_select_flow(ctx, action="刪除", mode="all"):
+    items = _memory_review_candidates("待整理" if action in {"保留", "升級紀念日"} else "all")
+    if not items:
+        await ctx.send("目前沒有可處理的回憶。")
+        return True
+    pending_memory_review_inputs[getattr(ctx.author, "id", None)] = {"action": action, "stage": "choose", "mode": mode, "started_at": _board_now()}
+    lines = [f"請輸入要{action}的回憶編號：", ""]
+    for idx, ev in enumerate(items[:20], 1): lines.append(_format_memory_event_item(ev, idx))
+    await ctx.send("\n".join(lines)[:1900])
+    return True
+
+
+async def _handle_pending_memory_review_input(message):
+    uid = getattr(message.author, "id", None); sess = pending_memory_review_inputs.get(uid)
+    if not sess: return False
+    content = str(getattr(message, "content", "") or "").strip()
+    if content in {"取消", "cancel", "Cancel"}:
+        pending_memory_review_inputs.pop(uid, None); await message.channel.send("已取消回憶整理操作。"); return True
+    action = sess.get("action")
+    items = _memory_review_candidates("待整理" if action in {"保留", "升級紀念日"} else "all")[:20]
+    m = re.search(r"\d+", content)
+    if not m:
+        await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
+    idx = int(m.group(0)) - 1
+    if idx < 0 or idx >= len(items):
+        await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。"); return True
+    target_id = items[idx].get("id")
+    doc = load_life_events_doc(); events = doc.setdefault("major_life_events", [])
+    target = next((ev for ev in events if isinstance(ev, dict) and ev.get("id") == target_id), None)
+    if not target:
+        pending_memory_review_inputs.pop(uid, None); await message.channel.send("處理失敗，找不到該回憶。"); return True
+    if action == "刪除":
+        events[:] = [ev for ev in events if not (isinstance(ev, dict) and ev.get("id") == target_id)]
+        target["deleted_at"] = _board_now(); target["deleted_by"] = "大俠"
+        doc.setdefault("deleted_archive", []).insert(0, target)
+        doc["deleted_archive"] = doc["deleted_archive"][:300]
+        save_life_events_doc(doc)
+        await message.channel.send(f"🗑️ 已刪除回憶：**{target.get('title')}**")
+    elif action == "保留":
+        target["retention_status"] = "kept"; target["retained_by"] = "大俠"; target["retained_at"] = _board_now(); target["updated_at"] = _board_now()
+        save_life_events_doc(doc)
+        await message.channel.send(f"✅ 已保留回憶：**{target.get('title')}**")
+    elif action == "升級紀念日":
+        board = load_anniversary_board(); annivs = board.setdefault("anniversaries", [])
+        ann = _anniv_item_from_text(f"{target.get('title')}：{target.get('anchor_date') or ''} {target.get('summary') or ''}")
+        ann["id"] = _next_prefixed_id(annivs, "A"); ann["source"] = "promoted_from_life_events"; ann["source_life_event_id"] = target_id; annivs.append(ann); save_anniversary_board(board)
+        target["retention_status"] = "promoted_to_anniversary"; target["anniversary_id"] = ann["id"]; target["updated_at"] = _board_now(); save_life_events_doc(doc)
+        await message.channel.send(f"🎂 已升級為紀念日：**{ann.get('id')} {ann.get('title')}**")
+    pending_memory_review_inputs.pop(uid, None)
+    return True
+
+
+async def _handle_memory_review_command(ctx, args=""):
+    raw = str(args or "").strip()
+    if not raw:
+        await _memory_review_send_list(ctx, mode="all"); return
+    if raw == "待整理":
+        await _memory_review_send_list(ctx, mode="待整理"); return
+    for action in ("刪除", "保留", "升級紀念日"):
+        if raw == action or raw.startswith(action + " "):
+            await _memory_review_start_select_flow(ctx, action=action); return
+    await ctx.send("指令格式：`/回憶`、`/回憶 待整理`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`。")
+
+
+async def _handle_memory_review_message_direct(message):
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/回憶(?:\s+|$)", content): return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，回憶整理先只開放在女友小俠的私人頻道使用喔。"); return True
+    raw = re.sub(r"^/回憶(?:\s+|$)", "", content).strip()
+    await _handle_memory_review_command(_WardrobeMessageCtxAdapter(message), raw)
+    return True
 
 def _json_hash(data):
     payload = json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -3864,7 +4382,7 @@ def infer_diary_promise_kind(promise_text):
 # 🤝 v1.5.00 Promise Board：大俠手動承諾 / 小俠單方面承諾
 # ==========================================
 
-PROMISE_BOARD_VERSION = 1
+PROMISE_BOARD_VERSION = 2
 PROMISE_STATUS_ACTIVE = "active"
 PROMISE_STATUS_PAUSED = "paused"
 PROMISE_STATUS_DONE = "done"
@@ -4225,6 +4743,21 @@ async def _handle_promise_board_message_direct(message):
     await _handle_promise_board_command(ctx, cmd, raw, source=("xiaoxia" if cmd == "小俠承諾" else "daxia"))
     return True
 
+
+XIAOXIA_PROMISE_EMOTIONAL_ONLY_RE = re.compile(r"(一直愛你|永遠愛你|陪著你|陪你|努力|珍惜你|想你|等你|乖乖|更懂你|更愛你|不離開|不要離開)")
+XIAOXIA_PROMISE_CONCRETE_RE = re.compile(r"(照片|圖片|寫真|穿搭|交照|日記|寫清楚|整理|清單|菜單|行程|心得|說明|補一張|放到交換日記|給你看|準備一份|列出)")
+XIAOXIA_PROMISE_FUTURE_RE = re.compile(r"(我會|我一定會|我會把|我會在|下次|明天|今天|今晚|下一篇|之後|週末|到時候|等一下)")
+
+
+def is_concrete_xiaoxia_promise_text(text):
+    value = _clean_text_compact(text)
+    if len(value) < 8: return False
+    if XIAOXIA_PROMISE_EMOTIONAL_ONLY_RE.search(value) and not XIAOXIA_PROMISE_CONCRETE_RE.search(value): return False
+    if not XIAOXIA_PROMISE_CONCRETE_RE.search(value): return False
+    if not (XIAOXIA_PROMISE_FUTURE_RE.search(value) or DIARY_PROMISE_SIGNAL_RE.search(value)): return False
+    if re.search(r"(已經|剛剛|完成了|交付了|已完成|不用再|不必再)", value) and not re.search(r"(下次|下一篇|明天|今天|今晚|之後)", value): return False
+    return True
+
 async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="chat", user_text="", max_items=3):
     source_text = str(source_text or "")
     if not (DIARY_PROMISE_SIGNAL_RE.search(source_text) and DIARY_DELIVERABLE_RE.search(source_text)): return []
@@ -4250,7 +4783,7 @@ async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="ch
     added = []
     for value in raw_items[:max_items]:
         text_value = narrative_safe_text(value, max_len=220)
-        if not text_value: continue
+        if not text_value or not is_concrete_xiaoxia_promise_text(text_value): continue
         ok, item = add_promise_to_board(text_value, source="xiaoxia", origin=origin, source_context=source_text, allow_duplicate=False)
         if ok: added.append(item)
     return added
@@ -12372,8 +12905,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
         if channel: await channel.send("📝 大俠目前沒有未讀的日記或新對話需要回覆喔！")
         return
 
-    # --- 階段 2.5：獨立立體記憶萃取 (嚴格分類雙閘門版) ---
-    if chat_context:
+    # --- v1.5.01：不再由交換日記流程自動寫 profile / life_events；柴米油鹽由每日整理統一寫 daily_life_log。 ---
+    if False and chat_context:
         try:
             print("🧠 正在從今日對話中萃取【雙向立體記憶】...")
             
@@ -12757,7 +13290,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 save_state(app_state)
             
                 # 交換日記中可保存的偏好與事件，於寫入 profile 當下統一整理。
-                append_safe_memories(profile, "daxia_traits", result.get("extracted_preferences", []), added_at=today_str)
+                # v1.5.01：交換日記萃取不得自動寫入 profile；人設只允許大俠指令維護。
+                pass
 
                 creative_memory_source = "\n".join([
                     str(result.get("xiaoxia_daily_scene", "")),
@@ -13157,6 +13691,10 @@ async def on_ready():
         midnight_feedback_task.start()
         print("🌙 晚間 23:30 日記回饋排程已啟動！")
 
+    if not monthly_memory_review_reminder_task.is_running():
+        monthly_memory_review_reminder_task.start()
+        print("📚 每月25日 08:00 回憶整理提醒已啟動（只提醒，不列清單）。")
+
 @girlfriend_bot.command(name='more')
 async def more(ctx):
     if not state["current_topic_data"]:
@@ -13549,6 +14087,31 @@ async def xiaoxia_promise_board_command(ctx, *, args: str = ""):
         return
     await _handle_promise_board_command(ctx, "小俠承諾", args, source="xiaoxia")
 
+
+@girlfriend_bot.command(name='大俠人設')
+async def daxia_profile_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return
+    await _handle_profile_board_command(ctx, "大俠人設", args, kind="daxia")
+
+@girlfriend_bot.command(name='小俠人設')
+async def xiaoxia_profile_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return
+    await _handle_profile_board_command(ctx, "小俠人設", args, kind="xiaoxia")
+
+@girlfriend_bot.command(name='事件')
+async def event_board_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，事件板先只開放在女友小俠的私人頻道使用喔。"); return
+    await _handle_event_board_command(ctx, args)
+
+@girlfriend_bot.command(name='紀念日')
+async def anniversary_board_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，紀念日先只開放在女友小俠的私人頻道使用喔。"); return
+    await _handle_anniversary_board_command(ctx, args)
+
+@girlfriend_bot.command(name='回憶')
+async def memory_review_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，回憶整理先只開放在女友小俠的私人頻道使用喔。"); return
+    await _handle_memory_review_command(ctx, args)
 
 @girlfriend_bot.command(name='今日衣著')
 async def today_outfit_command(ctx):
@@ -13979,8 +14542,11 @@ async def on_message(message):
 
     # 1. 基礎過濾
     if message.author.bot: return
-    if await _handle_pending_promise_board_input(message):
-        return
+    if await _handle_pending_promise_board_input(message): return
+    if await _handle_pending_profile_input(message): return
+    if await _handle_pending_event_input(message): return
+    if await _handle_pending_anniv_input(message): return
+    if await _handle_pending_memory_review_input(message): return
     if message.author.id in pending_inputs: return
 
     # 🎴 今晚命運牌：
@@ -14240,9 +14806,8 @@ async def on_message(message):
                         save_temp_chat(daily_chat_logs)
                         print(f"🧭 已標記重大事件子任務完成：{[t['label'] for t in completed_subtasks]}")
 
-                active_life_events, life_changed = refresh_life_events(profile=profile, now_dt=now)
-                if life_changed:
-                    save_profile(profile)
+                # v1.5.01：不得再從 profile 掃描 active/followup 事件，避免舊 profile 與 life_events 打架。
+                active_life_events, life_changed = [], False
 
                 if intimate_mode:
                     life_event_context = "當下互動模式啟用：本輪不載入重大事件。"
@@ -14257,36 +14822,13 @@ async def on_message(message):
                     )
                 else:
                     # 普通聊天只讀目前仍有效的事件、真正近期內容與可在一般情境提起的 pending 承諾。
-                    life_event_context = _active_events_for_prompt(
-                        load_life_events(),
-                        now,
-                        max_items=3,
-                    )
-                    daxia_traits = safe_memory_join(
-                        profile.get("daxia_traits", []),
-                        max_items=6,
-                        max_chars=700,
-                    )
-                    promises = _commitments_for_prompt(
-                        profile,
-                        intimate_mode=False,
-                        max_items=4,
-                    )
-                    capabilities = safe_memory_join(
-                        profile.get("xiaoxia_self", {}).get("capabilities", []),
-                        max_items=5,
-                        max_chars=420,
-                    )
-                    recent = _recent_context_for_prompt(
-                        profile,
-                        now,
-                        max_items=5,
-                    )
-                    xiaoxia_personality = _balanced_xiaoxia_traits_for_prompt(
-                        profile,
-                        max_items=5,
-                        max_chars=760,
-                    )
+                    life_event_context = event_board_summary_for_prompt(max_items=5)
+                    daxia_traits = daxia_profile_context_for_prompt(max_items=12, max_chars=1400)
+                    promises = promise_board_summary_for_prompt(max_items=8)
+                    xiaoxia_profile_for_prompt = load_xiaoxia_profile()
+                    capabilities = safe_memory_join(xiaoxia_profile_for_prompt.get("capabilities", []), max_items=5, max_chars=420)
+                    recent = anniversary_upcoming_summary(now, days_ahead=30)
+                    xiaoxia_personality = xiaoxia_profile_context_for_prompt(max_items=12, max_chars=1600)
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -14346,7 +14888,7 @@ async def on_message(message):
                     f"▶️ 妳目前的興趣、能力與生活感：{xiaoxia_personality}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
-                    f"▶️ 最近發生的事/大俠近況：{recent}\n"
+                    f"▶️ 近期紀念日提醒：{recent}\n"
                     f"▶️ 本次連續會話紀錄（最高即時事實來源）：\n{chat_history_str}\n\n"
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
@@ -14456,6 +14998,7 @@ async def on_message(message):
                 if captured_promises:
                     added_items = []
                     for promise_text in captured_promises:
+                        if not is_concrete_xiaoxia_promise_text(promise_text): continue
                         ok, item = add_promise_to_board(
                             promise_text,
                             source="xiaoxia",
@@ -14802,110 +15345,37 @@ async def auto_defrag_task():
     else:
         print(f"⚠️ 找不到 PRIVATE_ASSISTANT_CHANNEL_ID={PRIVATE_ASSISTANT_CHANNEL_ID}，跳過私人大腦巡邏回報。")
 
+
+@tasks.loop(time=time(hour=8, minute=0, tzinfo=TZ_TPE))
+async def monthly_memory_review_reminder_task():
+    """v1.5.01：每月25日只提醒整理，不主動列出清單。"""
+    now=datetime.now(TZ_TPE)
+    if now.day != 25: return
+    channel=discord.utils.get(girlfriend_bot.get_all_channels(), name="唐分糕") or get_architect_channel(PRIVATE_ASSISTANT_CHANNEL_ID)
+    if channel: await channel.send(memory_monthly_review_reminder_text())
+    else: print("⚠️ [MONTHLY_MEMORY_REVIEW_REMINDER] 找不到可提醒頻道。")
+
 # ==========================================
 # 🧠 記憶碎片重組與垃圾回收系統 (Memory Defrag & GC)
 # ==========================================
 async def optimize_memory_vault(channel=None):
-    """
-    每日無條件記憶治理：
-    - 先備份
-    - 保守清理與承諾結構化
-    - Gemini 理解式整理
-    - 合併事件、尊重反覆修正
-    - 原子寫回三份資料
-    """
-    now_dt = datetime.now(TZ_TPE)
+    """v1.5.01：每日只整理 daily_life_log 與清除 21 天以前柴米油鹽，不再自動改 profile / 承諾 / 事件 / 紀念日。"""
+    now_dt=datetime.now(TZ_TPE)
     try:
-        backup_dir = _daily_memory_backup(now_dt)
-        profile = load_profile()
-        events = load_life_events()
-        directives = load_memory_directives()
-        logs = load_temp_chat()
-
-        before_counts = {
-            "traits": len(profile.get("daxia_traits", []))
-            + len(profile.get("xiaoxia_traits", [])),
-            "shared": len(profile.get("shared_knowledge", [])),
-            "recent": len(profile.get("recent_context", [])),
-            "commitments": len(profile.get("xiaoxia_self", {}).get("promises", [])),
-            "events": len(events),
-        }
-
-        moved = _archive_stale_recent_context(profile, now_dt)
-        removed_traits = _remove_harmful_trait_records(profile)
-        _normalize_commitments(profile)
-        deterministic_deduped = _dedupe_profile_semantically(profile)
-
-        organizer_result = None
-        organizer_error = None
-        try:
-            organizer_result = await _llm_daily_memory_organize(
-                profile,
-                events,
-                directives,
-                logs,
-                now_dt,
-            )
-        except Exception as exc:
-            organizer_error = f"{type(exc).__name__}: {exc}"
-            print(f"⚠️ [DAILY_MEMORY_LLM_FAILED] {organizer_error}")
-
-        if isinstance(organizer_result, dict):
-            profile, events, directives = _apply_daily_organized_result(
-                profile,
-                events,
-                directives,
-                organizer_result,
-                now_dt,
-            )
-            organizer_summary = str(organizer_result.get("summary", "") or "").strip()
-        else:
-            # LLM 整理失敗時，仍保存 deterministic 清理結果。
-            events = _validate_organized_events(events)
-            organizer_summary = "LLM 整理失敗，已完成本地保守整理。"
-
-        # 原子寫回，避免中途崩潰造成半套資料。
-        _atomic_write_json(PROFILE_DATA_PATH, profile)
-        _atomic_write_json(LIFE_EVENTS_PATH, events)
-        _atomic_write_json(MEMORY_DIRECTIVES_PATH, directives)
-
-        after_counts = {
-            "traits": len(profile.get("daxia_traits", []))
-            + len(profile.get("xiaoxia_traits", [])),
-            "shared": len(profile.get("shared_knowledge", [])),
-            "recent": len(profile.get("recent_context", [])),
-            "commitments": len(profile.get("xiaoxia_self", {}).get("promises", [])),
-            "events": len(events),
-        }
-
-        report = (
-            f"🧠 **[每日記憶治理完成｜v{LOBSTER_VERSION}]**\n"
-            f"備份：`{backup_dir}`\n"
-            f"人物特質：{before_counts['traits']} → {after_counts['traits']}\n"
-            f"共通知識：{before_counts['shared']} → {after_counts['shared']}\n"
-            f"近期狀態：{before_counts['recent']} → {after_counts['recent']} "
-            f"（封存 {moved}）\n"
-            f"承諾：{before_counts['commitments']} → {after_counts['commitments']} "
-            f"（pending/completed/cancelled 均保留）\n"
-            f"事件：{before_counts['events']} → {after_counts['events']}\n"
-            f"移除不當人格化錯誤：{removed_traits}；本地去重：{deterministic_deduped}\n"
-            f"整理摘要：{organizer_summary or '完成'}"
-        )
-        if organizer_error:
-            report += f"\n⚠️ LLM 整理狀態：{organizer_error}"
-
-        if channel:
-            # Discord 2000 字限制。
-            await channel.send(report[:1900])
+        backup_dir=_daily_memory_backup(now_dt)
+        removed=prune_daily_life_log(now_dt, retention_days=21)
+        item=await upsert_daily_life_log_from_today(now_dt)
+        report=(f"🧠 **[每日柴米油鹽整理完成｜v{LOBSTER_VERSION}]**\n"
+                f"備份：`{backup_dir}`\n"
+                "profile：未自動改寫（只允許 /大俠人設、/小俠人設）\n"
+                "承諾/事件/紀念日：未自動改寫（/小俠承諾由明確具體承諾流程另行登記）\n"
+                f"daily_life_log：{'已更新 ' + item.get('id') if isinstance(item, dict) else '今日無可整理內容'}\n"
+                f"21天過期柴米油鹽：刪除 {removed} 筆")
+        if channel: await channel.send(report[:1900])
         print(report)
-
     except Exception as exc:
-        print(f"❌ [DAILY_MEMORY_GOVERNANCE_ERROR] {type(exc).__name__}: {exc}")
-        if channel:
-            await channel.send(
-                "❌ 每日記憶治理失敗，原始檔案未被刻意刪除；"
-                f"錯誤：{type(exc).__name__}: {str(exc)[:500]}"
-            )
+        print(f"❌ [DAILY_LIFE_LOG_GOVERNANCE_ERROR] {type(exc).__name__}: {exc}")
+        if channel: await channel.send(f"❌ 每日柴米油鹽整理失敗：{type(exc).__name__}: {str(exc)[:500]}")
 
 
 # ==========================================
