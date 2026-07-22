@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.02"
+LOBSTER_VERSION = "1.5.03"
 
 
 def _normalize_generation_level(level):
@@ -3177,7 +3177,7 @@ async def _handle_profile_board_command(ctx, command_name, args="", kind="daxia"
 async def _handle_profile_board_message_direct(message):
     content=str(getattr(message,"content","") or "").strip()
     if not re.match(r"^/(大俠人設|小俠人設)(?:\s+|$)", content): return False
-    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return True
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，人設管理先只開放在女友小俠頻道使用喔。"); return True
     cmd="小俠人設" if content.startswith("/小俠人設") else "大俠人設"; raw=re.sub(rf"^/{cmd}(?:\s+|$)","",content).strip()
     await _handle_profile_board_command(_WardrobeMessageCtxAdapter(message), cmd, raw, kind=("xiaoxia" if cmd=="小俠人設" else "daxia")); return True
 
@@ -3247,7 +3247,7 @@ async def _handle_event_board_command(ctx,args=""):
 async def _handle_event_board_message_direct(message):
     content=str(getattr(message,"content","") or "").strip()
     if not re.match(r"^/事件(?:\s+|$)", content): return False
-    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，事件板先只開放在女友小俠的私人頻道使用喔。"); return True
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，事件板先只開放在女友小俠頻道使用喔。"); return True
     await _handle_event_board_command(_WardrobeMessageCtxAdapter(message), re.sub(r"^/事件(?:\s+|$)","",content).strip()); return True
 
 
@@ -3321,7 +3321,7 @@ async def _handle_anniversary_board_command(ctx,args=""):
 async def _handle_anniversary_board_message_direct(message):
     content=str(getattr(message,"content","") or "").strip()
     if not re.match(r"^/紀念日(?:\s+|$)", content): return False
-    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，紀念日先只開放在女友小俠的私人頻道使用喔。"); return True
+    if not _is_girlfriend_xiaoxia_channel(message.channel): await message.channel.send("大俠，紀念日先只開放在女友小俠頻道使用喔。"); return True
     await _handle_anniversary_board_command(_WardrobeMessageCtxAdapter(message), re.sub(r"^/紀念日(?:\s+|$)","",content).strip()); return True
 
 
@@ -3544,7 +3544,7 @@ async def _handle_memory_review_message_direct(message):
     content = str(getattr(message, "content", "") or "").strip()
     if not re.match(r"^/回憶(?:\s+|$)", content): return False
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，回憶整理先只開放在女友小俠的私人頻道使用喔。"); return True
+        await message.channel.send("大俠，回憶整理先只開放在女友小俠頻道使用喔。"); return True
     raw = re.sub(r"^/回憶(?:\s+|$)", "", content).strip()
     await _handle_memory_review_command(_WardrobeMessageCtxAdapter(message), raw)
     return True
@@ -4799,7 +4799,7 @@ async def _handle_promise_board_message_direct(message):
     content = str(getattr(message, "content", "") or "").strip()
     if not re.match(r"^/(承諾|小俠承諾)(?:\s+|$)", content, flags=re.IGNORECASE): return False
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，承諾清單先只開放在女友小俠的私人頻道使用喔。"); return True
+        await message.channel.send("大俠，承諾清單先只開放在女友小俠頻道使用喔。"); return True
     cmd = "小俠承諾" if content.startswith("/小俠承諾") else "承諾"
     raw = re.sub(rf"^/{cmd}(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
     ctx = _WardrobeMessageCtxAdapter(message)
@@ -11029,21 +11029,19 @@ async def _handle_wardrobe_replace_image_command(ctx, args, remove_person=False)
 # 📸 Seedream v4.5 /photo 統一照片工作台
 # ==========================================
 def _is_girlfriend_xiaoxia_channel(channel) -> bool:
-    """女友小俠可互動頻道；排除說故事小俠姊姊與公開服務頻道。"""
-    if is_story_channel_or_thread(channel) or is_public_service_channel(channel):
-        return False
+    """女友小俠可互動頻道：私人伺服器內，除說故事小俠姊姊與公開服務頻道外皆可。"""
     if channel is None:
         return False
-    channel_name = getattr(channel, "name", "") or ""
-    girlfriend_names = set(PRIVATE_UPLOAD_CHANNEL_NAMES) | set(PRIVATE_NOTE_CHANNEL_NAMES) | {"書房"}
-    return (
-        getattr(getattr(channel, "guild", None), "id", None) == PRIVATE_GUILD_ID
-        and (
-            getattr(channel, "id", None) in PRIVATE_UPLOAD_CHANNEL_IDS
-            or getattr(channel, "id", None) in PRIVATE_NOTE_CHANNEL_IDS
-            or any(name in channel_name for name in girlfriend_names)
-        )
-    )
+    if is_story_channel_or_thread(channel) or is_public_service_channel(channel):
+        return False
+    guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    if guild_id != PRIVATE_GUILD_ID:
+        return False
+    channel_name = str(getattr(channel, "name", "") or "")
+    blocked_name_tokens = ("故事", "story", "小俠姊姊")
+    if any(token in channel_name for token in blocked_name_tokens):
+        return False
+    return True
 
 
 def _supported_photo_attachment(attachment) -> bool:
@@ -12077,7 +12075,7 @@ async def _generate_photo_from_context(context, msg=None):
 async def handle_photo_raw_command(message, user_input):
     """v1.4.86: playground-equivalent Seedream test mode. Uses 9 base refs and the user prompt with minimal wrapping."""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，`/photo_raw` 先只開放在女友小俠的私人頻道使用喔。")
+        await message.channel.send("大俠，`/photo_raw` 先只開放在女友小俠頻道使用喔。")
         return None
     raw_input = str(user_input or "").strip()
     raw_prompt = re.sub(r"^/photo_raw\b", "", raw_input, flags=re.IGNORECASE).strip()
@@ -12118,7 +12116,7 @@ async def handle_photo_raw_command(message, user_input):
 async def handle_unified_photo_command(message, user_input):
     """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，`/photo` 先只開放在女友小俠的私人頻道使用喔。")
+        await message.channel.send("大俠，`/photo` 先只開放在女友小俠頻道使用喔。")
         return None
 
     raw_input = str(user_input or "").strip()
@@ -13940,7 +13938,7 @@ async def _send_wardrobe_browse_message(ctx, query="", page=0):
 @girlfriend_bot.command(name='trace')
 async def generation_trace_command(ctx, *, args: str = "最近"):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
-        await ctx.send("大俠，`/trace` 先只開放在女友小俠的私人頻道使用喔。")
+        await ctx.send("大俠，`/trace` 先只開放在女友小俠頻道使用喔。")
         return
     raw = str(args or "最近").strip()
     parts = raw.split()
@@ -13968,7 +13966,7 @@ async def generation_trace_command(ctx, *, args: str = "最近"):
 @girlfriend_bot.command(name='衣櫃')
 async def wardrobe_command(ctx, *, args: str = ""):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
-        await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠的私人頻道使用喔。")
+        await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠頻道使用喔。")
         return
 
     action, payload = _parse_wardrobe_command(ctx.message.content)
@@ -14059,7 +14057,7 @@ async def _handle_diary_wardrobe_message_direct(message):
         return False
 
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，`/交換日記 ...` 先只開放在女友小俠的私人頻道使用喔。")
+        await message.channel.send("大俠，`/交換日記 ...` 先只開放在女友小俠頻道使用喔。")
         return True
 
     raw = re.sub(r"^/交換日記(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
@@ -14141,7 +14139,7 @@ async def _handle_wardrobe_message_direct(message):
     ctx = _WardrobeMessageCtxAdapter(message)
     try:
         if not _is_girlfriend_xiaoxia_channel(message.channel):
-            await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠的私人頻道使用喔。")
+            await ctx.send("大俠，`/衣櫃` 先只開放在女友小俠頻道使用喔。")
             return True
 
         action, payload = _parse_wardrobe_command(content)
@@ -14237,7 +14235,7 @@ async def _handle_wardrobe_message_direct(message):
 @girlfriend_bot.command(name='承諾')
 async def promise_board_command(ctx, *, args: str = ""):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
-        await ctx.send("大俠，`/承諾` 先只開放在女友小俠的私人頻道使用喔。")
+        await ctx.send("大俠，`/承諾` 先只開放在女友小俠頻道使用喔。")
         return
     await _handle_promise_board_command(ctx, "承諾", args, source="daxia")
 
@@ -14245,34 +14243,34 @@ async def promise_board_command(ctx, *, args: str = ""):
 @girlfriend_bot.command(name='小俠承諾')
 async def xiaoxia_promise_board_command(ctx, *, args: str = ""):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel):
-        await ctx.send("大俠，`/小俠承諾` 先只開放在女友小俠的私人頻道使用喔。")
+        await ctx.send("大俠，`/小俠承諾` 先只開放在女友小俠頻道使用喔。")
         return
     await _handle_promise_board_command(ctx, "小俠承諾", args, source="xiaoxia")
 
 
 @girlfriend_bot.command(name='大俠人設')
 async def daxia_profile_command(ctx, *, args: str = ""):
-    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠頻道使用喔。"); return
     await _handle_profile_board_command(ctx, "大俠人設", args, kind="daxia")
 
 @girlfriend_bot.command(name='小俠人設')
 async def xiaoxia_profile_command(ctx, *, args: str = ""):
-    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠的私人頻道使用喔。"); return
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，人設管理先只開放在女友小俠頻道使用喔。"); return
     await _handle_profile_board_command(ctx, "小俠人設", args, kind="xiaoxia")
 
 @girlfriend_bot.command(name='事件')
 async def event_board_command(ctx, *, args: str = ""):
-    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，事件板先只開放在女友小俠的私人頻道使用喔。"); return
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，事件板先只開放在女友小俠頻道使用喔。"); return
     await _handle_event_board_command(ctx, args)
 
 @girlfriend_bot.command(name='紀念日')
 async def anniversary_board_command(ctx, *, args: str = ""):
-    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，紀念日先只開放在女友小俠的私人頻道使用喔。"); return
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，紀念日先只開放在女友小俠頻道使用喔。"); return
     await _handle_anniversary_board_command(ctx, args)
 
 @girlfriend_bot.command(name='回憶')
 async def memory_review_command(ctx, *, args: str = ""):
-    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，回憶整理先只開放在女友小俠的私人頻道使用喔。"); return
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，回憶整理先只開放在女友小俠頻道使用喔。"); return
     await _handle_memory_review_command(ctx, args)
 
 @girlfriend_bot.command(name='今日衣著')
