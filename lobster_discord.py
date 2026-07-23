@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.03"
+LOBSTER_VERSION = "1.5.04"
 
 
 def _normalize_generation_level(level):
@@ -3368,6 +3368,99 @@ TEMP_CHAT：
         if isinstance(old,dict) and old.get("id")==item["id"]: entries[i]=item; break
     else: entries.insert(0,item)
     save_life_events_doc(doc); return item
+
+
+def append_daily_life_log_entry(title, facts=None, *, log_type="recent_awareness", anchor_date=None, source=None, do_not_proactively_raise=False, meta=None):
+    """
+    v1.5.04：近期意識層。
+    只寫入 life_events.json / daily_life_log，讓小俠保有最近 1~3 天生活連續感；
+    不把內容升級成 profile、/承諾、/事件 或 /紀念日。
+    """
+    try:
+        date_key = str(anchor_date or datetime.now(TZ_TPE).strftime("%Y-%m-%d"))[:10]
+        safe_facts = []
+        for x in (facts or []):
+            t = narrative_safe_text(x, max_len=260)
+            if t:
+                safe_facts.append(t)
+        if not safe_facts:
+            safe_facts = [narrative_safe_text(title, max_len=260)]
+        safe_title = narrative_safe_text(title or f"{date_key} 近期生活紀錄", max_len=120)
+        doc = load_life_events_doc()
+        entries = doc.setdefault("daily_life_log", [])
+        stamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S")
+        base = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", safe_title)[:32].strip("_") or str(log_type or "recent")
+        item = {
+            "id": f"daily_life_{date_key.replace('-', '')}_{stamp}_{base}",
+            "title": safe_title,
+            "memory_zone": "daily_life_log",
+            "type": str(log_type or "recent_awareness"),
+            "status": "archived",
+            "anchor_date": date_key,
+            "facts": safe_facts[:8],
+            "importance": "low",
+            "do_not_proactively_raise": bool(do_not_proactively_raise),
+            "auto_delete_after_days": 21,
+            "source": source or ["system_recent_awareness"],
+            "updated_at": _board_now(),
+        }
+        if isinstance(meta, dict):
+            item["meta"] = _trace_sanitize(meta)
+        # 同日同 type 同 title 只更新，不重複堆疊。
+        for i, old in enumerate(entries):
+            if isinstance(old, dict) and old.get("anchor_date") == item["anchor_date"] and old.get("type") == item["type"] and old.get("title") == item["title"]:
+                merged = dict(old)
+                merged.update(item)
+                old_facts = [narrative_safe_text(x, max_len=260) for x in (old.get("facts") or []) if narrative_safe_text(x, max_len=260)]
+                merged["facts"] = (safe_facts + [x for x in old_facts if x not in safe_facts])[:8]
+                entries[i] = merged
+                save_life_events_doc(doc)
+                return merged
+        entries.insert(0, item)
+        save_life_events_doc(doc)
+        return item
+    except Exception as exc:
+        print(f"⚠️ [DAILY_LIFE_LOG_APPEND_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+
+def recent_daily_life_log_context(now_dt=None, days=3, limit=8):
+    """
+    v1.5.04：一般聊天用的『近期意識』摘要。
+    只取最近數天 daily_life_log；明確告訴小俠它是生活連續感，不是待辦。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    try:
+        prune_daily_life_log(now_dt, retention_days=21)
+        cutoff = now_dt.date() - timedelta(days=max(0, int(days or 3) - 1))
+        rows = []
+        for item in load_life_events_doc().get("daily_life_log", []) or []:
+            if not isinstance(item, dict):
+                continue
+            dt = _parse_memory_date(item.get("anchor_date") or item.get("date") or item.get("created_at"))
+            if not dt or dt.date() < cutoff:
+                continue
+            facts = [narrative_safe_text(x, max_len=180) for x in (item.get("facts") or []) if narrative_safe_text(x, max_len=180)]
+            if not facts:
+                summary = narrative_safe_text(item.get("summary") or item.get("title"), max_len=180)
+                facts = [summary] if summary else []
+            if facts:
+                rows.append((dt, item, facts))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        lines = []
+        for dt, item, facts in rows[:max(1, int(limit or 8))]:
+            title = narrative_safe_text(item.get("title") or item.get("type") or "近期生活", max_len=80)
+            lines.append(f"- {dt.strftime('%Y-%m-%d')}｜{title}：" + "；".join(facts[:3]))
+        if not lines:
+            return "最近三天沒有可用的柴米油鹽摘要。"
+        return (
+            "以下是最近三天的生活連續感，只作為理解大俠眼前話題的背景；"
+            "不得把它當成待辦、承諾、事件或紀念日，也不要無關時主動翻出來。\n"
+            + "\n".join(lines)
+        )
+    except Exception as exc:
+        print(f"⚠️ [RECENT_AWARENESS_CONTEXT_FAILED] {type(exc).__name__}: {exc}")
+        return "近期生活摘要暫時讀取失敗。"
 
 MEMORY_REVIEW_PAGE_SIZE = 5
 
@@ -12545,6 +12638,25 @@ class PhotoRepairPreviewView(discord.ui.View):
             updated = await _overwrite_generated_photo(self.original_context, self.repaired_context, message=target_message)
             self.original_context = dict(updated)
             self.repaired_context = dict(updated)
+            try:
+                topic = str(updated.get("topic") or updated.get("event") or "")
+                composition = _clean_text_compact(updated.get("composition") or updated.get("scene") or "")
+                diary_date = _extract_diary_date_from_title(topic) or str(updated.get("publish_date") or "")[:10] or _today_str_tpe()
+                if str(updated.get("type") or "").lower() == "diary" or "交換日記" in topic:
+                    append_daily_life_log_entry(
+                        f"{diary_date} 交換日記修正版照片已採用",
+                        [
+                            f"大俠已採用 {diary_date} 交換日記的修正版照片並覆蓋原圖。",
+                            f"修正版照片內容：{composition}" if composition else "修正版照片已被大俠確認採用。",
+                        ],
+                        log_type="diary_photo_accepted",
+                        anchor_date=diary_date,
+                        source=["photo_repair_accept"],
+                        do_not_proactively_raise=False,
+                        meta={"message_id": getattr(target_message, "id", None), "local_url": updated.get("local_url")},
+                    )
+            except Exception as log_exc:
+                print(f"⚠️ [RECENT_AWARENESS_PHOTO_ACCEPT_LOG_FAILED] {type(log_exc).__name__}: {log_exc}")
             for child in self.children:
                 child.disabled = True
             await interaction.followup.send("✅ 已採用修正版並覆蓋原圖。", ephemeral=True)
@@ -13705,6 +13817,22 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 diary_photo_payload["message_id"] = diary_msg.id
                 photo_generation_contexts[diary_msg.id] = diary_photo_payload
                 result_view.context = diary_photo_payload
+                try:
+                    append_daily_life_log_entry(
+                        f"{entry_date} 交換日記已完成",
+                        [
+                            f"小俠已完成 {entry_date} 的交換日記回覆。",
+                            f"照片構想：{result.get('scenario_tw', '')}" if result.get("scenario_tw") else "",
+                            f"今日履約：{result.get('promise_delivery', '')}" if result.get("promise_delivery") else "",
+                        ],
+                        log_type="diary_completed",
+                        anchor_date=entry_date,
+                        source=["xiaoxia_diary", "process_diary_reply"],
+                        do_not_proactively_raise=False,
+                        meta={"message_id": diary_msg.id, "local_url": local_url},
+                    )
+                except Exception as log_exc:
+                    print(f"⚠️ [RECENT_AWARENESS_DIARY_COMPLETED_LOG_FAILED] {type(log_exc).__name__}: {log_exc}")
                 await diary_msg.add_reaction("➕")
                 await diary_msg.add_reaction("🎲")
                 await diary_msg.add_reaction("🗑️")
@@ -14797,8 +14925,8 @@ async def on_message(message):
         return
 
     # 4. 觸發對話邏輯
-    valid_channels = ["唐分糕", "書房", "給你全世界"]
-    if any(keyword in message.channel.name for keyword in valid_channels) or girlfriend_bot.user.mentioned_in(message):
+    # v1.5.04：所有女友小俠頻道都可以一般聊天；說故事小俠姊姊頻道已在上方排除。
+    if _is_girlfriend_xiaoxia_channel(message.channel) or girlfriend_bot.user.mentioned_in(message):
         
         # 🌟 [避讓禮儀] 
         # 如果不是拍照指令，且這則訊息標記小夏，小俠就自動安靜。
@@ -14910,7 +15038,7 @@ async def on_message(message):
                 msg_parts.append(types.Part.from_text(text=text_query + invisible_time_tag))
                 
                 prefix = f"({current_target}) " if current_target else ""
-                if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
+                if _is_girlfriend_xiaoxia_channel(message.channel):
                     daily_chat_logs.append(
                         _conversation_log_text(
                             f"{prefix}大俠",
@@ -14975,14 +15103,16 @@ async def on_message(message):
                     promises = "本輪不載入歷史承諾。"
                     capabilities = "自然理解並回應大俠此刻的話。"
                     recent = "本輪不載入過去行程、家人、工作或其他生活事件。"
+                    recent_awareness_context = "當下互動模式啟用：本輪不載入近期柴米油鹽摘要。"
                     xiaoxia_personality = _balanced_xiaoxia_traits_for_prompt(
                         profile,
                         max_items=4,
                         max_chars=620,
                     )
                 else:
-                    # 普通聊天只讀目前仍有效的事件、真正近期內容與可在一般情境提起的 pending 承諾。
+                    # 普通聊天只讀目前仍有效的事件、真正近期內容、近期生活連續感與可在一般情境提起的 pending 承諾。
                     life_event_context = event_board_summary_for_prompt(max_items=5)
+                    recent_awareness_context = recent_daily_life_log_context(now_dt=now, days=3, limit=8)
                     daxia_traits = daxia_profile_context_for_prompt(max_items=12, max_chars=1400)
                     promises = promise_board_summary_for_prompt(max_items=8)
                     xiaoxia_profile_for_prompt = load_xiaoxia_profile()
@@ -15049,6 +15179,7 @@ async def on_message(message):
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
                     f"▶️ 近期紀念日提醒：{recent}\n"
+                    f"▶️ 最近三天生活連續感：\n{recent_awareness_context}\n"
                     f"▶️ 本次連續會話紀錄（最高即時事實來源）：\n{chat_history_str}\n\n"
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
@@ -15183,7 +15314,7 @@ async def on_message(message):
                     xiaoxia_reply = f"{xiaoxia_reply} {rendered_emoji}".strip()
 
                 # 存入短期對話紀錄；只記她使用了哪個自己的化身，不保留內部控制碼。
-                if "唐分糕" in message.channel.name or "給你全世界" in message.channel.name:
+                if _is_girlfriend_xiaoxia_channel(message.channel):
                     expression_note = ""
                     if expression_used:
                         if selected_sticker_key:
