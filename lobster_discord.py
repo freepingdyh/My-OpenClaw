@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.05"
+LOBSTER_VERSION = "1.5.06"
 
 
 def _normalize_generation_level(level):
@@ -3485,6 +3485,169 @@ def recent_daily_life_log_context(now_dt=None, days=3, limit=8):
         return "近期生活摘要暫時讀取失敗。"
 
 
+
+MANUAL_RECENT_MEMORY_BOUNDARIES = [
+    "這是短期生活記憶，不是新的待履約承諾。",
+    "這不是新的近期事件。",
+    "這不是紀念日。",
+    "除非大俠主動提起，平常不要把它當作重大事件追討。",
+]
+
+
+def _manual_recent_memory_signature(summary, facts):
+    payload = "|".join([
+        _clean_text_compact(summary or "").lower(),
+        *[_clean_text_compact(x).lower() for x in (facts or []) if _clean_text_compact(x)],
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def compile_recent_memory_from_temp_chat(now_dt=None):
+    """
+    v1.5.06：手動把目前 temp_chat 即時整理到 life_events.json / daily_life_log。
+    嚴格禁止寫入 profile、promise、event、anniversary 等其他記憶區。
+    回傳 (status, item, fragment_count)，status 為 created / duplicate / empty / failed。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    date_key = now_dt.strftime("%Y-%m-%d")
+    created_at = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    logs = _clean_temp_chat_logs(load_temp_chat(), max_entries=72, max_chars=36000)
+    recent_logs = [str(x).strip() for x in logs[-40:] if str(x).strip()]
+    fragment_count = len(recent_logs)
+    if not recent_logs:
+        return "empty", None, 0
+
+    chat_blob = "\n".join(recent_logs)[-12000:]
+    prompt = f"""
+你是小俠 Discord Bot 的短期生活記憶整理員。
+請把 temp_chat 的近期聊天整理成一筆可供關鍵字搜尋的 daily_life_log。
+
+硬性規則：
+1. 只能摘要聊天中確實出現的內容，不可補造。
+2. 這是柴米油鹽短期記憶，不是承諾、不是事件、不是紀念日，也不可升級成人設。
+3. 必須保留重要專有名詞、測試關鍵字與使用者明確指定的字串，例如「藍莓鬆餅測試」，不可改寫到搜尋不到。
+4. summary 為一段精簡中文；facts 為 1 至 8 條可獨立搜尋的事實。
+5. 避免露骨成人細節，只保留含蓄生活脈絡。
+6. 只回 JSON，不要 Markdown。
+
+日期：{date_key}
+TEMP_CHAT：
+{chat_blob}
+
+輸出格式：
+{{"summary":"...","facts":["..."],"keywords":["..."]}}
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+        )
+        data = _extract_json_object(getattr(resp, "text", "") or "")
+    except Exception as exc:
+        print(f"⚠️ [MANUAL_RECENT_MEMORY_LLM_FAILED] {type(exc).__name__}: {exc}")
+        data = {}
+
+    raw_summary = data.get("summary") if isinstance(data, dict) else ""
+    if isinstance(raw_summary, list):
+        raw_summary = "；".join(str(x) for x in raw_summary if str(x).strip())
+    summary = narrative_safe_text(raw_summary, max_len=600)
+
+    raw_facts = data.get("facts", []) if isinstance(data, dict) else []
+    if isinstance(raw_facts, str):
+        raw_facts = [raw_facts]
+    facts = []
+    for value in raw_facts:
+        safe = narrative_safe_text(value, max_len=260)
+        if safe and safe not in facts:
+            facts.append(safe)
+
+    # LLM 暫時失敗時仍保證指令可用，並保留原始關鍵字供搜尋。
+    if not facts:
+        for value in recent_logs[-8:]:
+            safe = narrative_safe_text(value, max_len=260)
+            if safe and safe not in facts:
+                facts.append(safe)
+    if not summary:
+        summary = narrative_safe_text("；".join(facts[:4]), max_len=600)
+    if not summary and not facts:
+        return "empty", None, fragment_count
+
+    keywords = []
+    raw_keywords = data.get("keywords", []) if isinstance(data, dict) else []
+    if isinstance(raw_keywords, str):
+        raw_keywords = [raw_keywords]
+    for value in raw_keywords:
+        safe = narrative_safe_text(value, max_len=50)
+        if safe and safe not in keywords:
+            keywords.append(safe)
+
+    signature = _manual_recent_memory_signature(summary, facts)
+    doc = load_life_events_doc()
+    entries = doc.setdefault("daily_life_log", [])
+    for old in entries:
+        if not isinstance(old, dict):
+            continue
+        if old.get("anchor_date") != date_key or old.get("type") != "daily_summary_manual":
+            continue
+        old_signature = str(old.get("content_signature") or "")
+        if not old_signature:
+            old_signature = _manual_recent_memory_signature(old.get("summary"), old.get("facts") or [])
+        if old_signature == signature:
+            return "duplicate", old, fragment_count
+
+    stamp = now_dt.strftime("%Y%m%d_%H%M%S")
+    item = {
+        "id": f"daily_life_manual_{stamp}",
+        "memory_zone": "daily_life_log",
+        "type": "daily_summary_manual",
+        "status": "archived",
+        "anchor_date": date_key,
+        "title": f"{date_key} 即時柴米油鹽整理",
+        "summary": summary,
+        "facts": facts[:8],
+        "boundaries": list(MANUAL_RECENT_MEMORY_BOUNDARIES),
+        "source": ["temp_chat"],
+        "created_at": created_at,
+        "updated_at": created_at,
+        "auto_delete_after_days": 21,
+        "expires_after_days": 21,
+        "do_not_treat_as_promise": True,
+        "do_not_treat_as_event": True,
+        "do_not_proactively_raise": True,
+        "managed_by": "v1.5.06_recent_memory_manual_compile",
+        "content_signature": signature,
+    }
+    if keywords:
+        item["retrieval_keywords"] = keywords[:12]
+    entries.insert(0, item)
+    save_life_events_doc(doc)
+    print(f"🧾 [MANUAL_RECENT_MEMORY_COMPILED] id={item['id']} fragments={fragment_count}")
+    return "created", item, fragment_count
+
+
+async def _recent_memory_manual_compile(ctx):
+    status, item, fragment_count = await compile_recent_memory_from_temp_chat()
+    if status == "duplicate":
+        await ctx.send("🧾 近期記憶已整理過相同內容，沒有重複新增。")
+        return
+    if status == "empty":
+        await ctx.send("🧾 temp_chat 目前沒有可整理的近期聊天內容。")
+        return
+    if status != "created" or not isinstance(item, dict):
+        await ctx.send("⚠️ 近期記憶即時整理失敗，請稍後再試。")
+        return
+    summary = narrative_safe_text(item.get("summary") or "", max_len=700)
+    reply = (
+        "🧾 已完成近期記憶即時整理，寫入 daily_life_log。\n"
+        f"日期：{item.get('anchor_date')}\n"
+        "類型：daily_summary_manual\n"
+        f"整理片段：{fragment_count} 則\n\n"
+        f"摘要：{summary}\n\n"
+        "可用 /近期記憶 或 /近期記憶 搜尋 關鍵字 檢查。"
+    )
+    await ctx.send(reply[:1900])
+
 RECENT_MEMORY_PAGE_SIZE = 5
 
 def _recent_memory_search_blob(item):
@@ -3553,7 +3716,7 @@ async def _recent_memory_send_list(ctx, page=1, query="", days=21):
     lines = [f"{title}｜共 {total} 筆｜第 {page}/{total_pages} 頁", ""]
     for idx, item in enumerate(page_items, start + 1):
         lines.append(_format_recent_memory_item(item, idx))
-    lines.append("\n可用：`/近期記憶 2`、`/近期記憶 搜尋 XPark`、`/近期記憶 搜尋 交換日記 2`。")
+    lines.append("\n可用：`/近期記憶 整理`、`/近期記憶 2`、`/近期記憶 搜尋 XPark`、`/近期記憶 搜尋 交換日記 2`。")
     await ctx.send("\n\n".join(lines)[:1900])
 
 
@@ -3561,6 +3724,9 @@ async def _handle_recent_memory_command(ctx, args=""):
     raw = str(args or "").strip()
     if not raw:
         await _recent_memory_send_list(ctx, page=1)
+        return
+    if raw in {"整理", "編譯", "即時整理"}:
+        await _recent_memory_manual_compile(ctx)
         return
     if raw.startswith("搜尋"):
         payload = raw[len("搜尋"):].strip()
@@ -3574,7 +3740,7 @@ async def _handle_recent_memory_command(ctx, args=""):
     if re.fullmatch(r"(?:第\s*)?\d+\s*(?:頁)?", raw):
         await _recent_memory_send_list(ctx, page=_parse_page_arg(raw, 1))
         return
-    await ctx.send("指令格式：`/近期記憶`、`/近期記憶 2`、`/近期記憶 搜尋 關鍵字`、`/近期記憶 搜尋 XPark 2`。")
+    await ctx.send("指令格式：`/近期記憶`、`/近期記憶 2`、`/近期記憶 搜尋 關鍵字`、`/近期記憶 整理`（亦支援 `編譯`、`即時整理`）。")
 
 
 async def _handle_recent_memory_message_direct(message):
