@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.08"
+LOBSTER_VERSION = "1.5.09"
 
 
 def _normalize_generation_level(level):
@@ -8874,6 +8874,8 @@ Rules:
 - Be strict about mandatory character anchors such as hair color/style, costume main color palette, costume silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
 - Do not fail only because the outfit is more sensual, fitted, low-cut, open-neckline, cleavage-emphasizing, or mature; fail only if sensual styling replaces the required character anchors.
 - If the prompt explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, or contains DEFAULT L0 ALLURE LOCK / target vibe 魅, set chest_allure_ok=false and sexy_ok=false when the outfit is fully closed-collar, fully buttoned, conservative, or only slim-fit without visibly readable chest allure through open neckline, low neckline, collarbones, upper-chest, natural cleavage, or bust contour.
+- For DEFAULT L0 ALLURE LOCK / target vibe 魅, front-facing, 3/4 front-facing, and side-facing poses are all allowed, but side-facing is acceptable only if the bustline / cleavage remains clearly visible and visually legible in the final image.
+- If the image uses a full side profile, extreme body rotation, hair, arms, props, trays, or cropping to hide the primary attraction point, set chest_allure_ok=false and sexy_ok=false. Do not count silhouette alone or side outline alone as satisfying chest allure.
 - Legline alone cannot compensate for missing chest allure in DEFAULT L0 ALLURE LOCK / target vibe 魅.
 - For DEFAULT L0 ALLURE LOCK / target vibe 魅, set second_attraction_ok=false and sexy_ok=false when there is no visible second attraction point: legline or waist-abdomen curve, or both when natural. Legline alone cannot compensate for missing chest allure.
 - Fail character_anchor_ok if the image only captures a vague mood but misses the recognizable role anchors.
@@ -9026,6 +9028,9 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
             "DEFAULT L0 ALLURE LOCK: sexy adaptation is a hard requirement for default /cosplay 魅 mode, not optional flavor text.",
             "Chest allure must be immediately and unambiguously readable through role-coherent garment structure such as an open neckline, low neckline, visible upper chest, visible collarbones, natural cleavage, or strong bust contour; facial expression alone or a merely slim-fit top does not satisfy this requirement.",
             "The second attraction point must be visibly readable as legline or waist-abdomen curve, or both when natural, according to the role costume and pose. Legline alone cannot compensate for missing chest allure.",
+            "Front-facing, 3/4 front-facing, and seductive side-facing poses are all allowed, but any side-facing pose is acceptable only when the bustline / cleavage remains clearly visible and visually legible in the final image.",
+            "Do not use pose cheating: do not hide the primary attraction point with full side profile, extreme body rotation, hair, arms, props, trays, or cropping. Do not satisfy the sexy requirement through silhouette alone or side outline alone.",
+            "If side pose is used, the torso should still turn enough toward the camera to keep the chest allure visible. The final composition must clearly show the primary attraction point and at least one strong secondary attraction point.",
             "The neckline cannot be rendered as a fully closed collar, fully buttoned blouse, conservative suit, conservative robe, or merely slim-fit outfit unless Daxia explicitly requested a conservative version.",
             "Keep the role recognizable, but do not let canon conservatism erase the requested mature sensual neckline, chest allure, and second attraction point. For profession, inn, maid, service, or uniform-coded roles, reinterpret the costume as an adult-feminine sexy version rather than leaving it as a plain conservative working uniform.",
         ] + sexy_adaptation
@@ -9171,6 +9176,8 @@ Mandatory obedience rules:
 - Sexy adaptation is mandatory, but it must not change the role into a different costume, different color palette, or generic glamour/fantasy fashion.
 - Default /cosplay 魅 mode is L0 allure: chest allure is mandatory, and the second attraction point must be legline or waist-abdomen curve, or both when natural. Legline alone is not enough if chest allure is weak or absent.
 - If Daxia explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, or if the target vibe is 魅, those elements are hard requirements at L0. Do not downgrade them into a fully closed collar, buttoned blouse, conservative uniform, conservative robe, or merely slim-fit silhouette.
+- Front-facing, 3/4 front-facing, and side-facing poses are all allowed, but do not use side pose to dodge the sexy requirement. When side-facing, the bustline / cleavage must still remain clearly visible and visually legible in the final image.
+- Do not use full side profile, extreme body rotation, hair, arms, props, trays, or cropping to hide the primary attraction point. Silhouette alone or side outline alone does not satisfy the chest-allure requirement.
 - For profession, inn, maid, service, office, or other uniform-coded roles, keep the occupation readable but convert the costume into an adult-feminine sexy reinterpretation rather than a plain conservative working uniform.
 - If a specific prop is listed, show it clearly.
 - If a specific source-world scene is listed, show it clearly.
