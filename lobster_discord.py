@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.06"
+LOBSTER_VERSION = "1.5.07"
 
 
 def _normalize_generation_level(level):
@@ -117,7 +117,7 @@ XIAOXIA_AESTHETIC_BASELINE = """
 Xiaoxia Aesthetic Baseline:
 - Xiaoxia should consistently feel like a beautiful adult East Asian woman with fair luminous skin, a sweet refined face, long feminine brown-family hair, and a photorealistic lifestyle aura.
 - Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally full and attractive bust, and long legs with especially graceful lower-leg proportions.
-- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep bust attractiveness as the primary charm point, then choose the most suitable secondary charm point between waistline and leg line according to the role, outfit structure, pose logic, and scene mood.
+- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep bust attractiveness as the primary charm point, then choose the most suitable secondary charm point between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood.
 - The result should feel alluring, elegant, and highly attractive, but never vulgar, anatomically distorted, or disconnected from the requested scene.
 """
 
@@ -5960,8 +5960,8 @@ VIBE_RENDER_GUIDE = {
         "translator": "dreamy, mysterious, ornate, magical, atmospheric, cinematic fantasy"
     },
     "魅": {
-        "planner": "魅：L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點；目標是最大化小俠版角色的誘惑效率，性感卻不低級，迷人卻不廉價。胸口魅力可透過深 V 領、低胸領口、心型領口、一字肩、掛脖、露鎖骨、露肩頸、胸口輪廓、自然乳溝、貼身上身剪裁與胸腰比例明確等方式呈現。fal.ai 會把關，程式不要替它自我設限。",
-        "translator": "maximum alluring sensuality, chest-emphasis first, then choose the strongest secondary attraction point between legline and waist-abdomen curve, deep V or low neckline, sweetheart neckline, off-shoulder or halter, visible collarbones and shoulder-neck line, natural cleavage, fitted upper silhouette, clear bust-waist ratio, seductive yet tasteful, unmistakable romantic tension"
+        "planner": "魅：L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條、腰腹曲線或兩者同時呈現之間選擇最合適的第二魅點；目標是最大化小俠版角色的誘惑效率，性感卻不低級，迷人卻不廉價。胸口魅力可透過深 V 領、低胸領口、心型領口、一字肩、掛脖、露鎖骨、露肩頸、胸口輪廓、自然乳溝、貼身上身剪裁與胸腰比例明確等方式呈現。fal.ai 會把關，程式不要替它自我設限。",
+        "translator": "maximum alluring sensuality, chest-emphasis first, then choose the strongest secondary attraction point between legline, waist-abdomen curve, or both, deep V or low neckline, sweetheart neckline, off-shoulder or halter, visible collarbones and shoulder-neck line, natural cleavage, fitted upper silhouette, clear bust-waist ratio, seductive yet tasteful, unmistakable romantic tension"
     },
 }
 
@@ -7043,6 +7043,13 @@ def _choose_outfit_elements(vibe_zh, is_profession=False, user_outfit_hints=None
     selected = []
     if user_tokens:
         selected.extend([f"user-specified: {t}" for t in user_tokens])
+    if vibe_zh == "魅":
+        for required in [
+            "L0 default allure lock: visible chest allure through open neckline, low neckline, collarbones, natural cleavage, or bust contour",
+            "secondary attraction point: legline, waist-abdomen curve, or both must be visibly readable",
+        ]:
+            if required not in selected:
+                selected.append(required)
     candidates = [x for x in pool if x not in selected]
     try:
         sample_count = min(max(count - len(selected), 0), len(candidates))
@@ -7065,7 +7072,7 @@ def _build_outfit_control(vibe_request=None, topic="", event="", persona="", use
         "雅": "Elegant means refined, graceful, and poised. The styling should feel polished, softly luxurious, and feminine without sliding into childishness or overt seduction.",
         "凜": "Sharp means capable, tailored, and commanding. The styling should show structure, confidence, and control rather than softness or pure ornament.",
         "幻": "Fantasy means dreamy, mysterious, and non-everyday. The styling should visibly carry atmosphere, worldbuilding, and dramatic visual language instead of looking like normal casual wear.",
-        "魅": "Allure is the max-open adult-feminine lane in this system. At L0, do not self-censor or pre-soften it; fal.ai safety checking will decide. Always strengthen chest allure first, then choose the most suitable second attraction point between legline and waist-abdomen curve based on the role, garment structure, scene mood, and pose logic. Maximize seductive efficiency while staying stylish rather than cheap. Chest allure may be expressed through a deep V or low neckline, sweetheart neckline, off-shoulder, halter, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper-body tailoring, and a clear bust-to-waist ratio. The final look must not collapse into a conservative uniform with only a flirtatious pose.",
+        "魅": "Allure is the max-open adult-feminine lane in this system. At L0, do not self-censor or pre-soften it; fal.ai safety checking will decide. Always strengthen chest allure first, then choose the most suitable second attraction point between legline, waist-abdomen curve, or both based on the role, garment structure, scene mood, and pose logic. Maximize seductive efficiency while staying stylish rather than cheap. Chest allure may be expressed through a deep V or low neckline, sweetheart neckline, off-shoulder, halter, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper-body tailoring, and a clear bust-to-waist ratio. The final look must not collapse into a conservative uniform with only a flirtatious pose.",
         "自然": "Use scene-appropriate clothing. If the user specified clothing, preserve it."
     }
     directive = family_directive.get(vibe_zh, family_directive["自然"])
@@ -7080,6 +7087,9 @@ def _build_outfit_control(vibe_request=None, topic="", event="", persona="", use
             " User-specified outfit details have the highest priority and must be preserved unless physically impossible. "
             f"User hints: {json.dumps(user_outfit_hints, ensure_ascii=False)}."
         )
+
+    if vibe_zh == "魅":
+        directive += " Default /cosplay is L0 allure unless Daxia explicitly asks for conservative styling: chest allure is a hard visual requirement, and the second attraction point may be legline, waist-abdomen curve, or both. A fully closed collar, fully buttoned conservative costume, or merely cute/elegant styling does not satisfy this mode."
 
     seduction_level = 5 if vibe_zh == "魅" else (1 if vibe_zh == "甜" else 2 if vibe_zh == "雅" else 3 if vibe_zh == "凜" else 3 if vibe_zh == "幻" else max(1, min(level, 3)))
     return {
@@ -7741,7 +7751,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 12. 依照目標氛圍模式，微調畫面張力與視覺語彙：甜 = 可愛親近；雅 = 優雅端莊；凜 = 俐落專業；幻 = 夢幻神秘；魅 = 成熟女性魅力拉滿。請把這個要求反映在服裝語氣、光線、眼神、鏡頭與戲劇張力上，但不要犧牲角色識別與場景邏輯。
 12b. 這次目標氛圍補充說明：{vibe_guide.get("planner")}。
 12c. 如果目標是「魅」，必須讓畫面明確讀得出成熟女性魅力與撩人張力；不能只停在優雅、知性、夢幻、保守漂亮。
-12d. 服裝控制指令是硬性創作指令，不是建議。五大族群都要落到可見造型；其中「魅」在 L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條與腰腹曲線之間選擇最合適的第二魅點，不可只改表情或氛圍。
+12d. 服裝控制指令是硬性創作指令，不是建議。五大族群都要落到可見造型；其中「魅」在 L0 必須固定強化胸口魅力，並根據角色類型、服裝結構、場景氛圍與姿態邏輯，在腿部線條、腰腹曲線或兩者同時呈現之間選擇最合適的第二魅點，不可只改表情或氛圍。
 12d-1. 角色辨識度是硬性要求：L0 不可把原角色洗成不相干的黑色性感裝、惡魔翅膀或泛用內衣造型。請把性感化建立在原角色的主色系、剪影、徽記、道具、髮型/髮色、世界觀環境與角色任務上；至少保留 2 到 3 個原型視覺錨點。
 12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把「魅」壓回保守制服；若是「凜」，則要做成高效率、高專業感的俐落再詮釋。
 12f. 若使用者明確指定服裝元素，這些元素優先於角色預設服裝與場景偏好。
@@ -7838,7 +7848,7 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
 - Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
 - MANDATORY OUTFIT CONTROL: {json.dumps(cosplay_state.get("outfit_control", {}), ensure_ascii=False)}. Treat this as a hard visual requirement, not optional flavor text.
-- If the vibe target is 魅, always prioritize chest allure first, then choose the most suitable second attraction point between legline and waist-abdomen curve according to role type, garment structure, scene mood, and pose logic. Make this legible through concrete styling and framing such as a deep V or low neckline, sweetheart neckline, off-shoulder or halter line, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper silhouette, clear bust-waist ratio, intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene. This must be a sexy Xiaoxia version of the original role language, not a totally different costume.
+- If the vibe target is 魅, always prioritize chest allure first, then choose the most suitable second attraction point between legline, waist-abdomen curve, or both according to role type, garment structure, scene mood, and pose logic. Make this legible through concrete styling and framing such as a deep V or low neckline, sweetheart neckline, off-shoulder or halter line, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper silhouette, clear bust-waist ratio, intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene. This must be a sexy Xiaoxia version of the original role language, not a totally different costume.
 - For 魅, avoid collapsing the image into merely elegant, dreamy, scholarly, or cute.
 - For profession roles, preserve the occupational task and props, but explicitly transform the uniform into a high-fashion adult-feminine version if 魅 is requested; do not default to fully covered conservative workwear.
 - If the target is 魅, make the outfit visibly the most open, fitted, high-impact version that remains coherent for the role. It must not be merely a conservative outfit with a flirtier pose.
@@ -8131,7 +8141,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
             _forced_scene_diary_prompt_prefix(forced_scene_text)
             + f"Xiaoxia is in {forced_scene_text}, taking a natural solo diary selfie or being captured in a candid diary-photo moment. "
             + "The requested environment must be clearly visible with believable local scene details, natural lighting, and a lived-in diary feeling. "
-            + "Her outfit should fit the requested scene and the season, while preserving Xiaoxia Aesthetic: fair luminous skin, sweet refined face, tall slim feminine figure, naturally full bust, defined waist, and graceful long legs. "
+            + "Her outfit should fit the requested scene and the season while preserving Xiaoxia Aesthetic: fair luminous skin, sweet refined face, tall slim feminine figure, naturally full bust, defined waist, graceful long legs, and tasteful sensual charm unless Daxia explicitly asks for conservative styling. "
             + "Strictly only Xiaoxia appears in the image. No man, no second person, no visible partner, no external hands, no viewer body parts, no reflections or shadows of another person. Natural anatomy and plausible hands."
         )
     else:
@@ -8632,11 +8642,17 @@ def _extract_visual_must_have(text, mode="photo", visual_dict=None, trace_contex
         anchors = []
         if isinstance(trace_context, dict):
             anchors += [str(x) for x in (trace_context.get("cosplay_anchor_lines") or []) if str(x).strip()]
+            vibe_zh = str(((trace_context.get("vibe_mode") or {}) if isinstance(trace_context.get("vibe_mode"), dict) else {}).get("zh") or "")
+            state = trace_context.get("cosplay_state") if isinstance(trace_context.get("cosplay_state"), dict) else {}
+            vibe_zh = vibe_zh or str(state.get("vibe_target_zh") or "")
+            if vibe_zh == "魅" or trace_context.get("default_allure_hard_lock") or trace_context.get("user_requested_hard_sexy"):
+                items.append("L0 default allure: visibly readable chest allure through role-coherent open neckline, low neckline, collarbones, natural cleavage, or bust contour")
+                items.append("L0 default allure: visible second attraction point as legline, waist-abdomen curve, or both")
         if anchors:
             items.extend(["cosplay anchor: " + x[:120] for x in anchors[:8]])
         else:
             items.append("recognizable requested cosplay character and source-world visual anchors")
-    return _dedupe_keep_order(items)[:12]
+    return _dedupe_keep_order(items)[:14]
 
 
 def _extract_visual_must_not_have(text, mode="photo", visual_dict=None, trace_context=None):
@@ -8654,7 +8670,14 @@ def _extract_visual_must_not_have(text, mode="photo", visual_dict=None, trace_co
         items.append("closed collar or fully buttoned conservative neckline if open neckline/low-cut was requested")
     if str(mode or "").lower() == "cosplay":
         items += ["generic glamour outfit replacing role costume", "unrelated indoor room/cafe/bedroom when source-world scene was requested"]
-    return _dedupe_keep_order(items)[:12]
+        if isinstance(trace_context, dict):
+            vibe_zh = str(((trace_context.get("vibe_mode") or {}) if isinstance(trace_context.get("vibe_mode"), dict) else {}).get("zh") or "")
+            state = trace_context.get("cosplay_state") if isinstance(trace_context.get("cosplay_state"), dict) else {}
+            vibe_zh = vibe_zh or str(state.get("vibe_target_zh") or "")
+            if vibe_zh == "魅" or trace_context.get("default_allure_hard_lock") or trace_context.get("user_requested_hard_sexy"):
+                items.append("fully closed conservative neckline or fully buttoned conservative outfit in default L0 allure cosplay")
+                items.append("allure satisfied only by expression/pose while garment structure remains conservative")
+    return _dedupe_keep_order(items)[:14]
 
 
 def _dedupe_keep_order(seq):
@@ -8849,7 +8872,8 @@ Rules:
 - Canon-first sexy cosplay: sexy styling is allowed and desired when requested, but it must remain inside the source character's recognizable costume system.
 - Be strict about mandatory character anchors such as hair color/style, costume main color palette, costume silhouette, signature gloves/cloak/armor, props, emblems, and source-world environment.
 - Do not fail only because the outfit is more sensual, fitted, low-cut, open-neckline, cleavage-emphasizing, or mature; fail only if sensual styling replaces the required character anchors.
-- If the prompt explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, set sexy_ok=false when the outfit is fully closed-collar, fully buttoned, conservative, or only slim-fit without a visibly open neckline / visible upper-chest or cleavage emphasis.
+- If the prompt explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, or contains DEFAULT L0 ALLURE LOCK / target vibe 魅, set sexy_ok=false when the outfit is fully closed-collar, fully buttoned, conservative, or only slim-fit without visibly readable chest allure through open neckline, low neckline, collarbones, upper-chest, natural cleavage, or bust contour.
+- For DEFAULT L0 ALLURE LOCK / target vibe 魅, set sexy_ok=false when there is no visible second attraction point: legline, waist-abdomen curve, or both.
 - Fail character_anchor_ok if the image only captures a vague mood but misses the recognizable role anchors.
 - Fail outfit_ok if the outfit becomes a generic glamour dress, generic white dress, generic black outfit, ordinary lingerie/fashion, or unrelated costume instead of a sexy adaptation of the requested character costume.
 - Fail scene_ok if the prompt requests a nightclub/stage/starship/fantasy journey/future city/etc. but the image shows an unrelated library, cafe, bedroom, tea room, garden, or generic portrait setting.
@@ -8957,9 +8981,6 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
 
     user_request = str(trace_context.get("user_input") or story.get("user_mode_request") or initial_prompt or "").strip()
-    user_requested_hard_sexy = _text_demands_hard_sexy(user_request) or _text_demands_hard_sexy(story.get("user_mode_request"))
-    if user_requested_hard_sexy:
-        trace_context["user_requested_hard_sexy"] = True
     work_title = str(story.get("work_title") or candidate.get("work_title") or user_request or "the requested source work").strip()
     character_name = str(story.get("character_name") or candidate.get("character_name") or user_request or "the requested character").strip()
     family_label = str(story.get("family_label") or candidate.get("family_label") or "cosplay").strip()
@@ -8976,6 +8997,11 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     camera = str(state.get("camera_direction") or "photorealistic cinematic cosplay still").strip()
     mood = str(state.get("mood_tw") or state.get("emotion") or candidate.get("mood") or "role-faithful cinematic mood").strip()
     vibe = str(state.get("vibe_target_zh") or (trace_context.get("vibe_mode") or {}).get("zh") or "魅").strip()
+    default_allure_hard_lock = (vibe == "魅")
+    user_requested_hard_sexy = default_allure_hard_lock or _text_demands_hard_sexy(user_request) or _text_demands_hard_sexy(story.get("user_mode_request"))
+    if user_requested_hard_sexy:
+        trace_context["user_requested_hard_sexy"] = True
+        trace_context["default_allure_hard_lock"] = bool(default_allure_hard_lock)
 
     key = (work_title + " " + character_name + " " + user_request).lower()
     explicit_hint = str(story.get("user_outfit_hints") or "").strip()
@@ -8989,9 +9015,11 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     ]
     if user_requested_hard_sexy:
         sexy_adaptation = [
-            "USER EXPLICIT SEXY LOCK: the sexy adaptation is a hard requirement at L0, not optional flavor text.",
-            "If Daxia requested open neckline / open chest / low-cut / visible cleavage, the neckline must be visibly open and cannot be rendered as a closed collar, fully buttoned blouse, conservative suit, or merely slim-fit outfit.",
-            "Keep the role recognizable, but do not let canon conservatism erase the requested mature sensual neckline and cleavage emphasis.",
+            "DEFAULT L0 ALLURE LOCK: sexy adaptation is a hard requirement for default /cosplay 魅 mode, not optional flavor text.",
+            "Chest allure must be visibly readable through role-coherent garment structure such as open neckline, low neckline, visible collarbones, natural cleavage, or strong bust contour; do not satisfy this only with facial expression.",
+            "The second attraction point must be visibly readable as legline, waist-abdomen curve, or both, according to the role costume and pose.",
+            "The neckline cannot be rendered as a fully closed collar, fully buttoned blouse, conservative suit, or merely slim-fit outfit unless Daxia explicitly requested a conservative version.",
+            "Keep the role recognizable, but do not let canon conservatism erase the requested mature sensual neckline, chest allure, and second attraction point.",
         ] + sexy_adaptation
 
     forbidden = [
@@ -9133,7 +9161,8 @@ NEGATIVE ROLE-DRIFT RULES:
 Mandatory obedience rules:
 - Character recognizability is mandatory: hair/hair color, costume color/silhouette, props, and environment must match the selected role.
 - Sexy adaptation is mandatory, but it must not change the role into a different costume, different color palette, or generic glamour/fantasy fashion.
-- If Daxia explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, those elements are hard requirements at L0. Do not downgrade them into a fully closed collar, buttoned blouse, conservative uniform, or merely slim-fit silhouette.
+- Default /cosplay 魅 mode is L0 allure: chest allure is mandatory, and the second attraction point must be legline, waist-abdomen curve, or both.
+- If Daxia explicitly requests sexy/open-neckline/open-chest/low-cut/cleavage styling, or if the target vibe is 魅, those elements are hard requirements at L0. Do not downgrade them into a fully closed collar, buttoned blouse, conservative uniform, or merely slim-fit silhouette.
 - If a specific prop is listed, show it clearly.
 - If a specific source-world scene is listed, show it clearly.
 - Xiaoxia remains recognizable as Xiaoxia cosplaying the role; hairstyle and hair color may adapt only to improve role recognizability.
@@ -9673,7 +9702,7 @@ def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
-        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, bust attractiveness as the primary charm point, and the most suitable secondary charm point chosen between waistline and leg line according to the role, outfit structure, pose logic, and scene mood. "
+        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, bust attractiveness as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
         "Daxia's current request still overrides this baseline. If Daxia asks for stronger role fidelity, fuller bust, slimmer body, longer lower legs, or another targeted adjustment, obey that request first while still keeping Xiaoxia recognizable. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
@@ -9813,10 +9842,8 @@ def _diary_build_visual_guard_context(initial_prompt="", visual_dict=None, trace
         "不要以裸露", "不要以身體部位", "not too spicy", "not too sexy",
         "avoid exposed body parts", "daily life",
     ])
-    # Diary fallback: if this is an outfit-preparation/date look and no explicit spicy request exists, keep it daily-life safe.
-    if (not not_too_spicy) and _diary_contains_any(source, ["穿搭", "look", "約會穿搭", "準備"]):
-        if not _diary_contains_any(source, ["性感版", "開胸", "低胸", "露胸", "比基尼", "內衣"]):
-            not_too_spicy = True
+    # v1.5.07: diary defaults are attractive/sexy again. Only explicit Daxia modesty words activate not_too_spicy.
+    # Do not auto-convert generic outfit-preparation/date looks into conservative mode.
 
     if not scene:
         scene = "小俠家中或試衣間"
@@ -9824,7 +9851,7 @@ def _diary_build_visual_guard_context(initial_prompt="", visual_dict=None, trace
         scene = "小俠家中或試衣間"
 
     if not outfit or outfit in {"水族館約會穿搭", "約會穿搭", "穿搭look", "look"}:
-        outfit_spec = "pretty, feminine, date-ready daily-life outfit prepared for the future aquarium date; not swimwear, not lingerie, not overly spicy"
+        outfit_spec = "attractive, feminine, date-ready outfit prepared for the future aquarium date; allow tasteful sensual charm unless Daxia explicitly says not too spicy"
     else:
         outfit_spec = outfit
 
@@ -9900,7 +9927,7 @@ def _build_diary_guarded_minimal_prompt(initial_prompt="", visual_dict=None, tra
             "",
             "PREVIOUS OUTPUT WAS REJECTED:",
             str(retry_reason)[:900],
-            "Correct the failure now. The diary photo promise, actual scene/location, future-event boundary, outfit specification, and modesty boundary must all be obeyed.",
+            "Correct the failure now. The diary photo promise, actual scene/location, future-event boundary, outfit specification, and any explicit modesty boundary must all be obeyed.",
         ]
     lines += [
         "",
@@ -13585,11 +13612,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # 動態季節與服裝判定 (以台灣氣候為準)
             # 交換日記重點是「當天生活中的吸引力」，不把裸露或身體部位當成畫面主題。
             if 5 <= current_month <= 10:
-                season_rule = f"現在是台灣的 {current_month} 月，天氣較熱。請搭配有女性魅力且適合日常生活的夏季服裝（如絲質無袖洋裝、細肩帶搭配薄罩衫、輕盈長裙或居家休閒服）；避免冬裝，也不要以裸露或身體部位作為畫面焦點。"
+                season_rule = f"現在是台灣的 {current_month} 月，天氣較熱。請搭配有女性魅力、成熟吸引力且適合當下場景的夏季服裝（如絲質無袖洋裝、細肩帶搭配薄罩衫、輕盈長裙、貼身針織或居家休閒服）；除非大俠明確要求保守或不要太辣，否則可自然展現胸口魅力、腰線或腿部線條，但避免裸體或露骨色情。"
             elif current_month in [11, 12, 1, 2, 3, 4]:
-                season_rule = f"現在是台灣的 {current_month} 月，天氣微涼或寒冷。請搭配有女性魅力且自然生活化的秋冬服裝（如合身針織上衣、露肩針織衫、長裙、絲襪與長靴）；避免海灘服裝，也不要以裸露或身體部位作為畫面焦點。"
+                season_rule = f"現在是台灣的 {current_month} 月，天氣微涼或寒冷。請搭配有女性魅力、成熟吸引力且自然生活化的秋冬服裝（如合身針織上衣、露肩針織衫、長裙、絲襪與長靴）；除非大俠明確要求保守或不要太辣，否則可自然展現胸口魅力、腰線或腿部線條；避免海灘服裝、裸體或露骨色情。"
             else:
-                season_rule = "請搭配符合當前氣候、有女性魅力且自然生活化的服裝；不要以裸露或身體部位作為畫面焦點。"
+                season_rule = "請搭配符合當前氣候、有女性魅力、成熟吸引力且自然生活化的服裝；除非大俠明確要求保守或不要太辣，否則可自然展現胸口魅力、腰線或腿部線條；避免裸體或露骨色情。"
             
             # 🤝 提取待履約清單：本篇日記必須實際交付，而不只是回想承諾。
             promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
@@ -13677,7 +13704,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             6. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
                - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須 **100% 聚焦於兌現該承諾的一個生活瞬間**！
                - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
-               - 【視覺邊界】：嚴禁使用露骨描寫、裸體或聚焦身體部位的描述。魅力應來自當下心境、自然衣著、光線與兩人的情感連結。
+               - 【視覺邊界】：交換日記預設可呈現高級性感與戀人視角吸引力；除非大俠明確要求保守或不要太辣，不要自動把小俠降成保守穿搭。嚴禁裸體或露骨色情，魅力應來自胸口魅力、腰線、腿部線條、自然衣著、光線與兩人的情感連結。
                - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的服裝設定」或「自然有魅力的日常穿搭」為準。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
             
