@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.04"
+LOBSTER_VERSION = "1.5.05"
 
 
 def _normalize_generation_level(level):
@@ -3370,7 +3370,7 @@ TEMP_CHAT：
     save_life_events_doc(doc); return item
 
 
-def append_daily_life_log_entry(title, facts=None, *, log_type="recent_awareness", anchor_date=None, source=None, do_not_proactively_raise=False, meta=None):
+def append_daily_life_log_entry(title, facts=None, *, log_type="recent_awareness", anchor_date=None, source=None, do_not_proactively_raise=False, meta=None, boundaries=None, keywords=None):
     """
     v1.5.04：近期意識層。
     只寫入 life_events.json / daily_life_log，讓小俠保有最近 1~3 天生活連續感；
@@ -3404,6 +3404,19 @@ def append_daily_life_log_entry(title, facts=None, *, log_type="recent_awareness
             "source": source or ["system_recent_awareness"],
             "updated_at": _board_now(),
         }
+        safe_boundaries = []
+        for x in (boundaries or []):
+            t = narrative_safe_text(x, max_len=220)
+            if t:
+                safe_boundaries.append(t)
+        if safe_boundaries:
+            item["boundaries"] = safe_boundaries[:8]
+        safe_keywords = [narrative_safe_text(x, max_len=40) for x in (keywords or []) if narrative_safe_text(x, max_len=40)]
+        if safe_keywords:
+            item["retrieval_keywords"] = safe_keywords[:12]
+        item["do_not_treat_as_promise"] = True
+        item["do_not_treat_as_event"] = True
+        item["expires_after_days"] = 21
         if isinstance(meta, dict):
             item["meta"] = _trace_sanitize(meta)
         # 同日同 type 同 title 只更新，不重複堆疊。
@@ -3413,6 +3426,12 @@ def append_daily_life_log_entry(title, facts=None, *, log_type="recent_awareness
                 merged.update(item)
                 old_facts = [narrative_safe_text(x, max_len=260) for x in (old.get("facts") or []) if narrative_safe_text(x, max_len=260)]
                 merged["facts"] = (safe_facts + [x for x in old_facts if x not in safe_facts])[:8]
+                if safe_boundaries:
+                    old_boundaries = [narrative_safe_text(x, max_len=220) for x in (old.get("boundaries") or []) if narrative_safe_text(x, max_len=220)]
+                    merged["boundaries"] = (safe_boundaries + [x for x in old_boundaries if x not in safe_boundaries])[:8]
+                if safe_keywords:
+                    old_keywords = [narrative_safe_text(x, max_len=40) for x in (old.get("retrieval_keywords") or []) if narrative_safe_text(x, max_len=40)]
+                    merged["retrieval_keywords"] = (safe_keywords + [x for x in old_keywords if x not in safe_keywords])[:12]
                 entries[i] = merged
                 save_life_events_doc(doc)
                 return merged
@@ -3441,16 +3460,19 @@ def recent_daily_life_log_context(now_dt=None, days=3, limit=8):
             if not dt or dt.date() < cutoff:
                 continue
             facts = [narrative_safe_text(x, max_len=180) for x in (item.get("facts") or []) if narrative_safe_text(x, max_len=180)]
+            boundaries = [narrative_safe_text(x, max_len=140) for x in (item.get("boundaries") or []) if narrative_safe_text(x, max_len=140)]
             if not facts:
                 summary = narrative_safe_text(item.get("summary") or item.get("title"), max_len=180)
                 facts = [summary] if summary else []
+            if boundaries:
+                facts = (facts[:4] + ["邊界：" + "；".join(boundaries[:3])])[:5]
             if facts:
                 rows.append((dt, item, facts))
         rows.sort(key=lambda r: r[0], reverse=True)
         lines = []
         for dt, item, facts in rows[:max(1, int(limit or 8))]:
             title = narrative_safe_text(item.get("title") or item.get("type") or "近期生活", max_len=80)
-            lines.append(f"- {dt.strftime('%Y-%m-%d')}｜{title}：" + "；".join(facts[:3]))
+            lines.append(f"- {dt.strftime('%Y-%m-%d')}｜{title}：" + "；".join(facts[:5]))
         if not lines:
             return "最近三天沒有可用的柴米油鹽摘要。"
         return (
@@ -3461,6 +3483,111 @@ def recent_daily_life_log_context(now_dt=None, days=3, limit=8):
     except Exception as exc:
         print(f"⚠️ [RECENT_AWARENESS_CONTEXT_FAILED] {type(exc).__name__}: {exc}")
         return "近期生活摘要暫時讀取失敗。"
+
+
+RECENT_MEMORY_PAGE_SIZE = 5
+
+def _recent_memory_search_blob(item):
+    if not isinstance(item, dict):
+        return ""
+    parts = [
+        str(item.get("id") or ""),
+        str(item.get("title") or ""),
+        str(item.get("type") or ""),
+        str(item.get("anchor_date") or item.get("date") or ""),
+        str(item.get("summary") or ""),
+        " ".join([str(x) for x in (item.get("facts") or [])]),
+        " ".join([str(x) for x in (item.get("boundaries") or [])]),
+        " ".join([str(x) for x in (item.get("retrieval_keywords") or [])]),
+    ]
+    return _clean_text_compact(" ".join(parts))
+
+
+def _recent_memory_candidates(days=21, query=""):
+    now_dt = datetime.now(TZ_TPE)
+    prune_daily_life_log(now_dt, retention_days=21)
+    cutoff = now_dt.date() - timedelta(days=max(0, int(days or 21) - 1))
+    rows = []
+    q = _clean_text_compact(query or "")
+    q_lower = q.lower()
+    for item in load_life_events_doc().get("daily_life_log", []) or []:
+        if not isinstance(item, dict):
+            continue
+        dt = _parse_memory_date(item.get("anchor_date") or item.get("date") or item.get("created_at"))
+        if not dt or dt.date() < cutoff:
+            continue
+        if q_lower and q_lower not in _recent_memory_search_blob(item).lower():
+            continue
+        rows.append((dt, item))
+    rows.sort(key=lambda r: (r[0], str(r[1].get("updated_at") or "")), reverse=True)
+    return [item for _dt, item in rows]
+
+
+def _format_recent_memory_item(item, idx=None):
+    prefix = f"{idx}. " if idx is not None else ""
+    title = narrative_safe_text(item.get("title") or item.get("type") or "近期生活記憶", max_len=90)
+    date = str(item.get("anchor_date") or item.get("date") or item.get("created_at") or "")[:10]
+    typ = str(item.get("type") or "daily_life_log")
+    facts = [narrative_safe_text(x, max_len=180) for x in (item.get("facts") or []) if narrative_safe_text(x, max_len=180)]
+    boundaries = [narrative_safe_text(x, max_len=130) for x in (item.get("boundaries") or []) if narrative_safe_text(x, max_len=130)]
+    body = "；".join(facts[:3]) if facts else narrative_safe_text(item.get("summary") or "", max_len=220)
+    lines = [f"{prefix}**{date}｜{title}**", f"   類型：{typ}", f"   {body[:360]}"]
+    if boundaries:
+        lines.append("   邊界：" + "；".join(boundaries[:3]))
+    return "\n".join(lines)
+
+
+async def _recent_memory_send_list(ctx, page=1, query="", days=21):
+    items = _recent_memory_candidates(days=days, query=query)
+    total = len(items)
+    total_pages = max(1, math.ceil(total / RECENT_MEMORY_PAGE_SIZE))
+    page = max(1, min(int(page or 1), total_pages))
+    start = (page - 1) * RECENT_MEMORY_PAGE_SIZE
+    page_items = items[start:start + RECENT_MEMORY_PAGE_SIZE]
+    title = "🧾 近期記憶"
+    if query:
+        title += f"｜搜尋：{query}"
+    if not items:
+        await ctx.send(title + "\n\n最近 21 天沒有符合條件的柴米油鹽／近期生活記憶。")
+        return
+    lines = [f"{title}｜共 {total} 筆｜第 {page}/{total_pages} 頁", ""]
+    for idx, item in enumerate(page_items, start + 1):
+        lines.append(_format_recent_memory_item(item, idx))
+    lines.append("\n可用：`/近期記憶 2`、`/近期記憶 搜尋 XPark`、`/近期記憶 搜尋 交換日記 2`。")
+    await ctx.send("\n\n".join(lines)[:1900])
+
+
+async def _handle_recent_memory_command(ctx, args=""):
+    raw = str(args or "").strip()
+    if not raw:
+        await _recent_memory_send_list(ctx, page=1)
+        return
+    if raw.startswith("搜尋"):
+        payload = raw[len("搜尋"):].strip()
+        page = 1
+        m = re.search(r"\s+(\d+)\s*$", payload)
+        if m:
+            page = int(m.group(1))
+            payload = payload[:m.start()].strip()
+        await _recent_memory_send_list(ctx, page=page, query=payload)
+        return
+    if re.fullmatch(r"(?:第\s*)?\d+\s*(?:頁)?", raw):
+        await _recent_memory_send_list(ctx, page=_parse_page_arg(raw, 1))
+        return
+    await ctx.send("指令格式：`/近期記憶`、`/近期記憶 2`、`/近期記憶 搜尋 關鍵字`、`/近期記憶 搜尋 XPark 2`。")
+
+
+async def _handle_recent_memory_message_direct(message):
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/近期記憶(?:\s+|$)", content):
+        return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，近期記憶查詢先只開放在女友小俠頻道使用喔。")
+        return True
+    raw = re.sub(r"^/近期記憶(?:\s+|$)", "", content).strip()
+    await _handle_recent_memory_command(_WardrobeMessageCtxAdapter(message), raw)
+    return True
+
 
 MEMORY_REVIEW_PAGE_SIZE = 5
 
@@ -12643,16 +12770,30 @@ class PhotoRepairPreviewView(discord.ui.View):
                 composition = _clean_text_compact(updated.get("composition") or updated.get("scene") or "")
                 diary_date = _extract_diary_date_from_title(topic) or str(updated.get("publish_date") or "")[:10] or _today_str_tpe()
                 if str(updated.get("type") or "").lower() == "diary" or "交換日記" in topic:
+                    facts = [
+                            f"{diary_date} 的交換日記照片已由大俠採用修正版並覆蓋原圖。",
+                            f"照片主題／內容：{composition}" if composition else "修正版照片已被大俠確認採用。",
+                        ]
+                    blob = _clean_text_compact(" ".join(facts + [str(updated.get("topic") or ""), str(updated.get("event") or "")]))
+                    if "XPark" in blob or "XPARK" in blob or "水族館" in blob:
+                        facts.extend([
+                            "這張照片是週末 XPark 約會前的穿搭準備照。",
+                            "照片本身不是水族館現場，而是約會前的試穿或準備情境。",
+                            "大俠在意的兩個邊界是：不要拍成水族館現場、不要穿得太辣。",
+                        ])
                     append_daily_life_log_entry(
                         f"{diary_date} 交換日記修正版照片已採用",
-                        [
-                            f"大俠已採用 {diary_date} 交換日記的修正版照片並覆蓋原圖。",
-                            f"修正版照片內容：{composition}" if composition else "修正版照片已被大俠確認採用。",
-                        ],
+                        facts,
                         log_type="diary_photo_accepted",
                         anchor_date=diary_date,
                         source=["photo_repair_accept"],
                         do_not_proactively_raise=False,
+                        boundaries=[
+                            "這不是新的待履約承諾。",
+                            "這不是新的近期事件。",
+                            "不要再把此交換日記照片當成未完成事項追討。",
+                        ],
+                        keywords=["交換日記", "修正版", "覆蓋原圖", "XPark", "水族館", "穿搭照"],
                         meta={"message_id": getattr(target_message, "id", None), "local_url": updated.get("local_url")},
                     )
             except Exception as log_exc:
@@ -13818,17 +13959,29 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 photo_generation_contexts[diary_msg.id] = diary_photo_payload
                 result_view.context = diary_photo_payload
                 try:
-                    append_daily_life_log_entry(
-                        f"{entry_date} 交換日記已完成",
-                        [
+                    facts = [
                             f"小俠已完成 {entry_date} 的交換日記回覆。",
                             f"照片構想：{result.get('scenario_tw', '')}" if result.get("scenario_tw") else "",
                             f"今日履約：{result.get('promise_delivery', '')}" if result.get("promise_delivery") else "",
-                        ],
+                        ]
+                    diary_blob = _clean_text_compact(" ".join(facts + [str(result.get("image_prompt") or ""), str(result.get("promise_delivery") or "")]))
+                    if "XPark" in diary_blob or "XPARK" in diary_blob or "水族館" in diary_blob:
+                        facts.extend([
+                            "若本篇照片與 XPark 約會穿搭有關，照片應被理解為約會前穿搭準備照，不是水族館現場。",
+                            "此類照片的明確邊界：不要拍成水族館現場、不要穿得太辣。",
+                        ])
+                    append_daily_life_log_entry(
+                        f"{entry_date} 交換日記已完成",
+                        facts,
                         log_type="diary_completed",
                         anchor_date=entry_date,
                         source=["xiaoxia_diary", "process_diary_reply"],
                         do_not_proactively_raise=False,
+                        boundaries=[
+                            "這是近期生活記憶，不是新的待辦。",
+                            "不要把已完成的交換日記重新說成未完成。",
+                        ],
+                        keywords=["交換日記", "完成", "XPark", "水族館", "穿搭照"],
                         meta={"message_id": diary_msg.id, "local_url": local_url},
                     )
                 except Exception as log_exc:
@@ -14401,6 +14554,11 @@ async def memory_review_command(ctx, *, args: str = ""):
     if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，回憶整理先只開放在女友小俠頻道使用喔。"); return
     await _handle_memory_review_command(ctx, args)
 
+@girlfriend_bot.command(name='近期記憶')
+async def recent_memory_command(ctx, *, args: str = ""):
+    if not _is_girlfriend_xiaoxia_channel(ctx.channel): await ctx.send("大俠，近期記憶查詢先只開放在女友小俠頻道使用喔。"); return
+    await _handle_recent_memory_command(ctx, args)
+
 @girlfriend_bot.command(name='今日衣著')
 async def today_outfit_command(ctx):
     outfit = _get_current_outfit_state()
@@ -14904,6 +15062,10 @@ async def on_message(message):
 
         # 🤝 /承諾、/小俠承諾：承諾清單由大俠手動審核，避免小夏自動誤判。
         if await _handle_promise_board_message_direct(message):
+            return
+
+        # 🧾 /近期記憶：直接查 daily_life_log，避免靠聊天推測來源。
+        if await _handle_recent_memory_message_direct(message):
             return
 
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
