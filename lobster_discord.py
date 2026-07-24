@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.11"
+LOBSTER_VERSION = "1.5.12"
 
 
 def _normalize_generation_level(level):
@@ -3077,23 +3077,39 @@ def _profile_items(data):
     return out
 
 
-def _profile_prompt_from_clean(data, max_items=10, max_chars=1200):
+def _profile_prompt_from_clean(data, max_items=None, max_chars=None):
+    """
+    v1.5.12：profile 已改為大俠手動維護的穩定人設，不再當作雜亂記憶池。
+    因此一般聊天應盡量讀完整 daxia_profile / xiaoxia_profile，避免大俠花時間整理後卻沒進 prompt。
+    max_items / max_chars 仍保留作為安全上限；None 或 <=0 代表不在該層截斷。
+    """
     if not isinstance(data, dict): return ""
-    parts=[]; identity=data.get("identity") if isinstance(data.get("identity"), dict) else {}
-    for v in identity.values():
-        if isinstance(v, str) and v.strip(): parts.append(v.strip())
-    for item in _profile_items(data)[:max_items]:
-        if isinstance(item, dict) and item.get("text"): parts.append(str(item.get("text")).strip())
-    return "；".join(parts)[:max_chars]
+    parts=[]
+    identity=data.get("identity") if isinstance(data.get("identity"), dict) else {}
+    for k, v in identity.items():
+        if isinstance(v, str) and v.strip():
+            parts.append(f"{k}: {v.strip()}")
+    items=_profile_items(data)
+    if isinstance(max_items, int) and max_items > 0:
+        items = items[:max_items]
+    for item in items:
+        if isinstance(item, dict) and item.get("text"):
+            category = _clean_text_compact(item.get("category") or "")
+            txt = _clean_text_compact(item.get("text") or "")
+            parts.append((f"[{category}] " if category else "") + txt)
+    out = "；".join([p for p in parts if p])
+    if isinstance(max_chars, int) and max_chars > 0:
+        out = out[:max_chars]
+    return out
 
 
-def daxia_profile_context_for_prompt(max_items=12, max_chars=1400):
+def daxia_profile_context_for_prompt(max_items=None, max_chars=6000):
     return _profile_prompt_from_clean(load_profile(), max_items, max_chars) or "大俠重視小俠、承諾與真誠互動。"
 
 
-def xiaoxia_profile_context_for_prompt(max_items=12, max_chars=1600):
+def xiaoxia_profile_context_for_prompt(max_items=None, max_chars=7000):
     xp=load_xiaoxia_profile(); core=_profile_prompt_from_clean(xp, max_items, max_chars)
-    caps=safe_memory_join(xp.get("capabilities", []), max_items=5, max_chars=360) if isinstance(xp.get("capabilities"), list) else ""
+    caps=safe_memory_join(xp.get("capabilities", []), max_items=20, max_chars=1200) if isinstance(xp.get("capabilities"), list) else ""
     return (core + ("；能力：" + caps if caps else "")).strip("；") or XIAOXIA_CORE_IDENTITY.strip()
 
 
@@ -15527,12 +15543,12 @@ async def on_message(message):
                     # 普通聊天只讀目前仍有效的事件、真正近期內容、近期生活連續感與可在一般情境提起的 pending 承諾。
                     life_event_context = event_board_summary_for_prompt(max_items=5)
                     recent_awareness_context = recent_daily_life_log_context(now_dt=now, days=3, limit=8)
-                    daxia_traits = daxia_profile_context_for_prompt(max_items=12, max_chars=1400)
+                    daxia_traits = daxia_profile_context_for_prompt(max_items=None, max_chars=6000)
                     promises = promise_board_summary_for_prompt(max_items=8)
                     xiaoxia_profile_for_prompt = load_xiaoxia_profile()
-                    capabilities = safe_memory_join(xiaoxia_profile_for_prompt.get("capabilities", []), max_items=5, max_chars=420)
+                    capabilities = safe_memory_join(xiaoxia_profile_for_prompt.get("capabilities", []), max_items=20, max_chars=1200)
                     recent = anniversary_upcoming_summary(now, days_ahead=30)
-                    xiaoxia_personality = xiaoxia_profile_context_for_prompt(max_items=12, max_chars=1600)
+                    xiaoxia_personality = xiaoxia_profile_context_for_prompt(max_items=None, max_chars=7000)
 
                 room_context = ""
                 if "書房" in message.channel.name:
@@ -15587,9 +15603,10 @@ async def on_message(message):
                         else ""
                     )
                     + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
-                    f"▶️ 大俠的特徵與喜好：{daxia_traits}\n"
+                    "【長期人設優先規則】：大俠人設與小俠人設是大俠手動整理的穩定長期事實。當大俠問『你知道我嗎』『我為妳做過什麼』『妳是誰』『我們是什麼關係』或類似問題時，必須優先依這兩份人設回答；但仍用自然女友口吻表達，不提 JSON、檔案、prompt 或系統。\n"
+                    f"▶️ 大俠的完整穩定人設：{daxia_traits}\n"
                     f"▶️ 妳的固定核心身份：{XIAOXIA_CORE_IDENTITY}\n"
-                    f"▶️ 妳目前的興趣、能力與生活感：{xiaoxia_personality}\n"
+                    f"▶️ 妳的完整穩定人設、興趣、能力與生活感：{xiaoxia_personality}\n"
                     f"▶️ 妳具備的能力：{capabilities}\n"
                     f"▶️ 妳答應過大俠的事：{promises}\n"
                     f"▶️ 近期紀念日提醒：{recent}\n"
