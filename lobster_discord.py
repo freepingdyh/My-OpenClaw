@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.12"
+LOBSTER_VERSION = "1.5.13"
 
 
 def _normalize_generation_level(level):
@@ -96,8 +96,9 @@ SOLO_NEGATIVE_MINIMAL = (
 
 
 XIAOXIA_APPEARANCE_CORE = """
-Xiaoxia is a recognizable adult fictional East Asian woman with fair skin, a sweet refined face, a tall and slim yet clearly curvy figure, a defined waist, graceful feminine curves, a naturally full and visually impressive bust proportion, and a soft hourglass silhouette.
+Xiaoxia is a recognizable adult fictional East Asian woman with fair skin, a sweet refined face, a tall and slim yet clearly curvy figure, a defined waist, graceful feminine curves, a naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette.
 Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, heavier, flatter, older, or like a different woman.
+Her bust-to-waist contrast should stay visibly substantial even in side-facing or three-quarter poses, while keeping anatomy natural and elegant.
 Preserve her long-hair feminine aura and photorealistic lifestyle feel.
 """
 
@@ -116,8 +117,8 @@ Even when the hair changes for the role, the result must still read clearly as X
 XIAOXIA_AESTHETIC_BASELINE = """
 Xiaoxia Aesthetic Baseline:
 - Xiaoxia should consistently feel like a beautiful adult East Asian woman with fair luminous skin, a sweet refined face, long feminine brown-family hair, and a photorealistic lifestyle aura.
-- Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally full and visually impressive bust, a soft hourglass silhouette, and long legs with especially graceful lower-leg proportions.
-- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep bust attractiveness as the primary charm point, then choose the most suitable secondary charm point between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood.
+- Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally full, prominent, and visually commanding bust, a soft hourglass silhouette, and long legs with especially graceful lower-leg proportions.
+- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep a full, prominent bust presence as the primary charm point, then choose the most suitable secondary charm point between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood.
 - The result should feel alluring, elegant, and highly attractive, but never vulgar, anatomically distorted, or disconnected from the requested scene.
 """
 
@@ -143,7 +144,7 @@ def _appearance_anchor_block(mode):
         lines.append("- In cosplay, preserve the role's recognizable visual identity while still clearly reading as Xiaoxia cosplaying the role.")
     else:
         lines.append(f"- {XIAOXIA_HAIR_RULE_GENERAL.strip()}")
-    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim yet clearly curvy, with a defined waist, graceful leg line, a naturally full and visually impressive bust proportion, and a soft hourglass silhouette; do not weaken or flatten these traits unless the user explicitly asks for a change.")
+    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim yet clearly curvy, with a defined waist, graceful leg line, a naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette; do not weaken or flatten these traits unless the user explicitly asks for a change.")
     lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, flatter, or childlike silhouette.")
     lines.append(f"- {XIAOXIA_USER_PRIORITY_RULES.strip()}")
     return "\n".join(lines)
@@ -6027,7 +6028,7 @@ def _strengthen_cosplay_state_for_vibe(planned, vibe_request=None):
         planned["outfit_intent"] = (str(planned.get("outfit_intent") or "") + " Maximize seductive efficiency in a tasteful, role-coherent, body-aware, glamorous adult-feminine way.").strip()
         planned["expression_direction"] = (str(planned.get("expression_direction") or "") + " The eyes and lips should carry obvious adult allure: intimate eye contact or a caught glance, softly teasing smile or parted lips, knowingly inviting energy.").strip()
         planned["lighting_direction"] = (str(planned.get("lighting_direction") or "") + " Use warmer sculpting light and richer contrast so the chest allure, chosen secondary attraction point, body lines, and fabric texture read clearly as sensual.").strip()
-        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the chest allure and the chosen second attraction point are clearly legible through outfit, silhouette, posture, and emotional tension rather than flattened into a safe documentary shot. Side-profile or three-quarter framing is allowed, but even then the bust presence must remain visually readable through contour, garment structure, posture, and bust-to-waist contrast rather than being hidden away.").strip()
+        planned["camera_direction"] = (str(planned.get("camera_direction") or "") + " Frame her so the chest allure and the chosen second attraction point are clearly legible through outfit, silhouette, posture, and emotional tension rather than flattened into a safe documentary shot. Side-profile or three-quarter framing is allowed, but even then the full bust presence must remain visually readable, substantial, and clearly above-average through contour, garment structure, posture, and bust-to-waist contrast rather than being hidden away.").strip()
         planned["vibe_notes"] = "Chest allure must read first; then a clearly readable second allure point must appear as legline or waist-abdomen curve, or both when natural to the role and scene."
     return planned
 
@@ -7872,7 +7873,7 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Mention believable hand behavior so the hands remain purposeful and natural.
 - Avoid mentioning JSON or metadata.
 - {variation_rule}
-- The prompt must end with: "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying the role, not the original actor or character. Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands." 
+- The prompt must end with: "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying the role, not the original actor or character. Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands." 
 
 Also return:
 1. composition: Traditional Chinese, 90 characters max.
@@ -7891,7 +7892,7 @@ Return JSON only:
             "Xiaoxia is in a natural role-appropriate story moment inside a believable setting that matches the character world. "
             "She performs one clear main action with a small purposeful hand movement, wears a complete tasteful cosplay outfit with recognizable details, and still clearly remains Xiaoxia. "
             "The scene includes visible environment details, cinematic light, expressive eyes, natural hands, and a candid story-still feeling rather than a studio pose. "
-            "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying this role, not the original actor or character. "
+            "Maintain consistent facial identity and core body identity from the reference images. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. Keep Xiaoxia clearly recognizable. Hairstyle and hair color may adapt to the cosplay role when needed for recognizability, while still reading as Xiaoxia cosplaying this role, not the original actor or character. "
             "Natural anatomy, natural hands, plausible posture, photorealistic cinematic cosplay image. Strictly solo focus on Xiaoxia. No other people, no men, no visible viewer body parts, and no external hands."
         ),
         "composition": cosplay_state.get("scenario_tw", "小俠在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。"),
@@ -8002,7 +8003,7 @@ def _forced_scene_diary_prompt_prefix(forced_scene):
         f"The diary image MUST clearly show Xiaoxia in this requested scene/activity: {scene}.\n"
         "This requested scene overrides diary defaults, wardrobe metadata, recent chat context, romantic bedroom defaults, and aesthetic improvisation.\n"
         f"{no_home}"
-        "Use Xiaoxia Aesthetic only inside this requested scene. Xiaoxia must be solo, recognizable, tall and slim, with fair luminous skin, a naturally full bust, defined waist, and graceful long legs, unless Daxia explicitly requests otherwise.\n"
+        "Use Xiaoxia Aesthetic only inside this requested scene. Xiaoxia must be solo, recognizable, tall and slim, with fair luminous skin, a naturally full, prominent, and visually commanding bust, defined waist, and graceful long legs, unless Daxia explicitly requests otherwise.\n"
     )
 
 async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, reply_to_daxia,
@@ -8142,7 +8143,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 - 允許使用 looking directly at the camera, sultry gaze, biting lower lip, tender yet alluring smile 等神情；這些都必須是小俠獨自面對看不見的鏡頭，不可形成雙人互動畫面。
 - 畫面中只能出現小俠本人；不可出現任何男性、第二人、其他人物、外來手部/手臂、男性剪影、倒影、影子、被裁切的身體部位、床邊另一個人或前景肩膀。鏡頭只代表大俠的不可見視角。
 - {variation_rule}
-- 結尾必須包含：Strictly only Xiaoxia appears in the image. The frame contains exactly one human figure: Xiaoxia. No man, no second person, no visible partner, no external hands, no male hands, no male arms, no male silhouette, no male reflection, no cropped body parts, no shadow or reflection of another person, no foreground shoulder or viewer body part. The camera is an invisible Daxia point of view and Daxia must never be visually depicted. All romance is expressed through Xiaoxia's solo gaze, pose, lighting, props, and empty surrounding space. Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
+- 結尾必須包含：Strictly only Xiaoxia appears in the image. The frame contains exactly one human figure: Xiaoxia. No man, no second person, no visible partner, no external hands, no male hands, no male arms, no male silhouette, no male reflection, no cropped body parts, no shadow or reflection of another person, no foreground shoulder or viewer body part. The camera is an invisible Daxia point of view and Daxia must never be visually depicted. All romance is expressed through Xiaoxia's solo gaze, pose, lighting, props, and empty surrounding space. Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography.
 
 只回傳 JSON：
 {{
@@ -8157,7 +8158,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
             _forced_scene_diary_prompt_prefix(forced_scene_text)
             + f"Xiaoxia is in {forced_scene_text}, taking a natural solo diary selfie or being captured in a candid diary-photo moment. "
             + "The requested environment must be clearly visible with believable local scene details, natural lighting, and a lived-in diary feeling. "
-            + "Her outfit should fit the requested scene and the season while preserving Xiaoxia Aesthetic: fair luminous skin, sweet refined face, tall slim yet clearly curvy feminine figure, naturally full and visually impressive bust, soft hourglass silhouette, defined waist, graceful long legs, and tasteful sensual charm unless Daxia explicitly asks for conservative styling. "
+            + "Her outfit should fit the requested scene and the season while preserving Xiaoxia Aesthetic: fair luminous skin, sweet refined face, tall slim yet clearly curvy feminine figure, naturally full, prominent, and visually commanding bust, soft hourglass silhouette, defined waist, graceful long legs, and tasteful sensual charm unless Daxia explicitly asks for conservative styling. "
             + "Strictly only Xiaoxia appears in the image. No man, no second person, no visible partner, no external hands, no viewer body parts, no reflections or shadows of another person. Natural anatomy and plausible hands."
         )
     else:
@@ -8165,7 +8166,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
             "In a warmly lit contemporary Taiwan bedroom, she is resting intimately on the edge of the bed, wearing a soft, slightly translucent silk slip dress that tastefully flatters her graceful curves. "
             "One hand softly adjusts her loose hair while her eyes look directly into the camera (boyfriend POV) with a profoundly tender, alluring, and romantic smile. "
             "Dim ambient lighting and dramatic chiaroscuro shadows create a deeply private, seductive, and cozy atmosphere. "
-            "Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
+            "Maintain consistent facial identity and core body identity from Image 1. Preserve Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. Keep her everyday identity recognizable. Allow a scene-appropriate natural hairstyle variation such as loose waves, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo, while keeping the hair color within a natural brown family. She is an adult fictional character. Natural anatomical alignment, realistic neck and shoulders, photorealistic lifestyle photography. "
             "Strictly only Xiaoxia appears in the image. Xiaoxia is the only human figure. No man, no male head, no male face, no male hair, no male partner, no male hands, no male arms, no male shoulder, no male back, no blurred male foreground figure, no cropped male body parts, no other people."
         )
     fallback_visual = {
@@ -8426,13 +8427,13 @@ def _compose_ultimate_safe_prompt(mode, visual_dict, initial_prompt):
         safe_style = (
             "Create a very safe, elegant, natural daily-life image of an adult fictional Asian woman in a modest, refined outfit. "
             "Use gentle ambient light, realistic posture, and a quiet lived-in atmosphere. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. If it is a Daxia point-of-view scene, Daxia must never be visually depicted and POV must be implied only through framing. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, seating or standing situation, and gaze direction from the hard scene anchors. "
-            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. Allow a scene-appropriate natural hairstyle variation while keeping the hair color in a natural brown family. High quality."
+            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. Allow a scene-appropriate natural hairstyle variation while keeping the hair color in a natural brown family. High quality."
         )
     else:
         safe_style = (
             "Create a very safe, story-driven cosplay image of an adult fictional Asian woman in a modest, character-appropriate outfit. The style may be cute, heroic, magical, adventurous, dramatic, or refined as long as it remains safe and non-revealing. "
             "Use graceful cinematic ambience, realistic posture, and a task-focused moment. Strictly only Xiaoxia appears in the image. NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections. Xiaoxia's anatomy and movement must be natural and physically plausible. Preserve the specific activity, hand actions, props, body orientation, and gaze direction from the hard scene anchors. "
-            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full and visually impressive bust proportion, and a soft hourglass silhouette. For cosplay, hairstyle and hair color may adapt to the role when needed for recognizability, while still clearly reading as Xiaoxia cosplaying the role. High quality."
+            "Maintain consistent facial identity and core body identity from Image 1. Keep Xiaoxia's recognizable sweet East Asian facial features, fair skin, tall slim yet clearly curvy figure, defined waist, naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette. For cosplay, hairstyle and hair color may adapt to the role when needed for recognizability, while still clearly reading as Xiaoxia cosplaying the role. High quality."
         )
     return f"{hard_anchor_block}\n\nULTIMATE SAFE STYLE LAYER:\n{safe_style}"
 
@@ -9776,7 +9777,7 @@ def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
         "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
-        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, a naturally full and visually impressive bust with a soft hourglass silhouette as part of Xiaoxia's core body identity, bust attractiveness as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
+        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, a naturally full and visually impressive bust with a soft hourglass silhouette as part of Xiaoxia's core body identity, a full, prominent bust presence as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
         "Daxia's current request still overrides this baseline. If Daxia asks for stronger role fidelity, fuller bust, slimmer body, longer lower legs, or another targeted adjustment, obey that request first while still keeping Xiaoxia recognizable. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
@@ -12252,7 +12253,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 7. 不可加入大俠沒有要求的第二人物。
 8. 即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
 9. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
-10. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條但曲線明顯、腰線明確、自然豐滿且有存在感的上圍、柔和沙漏感身形、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
+10. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條但曲線明顯、腰線明確、自然豐滿、存在感再加強的上圍、柔和沙漏感身形、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -12276,7 +12277,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
         "camera_framing": "half_body",
         "photo_prompt": (
             f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
-            f"She is wearing {fallback_outfit}, with a warm everyday mood. Preserve Xiaoxia Aesthetic by default: fair luminous skin, a sweet refined face, a tall slim yet clearly curvy feminine figure, a defined waist, a naturally full and visually impressive bust, a soft hourglass silhouette, and long graceful legs with an elegant lower-leg line, unless Daxia explicitly requests otherwise. "
+            f"She is wearing {fallback_outfit}, with a warm everyday mood. Preserve Xiaoxia Aesthetic by default: fair luminous skin, a sweet refined face, a tall slim yet clearly curvy feminine figure, a defined waist, a naturally full, prominent, and visually commanding bust, a soft hourglass silhouette, and long graceful legs with an elegant lower-leg line, unless Daxia explicitly requests otherwise. "
             "Solo Xiaoxia only. Do not show any man, any other person, or any visible body part of the viewer, including foreground hands, shoulders, back, torso, silhouette, or reflections. The POV should be implied only through framing. Realistic anatomy only, with natural body movement, natural limb positions, and no awkward pose or malformed hands."
         ),
     }
