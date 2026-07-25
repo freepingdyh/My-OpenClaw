@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.13"
+LOBSTER_VERSION = "1.5.14"
 
 
 def _normalize_generation_level(level):
@@ -3775,15 +3775,16 @@ async def _handle_recent_memory_message_direct(message):
 MEMORY_REVIEW_PAGE_SIZE = 5
 
 def memory_monthly_review_reminder_text():
-    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 1 個月，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶 2`（看第2頁）\n`/回憶 搜尋 關鍵字`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除，不需要手動處理。"
+    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 21 天，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶 2`（看第2頁）\n`/回憶 搜尋 關鍵字`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除；life_events 則可用 `/回憶 待整理` 列出後直接依編號處理。"
 
 def due_memory_review_items(now_dt=None):
+    """v1.5.14：/回憶 待整理 改為列出超過 21 天且尚未保留/升級/刪除的 life_events。"""
     now_dt=now_dt or datetime.now(TZ_TPE); rows=[]
     for ev in load_life_events_doc().get("major_life_events",[]) or []:
         if not isinstance(ev,dict) or ev.get("memory_zone")=="daily_life_log": continue
         if str(ev.get("retention_status") or "pending_review") not in {"pending_review",""}: continue
         dt=_parse_memory_date(ev.get("anchor_date") or ev.get("created_at"))
-        if dt and 30 <= (now_dt.date()-dt.date()).days < 60: rows.append(ev)
+        if dt and (now_dt.date()-dt.date()).days >= 21: rows.append(ev)
     return rows
 
 
@@ -3842,6 +3843,16 @@ async def _memory_review_send_list(ctx, mode="all", page=1, query=""):
     title = "📚 待整理回憶" if mode in {"待整理", "review"} else "📚 回憶清單"
     if query:
         title += f"｜搜尋：{query}"
+    uid = getattr(ctx.author, "id", None)
+    if uid is not None:
+        pending_memory_review_inputs[uid] = {
+            "stage": "last_list",
+            "mode": mode,
+            "page": page,
+            "query": query,
+            "shown_ids": [ev.get("id") for ev in page_items if isinstance(ev, dict)],
+            "started_at": _board_now(),
+        }
     if not items:
         await ctx.send(title + "\n\n目前沒有符合條件的回憶。")
         return
@@ -3849,67 +3860,91 @@ async def _memory_review_send_list(ctx, mode="all", page=1, query=""):
     base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
     for idx, ev in enumerate(page_items, base_index + 1):
         lines.append(_format_memory_event_item(ev, idx))
-    lines.append("\n可用：`/回憶 2`、`/回憶 待整理 2`、`/回憶 搜尋 關鍵字`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`")
+    lines.append("\n可直接處理上方編號：`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。")
+    lines.append("若進入等待輸入流程，可輸入 `c` 取消。")
     await ctx.send("\n".join(lines)[:1900])
 
 
-async def _memory_review_start_select_flow(ctx, action="刪除", mode="all", page=1, query=""):
-    mode_for_items = "待整理" if action in {"保留", "升級紀念日"} else mode
-    items = _memory_review_candidates(mode_for_items, query=query)
-    page_items, page, total_pages, total = _memory_paginate(items, page)
-    if not items:
-        await ctx.send("目前沒有可處理的回憶。")
-        return True
-    pending_memory_review_inputs[getattr(ctx.author, "id", None)] = {"action": action, "stage": "choose", "mode": mode_for_items, "page": page, "query": query, "started_at": _board_now()}
-    lines = [f"請輸入要{action}的回憶編號（目前第 {page}/{total_pages} 頁，共 {total} 筆）：", ""]
-    base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
-    for idx, ev in enumerate(page_items, base_index + 1):
-        lines.append(_format_memory_event_item(ev, idx))
-    lines.append("\n可輸入上方全域編號，或輸入「取消」。")
-    await ctx.send("\n".join(lines)[:1900])
-    return True
+def _memory_review_last_list_context(ctx, fallback_mode="待整理"):
+    uid = getattr(ctx.author, "id", None)
+    sess = pending_memory_review_inputs.get(uid) if uid is not None else None
+    if isinstance(sess, dict) and sess.get("stage") in {"last_list", "choose"}:
+        return {
+            "mode": sess.get("mode") or fallback_mode,
+            "page": int(sess.get("page") or 1),
+            "query": sess.get("query") or "",
+        }
+    return {"mode": fallback_mode, "page": 1, "query": ""}
 
 
-async def _handle_pending_memory_review_input(message):
-    uid = getattr(message.author, "id", None); sess = pending_memory_review_inputs.get(uid)
-    if not sess: return False
-    content = str(getattr(message, "content", "") or "").strip()
-    if content in {"取消", "cancel", "Cancel"}:
-        pending_memory_review_inputs.pop(uid, None); await message.channel.send("已取消回憶整理操作。"); return True
-    action = sess.get("action")
-    mode = sess.get("mode") or ("待整理" if action in {"保留", "升級紀念日"} else "all")
-    query = sess.get("query") or ""
+async def _memory_review_apply_action(ctx, action, number, mode="待整理", query=""):
     items = _memory_review_candidates(mode, query=query)
-    m = re.search(r"\d+", content)
-    if not m:
-        await message.channel.send("請輸入清單編號，或輸入「取消」。"); return True
-    idx = int(m.group(0)) - 1
+    try:
+        idx = int(number) - 1
+    except Exception:
+        await ctx.send("請輸入清單編號，例如：`/回憶 刪除 2`，或輸入 `c` 取消。")
+        return True
     if idx < 0 or idx >= len(items):
-        await message.channel.send("編號超出範圍，請重新輸入，或輸入「取消」。"); return True
+        await ctx.send("編號超出範圍。請先用 `/回憶 待整理` 重新確認清單，再輸入例如 `/回憶 刪除 2`。")
+        return True
     target_id = items[idx].get("id")
     doc = load_life_events_doc(); events = doc.setdefault("major_life_events", [])
     target = next((ev for ev in events if isinstance(ev, dict) and ev.get("id") == target_id), None)
     if not target:
-        pending_memory_review_inputs.pop(uid, None); await message.channel.send("處理失敗，找不到該回憶。"); return True
+        await ctx.send("處理失敗，找不到該回憶。請重新執行 `/回憶 待整理`。")
+        return True
     if action == "刪除":
         events[:] = [ev for ev in events if not (isinstance(ev, dict) and ev.get("id") == target_id)]
         target["deleted_at"] = _board_now(); target["deleted_by"] = "大俠"
         doc.setdefault("deleted_archive", []).insert(0, target)
         doc["deleted_archive"] = doc["deleted_archive"][:300]
         save_life_events_doc(doc)
-        await message.channel.send(f"🗑️ 已刪除回憶：**{target.get('title')}**")
+        await ctx.send(f"🗑️ 已刪除回憶：**{target.get('title')}**")
     elif action == "保留":
         target["retention_status"] = "kept"; target["retained_by"] = "大俠"; target["retained_at"] = _board_now(); target["updated_at"] = _board_now()
         save_life_events_doc(doc)
-        await message.channel.send(f"✅ 已保留回憶：**{target.get('title')}**")
+        await ctx.send(f"✅ 已保留回憶：**{target.get('title')}**")
     elif action == "升級紀念日":
         board = load_anniversary_board(); annivs = board.setdefault("anniversaries", [])
         ann = _anniv_item_from_text(f"{target.get('title')}：{target.get('anchor_date') or ''} {target.get('summary') or ''}")
         ann["id"] = _next_prefixed_id(annivs, "A"); ann["source"] = "promoted_from_life_events"; ann["source_life_event_id"] = target_id; annivs.append(ann); save_anniversary_board(board)
         target["retention_status"] = "promoted_to_anniversary"; target["anniversary_id"] = ann["id"]; target["updated_at"] = _board_now(); save_life_events_doc(doc)
-        await message.channel.send(f"🎂 已升級為紀念日：**{ann.get('id')} {ann.get('title')}**")
-    pending_memory_review_inputs.pop(uid, None)
+        await ctx.send(f"🎂 已升級為紀念日：**{ann.get('id')} {ann.get('title')}**")
+    uid = getattr(ctx.author, "id", None)
+    if uid is not None:
+        pending_memory_review_inputs.pop(uid, None)
     return True
+
+
+async def _memory_review_start_select_flow(ctx, action="刪除", mode="待整理", page=1, query=""):
+    items = _memory_review_candidates(mode, query=query)
+    page_items, page, total_pages, total = _memory_paginate(items, page)
+    if not items:
+        await ctx.send("目前沒有可處理的回憶。")
+        return True
+    pending_memory_review_inputs[getattr(ctx.author, "id", None)] = {"action": action, "stage": "choose", "mode": mode, "page": page, "query": query, "started_at": _board_now()}
+    lines = [f"請輸入要{action}的回憶編號（目前第 {page}/{total_pages} 頁，共 {total} 筆）：", ""]
+    base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
+    for idx, ev in enumerate(page_items, base_index + 1):
+        lines.append(_format_memory_event_item(ev, idx))
+    lines.append("\n可輸入上方全域編號，或輸入 `c` 取消。")
+    await ctx.send("\n".join(lines)[:1900])
+    return True
+
+
+async def _handle_pending_memory_review_input(message):
+    uid = getattr(message.author, "id", None); sess = pending_memory_review_inputs.get(uid)
+    if not sess or sess.get("stage") != "choose": return False
+    content = str(getattr(message, "content", "") or "").strip()
+    if content.lower() in {"c", "cancel", "取消"}:
+        pending_memory_review_inputs.pop(uid, None); await message.channel.send("已取消回憶整理操作。") ; return True
+    action = sess.get("action")
+    mode = sess.get("mode") or "待整理"
+    query = sess.get("query") or ""
+    m = re.search(r"\d+", content)
+    if not m:
+        await message.channel.send("請輸入清單編號，或輸入 `c` 取消。") ; return True
+    return await _memory_review_apply_action(_WardrobeMessageCtxAdapter(message), action, int(m.group(0)), mode=mode, query=query)
 
 
 async def _handle_memory_review_command(ctx, args=""):
@@ -3931,16 +3966,22 @@ async def _handle_memory_review_command(ctx, args=""):
     for action in ("刪除", "保留", "升級紀念日"):
         if raw == action or raw.startswith(action + " "):
             payload = raw[len(action):].strip()
-            page = _parse_page_arg(payload, 1) if payload else 1
-            query = ""
+            last_ctx = _memory_review_last_list_context(ctx, fallback_mode="待整理")
+            mode = last_ctx["mode"] or "待整理"
+            page = last_ctx["page"] or 1
+            query = last_ctx["query"] or ""
             if payload.startswith("搜尋"):
                 qraw = payload[len("搜尋"):].strip()
                 m = re.search(r"\s+(\d+)\s*$", qraw)
                 if m:
                     page = int(m.group(1)); qraw = qraw[:m.start()].strip()
                 query = qraw
-            await _memory_review_start_select_flow(ctx, action=action, page=page, query=query); return
-    await ctx.send("指令格式：`/回憶`、`/回憶 2`、`/回憶 待整理 2`、`/回憶 搜尋 關鍵字`、`/回憶 刪除`、`/回憶 保留`、`/回憶 升級紀念日`。")
+                await _memory_review_start_select_flow(ctx, action=action, mode="all", page=page, query=query); return
+            mnum = re.search(r"\d+", payload)
+            if mnum:
+                await _memory_review_apply_action(ctx, action, int(mnum.group(0)), mode=mode, query=query); return
+            await _memory_review_start_select_flow(ctx, action=action, mode=mode, page=page, query=query); return
+    await ctx.send("指令格式：`/回憶`、`/回憶 待整理`、`/回憶 搜尋 關鍵字`、`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。等待輸入時可按 `c` 取消。")
 
 
 async def _handle_memory_review_message_direct(message):
