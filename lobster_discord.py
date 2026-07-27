@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.15"
+LOBSTER_VERSION = "1.5.16"
 
 
 def _normalize_generation_level(level):
@@ -529,6 +529,20 @@ os.makedirs(SEEDREAM_V45_REMOTE_CACHE_DIR, exist_ok=True)
 SEEDREAM_V45_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_V5_PRO_MODEL_ID = os.environ.get("SEEDREAM_V5_PRO_MODEL_ID", "bytedance/seedream/v5/pro/edit")
 SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
+
+def _env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", "關", "關閉"}
+
+# v1.5.16：主線生圖預設關閉 fal.ai / Seedream safety checker。
+# 影響：/photo、/cosplay、/交換日記、/photo_raw，以及舊 travel/shopping/world scene Seedream 路徑。
+# 可在 Zeabur 環境變數設 SEEDREAM_ENABLE_SAFETY_CHECKER=true 臨時改回開啟。
+SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", False)
+
+# 衣櫃去人化仍保留獨立開關，預設 true；若之後要連去人化也關，可設 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER=false。
+SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER", True)
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
 WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
 WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
@@ -8953,7 +8967,9 @@ def _context_seedream_model_label(context=None):
     return _seedream_model_label_from_id(_context_seedream_model_id(context=context))
 
 
-def _seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=True):
+def _seedream_request_args(model_id, final_prompt, image_urls, enable_safety_checker=None):
+    if enable_safety_checker is None:
+        enable_safety_checker = SEEDREAM_ENABLE_SAFETY_CHECKER
     args = {
         "prompt": final_prompt,
         "image_urls": image_urls,
@@ -9936,7 +9952,7 @@ def _seedream_error_is_retryable(value):
     ))
 
 
-async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True, trace_context=None):
+async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=None, trace_context=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
@@ -9949,7 +9965,7 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Tru
         final_prompt = str(custom_prompt or "").strip()
     else:
         final_prompt = _seedream_cosplay_prompt(custom_prompt)
-    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "raw_seedream_mode": (trace_context or {}).get("raw_seedream_mode")})
+    _trace_stage(trace_context, "seedream_cosplay_final_prompt", prompt=final_prompt, data={"model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "raw_seedream_mode": (trace_context or {}).get("raw_seedream_mode"), "enable_safety_checker": bool(enable_safety_checker)})
 
     def _subscribe():
         def on_queue_update(update):
@@ -10199,7 +10215,7 @@ def _seedream_diary_prompt(custom_prompt, visual_checklist=None):
     )
 
 
-async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True, trace_context=None):
+async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None, trace_context=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做交換日記 image-to-image。"""
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
@@ -10963,7 +10979,7 @@ async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_pr
                 "image_size": SEEDREAM_V45_IMAGE_SIZE,
                 "num_images": 1,
                 "max_images": 1,
-                "enable_safety_checker": True,
+                "enable_safety_checker": bool(SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER),
             },
             with_logs=True,
             on_queue_update=on_queue_update,
@@ -12052,8 +12068,10 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
     return base + "\nTEXT REQUEST — this controls the final scene, pose, action, and composition:\n\n" + custom_prompt
 
 
-async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None, trace_context=None):
+async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=None, current_outfit=None, trace_context=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
+    if enable_safety_checker is None:
+        enable_safety_checker = SEEDREAM_ENABLE_SAFETY_CHECKER
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -12062,7 +12080,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-    _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE})
+    _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "enable_safety_checker": bool(enable_safety_checker)})
 
     async def _build_image_urls(force_reference_refresh=False):
         urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
@@ -12715,7 +12733,7 @@ async def handle_photo_raw_command(message, user_input):
     final_prompt = raw_prompt if raw_prompt.startswith("FIGURE ROLE MAP") else _build_pose_critical_seedream_prompt(raw_prompt, has_reference=False)
     _trace_stage(trace_context, "photo_raw_input", prompt=final_prompt, data={"note":"direct playground-equivalent prompt; no planner/translator/wardrobe"})
     try:
-        generated_image_url = await generate_seedream_v45_photo(final_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=None, trace_context=trace_context)
+        generated_image_url = await generate_seedream_v45_photo(final_prompt, reference_image_path=None, enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER, current_outfit=None, trace_context=trace_context)
         if not generated_image_url or not str(generated_image_url).startswith("http"):
             raise Exception(str(generated_image_url))
         _trace_stage(trace_context, "photo_raw_generation_result", data={"result_url": generated_image_url})
@@ -13583,21 +13601,21 @@ async def generate_world_composite(discord_image_url=None, base_filename="base_x
     """
     try:
         if mode == "cosplay":
-            return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=True, trace_context=trace_context)
+            return await generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER, trace_context=trace_context)
         if mode == "diary":
             if discord_image_url:
                 return await generate_seedream_v45_photo(
                     custom_prompt,
                     reference_image_path=discord_image_url,
-                    enable_safety_checker=True,
+                    enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
                     current_outfit=current_outfit,
                     trace_context=trace_context,
                 )
-            return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=True, trace_context=trace_context)
+            return await generate_seedream_v45_diary(custom_prompt, enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER, trace_context=trace_context)
         if mode == "photo_scene":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=True, current_outfit=current_outfit, trace_context=trace_context)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER, current_outfit=current_outfit, trace_context=trace_context)
         if mode == "photo_reference":
-            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=True, current_outfit=current_outfit, trace_context=trace_context)
+            return await generate_seedream_v45_photo(custom_prompt, reference_image_path=discord_image_url, enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER, current_outfit=current_outfit, trace_context=trace_context)
 
         # 舊 travel / shopping / 未分類圖片模式也先轉 Seedream v4.5，避免回到 gpt-image-2 舊路徑。
         if mode in {"travel", "shopping", "default", "world", "scene"} or mode != "gpt_image_2_fallback":
