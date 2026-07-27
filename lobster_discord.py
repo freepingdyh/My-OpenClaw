@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.14"
+LOBSTER_VERSION = "1.5.15"
 
 
 def _normalize_generation_level(level):
@@ -1503,7 +1503,15 @@ def _active_events_for_prompt(events, now_dt, max_items=3):
             continue
         status = str(event.get("status", "")).lower()
         phase = str(event.get("current_phase", "")).lower()
-        if status in {"archived", "completed", "cancelled"} or phase == "completed":
+        event_status = str(event.get("event_status", "")).lower()
+        completion_status = str(event.get("completion_status", "")).lower()
+        if (
+            status in {"archived", "completed", "cancelled", "canceled", "deleted"}
+            or phase == "completed"
+            or event_status in {"completed", "done", "cancelled", "canceled", "deleted"}
+            or completion_status in {"completed", "done"}
+            or bool(event.get("do_not_treat_as_pending"))
+        ):
             continue
         summary = (
             event.get("current_summary")
@@ -3212,7 +3220,30 @@ def event_board_summary_for_prompt(max_items=5):
     return "\n".join(["【近期事件｜只有大俠手動新增才算】"]+[f"- {e.get('id')} {e.get('title')}：{e.get('description','')}" for e in active[-max_items:]])
 def _archive_completed_event_to_life_event(item):
     doc=load_life_events_doc(); events=doc.setdefault("major_life_events",[]); now=_board_now(); date_str=now[:10]
-    ev={"id":f"event_completed_{item.get('id')}_{date_str.replace('-','')}","title":f"事件完成：{item.get('title')}","type":"event_completed","memory_zone":"major_life_event","status":"archived","importance":item.get("importance","normal"),"participants":["大俠","小俠"],"anchor_date":date_str,"current_phase":"completed","summary":item.get("description") or item.get("title"),"facts":["大俠已確認此事件完成。",f"原事件內容：{item.get('description') or item.get('title')}"],"do_not_proactively_raise":True,"created_at":now,"updated_at":now,"event_board_id":item.get("id"),"retention_status":"pending_review"}
+    summary=item.get("description") or item.get("title")
+    ev={
+        "id":f"event_completed_{item.get('id')}_{date_str.replace('-','')}",
+        "title":f"事件完成：{item.get('title')}",
+        "type":"event_completed",
+        "memory_zone":"major_life_event",
+        "status":"archived",
+        "event_status":"completed",
+        "completion_status":"completed",
+        "importance":item.get("importance","normal"),
+        "participants":["大俠","小俠"],
+        "anchor_date":date_str,
+        "current_phase":"completed",
+        "summary":summary,
+        "completion_summary":"大俠已確認此事件完成；這是已發生並完成的回憶，不是待辦事項，也不是未履約事項。",
+        "facts":["大俠已確認此事件完成。",f"原事件內容：{summary}","此事件已完成，retention_status 只代表是否要長期保留，不代表尚未完成。"],
+        "reply_guidance":["這是已完成事件；只有大俠主動提到時才可作為回憶背景，不得主動當成待辦、承諾未履行或仍需跟進。"],
+        "do_not_proactively_raise":True,
+        "do_not_treat_as_pending":True,
+        "created_at":now,
+        "updated_at":now,
+        "event_board_id":item.get("id"),
+        "retention_status":"pending_review"
+    }
     events.insert(0,ev); save_life_events_doc(doc); return ev
 def _format_event_item(item,idx=None): return f"{f'{idx}. ' if idx is not None else ''}**{item.get('id')} {item.get('title')}**\n   {str(item.get('description') or '')[:240]}"
 async def _event_send_list(ctx):
@@ -3775,7 +3806,7 @@ async def _handle_recent_memory_message_direct(message):
 MEMORY_REVIEW_PAGE_SIZE = 5
 
 def memory_monthly_review_reminder_text():
-    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 21 天，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶 2`（看第2頁）\n`/回憶 搜尋 關鍵字`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除；life_events 則可用 `/回憶 待整理` 列出後直接依編號處理。"
+    return "📚 大俠，今天是每月回憶整理提醒日。\n\n有些 life_events 可能已經超過 21 天，建議有空時整理一下。\n\n可用指令：\n`/回憶 待整理`\n`/回憶 2`（看第2頁）\n`/回憶 搜尋 關鍵字`\n`/回憶 已保留`\n`/回憶 已完成`\n`/回憶 已取消`\n`/回憶 刪除`\n`/回憶 保留`\n`/回憶 升級紀念日`\n\n柴米油鹽區超過 21 天會自動刪除；life_events 則可用 `/回憶 待整理` 列出後直接依編號處理。"
 
 def due_memory_review_items(now_dt=None):
     """v1.5.14：/回憶 待整理 改為列出超過 21 天且尚未保留/升級/刪除的 life_events。"""
@@ -3801,9 +3832,18 @@ def _memory_event_search_blob(ev):
 def _memory_review_candidates(mode="all", now_dt=None, query=""):
     doc = load_life_events_doc()
     events = [ev for ev in doc.get("major_life_events", []) or [] if isinstance(ev, dict)]
-    if mode in {"待整理", "review"}:
+    mode_key = str(mode or "all").strip()
+    if mode_key in {"待整理", "review"}:
         allowed_ids = {ev.get("id") for ev in due_memory_review_items(now_dt)}
         events = [ev for ev in events if ev.get("id") in allowed_ids]
+    elif mode_key in {"已保留", "保留清單", "長期", "kept"}:
+        events = [ev for ev in events if str(ev.get("retention_status") or "").lower() in {"kept", "keep", "retained"}]
+    elif mode_key in {"已升級", "已升級紀念日", "promoted"}:
+        events = [ev for ev in events if str(ev.get("retention_status") or "").lower() == "promoted_to_anniversary"]
+    elif mode_key in {"已完成", "completed"}:
+        events = [ev for ev in events if _memory_event_status_label(ev) == "已完成"]
+    elif mode_key in {"已取消", "cancelled", "canceled"}:
+        events = [ev for ev in events if _memory_event_status_label(ev) == "已取消"]
     q = _clean_text_compact(query or "")
     if q:
         q_lower = q.lower()
@@ -3828,19 +3868,73 @@ def _memory_paginate(items, page=1, page_size=MEMORY_REVIEW_PAGE_SIZE):
     return items[start:start + page_size], page, total_pages, total
 
 
+def _memory_event_status_label(ev):
+    if not isinstance(ev, dict):
+        return "未標示"
+    event_status = str(ev.get("event_status") or ev.get("completion_status") or "").lower()
+    phase = str(ev.get("current_phase") or "").lower()
+    status = str(ev.get("status") or "").lower()
+    typ = str(ev.get("type") or "").lower()
+    if event_status in {"completed", "done"} or phase == "completed" or typ == "event_completed":
+        return "已完成"
+    if event_status in {"cancelled", "canceled"} or status in {"cancelled", "canceled"}:
+        return "已取消"
+    if event_status == "deleted" or status == "deleted":
+        return "已刪除"
+    if status in {"archived", "archive"}:
+        return "已封存"
+    if status in {"active", "followup"} or phase in {"active", "followup", "ongoing"}:
+        return "進行中"
+    if ev.get("do_not_treat_as_pending"):
+        return "已完成"
+    return status or phase or event_status or "未標示"
+
+
+def _memory_retention_status_label(ev):
+    raw = str((ev or {}).get("retention_status") or "pending_review").lower()
+    mapping = {
+        "pending_review": "待整理",
+        "": "待整理",
+        "kept": "長期保留",
+        "keep": "長期保留",
+        "retained": "長期保留",
+        "promoted_to_anniversary": "已升級紀念日",
+        "anniversary": "已升級紀念日",
+        "deleted": "已刪除",
+    }
+    return mapping.get(raw, raw)
+
+
 def _format_memory_event_item(ev, idx=None):
     prefix = f"{idx}. " if idx is not None else ""
     title = str(ev.get("title") or ev.get("id") or "未命名回憶")
     date = str(ev.get("anchor_date") or ev.get("created_at") or "")[:10]
-    summary = _clean_text_compact(ev.get("summary") or ev.get("archive_summary") or "；".join(ev.get("facts") or []))
-    status = str(ev.get("retention_status") or "pending_review")
-    return f"{prefix}**{ev.get('id')}｜{title}**\n   日期：{date}｜保留狀態：{status}\n   {summary[:220]}"
+    summary = _clean_text_compact(ev.get("summary") or ev.get("completion_summary") or ev.get("archive_summary") or "；".join(ev.get("facts") or []))
+    event_label = _memory_event_status_label(ev)
+    retention_label = _memory_retention_status_label(ev)
+    return f"{prefix}**{ev.get('id')}｜{title}**\n   日期：{date}｜事件狀態：{event_label}｜保留狀態：{retention_label}\n   {summary[:220]}"
 
 
 async def _memory_review_send_list(ctx, mode="all", page=1, query=""):
     items = _memory_review_candidates(mode, query=query)
     page_items, page, total_pages, total = _memory_paginate(items, page)
-    title = "📚 待整理回憶" if mode in {"待整理", "review"} else "📚 回憶清單"
+    title_map = {
+        "待整理": "📚 待整理回憶",
+        "review": "📚 待整理回憶",
+        "已保留": "📚 長期保留回憶",
+        "保留清單": "📚 長期保留回憶",
+        "長期": "📚 長期保留回憶",
+        "kept": "📚 長期保留回憶",
+        "已升級": "📚 已升級紀念日回憶",
+        "已升級紀念日": "📚 已升級紀念日回憶",
+        "promoted": "📚 已升級紀念日回憶",
+        "已完成": "📚 已完成回憶",
+        "completed": "📚 已完成回憶",
+        "已取消": "📚 已取消回憶",
+        "cancelled": "📚 已取消回憶",
+        "canceled": "📚 已取消回憶",
+    }
+    title = title_map.get(str(mode or "all").strip(), "📚 回憶清單")
     if query:
         title += f"｜搜尋：{query}"
     uid = getattr(ctx.author, "id", None)
@@ -3860,7 +3954,7 @@ async def _memory_review_send_list(ctx, mode="all", page=1, query=""):
     base_index = (page - 1) * MEMORY_REVIEW_PAGE_SIZE
     for idx, ev in enumerate(page_items, base_index + 1):
         lines.append(_format_memory_event_item(ev, idx))
-    lines.append("\n可直接處理上方編號：`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。")
+    lines.append("\n可直接處理上方編號：`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。也可用 `/回憶 已保留`、`/回憶 已完成`、`/回憶 已取消` 篩選。")
     lines.append("若進入等待輸入流程，可輸入 `c` 取消。")
     await ctx.send("\n".join(lines)[:1900])
 
@@ -3961,6 +4055,10 @@ async def _handle_memory_review_command(ctx, args=""):
     if raw.startswith("待整理"):
         payload = raw[len("待整理"):].strip()
         await _memory_review_send_list(ctx, mode="待整理", page=_parse_page_arg(payload, 1)); return
+    for filter_name in ("已保留", "保留清單", "長期", "已升級紀念日", "已升級", "已完成", "已取消"):
+        if raw == filter_name or raw.startswith(filter_name + " "):
+            payload = raw[len(filter_name):].strip()
+            await _memory_review_send_list(ctx, mode=filter_name, page=_parse_page_arg(payload, 1)); return
     if re.fullmatch(r"(?:第\s*)?\d+\s*(?:頁)?", raw):
         await _memory_review_send_list(ctx, mode="all", page=_parse_page_arg(raw, 1)); return
     for action in ("刪除", "保留", "升級紀念日"):
@@ -3981,7 +4079,7 @@ async def _handle_memory_review_command(ctx, args=""):
             if mnum:
                 await _memory_review_apply_action(ctx, action, int(mnum.group(0)), mode=mode, query=query); return
             await _memory_review_start_select_flow(ctx, action=action, mode=mode, page=page, query=query); return
-    await ctx.send("指令格式：`/回憶`、`/回憶 待整理`、`/回憶 搜尋 關鍵字`、`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。等待輸入時可按 `c` 取消。")
+    await ctx.send("指令格式：`/回憶`、`/回憶 待整理`、`/回憶 已保留`、`/回憶 已完成`、`/回憶 已取消`、`/回憶 搜尋 關鍵字`、`/回憶 刪除 2`、`/回憶 保留 1`、`/回憶 升級紀念日 3`。等待輸入時可按 `c` 取消。")
 
 
 async def _handle_memory_review_message_direct(message):
@@ -15646,6 +15744,7 @@ async def on_message(message):
                     )
                     + "【我們的珍貴記憶庫｜僅作背景參考，不要逐字複述】：\n"
                     "【長期人設優先規則】：大俠人設與小俠人設是大俠手動整理的穩定長期事實。當大俠問『你知道我嗎』『我為妳做過什麼』『妳是誰』『我們是什麼關係』或類似問題時，必須優先依這兩份人設回答；但仍用自然女友口吻表達，不提 JSON、檔案、prompt 或系統。\n"
+                    "【回憶狀態解讀規則】：life_events 的 retention_status=pending_review 只代表等待大俠決定是否長期保存，不代表事件未完成、承諾未履行或仍需跟進。若 current_phase=completed、event_status=completed、completion_status=completed、或 do_not_treat_as_pending=true，必須視為已發生且已完成的回憶；只有大俠主動提到時才可作背景，不得主動催辦或當成未完成事項。\n"
                     f"▶️ 大俠的完整穩定人設：{daxia_traits}\n"
                     f"▶️ 妳的固定核心身份：{XIAOXIA_CORE_IDENTITY}\n"
                     f"▶️ 妳的完整穩定人設、興趣、能力與生活感：{xiaoxia_personality}\n"
