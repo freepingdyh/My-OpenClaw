@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.19-R2"
+LOBSTER_VERSION = "1.5.20"
 
 
 def _normalize_generation_level(level):
@@ -541,6 +541,18 @@ def _env_bool(name, default=False):
         return bool(default)
     return str(raw).strip().lower() not in {"0", "false", "no", "off", "關", "關閉"}
 
+
+def _env_int(name, default=0, min_value=None, max_value=None):
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except Exception:
+        value = int(default)
+    if min_value is not None:
+        value = max(int(min_value), value)
+    if max_value is not None:
+        value = min(int(max_value), value)
+    return value
+
 # v1.5.16：主線生圖預設關閉 fal.ai / Seedream safety checker。
 # 影響：/photo、/cosplay、/交換日記、/photo_raw，以及舊 travel/shopping/world scene Seedream 路徑。
 # 可在 Zeabur 環境變數設 SEEDREAM_ENABLE_SAFETY_CHECKER=true 臨時改回開啟。
@@ -548,6 +560,15 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 
 # 衣櫃去人化仍保留獨立開關，預設 true；若之後要連去人化也關，可設 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER=false。
 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER", True)
+
+# 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
+XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
+XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS = _env_int("XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS", 2, 1, 8)
+XIAOXIA_AUTONOMY_ACTIVE_START_HOUR = _env_int("XIAOXIA_AUTONOMY_ACTIVE_START_HOUR", 9, 0, 23)
+XIAOXIA_AUTONOMY_ACTIVE_END_HOUR = _env_int("XIAOXIA_AUTONOMY_ACTIVE_END_HOUR", 22, 1, 23)
+XIAOXIA_AUTONOMY_CHANNEL_ID = _env_int("XIAOXIA_AUTONOMY_CHANNEL_ID", 0, 0, None)
+XIAOXIA_AUTONOMY_CHANNEL_NAME = os.environ.get("XIAOXIA_AUTONOMY_CHANNEL_NAME", "唐分糕").strip() or "唐分糕"
+
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
 WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
 WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
@@ -1382,6 +1403,53 @@ def _autonomy_enrich_activity(item):
     return out
 
 
+def _autonomy_time_bucket(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    h = int(now_dt.hour)
+    if 5 <= h < 11:
+        return "morning", "早晨"
+    if 11 <= h < 14:
+        return "noon", "中午"
+    if 14 <= h < 18:
+        return "afternoon", "午後"
+    if 18 <= h < 22:
+        return "evening", "晚間"
+    return "night", "夜裡"
+
+
+def _autonomy_apply_time_context(activity, now_dt=None):
+    """v1.5.20：活動名稱與場景要貼合實際觸發時間，避免晚上 8 點還說午後閱讀。"""
+    item = _autonomy_enrich_activity(activity)
+    if not isinstance(item, dict):
+        return item
+    bucket, label = _autonomy_time_bucket(now_dt)
+    aid = str(item.get("id") or "")
+    title = str(item.get("title") or "")
+    seed = str(item.get("photo_prompt_seed") or "")
+
+    if aid == "home_reading_afternoon" or "午後閱讀" in title:
+        if bucket in {"evening", "night"}:
+            item["title"] = "晚間閱讀" if bucket == "evening" else "睡前閱讀"
+            item["photo_prompt_seed"] = "小俠在書房或窗邊沙發晚間閱讀，手邊有書與熱茶，燈光溫暖安靜，居家生活感清楚。"
+        elif bucket == "morning":
+            item["title"] = "晨間閱讀"
+            item["photo_prompt_seed"] = "小俠在窗邊或書房晨間閱讀，手邊有書與溫茶，柔和晨光、安靜知性的居家氛圍。"
+        else:
+            item["title"] = "午後閱讀"
+            item["photo_prompt_seed"] = seed or "小俠在書房或窗邊沙發閱讀，手邊有茶與書籤，安靜、知性、溫柔。"
+    elif bucket in {"evening", "night"}:
+        if "午後" in title:
+            item["title"] = title.replace("午後", "晚間" if bucket == "evening" else "睡前")
+        if "下午" in str(item.get("title") or ""):
+            item["title"] = str(item.get("title") or "").replace("下午", "晚間" if bucket == "evening" else "夜裡")
+        if "午後" in seed or "下午" in seed:
+            item["photo_prompt_seed"] = seed.replace("午後", "晚間" if bucket == "evening" else "睡前").replace("下午", "晚間" if bucket == "evening" else "夜裡")
+
+    item["time_bucket"] = bucket
+    item["time_label"] = label
+    return item
+
+
 def _autonomy_all_categories(catalog=None):
     catalog = catalog or load_xiaoxia_activity_catalog()
     cats = []
@@ -1731,7 +1799,7 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
         modes = selected.get("visual_mode_candidates") or ["daily_life"]
         reward_due, reward_gap = _autonomy_should_reward_today(state)
         visual_mode = "reward_eye_candy" if reward_due and "reward_eye_candy" in modes else ("daily_life" if "daily_life" in modes else str(modes[0] or "daily_life"))
-        return selected, visual_mode, reward_gap
+        return _autonomy_apply_time_context(selected), visual_mode, reward_gap
     if category_filter:
         filtered = [x for x in catalog if str(x.get("category") or "") == str(category_filter)]
         if filtered:
@@ -1776,7 +1844,7 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
         visual_mode = "daily_life"
     else:
         visual_mode = str(modes[0] or "daily_life")
-    return selected, visual_mode, reward_gap
+    return _autonomy_apply_time_context(selected), visual_mode, reward_gap
 
 
 def _autonomy_wardrobe_candidate_score(item, activity, visual_mode):
@@ -2112,7 +2180,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 指定活動 sport_tennis`：直接指定今天的活動。\n"
             "`/小俠自主 狀態`：查看今日活動、主題線與養眼照保底狀態。\n"
             "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
-            "`/小俠自主 變事件`：把今天這個題材升級成近期事件。"
+            "`/小俠自主 變事件`：把今天這個題材升級成近期事件。\n"
+            "自動排程：Zeabur 設 `XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT=1~6` 可讓小俠每日不定時自主活動；每次至少間隔 `XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS` 小時。"
         )
         return True
 
@@ -16356,6 +16425,10 @@ async def on_ready():
         monthly_memory_review_reminder_task.start()
         print("📚 每月25日 08:00 回憶整理提醒已啟動（只提醒，不列清單）。")
 
+    if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 and not xiaoxia_autonomy_auto_task.is_running():
+        xiaoxia_autonomy_auto_task.start()
+        print(f"🌱 小俠自主自動排程已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}")
+
 @girlfriend_bot.command(name='more')
 async def more(ctx):
     if not state["current_topic_data"]:
@@ -18004,6 +18077,143 @@ async def test_lyric_push(interaction: discord.Interaction):
     )
     # 這裡隨便找一個您頻道現有的 MP3 網址或空的 File 即可
     await interaction.response.send_message(content="📡 正在測試歌詞推送功能...", embed=embed)
+
+# ==========================================
+# 🌱 v1.5.20 小俠自主自動活動排程
+# ==========================================
+def _get_xiaoxia_autonomy_channel_for_auto():
+    channel = None
+    if XIAOXIA_AUTONOMY_CHANNEL_ID:
+        try:
+            channel = girlfriend_bot.get_channel(int(XIAOXIA_AUTONOMY_CHANNEL_ID))
+        except Exception:
+            channel = None
+    if channel is None:
+        channel = discord.utils.get(girlfriend_bot.get_all_channels(), name=XIAOXIA_AUTONOMY_CHANNEL_NAME)
+    return channel
+
+
+def _autonomy_generate_auto_slots(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    count = int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0)
+    if count <= 0:
+        return []
+    start_hour = int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR)
+    end_hour = int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR)
+    if end_hour <= start_hour:
+        end_hour = min(23, start_hour + 1)
+    min_gap_minutes = max(60, int(XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS or 2) * 60)
+
+    start_dt = now_dt.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    end_dt = now_dt.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+    earliest = start_dt
+    if now_dt.date() == start_dt.date():
+        earliest = max(start_dt, now_dt + timedelta(minutes=10))
+    if earliest > end_dt:
+        return []
+
+    available_minutes = int((end_dt - earliest).total_seconds() // 60)
+    max_count_by_gap = max(1, available_minutes // min_gap_minutes + 1)
+    count = max(0, min(count, max_count_by_gap, 6))
+    if count <= 0:
+        return []
+
+    slots = []
+    for _ in range(200):
+        candidates = sorted(random.randint(0, max(0, available_minutes)) for __ in range(count))
+        if all((candidates[i] - candidates[i-1]) >= min_gap_minutes for i in range(1, len(candidates))):
+            slots = candidates
+            break
+    if not slots:
+        slots = [min(available_minutes, i * min_gap_minutes) for i in range(count)]
+
+    rows = []
+    for idx, minute_offset in enumerate(slots, 1):
+        t = earliest + timedelta(minutes=int(minute_offset))
+        rows.append({
+            "id": f"AUTO_SLOT_{now_dt.strftime('%Y%m%d')}_{idx:02d}",
+            "time": t.strftime("%H:%M"),
+            "status": "pending",
+            "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    return rows
+
+
+def _autonomy_ensure_auto_schedule(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    date_key = now_dt.strftime("%Y-%m-%d")
+    state = load_xiaoxia_autonomy_state()
+    scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+    expected = int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0)
+    if scheduler.get("date") != date_key or int(scheduler.get("daily_limit") or -1) != expected:
+        scheduler = {
+            "date": date_key,
+            "daily_limit": expected,
+            "min_interval_hours": int(XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS or 2),
+            "active_start_hour": int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR),
+            "active_end_hour": int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR),
+            "channel_name": XIAOXIA_AUTONOMY_CHANNEL_NAME,
+            "slots": _autonomy_generate_auto_slots(now_dt),
+            "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        state["auto_scheduler"] = scheduler
+        save_xiaoxia_autonomy_state(state)
+        print(f"🌱 [AUTONOMY_AUTO_SCHEDULE_CREATED] date={date_key} slots={scheduler.get('slots')}")
+    return scheduler
+
+
+@tasks.loop(minutes=10)
+async def xiaoxia_autonomy_auto_task():
+    if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) <= 0:
+        return
+    now_dt = datetime.now(TZ_TPE)
+    scheduler = _autonomy_ensure_auto_schedule(now_dt)
+    slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
+    due = []
+    for item in slots:
+        if not isinstance(item, dict) or item.get("status") != "pending":
+            continue
+        try:
+            hh, mm = [int(x) for x in str(item.get("time") or "").split(":", 1)]
+            slot_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        except Exception:
+            continue
+        if now_dt >= slot_dt:
+            due.append(item)
+    if not due:
+        return
+
+    channel = _get_xiaoxia_autonomy_channel_for_auto()
+    if not channel:
+        print(f"⚠️ [AUTONOMY_AUTO_CHANNEL_MISSING] id={XIAOXIA_AUTONOMY_CHANNEL_ID} name={XIAOXIA_AUTONOMY_CHANNEL_NAME}")
+        return
+
+    item = due[0]
+    item["status"] = "running"
+    item["started_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    state = load_xiaoxia_autonomy_state()
+    state["auto_scheduler"] = scheduler
+    save_xiaoxia_autonomy_state(state)
+
+    try:
+        await channel.send(f"🌱 小俠到了今天自己安排的生活時段（{item.get('time')}），準備去做一件事、拍一張照給大俠。")
+        fake_message = type("AutonomyAutoMessage", (), {})()
+        fake_message.channel = channel
+        fake_message.author = getattr(girlfriend_bot, "user", None)
+        fake_message.content = "/小俠自主 重抽"
+        ok = await handle_xiaoxia_autonomy_command(fake_message, "/小俠自主 重抽")
+        item["status"] = "sent" if ok else "failed"
+        item["sent_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as exc:
+        item["status"] = "failed"
+        item["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+        print(f"⚠️ [AUTONOMY_AUTO_SEND_FAILED] {item['error']}")
+    finally:
+        state = load_xiaoxia_autonomy_state()
+        scheduler["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_scheduler"] = scheduler
+        save_xiaoxia_autonomy_state(state)
+
 
 # ==========================================
 # ⏰ 自動排程系統
