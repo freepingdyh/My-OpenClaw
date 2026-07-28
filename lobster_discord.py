@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.18"
+LOBSTER_VERSION = "1.5.19"
 
 
 def _normalize_generation_level(level):
@@ -2230,7 +2230,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             return True
         specified_label = f"指定活動：{specified_activity.get('title')}"
     elif arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
-        await message.channel.send("大俠，目前 v1.5.17 R4 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ...`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`。")
+        await message.channel.send("大俠，目前 v1.5.19 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ...`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
         return True
 
     force_reroll = arg_key in {"重抽", "再抽", "重拍"} or bool(specified_category or specified_activity)
@@ -14557,9 +14557,120 @@ def _photo_context_old_url(context):
     return context.get("local_url") or context.get("image_url")
 
 
+def _is_autonomy_context(context):
+    if not isinstance(context, dict):
+        return False
+    source_module = str(context.get("source_module") or "").strip().lower()
+    image_role = str(context.get("image_role") or "").strip().lower()
+    photo_mode = str(context.get("photo_mode_override") or "").strip().lower()
+    source_mode = str(context.get("source_mode") or context.get("type") or "").strip().lower()
+    return (
+        source_module == "autonomy"
+        or image_role == "autonomy_today_image"
+        or photo_mode == "xiaoxia_autonomy"
+        or source_mode == "autonomy_photo"
+    )
+
+
+def _context_db_type(context):
+    mode = str((context or {}).get("source_mode") or (context or {}).get("type") or "").lower()
+    if mode == "cosplay":
+        return "cosplay"
+    if _is_autonomy_context(context):
+        return "autonomy_photo"
+    return "photo"
+
+
+def _autonomy_context_matches_today(today, context):
+    if not isinstance(today, dict) or not isinstance(context, dict):
+        return False
+    episode_id = str(context.get("episode_id") or "").strip()
+    if episode_id and str(today.get("episode_id") or "").strip() == episode_id:
+        return True
+    old_url = str(_photo_context_old_url(context) or "").strip()
+    if old_url and str(today.get("photo_url") or "").strip() == old_url:
+        return True
+    activity = context.get("autonomy_activity") if isinstance(context.get("autonomy_activity"), dict) else {}
+    activity_id = str(activity.get("id") or context.get("activity_id") or "").strip()
+    if activity_id and str(today.get("activity_id") or "").strip() == activity_id and str(today.get("date") or "") == datetime.now(TZ_TPE).strftime("%Y-%m-%d"):
+        return True
+    return False
+
+
+def _autonomy_update_episode_artifacts(episode_id, payload):
+    episode_id = str(episode_id or "").strip()
+    if not episode_id:
+        return False
+    rows = load_xiaoxia_autonomy_episode_log()
+    changed = False
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("episode_id") or "").strip() == episode_id:
+            for k, v in (payload or {}).items():
+                row[k] = v
+            changed = True
+            break
+    if changed:
+        save_xiaoxia_autonomy_episode_log(rows)
+    return changed
+
+
+def _sync_autonomy_today_after_photo_replace(original_context, new_context):
+    if not _is_autonomy_context(original_context):
+        return False
+    try:
+        state = load_xiaoxia_autonomy_state()
+        today = state.get("today") if isinstance(state.get("today"), dict) else {}
+        if not _autonomy_context_matches_today(today, original_context):
+            return False
+
+        activity = new_context.get("autonomy_activity") if isinstance(new_context.get("autonomy_activity"), dict) else (
+            original_context.get("autonomy_activity") if isinstance(original_context.get("autonomy_activity"), dict) else {}
+        )
+        photo_url = str(new_context.get("local_url") or new_context.get("image_url") or today.get("photo_url") or "").strip()
+        episode_id = str(new_context.get("episode_id") or original_context.get("episode_id") or today.get("episode_id") or "").strip()
+        if episode_id:
+            new_context["episode_id"] = episode_id
+
+        today_updates = {
+            "photo_url": photo_url,
+            "share_text": str(new_context.get("message") or today.get("share_text") or "").strip(),
+            "mood": str(new_context.get("mood_summary") or today.get("mood") or "").strip(),
+            "scene": str((activity.get("photo_prompt_seed") if activity else "") or today.get("scene") or "").strip(),
+            "wardrobe_id": str(new_context.get("wardrobe_id") or today.get("wardrobe_id") or "").strip(),
+            "wardrobe_name": str(new_context.get("wardrobe_name") or today.get("wardrobe_name") or "").strip(),
+            "wardrobe_reason": str(new_context.get("wardrobe_reason") or today.get("wardrobe_reason") or "").strip(),
+            "visual_mode": str(new_context.get("visual_mode") or today.get("visual_mode") or "").strip(),
+            "activity_id": str((activity.get("id") if activity else "") or today.get("activity_id") or "").strip(),
+            "activity_title": str((activity.get("title") if activity else "") or today.get("activity_title") or "").strip(),
+            "activity_category": str((activity.get("category") if activity else "") or today.get("activity_category") or "").strip(),
+            "episode_id": episode_id or str(today.get("episode_id") or "").strip(),
+        }
+        today.update(today_updates)
+        state["today"] = today
+        save_xiaoxia_autonomy_state(state)
+
+        _autonomy_update_episode_artifacts(today.get("episode_id") or episode_id, {
+            "photo_url": today.get("photo_url") or "",
+            "share_text": today.get("share_text") or "",
+            "mood": today.get("mood") or "",
+            "scene": today.get("scene") or "",
+            "wardrobe_id": today.get("wardrobe_id") or "",
+            "wardrobe_name": today.get("wardrobe_name") or "",
+            "wardrobe_reason": today.get("wardrobe_reason") or "",
+            "visual_mode": today.get("visual_mode") or "",
+            "activity_id": today.get("activity_id") or "",
+            "activity_title": today.get("activity_title") or "",
+            "category": today.get("activity_category") or "",
+        })
+        return True
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_SYNC_AFTER_REPLACE_FAILED] {type(exc).__name__}: {exc}")
+        return False
+
+
 async def _overwrite_generated_photo(original_context, repaired_context, message=None):
     old_url = _photo_context_old_url(original_context)
-    repaired_payload = _photo_db_payload(repaired_context)
+    repaired_payload = _photo_db_payload(repaired_context, type_override=_context_db_type(repaired_context))
 
     # 交換日記：同步 HTML 與照片 DB。
     if str(original_context.get("type") or "").lower() == "diary" or "交換日記" in str(original_context.get("topic", "")):
@@ -14586,6 +14697,7 @@ async def _overwrite_generated_photo(original_context, repaired_context, message
         await _edit_photo_message_with_file(message, repaired_context, view=view, title_prefix="🩹 修正版已覆蓋")
         photo_generation_contexts[message.id] = repaired_context
 
+    _sync_autonomy_today_after_photo_replace(original_context, repaired_context)
     _safe_delete_vault_image(old_url)
     return repaired_context
 
@@ -14718,6 +14830,181 @@ class PhotoRepairPreviewView(discord.ui.View):
 
 
 
+async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
+    """完整重擲 /小俠自主：重新抽活動、重新口語分享、重新生圖，並更新今日自主狀態。"""
+    original_context = dict(original_context or {})
+    raw = str(original_context.get("user_input") or "/小俠自主 重抽").strip() or "/小俠自主 重抽"
+    catalog = load_xiaoxia_activity_catalog()
+    current_activity = original_context.get("autonomy_activity") if isinstance(original_context.get("autonomy_activity"), dict) else {}
+    current_activity = _autonomy_enrich_activity(current_activity) if current_activity else {}
+    current_id = str(current_activity.get("id") or original_context.get("activity_id") or "").strip()
+
+    preserve_category = None
+    specified_label = ""
+    m_cat = re.match(r"^/小俠自主\s+指定類別\s+(.+)$", raw, flags=re.IGNORECASE)
+    m_act = re.match(r"^/小俠自主\s+指定活動\s+(.+)$", raw, flags=re.IGNORECASE)
+    if m_cat:
+        q = str(m_cat.group(1) or "").strip()
+        preserve_category = _autonomy_resolve_category(q, catalog=catalog)
+        if preserve_category:
+            specified_label = f"指定類別：{preserve_category}"
+    elif m_act:
+        q = str(m_act.group(1) or "").strip()
+        act = _autonomy_resolve_activity(q, catalog=catalog)
+        if isinstance(act, dict):
+            preserve_category = str(act.get("category") or "").strip() or None
+            if preserve_category:
+                specified_label = f"指定活動同類：{preserve_category}"
+
+    available = [x for x in catalog if isinstance(x, dict) and (not preserve_category or str(x.get("category") or "") == preserve_category)]
+    unique_ids = {str(x.get("id") or "").strip() for x in available if str(x.get("id") or "").strip()}
+
+    if msg:
+        await msg.edit(content="🔄 小俠正在重新安排今天的自主生活：重抽活動、重寫分享、重新拍照…")
+
+    activity = None
+    visual_mode = "daily_life"
+    reward_gap = 999
+    for _ in range(8):
+        candidate, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=preserve_category)
+        candidate = _autonomy_enrich_activity(candidate)
+        if len(unique_ids) <= 1 or str(candidate.get("id") or "").strip() != current_id:
+            activity = candidate
+            break
+    if activity is None:
+        activity, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=preserve_category)
+        activity = _autonomy_enrich_activity(activity)
+
+    thread_context = _autonomy_thread_context_for_activity(activity)
+    wardrobe_item, wardrobe_reason = _autonomy_choose_wardrobe(activity, visual_mode)
+    reference_item_path = None
+    reference_item_url = None
+    wardrobe_id = None
+    wardrobe_name = ""
+    if isinstance(wardrobe_item, dict):
+        reference_item_path = wardrobe_item.get("reference_image_path")
+        reference_item_url = wardrobe_item.get("local_url")
+        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
+            reference_item_path = reference_item_url
+        if not reference_item_path:
+            wardrobe_item = None
+        else:
+            wardrobe_id = wardrobe_item.get("id")
+            wardrobe_name = wardrobe_item.get("name")
+
+    policy_info = _autonomy_people_policy_info(activity)
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
+    source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
+    context = {
+        "mode": source_mode,
+        "source_mode": source_mode,
+        "source_module": "autonomy",
+        "image_role": "autonomy_today_image",
+        "scene_text": f"小俠自主生活｜{activity.get('title')}",
+        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": activity.get("title") or "",
+        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": "lifestyle portrait",
+        "prompt_base": prompt_base,
+        "reference_item_path": reference_item_path,
+        "reference_item_url": reference_item_url,
+        "wardrobe_id": wardrobe_id,
+        "generation_mode": source_mode,
+        "used_pending_wardrobe": bool(wardrobe_item),
+        "photo_mode_override": "xiaoxia_autonomy",
+        "user_input": raw,
+        "trace_action": "xiaoxia_autonomy_full_reroll",
+        "__trace_context": {
+            "kind": "photo",
+            "action": "xiaoxia_autonomy_full_reroll",
+            "source_mode": source_mode,
+            "user_input": raw,
+            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
+            "wardrobe_id": wardrobe_id,
+            "wardrobe_name": wardrobe_name,
+            "visual_mode": visual_mode,
+            "activity": activity,
+            "theme_key": _autonomy_theme_key_for_activity(activity),
+            "continuity_group": _autonomy_continuity_group_for_activity(activity),
+            "thread_context": thread_context,
+            "specified_label": specified_label,
+            "reward_gap_days": reward_gap,
+            "custom_people_policy": policy_info.get("policy_key"),
+            "autonomy_people_policy": policy_info.get("policy_key"),
+            "allow_background_bystanders_override": bool(policy_info.get("allow_background_bystanders")),
+            "strict_solo_required_override": bool(policy_info.get("strict_solo_required")),
+            "male_background_ok": bool(policy_info.get("male_background_ok")),
+            "female_background_ok": bool(policy_info.get("female_background_ok")),
+            "no_male_people": bool(policy_info.get("no_male_people")),
+        },
+    }
+
+    if msg:
+        await msg.edit(content=f"📸 小俠把今天的自主活動改成：**{activity.get('title')}**。正在重新拍下這一刻…")
+
+    context = await _generate_photo_from_context(context, msg=msg)
+    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context)
+    context["message"] = share_text
+    context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
+    context["autonomy_activity"] = activity
+    context["visual_mode"] = visual_mode
+    context["wardrobe_reason"] = wardrobe_reason
+    context["wardrobe_name"] = wardrobe_name or ""
+
+    if wardrobe_item:
+        _log_wardrobe_usage(
+            wardrobe_item,
+            purpose="autonomy_reward" if visual_mode == "reward_eye_candy" else "autonomy_daily",
+            scene_text=activity.get("photo_prompt_seed") or activity.get("title") or "",
+            extra={
+                "source_mode": "xiaoxia_autonomy",
+                "mood": context.get("mood_summary") or "",
+                "visual_mode": visual_mode,
+                "activity_id": activity.get("id"),
+                "activity_category": activity.get("category"),
+            },
+        )
+
+    today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    today_payload = {
+        "date": today_key,
+        "activity_id": activity.get("id"),
+        "activity_title": activity.get("title"),
+        "activity_category": activity.get("category"),
+        "theme_key": _autonomy_theme_key_for_activity(activity),
+        "continuity_group": _autonomy_continuity_group_for_activity(activity),
+        "thread_context": thread_context,
+        "specified_label": specified_label,
+        "visual_mode": visual_mode,
+        "wardrobe_id": wardrobe_id or "",
+        "wardrobe_name": wardrobe_name or "",
+        "wardrobe_reason": wardrobe_reason,
+        "scene": activity.get("photo_prompt_seed") or "",
+        "mood": context.get("mood_summary") or "",
+        "share_text": share_text,
+        "photo_sent": True,
+        "photo_url": context.get("local_url") or context.get("image_url") or "",
+        "sent_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "event_upgrade_potential": activity.get("event_upgrade_potential") or "",
+    }
+    state = load_xiaoxia_autonomy_state()
+    if state.get("today") and isinstance(state.get("today"), dict) and state["today"].get("date") == today_key and state["today"].get("photo_sent"):
+        state.setdefault("history", []).append(dict(state["today"]))
+    episode = _autonomy_append_episode(today_payload, activity, context=context)
+    today_payload["episode_id"] = episode.get("episode_id", "")
+    context["episode_id"] = today_payload["episode_id"]
+    state["today"] = today_payload
+    if visual_mode == "reward_eye_candy":
+        state["last_reward_photo_date"] = today_key
+    save_xiaoxia_autonomy_state(state)
+
+    daily_chat_logs = load_temp_chat()
+    daily_chat_logs.append(narrative_safe_text(f"【小俠自主生活】{activity.get('title')}｜{share_text}", max_len=900))
+    save_temp_chat(daily_chat_logs)
+    return context
+
+
 async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_topic=True):
     """完整重擲：重新選題、重新內文、重新生圖，回傳可直接覆蓋訊息的 cosplay context。"""
     raw_mode = str(mode or "auto").strip() or "auto"
@@ -14836,7 +15123,7 @@ class PhotoResultView(discord.ui.View):
         try:
             new_context = await _generate_photo_from_context(context)
             db = load_memory()
-            db.insert(0, _photo_db_payload(new_context))
+            db.insert(0, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
             save_memory(db)
             _set_current_outfit_state(_build_outfit_state_from_context(new_context))
             _log_wardrobe_usage_from_context(new_context, purpose="photo_more")
@@ -14869,7 +15156,8 @@ class PhotoResultView(discord.ui.View):
         try:
             old_url = context.get("local_url") or context.get("image_url")
             new_context = await _generate_photo_from_context(context)
-            _replace_photo_db_record(old_url, _photo_db_payload(new_context))
+            _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
+            _sync_autonomy_today_after_photo_replace(context, new_context)
             _safe_delete_vault_image(old_url)
             _set_current_outfit_state(_build_outfit_state_from_context(new_context))
             _log_wardrobe_usage_from_context(new_context, purpose="photo_reroll")
@@ -14885,16 +15173,25 @@ class PhotoResultView(discord.ui.View):
     async def full_reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
-        if str(context.get("type") or context.get("source_mode") or "").lower() != "cosplay":
-            await interaction.followup.send("🔄 完整重擲目前只套用在 cosplay；這張先用『骰子取代』重畫。", ephemeral=True)
+        mode_key = str(context.get("type") or context.get("source_mode") or "").lower()
+        is_autonomy = _is_autonomy_context(context)
+        if mode_key != "cosplay" and not is_autonomy:
+            await interaction.followup.send("🔄 完整重擲目前支援 cosplay 與 /小俠自主；這張先用『骰子取代』重畫。", ephemeral=True)
             return
         status = None
         try:
-            status = await interaction.followup.send("🔄 小俠正在重新抽題、重寫內文、重新生圖…", wait=True)
-            old_url = context.get("local_url") or context.get("image_url")
-            new_context = await _create_cosplay_context_for_reroll(context.get("user_mode_request") or "auto", msg=status, force_new_topic=True)
-            _replace_photo_db_record(old_url, _photo_db_payload(new_context))
-            _safe_delete_vault_image(old_url)
+            if mode_key == "cosplay":
+                status = await interaction.followup.send("🔄 小俠正在重新抽題、重寫內文、重新生圖…", wait=True)
+                old_url = context.get("local_url") or context.get("image_url")
+                new_context = await _create_cosplay_context_for_reroll(context.get("user_mode_request") or "auto", msg=status, force_new_topic=True)
+                _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
+                _safe_delete_vault_image(old_url)
+            else:
+                status = await interaction.followup.send("🔄 小俠正在重新安排今天的自主活動、重寫分享、重新拍照…", wait=True)
+                old_url = context.get("local_url") or context.get("image_url")
+                new_context = await _create_autonomy_context_for_full_reroll(context, msg=status)
+                _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
+                _safe_delete_vault_image(old_url)
             self.context = new_context
             if interaction.message:
                 new_context["message_id"] = interaction.message.id
@@ -14933,7 +15230,7 @@ class PhotoResultView(discord.ui.View):
         try:
             new_context = await _generate_photo_from_context(context)
             db = load_memory()
-            db_type = "cosplay" if str(new_context.get("source_mode") or new_context.get("type") or "").lower() == "cosplay" else "photo"
+            db_type = _context_db_type(new_context)
             db.insert(0, _photo_db_payload(new_context, type_override=db_type))
             save_memory(db)
             view = PhotoResultView(new_context)
@@ -14960,7 +15257,7 @@ class PhotoResultView(discord.ui.View):
             return
         await interaction.response.defer(thinking=True)
         try:
-            db_type = "cosplay" if str(context.get("source_mode") or context.get("type") or "").lower() == "cosplay" else "photo"
+            db_type = _context_db_type(context)
             _replace_photo_db_record(target_url, _photo_db_payload(context, type_override=db_type))
             _safe_delete_vault_image(target_url)
             if target_mid and interaction.channel:
