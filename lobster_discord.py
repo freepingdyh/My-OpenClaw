@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.20"
+LOBSTER_VERSION = "1.5.20-R1"
 
 
 def _normalize_generation_level(level):
@@ -1445,6 +1445,26 @@ def _autonomy_apply_time_context(activity, now_dt=None):
         if "午後" in seed or "下午" in seed:
             item["photo_prompt_seed"] = seed.replace("午後", "晚間" if bucket == "evening" else "睡前").replace("下午", "晚間" if bucket == "evening" else "夜裡")
 
+    # v1.5.20-R1：所有夜間/晚間活動都要修正光線邏輯，不只閱讀類。
+    # 避免 20:00 以後仍出現明亮白天窗光、陽光灑落、柔和自然光等失真場景。
+    seed2 = str(item.get("photo_prompt_seed") or "")
+    if bucket in {"evening", "night"}:
+        replacements = {
+            "柔和自然光": "溫暖室內燈光",
+            "自然光": "室內暖光",
+            "陽光": "室內暖光",
+            "晨光": "室內暖光",
+            "午後光線": "晚間室內燈光",
+            "白天": "晚間",
+        }
+        for k, v in replacements.items():
+            seed2 = seed2.replace(k, v)
+        if seed2 and not any(x in seed2 for x in ["夜", "晚間", "室內燈", "暖光", "窗外"]):
+            seed2 += "，時間是晚間，窗外應是夜色或暗窗景，主要光源來自室內燈光。"
+        elif seed2:
+            seed2 += "，請符合當下晚間時間：窗外不能是明亮白天，主要光源來自室內暖燈或教室燈。"
+        item["photo_prompt_seed"] = seed2
+
     item["time_bucket"] = bucket
     item["time_label"] = label
     return item
@@ -2120,6 +2140,29 @@ def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
         composition_guard += " For concert scenes, prefer the concert hall lobby, corridor, side foyer, entrance area, or intermission moment with Xiaoxia holding a program booklet. Avoid stage-dominant or audience-dominant compositions."
 
     thread_context = _autonomy_thread_context_for_activity(activity)
+    now_dt = datetime.now(TZ_TPE)
+    _bucket, _time_label = _autonomy_time_bucket(now_dt)
+    if _bucket in {"evening", "night"}:
+        time_lighting_rule = (
+            f"Current Taiwan local time is {now_dt.strftime('%H:%M')} ({_time_label}). "
+            "The image must visually match evening/night. If windows are visible, they must look dark outside or show night city reflections, not bright daylight. "
+            "Do not use sunshine, morning light, afternoon sunlight, or bright white daytime window light. Use warm indoor lamps, classroom ceiling lights, studio lighting, or cozy evening ambient light instead."
+        )
+    elif _bucket == "morning":
+        time_lighting_rule = (
+            f"Current Taiwan local time is {now_dt.strftime('%H:%M')} ({_time_label}). "
+            "Use morning-appropriate light only; do not make it look like afternoon or night."
+        )
+    elif _bucket == "afternoon":
+        time_lighting_rule = (
+            f"Current Taiwan local time is {now_dt.strftime('%H:%M')} ({_time_label}). "
+            "Use afternoon-appropriate light; do not make it look like night."
+        )
+    else:
+        time_lighting_rule = (
+            f"Current Taiwan local time is {now_dt.strftime('%H:%M')} ({_time_label}). "
+            "Use lighting consistent with this time of day."
+        )
 
     return f"""
 Xiaoxia autonomy daily photo.
@@ -2128,6 +2171,8 @@ Activity title: {title}
 Activity category: {category}
 Activity tags: {tags}
 Location type: {location_type}
+Current time context: {now_dt.strftime('%Y-%m-%d %H:%M')} Taiwan time, {_time_label}
+Time and lighting rule: {time_lighting_rule}
 Scene seed: {seed}
 
 Narrative intent:
