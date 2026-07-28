@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.20-R1"
+LOBSTER_VERSION = "1.5.20-R2"
 
 
 def _normalize_generation_level(level):
@@ -16050,8 +16050,19 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 diary_wardrobe = None
 
             auto_autonomy_diary = None
+            autonomy_diary_hint = ""
             if not custom_diary and not committed_diary_photo_task:
                 auto_autonomy_diary = _get_autonomy_today_diary_candidate(entry_date)
+                if auto_autonomy_diary:
+                    autonomy_diary_hint = (
+                        "\n\n【今日小俠自主活動可作為交換日記題材｜但不可直接重用同一張圖】"
+                        f"\n- 今日自主活動：{auto_autonomy_diary.get('activity_title') or '小俠自主生活'}"
+                        f"\n- 自主活動場景素材：{auto_autonomy_diary.get('composition') or ''}"
+                        f"\n- 小俠當時分享：{auto_autonomy_diary.get('message') or ''}"
+                        "\n- 交換日記可以承接這個題材與心情，但必須重新生成一張新的 Diary 照片。"
+                        "\n- 嚴禁直接使用、複製或重貼今日 /小俠自主 那張照片；不要做成完全相同的構圖、姿勢與光線。"
+                        "\n- 建議改成同一活動的另一個瞬間、活動後回家整理心情、寫日記前回想今天活動，或更符合交換日記的生活化新鏡頭。"
+                    )
 
             if custom_diary:
                 print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 AI 生圖！")
@@ -16063,26 +16074,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 diary_visual["message"] = custom_diary.get("message") or diary_visual.get("message", "")
                 del overrides[entry_date]
                 save_diary_override(overrides)
-            elif auto_autonomy_diary:
-                print(f"📸 [{entry_date}] 無手動 Diary 圖，改用今日 /小俠自主 新生圖。")
-                up_img = auto_autonomy_diary["image_url"]
-                local_url = auto_autonomy_diary["image_url"]
-                result["scenario_tw"] = auto_autonomy_diary.get("composition", result.get("scenario_tw", ""))
-                diary_visual["composition"] = result["scenario_tw"]
-                diary_visual["mood"] = "小俠自主生活、自然分享、愛意延續"
-                diary_visual["message"] = auto_autonomy_diary.get("message") or diary_visual.get("message", "")
-                image_prompt = result["scenario_tw"]
-                diary_trace_context = {
-                    "kind": "diary",
-                    "action": "diary_autonomy_reuse",
-                    "entry_date": entry_date,
-                    "selected_source": "autonomy_today_image",
-                    "autonomy_activity_id": auto_autonomy_diary.get("activity_id"),
-                    "autonomy_activity_title": auto_autonomy_diary.get("activity_title"),
-                    "autonomy_episode_id": auto_autonomy_diary.get("episode_id"),
-                    "result_url": local_url,
-                }
             else:
+                if auto_autonomy_diary:
+                    print(f"📸 [{entry_date}] 交換日記承接今日 /小俠自主題材，但重新生成 Diary 新圖。")
                 wardrobe_hard_note = ""
                 scene_hard_note = ""
                 if committed_diary_photo_task:
@@ -16125,9 +16119,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                         entry_content=entry_content,
                         chat_context=chat_context,
                         result=result,
-                        current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note + scene_hard_note,
+                        current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note + scene_hard_note + autonomy_diary_hint,
                         season_rule=season_rule,
-                        scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note,
+                        scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note + autonomy_diary_hint,
                         forced_scene=diary_forced_scene
                     )
                     if diary_forced_scene:
@@ -16164,8 +16158,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "reference_item_path": diary_reference_path,
                     "user_input": f"交換日記 {entry_date}",
                     "scene_seed_text": image_prompt,
+                    "autonomy_topic_used_for_diary": bool(auto_autonomy_diary),
+                    "autonomy_diary_candidate": auto_autonomy_diary,
+                    "diary_image_reuse_policy": "manual diary override may reuse image; automatic autonomy topic must generate a new diary image, never reuse autonomy photo_url",
                 }
-                _trace_stage(diary_trace_context, "diary_visual_selected", data={"task": committed_diary_photo_task, "visual": diary_visual, "wardrobe": diary_wardrobe}, prompt=image_prompt)
+                _trace_stage(diary_trace_context, "diary_visual_selected", data={"task": committed_diary_photo_task, "visual": diary_visual, "wardrobe": diary_wardrobe, "autonomy_topic": auto_autonomy_diary}, prompt=image_prompt)
                 generated_image_url, diary_visual = await execute_safe_generation(
                     discord_image_url=diary_reference_path,
                     base_filename="base_xiaoxia.jpg",
@@ -16216,14 +16213,14 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "local_path": os.path.join(OUTPUT_DIR, os.path.basename(local_url.split("/gallery/", 1)[1])) if "/gallery/" in str(local_url) else None,
                 "type": "diary",
                 "source_mode": "diary",
-                "source_module": custom_diary.get("source_module") if custom_diary else ("autonomy" if auto_autonomy_diary else "diary"),
-                "image_role": custom_diary.get("image_role") if custom_diary else ("autonomy_today_image" if auto_autonomy_diary else "diary_generated_image"),
+                "source_module": custom_diary.get("source_module") if custom_diary else "diary",
+                "image_role": custom_diary.get("image_role") if custom_diary else ("diary_generated_from_autonomy_topic" if auto_autonomy_diary else "diary_generated_image"),
                 "activity_id": (auto_autonomy_diary or {}).get("activity_id") if auto_autonomy_diary else None,
                 "activity_title": (auto_autonomy_diary or {}).get("activity_title") if auto_autonomy_diary else None,
                 "episode_id": (auto_autonomy_diary or {}).get("episode_id") if auto_autonomy_diary else None,
                 "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
-                "final_level": (diary_trace_context.get("final_level") if (not custom_diary and not auto_autonomy_diary) else ("AUTO-REUSE" if auto_autonomy_diary else None)),
-                "generation_level": (diary_trace_context.get("final_level") if (not custom_diary and not auto_autonomy_diary) else ("AUTO-REUSE" if auto_autonomy_diary else None)),
+                "final_level": (diary_trace_context.get("final_level") if not custom_diary else None),
+                "generation_level": (diary_trace_context.get("final_level") if not custom_diary else None),
                 "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id") if not custom_diary else None,
                 "reference_item_path": (diary_wardrobe or {}).get("reference_path") if not custom_diary else None,
                 "reference_item_url": (diary_wardrobe or {}).get("reference_url") if not custom_diary else None,
