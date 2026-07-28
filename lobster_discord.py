@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.19-R1"
+LOBSTER_VERSION = "1.5.19-R2"
 
 
 def _normalize_generation_level(level):
@@ -14041,43 +14041,16 @@ def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_fi
     return _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=attachment_filename)
 
 
-def _photo_visible_message_content(context, title_prefix="📸 小俠照片"):
-    """v1.5.19-R1：/小俠自主不能只送 embed；把小俠口語分享放進 Discord content。"""
-    context = context or {}
-    source_module = str(context.get("source_module") or "").strip().lower()
-    image_role = str(context.get("image_role") or "").strip().lower()
-    photo_mode = str(context.get("photo_mode_override") or "").strip().lower()
-    is_autonomy = source_module == "autonomy" or image_role == "autonomy_today_image" or photo_mode == "xiaoxia_autonomy"
-    if not is_autonomy:
-        return None
-
-    activity = context.get("autonomy_activity") if isinstance(context.get("autonomy_activity"), dict) else {}
-    title = (
-        str(activity.get("title") or "").strip()
-        or str(context.get("activity_title") or "").strip()
-        or str(context.get("scene_text") or "").replace("小俠自主生活｜", "").strip()
-        or "小俠自主生活"
-    )
-    message = str(context.get("message") or "").strip()
-    if len(message) > 900:
-        message = message[:900].rstrip() + "…"
-    prefix = str(title_prefix or "🌱 小俠今日自主").strip()
-    if message:
-        return f"{prefix}\n小俠今天去做：**{title}**\n\n{message}"
-    return f"{prefix}\n小俠今天去做：**{title}**"
-
-
 async def _send_photo_message(destination, context, view=None, title_prefix="📸 小俠照片"):
     """用 Discord attachment 顯示 /photo 圖片；gallery URL 只作資料庫/網頁使用。"""
     file, filename = _photo_discord_file(context)
     embed = _build_photo_embed(context, title_prefix=title_prefix, attachment_filename=filename if file else None)
-    content = _photo_visible_message_content(context, title_prefix=title_prefix)
     if file:
         print(f"📤 [PHOTO_DISCORD_SEND_WITH_FILE] filename={filename}")
-        sent = await destination.send(content=content, embed=embed, file=file, view=view)
+        sent = await destination.send(embed=embed, file=file, view=view)
     else:
         print("📤 [PHOTO_DISCORD_SEND_URL_FALLBACK]")
-        sent = await destination.send(content=content, embed=embed, view=view)
+        sent = await destination.send(embed=embed, view=view)
     print(f"✅ [PHOTO_DISCORD_SEND_DONE] message_id={getattr(sent, 'id', None)}")
     return sent
 
@@ -14089,16 +14062,15 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
     並嘗試清空原訊息附件，避免 Discord 把重骰結果顯示成「+1」。
     """
     embed = _build_result_embed(context, title_prefix=title_prefix, attachment_filename=None)
-    content = _photo_visible_message_content(context, title_prefix=title_prefix)
     try:
         print(f"📤 [PHOTO_DISCORD_EDIT_REPLACE_URL] message_id={getattr(message, 'id', None)} url={context.get('local_url') or context.get('image_url')}")
-        await message.edit(content=content, embed=embed, view=view, attachments=[])
+        await message.edit(embed=embed, view=view, attachments=[])
         print(f"✅ [PHOTO_DISCORD_EDIT_REPLACED] message_id={getattr(message, 'id', None)}")
         return
     except Exception as exc:
         print(f"⚠️ [PHOTO_DISCORD_EDIT_REPLACE_URL_FAILED] {type(exc).__name__}: {exc}")
         # 舊版 discord.py 可能不支援 attachments=[]；至少仍編輯同一則訊息，不送新訊息。
-        await message.edit(content=content, embed=embed, view=view)
+        await message.edit(embed=embed, view=view)
         print(f"✅ [PHOTO_DISCORD_EDIT_REPLACED_FALLBACK] message_id={getattr(message, 'id', None)}")
 
 
