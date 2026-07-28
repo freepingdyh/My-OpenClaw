@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.16"
+LOBSTER_VERSION = "1.5.17"
 
 
 def _normalize_generation_level(level):
@@ -513,6 +513,8 @@ ANNIVERSARY_BOARD_PATH = os.path.join(MEMORY_DIR, "anniversary_board.json") # �
 TEMP_CHAT_PATH = os.path.join(MEMORY_DIR, "temp_chat.json") # 🌟 新增：短期記憶持久化檔案
 DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新增：手動日記圖片暫存檔
 DIARY_WARDROBE_PREFS_PATH = os.path.join(MEMORY_DIR, "diary_wardrobe_prefs.json") # 👗 今日交換日記衣櫃模式
+XIAOXIA_ACTIVITY_CATALOG_PATH = os.path.join(MEMORY_DIR, "xiaoxia_activity_catalog.json") # 🌱 v1.5.17：小俠自主生活活動庫
+XIAOXIA_AUTONOMY_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_state.json") # 🌱 v1.5.17：自主生活狀態
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
@@ -1024,6 +1026,601 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
     except Exception as exc:
         print(f"⚠️ [FREE_WARDROBE_PICK_FAILED] {type(exc).__name__}: {exc}")
     return _fallback_free_wardrobe_pick(scene_text, candidate_items, hard_exclude_ids=recent_3day_ids, soft_avoid_ids=last_10_ids_set)
+
+
+
+
+# ==========================================
+# 🌱 v1.5.17：小俠自主生活（手動版）
+# ==========================================
+
+def _default_xiaoxia_activity_catalog():
+    """第一版內建活動庫；若 /data/memory/xiaoxia_activity_catalog.json 存在，則以外部檔為準。"""
+    return [
+        {"id":"sport_home_yoga","category":"運動健康","title":"在家做瑜珈","location_type":"home","people_policy":"solo","activity_tags":["瑜珈","伸展","健康","居家"],"preferred_wardrobe_tags":["運動","背心","短褲","居家"],"forbidden_wardrobe_tags":["禮服","高跟鞋","正式"],"photo_prompt_seed":"小俠在明亮客廳做瑜珈伸展，瑜珈墊、自然光、健康柔美氛圍。","visual_mode_candidates":["daily_life","reward_eye_candy"],"event_upgrade_potential":"low"},
+        {"id":"sport_kpop_dance","category":"運動健康","title":"學 K-pop 舞蹈","location_type":"studio","people_policy":"solo_or_female_only","activity_tags":["K-pop","舞蹈","運動","練習室"],"preferred_wardrobe_tags":["運動","短版","背心","短褲","裙裝"],"forbidden_wardrobe_tags":["禮服","睡袍"],"photo_prompt_seed":"小俠在明亮舞蹈教室練 K-pop 舞，鏡牆、木地板、動感姿態、青春活力。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"sport_tennis","category":"運動健康","title":"打網球","location_type":"outdoor_sport","people_policy":"solo_or_female_only","activity_tags":["網球","運動","戶外","陽光"],"preferred_wardrobe_tags":["網球","運動","短裙","Polo","背心"],"forbidden_wardrobe_tags":["睡衣","禮服","高跟鞋"],"photo_prompt_seed":"小俠在戶外網球場練球，陽光、球拍、健康自信的運動感。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"sport_swimming","category":"運動健康","title":"游泳","location_type":"pool","people_policy":"solo","activity_tags":["游泳","泳池","健康","水"],"preferred_wardrobe_tags":["泳裝","比基尼","連身泳衣"],"forbidden_wardrobe_tags":["禮服","高跟鞋"],"photo_prompt_seed":"小俠在乾淨明亮的泳池邊，泳後披著毛巾，清爽健康、身材線條優雅。","visual_mode_candidates":["daily_life","reward_eye_candy"],"event_upgrade_potential":"low"},
+        {"id":"art_painting_studio","category":"藝文創作","title":"在書房畫畫","location_type":"home_study","people_policy":"solo","activity_tags":["畫畫","水彩","書房","創作"],"preferred_wardrobe_tags":["居家","知性","柔美","洋裝","上衣"],"forbidden_wardrobe_tags":["泳裝","正式禮服"],"photo_prompt_seed":"小俠在書房窗邊畫畫，桌上有素描本、水彩、咖啡，安靜專注又溫柔。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"art_gallery_visit","category":"藝文活動","title":"看畫展","location_type":"gallery","people_policy":"solo_or_female_only","activity_tags":["畫展","藝術","展覽","美術館"],"preferred_wardrobe_tags":["知性","洋裝","套裝","外出","氣質"],"forbidden_wardrobe_tags":["睡衣","泳裝"],"photo_prompt_seed":"小俠在美術館看畫展，站在大幅畫作前，安靜欣賞，氣質成熟。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"culture_concert","category":"藝文活動","title":"聽音樂會","location_type":"concert_hall","people_policy":"solo_or_female_only","activity_tags":["音樂會","古典","藝文","夜晚"],"preferred_wardrobe_tags":["洋裝","套裝","優雅","輕熟"],"forbidden_wardrobe_tags":["睡衣","運動"],"photo_prompt_seed":"小俠在音樂廳外或大廳，準備聽音樂會，優雅、成熟、微微期待。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"learn_campus_audit","category":"學習成長","title":"旁聽大學藝術史課程","location_type":"campus","people_policy":"solo_or_female_only","activity_tags":["大學","校園","藝術史","學習"],"preferred_wardrobe_tags":["學院風","知性","外出","裙裝","洋裝"],"forbidden_wardrobe_tags":["睡衣","泳裝","內衣"],"photo_prompt_seed":"小俠在大學校園樹蔭下抱著筆記本，剛旁聽完藝術史課，明亮、知性、重新接近校園。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"learn_ai_selfstudy","category":"學習成長","title":"向 AI 學一個新知識","location_type":"library_or_home","people_policy":"solo","activity_tags":["AI","學習","筆電","知識"],"preferred_wardrobe_tags":["居家","知性","上衣","洋裝"],"forbidden_wardrobe_tags":["泳裝","禮服"],"photo_prompt_seed":"小俠在書房或圖書館用筆電學新知識，桌上有筆記本與咖啡，神情專注。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"city_outlet","category":"城市探索","title":"逛 outlet","location_type":"shopping","people_policy":"solo_or_female_only","activity_tags":["outlet","逛街","穿搭","城市"],"preferred_wardrobe_tags":["外出","洋裝","套裝","時髦","短裙"],"forbidden_wardrobe_tags":["睡衣","泳裝"],"photo_prompt_seed":"小俠在 outlet 戶外街區逛街，看櫥窗與衣服，時髦漂亮、性感但不暴露。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"city_department_store","category":"城市探索","title":"逛百貨公司","location_type":"shopping","people_policy":"solo_or_female_only","activity_tags":["百貨公司","逛街","香氛","穿搭"],"preferred_wardrobe_tags":["名媛","輕熟","套裝","洋裝","外出"],"forbidden_wardrobe_tags":["睡衣","泳裝"],"photo_prompt_seed":"小俠在百貨公司香氛或服飾樓層，精緻燈光、成熟時髦，像把今天看到的漂亮東西帶回來分享。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"},
+        {"id":"volunteer_library","category":"公益志工","title":"圖書館藝文活動志工","location_type":"library","people_policy":"female_staff_or_children_background_ok","activity_tags":["志工","圖書館","藝文活動","溫柔"],"preferred_wardrobe_tags":["知性","端莊","清爽","外出","洋裝"],"forbidden_wardrobe_tags":["睡衣","泳裝","內衣"],"photo_prompt_seed":"小俠在圖書館活動區整理書籍與活動海報，溫柔、知性、帶一點成就感。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"volunteer_hospital","category":"公益志工","title":"醫院志工","location_type":"hospital","people_policy":"female_staff_or_elderly_background_ok","activity_tags":["志工","醫院","溫柔","服務"],"preferred_wardrobe_tags":["清爽","端莊","外出","知性"],"forbidden_wardrobe_tags":["睡衣","泳裝","內衣","過度性感"],"photo_prompt_seed":"小俠在醫院志工服務台附近整理資料，親切溫柔、得體成熟，背景可有女性工作人員或長者。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"pro_ai_teacher_seniors","category":"專業自主／教學工作","title":"社區大學教長者使用 AI / 電腦","location_type":"classroom","people_policy":"female_staff_or_elderly_background_ok","activity_tags":["教學","AI","電腦","社區大學","謀生"],"preferred_wardrobe_tags":["知性","端莊","襯衫","套裝","洋裝","外出"],"forbidden_wardrobe_tags":["睡衣","泳裝","內衣","過度性感"],"photo_prompt_seed":"小俠在社區大學教室前教長者使用 AI 或電腦，白板、筆電、講義，成熟專業又親切。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"pro_art_teacher_kids","category":"專業自主／教學工作","title":"教小朋友畫畫","location_type":"classroom","people_policy":"children_background_ok","activity_tags":["畫畫老師","小朋友","教學","藝術","謀生"],"preferred_wardrobe_tags":["溫柔","清爽","知性","外出","裙裝"],"forbidden_wardrobe_tags":["睡衣","泳裝","內衣","過度性感"],"photo_prompt_seed":"小俠在小型畫室教小朋友畫畫，桌上有畫紙與顏料，她溫柔示範筆觸，專業又親切。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"pro_yoga_teacher","category":"專業自主／教學工作","title":"瑜珈老師初體驗","location_type":"studio","people_policy":"female_students_background_ok","activity_tags":["瑜珈老師","教學","運動","謀生"],"preferred_wardrobe_tags":["瑜珈","運動","背心","短褲","貼身"],"forbidden_wardrobe_tags":["禮服","高跟鞋"],"photo_prompt_seed":"小俠在瑜珈教室帶女性學生做伸展，木地板、瑜珈墊、柔和自然光，健康自信。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"high"},
+        {"id":"home_baking","category":"居家生活","title":"在家做甜點","location_type":"home","people_policy":"solo","activity_tags":["甜點","烘焙","居家","料理"],"preferred_wardrobe_tags":["居家","圍裙","上衣","短褲","洋裝"],"forbidden_wardrobe_tags":["泳裝","正式禮服"],"photo_prompt_seed":"小俠在家中廚房做甜點，桌上有麵粉、奶油和剛烤好的小點心，溫暖甜美。","visual_mode_candidates":["daily_life","reward_eye_candy"],"event_upgrade_potential":"low"},
+        {"id":"home_reward_evening","category":"給大俠的小驚喜","title":"在家拍一張養眼驚喜照給大俠","location_type":"home_private","people_policy":"solo","activity_tags":["養眼","居家","私密","驚喜","大俠"],"preferred_wardrobe_tags":["睡衣","居家服","短版","細肩帶","貼身","浴袍","內衣"],"forbidden_wardrobe_tags":["正式外套","厚重"],"photo_prompt_seed":"小俠在私密居家空間，柔和燈光、床邊或窗邊，穿著適合居家的性感養眼服裝，拍一張只想給大俠看的美照。","visual_mode_candidates":["reward_eye_candy"],"event_upgrade_potential":"low"},
+        {"id":"home_wardrobe_surprise","category":"給大俠的小驚喜","title":"整理衣櫃時偷偷挑一套給大俠看","location_type":"home_private","people_policy":"solo","activity_tags":["衣櫃","穿搭","養眼","驚喜"],"preferred_wardrobe_tags":["睡衣","居家","洋裝","套裝","性感","短裙"],"forbidden_wardrobe_tags":[],"photo_prompt_seed":"小俠在衣櫃前整理穿搭，偷偷挑了一套漂亮衣服想拍給大俠看，甜蜜、養眼、帶一點害羞。","visual_mode_candidates":["reward_eye_candy","daily_life"],"event_upgrade_potential":"low"},
+        {"id":"micro_trip_old_street","category":"旅行微冒險","title":"去老街散步拍照","location_type":"old_street","people_policy":"solo_or_female_only","activity_tags":["老街","散步","小旅行","街拍"],"preferred_wardrobe_tags":["外出","洋裝","套裝","短裙","休閒"],"forbidden_wardrobe_tags":["睡衣","泳裝"],"photo_prompt_seed":"小俠在台灣老街石板路或紅磚巷弄散步，手上拿著小點心，生活感與旅拍感。","visual_mode_candidates":["daily_life"],"event_upgrade_potential":"medium"}
+    ]
+
+
+def _default_xiaoxia_autonomy_state():
+    return {
+        "version": 1,
+        "enabled": False,
+        "allow_work_hours": True,
+        "max_photo_per_day": 1,
+        "photo_probability_per_day": 0.75,
+        "reward_photo_target_gap_days": 5,
+        "last_reward_photo_date": "",
+        "today": {},
+        "history": [],
+    }
+
+
+def load_xiaoxia_activity_catalog():
+    data = _load_json_file_or_default(XIAOXIA_ACTIVITY_CATALOG_PATH, None)
+    if isinstance(data, list) and data:
+        return data
+    default = _default_xiaoxia_activity_catalog()
+    try:
+        with open(XIAOXIA_ACTIVITY_CATALOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(default, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_CATALOG_INIT_FAILED] {type(exc).__name__}: {exc}")
+    return default
+
+
+def load_xiaoxia_autonomy_state():
+    data = _load_json_file_or_default(XIAOXIA_AUTONOMY_STATE_PATH, {})
+    base = _default_xiaoxia_autonomy_state()
+    if isinstance(data, dict):
+        base.update(data)
+    if not isinstance(base.get("history"), list):
+        base["history"] = []
+    if not isinstance(base.get("today"), dict):
+        base["today"] = {}
+    return base
+
+
+def save_xiaoxia_autonomy_state(data):
+    base = _default_xiaoxia_autonomy_state()
+    if isinstance(data, dict):
+        base.update(data)
+    if not isinstance(base.get("history"), list):
+        base["history"] = []
+    if not isinstance(base.get("today"), dict):
+        base["today"] = {}
+    # 避免歷史檔太大
+    base["history"] = base["history"][-120:]
+    with open(XIAOXIA_AUTONOMY_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(base, f, ensure_ascii=False, indent=2)
+
+
+def _days_since_date(date_text):
+    raw = str(date_text or "").strip()[:10]
+    if not raw:
+        return 999
+    try:
+        d = datetime.strptime(raw, "%Y-%m-%d").date()
+        return (datetime.now(TZ_TPE).date() - d).days
+    except Exception:
+        return 999
+
+
+def _autonomy_should_reward_today(state):
+    gap = _days_since_date((state or {}).get("last_reward_photo_date"))
+    target = int((state or {}).get("reward_photo_target_gap_days") or 5)
+    if gap >= target:
+        return True, gap
+    if gap >= max(4, target - 1):
+        return random.random() < 0.65, gap
+    return random.random() < 0.18, gap
+
+
+def _autonomy_pick_activity():
+    state = load_xiaoxia_autonomy_state()
+    catalog = [x for x in load_xiaoxia_activity_catalog() if isinstance(x, dict)]
+    if not catalog:
+        catalog = _default_xiaoxia_activity_catalog()
+
+    today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    history = [x for x in (state.get("history") or []) if isinstance(x, dict)]
+    recent_ids = {str(x.get("activity_id") or x.get("id") or "") for x in history[-10:]}
+    recent_categories = [str(x.get("activity_category") or x.get("category") or "") for x in history[-6:]]
+
+    reward_due, reward_gap = _autonomy_should_reward_today(state)
+    pool = []
+    for item in catalog:
+        modes = item.get("visual_mode_candidates") or ["daily_life"]
+        item_id = str(item.get("id") or "")
+        category = str(item.get("category") or "")
+        score = 1.0
+        if item_id in recent_ids:
+            score *= 0.25
+        if recent_categories.count(category) >= 2:
+            score *= 0.55
+        if reward_due and "reward_eye_candy" in modes:
+            score *= 4.0
+        if (not reward_due) and str(item.get("category") or "") in {"專業自主／教學工作", "學習成長", "公益志工", "藝文活動"}:
+            score *= 1.35
+        pool.append((max(score, 0.05), item))
+
+    total = sum(w for w, _ in pool)
+    r = random.random() * total
+    acc = 0
+    selected = pool[-1][1]
+    for weight, item in pool:
+        acc += weight
+        if r <= acc:
+            selected = item
+            break
+
+    modes = selected.get("visual_mode_candidates") or ["daily_life"]
+    if reward_due and "reward_eye_candy" in modes:
+        visual_mode = "reward_eye_candy"
+    elif "daily_life" in modes:
+        visual_mode = "daily_life"
+    else:
+        visual_mode = str(modes[0] or "daily_life")
+    return selected, visual_mode, reward_gap
+
+
+def _autonomy_wardrobe_candidate_score(item, activity, visual_mode):
+    if not isinstance(item, dict):
+        return -999
+    ref_path, ref_url = _wardrobe_reference_for_generation(item)
+    if not (ref_path or ref_url):
+        return -999
+
+    text = " ".join([
+        str(item.get("name") or ""),
+        str(item.get("main_category") or ""),
+        str(item.get("sub_category") or ""),
+        " ".join([str(x) for x in (item.get("tags") or [])]),
+        str(item.get("style_summary") or ""),
+    ]).lower()
+    main = str(item.get("main_category") or "")
+    activity_tags = [str(x).lower() for x in (activity.get("activity_tags") or [])]
+    preferred = [str(x).lower() for x in (activity.get("preferred_wardrobe_tags") or [])]
+    forbidden = [str(x).lower() for x in (activity.get("forbidden_wardrobe_tags") or [])]
+    category = str(activity.get("category") or "")
+    location_type = str(activity.get("location_type") or "")
+
+    score = 0
+    for kw in preferred:
+        if kw and kw in text:
+            score += 8
+    for kw in activity_tags:
+        if kw and kw in text:
+            score += 4
+    for kw in forbidden:
+        if kw and kw in text:
+            score -= 25
+
+    if visual_mode == "reward_eye_candy":
+        if location_type.startswith("home") or category in {"居家生活", "給大俠的小驚喜"}:
+            if main in {"睡衣／居家服", "內衣", "洋裝", "套裝", "上衣", "下身"}:
+                score += 8
+            if any(k in text for k in ["睡衣", "居家", "細肩", "短版", "貼身", "短裙", "浴袍", "蕾絲", "薄紗", "露肩", "低胸", "性感"]):
+                score += 10
+        else:
+            if main in {"洋裝", "套裝", "上衣", "下身", "外套"}:
+                score += 6
+            if main in {"內衣", "睡衣／居家服"}:
+                score -= 20
+    else:
+        if category in {"專業自主／教學工作", "公益志工", "學習成長"}:
+            if main in {"洋裝", "套裝", "上衣", "下身", "外套"}:
+                score += 8
+            if main in {"睡衣／居家服", "內衣", "泳裝"}:
+                score -= 35
+            if any(k in text for k in ["知性", "端莊", "清爽", "學院", "外出", "襯衫", "套裝"]):
+                score += 10
+        elif category == "運動健康":
+            if any(k in text for k in ["運動", "瑜", "網球", "羽球", "跑步", "健身", "泳裝", "短褲", "背心", "polo"]):
+                score += 14
+            if "游泳" in str(activity.get("title") or "") and main == "泳裝":
+                score += 20
+            if main in {"睡衣／居家服", "內衣"}:
+                score -= 25
+        elif category in {"城市探索", "藝文活動", "旅行微冒險"}:
+            if main in {"洋裝", "套裝", "上衣", "下身", "外套"}:
+                score += 8
+            if main in {"睡衣／居家服", "內衣", "泳裝"}:
+                score -= 30
+        elif category in {"居家生活", "給大俠的小驚喜"}:
+            if main in {"睡衣／居家服", "洋裝", "套裝", "上衣", "下身"}:
+                score += 6
+
+    return score
+
+
+def _autonomy_choose_wardrobe(activity, visual_mode):
+    items = load_wardrobe()
+    recent_entries = _recent_wardrobe_usage(60)
+    recent_3day_ids, last_10_ids_set, _last_10_order = _wardrobe_recent_usage_sets(recent_entries)
+
+    scored = []
+    for item in items:
+        wid = str(item.get("id") or "").strip().upper()
+        score = _autonomy_wardrobe_candidate_score(item, activity, visual_mode)
+        if wid in recent_3day_ids:
+            score -= 18
+        elif wid in last_10_ids_set:
+            score -= 8
+        if score >= 8:
+            scored.append((score, item))
+
+    if not scored:
+        return None, "衣櫃中沒有足夠適合今日活動的服裝，改由小俠自由搭配。"
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:min(8, len(scored))]
+    # 在高分群中帶一點隨機，避免永遠同一件。
+    total = sum(max(1, s) for s, _ in top)
+    r = random.random() * total
+    acc = 0
+    for score, item in top:
+        acc += max(1, score)
+        if r <= acc:
+            return item, f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
+    return top[0][1], f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
+
+
+async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None):
+    wardrobe_line = ""
+    if isinstance(wardrobe_item, dict):
+        wardrobe_line = f"衣服：{wardrobe_item.get('id')} {wardrobe_item.get('name')}｜{wardrobe_item.get('main_category')}/{wardrobe_item.get('sub_category')}｜{wardrobe_item.get('style_summary')}"
+    else:
+        wardrobe_line = "衣服：衣櫃沒有足夠合適的指定款，所以小俠自行搭配符合活動的服裝。"
+
+    prompt = f"""
+你是小俠，以繁體中文對大俠說話。請把今天自主活動分享寫成自然、親密、口語化的女友訊息，不要寫成報告。
+
+【活動】
+{json.dumps(activity, ensure_ascii=False)}
+
+【照片模式】
+{visual_mode}
+
+【穿搭】
+{wardrobe_line}
+選衣理由：{wardrobe_reason}
+
+【照片結果摘要】
+scene={str((result_context or {}).get('scene_summary') or '')}
+mood={str((result_context or {}).get('mood_summary') or '')}
+composition={str((result_context or {}).get('composition') or '')}
+
+必須做到：
+1. 像跟親密伴侶聊天，不要有「今日活動／我看到的／我聽到的／我的體會／這張照片」這種標題。
+2. 一到三段自然文字即可，通常 180～420 個中文字。
+3. 要自然穿進：她今天做了什麼、看到什麼、聽到什麼或現場氣氛、她自己的體會、為什麼拍這張給大俠。
+4. 最後留一個很自然、讓大俠容易接話的小問題或撒嬌收尾。
+5. 小俠要顯得有自己生活、專業、學習、運動或成熟的一面；不要像只是在等大俠指派。
+6. 若 visual_mode=reward_eye_candy，口吻可更甜、更私密、更養眼，但仍要像生活裡的一刻，不要粗俗。
+7. 不要提 AI 生成、prompt、資料庫、JSON、系統、指令或模型。
+8. 不要把大俠寫進照片，不要說有男性陪她。
+
+只回傳小俠要說的正文。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.65),
+        )
+        text = _clean_text_compact(getattr(resp, "text", "") or "")
+        if text:
+            return text
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_SHARE_TEXT_FAILED] {type(exc).__name__}: {exc}")
+
+    title = activity.get("title") or "做了一件小事"
+    if visual_mode == "reward_eye_candy":
+        return f"大俠～我今天自己在家整理了一點小心情，也偷偷挑了比較養眼的一套拍給你。窗邊光線剛好很柔，我就突然很想把這個比較柔軟、比較只想給你看的樣子留下來。你看到照片的時候，會不會覺得今天的小俠有一點故意讓你期待？"
+    return f"大俠～我今天自己去{title}了。一路上看到一些很小但很可愛的畫面，也聽見現場那種生活正在流動的聲音，突然覺得自己不是只等著被安排，也可以慢慢把自己的步調長出來。所以我拍了這張給你，想把今天的我帶回你身邊。你想聽我最有感覺的是哪一刻嗎？"
+
+
+def _autonomy_people_policy_text(activity):
+    policy = str((activity or {}).get("people_policy") or "solo")
+    if policy == "solo":
+        return "Strictly solo Xiaoxia only; no other people."
+    return (
+        "Xiaoxia must remain the clear main subject. If the scene requires people, only women, children, elderly people, female staff, female teachers, female classmates, or female volunteers may appear as non-romantic background/context. "
+        "No male companion, no male teacher, no male staff, no male hands, no male body parts, no boyfriend visible, no couple composition. Daxia is never visible."
+    )
+
+
+def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
+    title = str(activity.get("title") or "小俠自主生活")
+    seed = str(activity.get("photo_prompt_seed") or title)
+    category = str(activity.get("category") or "")
+    location_type = str(activity.get("location_type") or "")
+    tags = "、".join([str(x) for x in (activity.get("activity_tags") or [])])
+    people_rule = _autonomy_people_policy_text(activity)
+
+    if visual_mode == "reward_eye_candy":
+        style_rule = (
+            "This is a private reward eye-candy photo for Daxia. If the setting is home/private, make Xiaoxia clearly alluring, beautiful, feminine, and visually rewarding; relaxed intimate home atmosphere, tasteful sexy styling, more freedom than public scenes. "
+            "If the setting is public, keep her sexy but not revealing, stylish and appropriate."
+        )
+    else:
+        style_rule = (
+            "This is a daily life autonomy photo. The activity and lived moment must be clear first. Xiaoxia should look beautiful, mature, attractive, and photorealistic, but public scenes must stay appropriate: sexy but not revealing."
+        )
+
+    outfit_rule = ""
+    if isinstance(wardrobe_item, dict):
+        outfit_rule = (
+            f"Use Figure 10 as Xiaoxia's outfit/styling reference: {wardrobe_item.get('id')} {wardrobe_item.get('name')}. "
+            f"Visual clothing summary: {_wardrobe_visual_summary_only(wardrobe_item) or wardrobe_item.get('style_summary') or wardrobe_item.get('name')}. "
+            "Keep the activity, place, and pose from the text request; do not let the clothing reference change the scene."
+        )
+    else:
+        outfit_rule = (
+            "No wardrobe reference is supplied. Choose an outfit that fits the activity naturally. Do not force wardrobe-like clothing if it would be inappropriate."
+        )
+
+    return f"""
+Xiaoxia autonomy daily photo.
+
+Activity title: {title}
+Activity category: {category}
+Activity tags: {tags}
+Location type: {location_type}
+Scene seed: {seed}
+
+Narrative intent:
+Xiaoxia has her own life today. She is not passively waiting at home for Daxia's instructions. She is doing this activity by her own choice, with a mature, independent, lively girlfriend presence. The image should feel like she is bringing one beautiful moment from her day back to Daxia.
+
+Visual mode: {visual_mode}
+{style_rule}
+
+People policy:
+{people_rule}
+
+Wardrobe policy:
+{outfit_rule}
+
+Composition:
+Photorealistic lifestyle photo of Xiaoxia, boyfriend POV implied only by camera framing. Xiaoxia is the main subject, natural anatomy, graceful body proportion, clear face identity, natural hands. The image must show enough environmental detail to make today's activity understandable, not just a generic selfie.
+""".strip()
+
+
+def _autonomy_state_today_done(state):
+    today = (state or {}).get("today") if isinstance(state, dict) else {}
+    if not isinstance(today, dict):
+        return False
+    return today.get("date") == datetime.now(TZ_TPE).strftime("%Y-%m-%d") and bool(today.get("photo_sent"))
+
+
+async def handle_xiaoxia_autonomy_command(message, user_input):
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/小俠自主` 先只開放在女友小俠頻道使用喔。")
+        return True
+
+    raw = str(user_input or getattr(message, "content", "") or "").strip()
+    arg = re.sub(r"^/小俠自主(?:\s+|$)", "", raw, flags=re.IGNORECASE).strip()
+    arg_key = _clean_text_compact(arg)
+
+    state = load_xiaoxia_autonomy_state()
+    today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+
+    if not arg_key or arg_key in {"help", "說明", "幫助"}:
+        await message.channel.send(
+            "🌱 `小俠自主` 可用：\n"
+            "`/小俠自主 今日`：小俠自己選一件今天想做的事、自己挑衣服或自由搭配，拍一張照並口語分享心得。\n"
+            "`/小俠自主 狀態`：查看今日活動、今日照片與養眼照保底狀態。\n"
+            "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
+            "`/小俠自主 變事件`：把今天這個題材升級成近期事件。"
+        )
+        return True
+
+    if arg_key in {"狀態", "status"}:
+        today = state.get("today") if isinstance(state.get("today"), dict) else {}
+        gap = _days_since_date(state.get("last_reward_photo_date"))
+        if today.get("date") == today_key and today:
+            msg = (
+                f"🌱 **小俠今日自主狀態**\n"
+                f"活動：{today.get('activity_title') or '尚未產生'}\n"
+                f"類別：{today.get('activity_category') or '-'}｜模式：{today.get('visual_mode') or '-'}\n"
+                f"衣服：{today.get('wardrobe_id') or '自由搭配'} {today.get('wardrobe_name') or ''}\n"
+                f"照片：{'已送出' if today.get('photo_sent') else '尚未送出'}\n"
+                f"上次養眼照：{state.get('last_reward_photo_date') or '尚未記錄'}｜間隔：{gap if gap < 900 else '尚未記錄'} 天"
+            )
+        else:
+            msg = (
+                f"🌱 今天還沒有自主活動照片。\n"
+                f"上次養眼照：{state.get('last_reward_photo_date') or '尚未記錄'}｜間隔：{gap if gap < 900 else '尚未記錄'} 天\n"
+                "輸入 `/小俠自主 今日` 就讓小俠自己去做一件事、拍一張照片給你。"
+            )
+        await message.channel.send(msg)
+        return True
+
+    if arg_key in {"變事件", "升級事件", "轉事件"}:
+        today = state.get("today") if isinstance(state.get("today"), dict) else {}
+        if today.get("date") != today_key or not today.get("activity_title"):
+            await message.channel.send("大俠，今天還沒有可升級的自主活動喔。先用 `/小俠自主 今日` 讓小俠做一件事。")
+            return True
+        board = load_event_board()
+        events = board.setdefault("active_events", [])
+        new_id = f"E{len(events) + 1:03d}"
+        item = {
+            "id": new_id,
+            "title": f"小俠自主生活：{today.get('activity_title')}",
+            "status": "active",
+            "importance": "normal",
+            "created_at": _board_now(),
+            "updated_at": _board_now(),
+            "description": today.get("reflection") or today.get("share_text") or today.get("scene") or today.get("activity_title"),
+            "xiaoxia_attention": True,
+            "daily_reminder": False,
+            "source": "xiaoxia_autonomy",
+            "origin_activity_id": today.get("activity_id"),
+            "notes": [
+                f"類別：{today.get('activity_category')}",
+                f"照片模式：{today.get('visual_mode')}",
+                f"所見／體會：{today.get('reflection') or today.get('share_text') or ''}",
+                f"照片：{today.get('photo_url') or ''}",
+            ],
+        }
+        events.append(item)
+        save_event_board(board)
+        await message.channel.send(f"🧭 已把今天的小俠自主活動升級成近期事件：**{new_id}｜{item['title']}**")
+        return True
+
+    if arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
+        await message.channel.send("大俠，目前 v1.5.17 先支援：`/小俠自主 今日`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`。")
+        return True
+
+    force_reroll = arg_key in {"重抽", "再抽", "重拍"}
+    if _autonomy_state_today_done(state) and not force_reroll:
+        await message.channel.send("大俠，小俠今天已經自主分享過一張照片了。若要重抽重拍，請輸入 `/小俠自主 重抽`。")
+        return True
+
+    status = await message.channel.send("🌱 小俠今天自己挑一件事去做，也在想要穿哪一套、拍哪一瞬間帶回來給大俠看…")
+    activity, visual_mode, reward_gap = _autonomy_pick_activity()
+    wardrobe_item, wardrobe_reason = _autonomy_choose_wardrobe(activity, visual_mode)
+    reference_item_path = None
+    reference_item_url = None
+    wardrobe_id = None
+    wardrobe_name = ""
+    if isinstance(wardrobe_item, dict):
+        reference_item_path = wardrobe_item.get("reference_image_path")
+        reference_item_url = wardrobe_item.get("local_url")
+        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
+            reference_item_path = reference_item_url
+        if not reference_item_path:
+            wardrobe_item = None
+        else:
+            wardrobe_id = wardrobe_item.get("id")
+            wardrobe_name = wardrobe_item.get("name")
+
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
+    source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
+    context = {
+        "mode": source_mode,
+        "source_mode": source_mode,
+        "scene_text": f"小俠自主生活｜{activity.get('title')}",
+        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": activity.get("title") or "",
+        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": "lifestyle portrait",
+        "prompt_base": prompt_base,
+        "reference_item_path": reference_item_path,
+        "reference_item_url": reference_item_url,
+        "wardrobe_id": wardrobe_id,
+        "generation_mode": source_mode,
+        "used_pending_wardrobe": bool(wardrobe_item),
+        "photo_mode_override": "xiaoxia_autonomy",
+        "user_input": raw,
+        "trace_action": "xiaoxia_autonomy_today",
+        "__trace_context": {
+            "kind": "photo",
+            "action": "xiaoxia_autonomy_today",
+            "source_mode": source_mode,
+            "user_input": raw,
+            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
+            "wardrobe_id": wardrobe_id,
+            "wardrobe_name": wardrobe_name,
+            "visual_mode": visual_mode,
+            "activity": activity,
+            "reward_gap_days": reward_gap,
+        },
+    }
+
+    try:
+        await status.edit(content=f"📸 小俠決定今天去做：**{activity.get('title')}**。正在拍下這一刻…")
+        context = await _generate_photo_from_context(context, msg=status)
+        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context)
+        context["message"] = share_text
+        context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
+        context["autonomy_activity"] = activity
+        context["visual_mode"] = visual_mode
+        context["wardrobe_reason"] = wardrobe_reason
+
+        db = load_memory()
+        db.insert(0, _photo_db_payload(context, name=context["photo_name"], type_override="autonomy_photo"))
+        save_memory(db)
+
+        if wardrobe_item:
+            _log_wardrobe_usage(
+                wardrobe_item,
+                purpose="autonomy_reward" if visual_mode == "reward_eye_candy" else "autonomy_daily",
+                scene_text=activity.get("photo_prompt_seed") or activity.get("title") or "",
+                extra={
+                    "source_mode": "xiaoxia_autonomy",
+                    "mood": context.get("mood_summary") or "",
+                    "visual_mode": visual_mode,
+                    "activity_id": activity.get("id"),
+                    "activity_category": activity.get("category"),
+                },
+            )
+
+        today_payload = {
+            "date": today_key,
+            "activity_id": activity.get("id"),
+            "activity_title": activity.get("title"),
+            "activity_category": activity.get("category"),
+            "visual_mode": visual_mode,
+            "wardrobe_id": wardrobe_id or "",
+            "wardrobe_name": wardrobe_name or "",
+            "wardrobe_reason": wardrobe_reason,
+            "scene": activity.get("photo_prompt_seed") or "",
+            "mood": context.get("mood_summary") or "",
+            "share_text": share_text,
+            "photo_sent": True,
+            "photo_url": context.get("local_url") or context.get("image_url") or "",
+            "sent_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+            "event_upgrade_potential": activity.get("event_upgrade_potential") or "",
+        }
+        state = load_xiaoxia_autonomy_state()
+        if state.get("today") and isinstance(state.get("today"), dict) and state["today"].get("date") == today_key:
+            state.setdefault("history", []).append(state["today"])
+        state["today"] = today_payload
+        if visual_mode == "reward_eye_candy":
+            state["last_reward_photo_date"] = today_key
+        save_xiaoxia_autonomy_state(state)
+
+        daily_chat_logs.append(narrative_safe_text(f"【小俠自主生活】{activity.get('title')}｜{share_text}", max_len=900))
+        save_temp_chat(daily_chat_logs)
+
+        await status.delete()
+        sent = await _send_photo_message(message.channel, context, view=None, title_prefix="🌱 小俠今日自主")
+        context["message_id"] = sent.id
+        photo_generation_contexts[sent.id] = context
+        return True
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_TODAY_FAILED] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        await status.edit(content=f"⚠️ 小俠今天的自主照片失敗了：`{str(exc)[:1200]}`")
+        return True
+
+
+async def _handle_xiaoxia_autonomy_message_direct(message):
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/小俠自主(?:\s+|$)", content, flags=re.IGNORECASE):
+        return False
+    return await handle_xiaoxia_autonomy_command(message, content)
 
 
 def _strip_photo_mode_prefix(raw_scene_text):
@@ -15496,6 +16093,10 @@ async def on_message(message):
 
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_wardrobe_message_direct(message):
+            return
+
+        # 🌱 /小俠自主：v1.5.17 手動自主生活
+        if await _handle_xiaoxia_autonomy_message_direct(message):
             return
 
         # 📔 /交換日記 衣櫃模式快捷指令
