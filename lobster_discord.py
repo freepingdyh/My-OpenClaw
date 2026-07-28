@@ -1284,6 +1284,50 @@ def _autonomy_choose_wardrobe(activity, visual_mode):
     return top[0][1], f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
 
 
+async def _autonomy_people_policy_info(activity):
+    activity = activity if isinstance(activity, dict) else {}
+    category = str(activity.get("category") or "").strip()
+    location_type = str(activity.get("location_type") or "").strip().lower()
+    title = str(activity.get("title") or "")
+    tags = " ".join(str(x) for x in (activity.get("activity_tags") or []))
+    hay = f"{category} {location_type} {title} {tags}".lower()
+
+    private_locs = {"home", "home_private", "home_study", "library_or_home"}
+    sport_keywords = ["運動", "瑜珈", "瑜伽", "網球", "羽球", "跑步", "游泳", "泳", "健身", "k-pop", "dance", "sport", "yoga", "swim", "tennis", "badminton", "run"]
+
+    if location_type in private_locs or any(k in hay for k in ["房間", "卧室", "臥室", "溫泉", "温泉", "客廳", "客厅", "家中", "在家", "私密", "床邊", "床边", "書房", "书房", "廚房", "厨房"]):
+        return {
+            "policy_key": "private_strict_solo",
+            "allow_background_bystanders": False,
+            "strict_solo_required": True,
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": False,
+            "zh": "家中／私密環境，只有小俠一人。",
+        }
+
+    if category == "運動健康" or any(k in hay for k in sport_keywords):
+        return {
+            "policy_key": "autonomy_sport_no_male",
+            "allow_background_bystanders": True,
+            "strict_solo_required": False,
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": True,
+            "zh": "運動類場景不可有男性；可有非主體女性背景人物。",
+        }
+
+    return {
+        "policy_key": "autonomy_public_background_ok",
+        "allow_background_bystanders": True,
+        "strict_solo_required": False,
+        "no_male_people": False,
+        "male_background_ok": True,
+        "female_background_ok": True,
+        "zh": "公開場景可有背景路人，男性也可存在，但只能是非主體背景人物且不可互動。",
+    }
+
+
 async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None):
     wardrobe_line = ""
     if isinstance(wardrobe_item, dict):
@@ -1340,12 +1384,22 @@ composition={str((result_context or {}).get('composition') or '')}
 
 
 def _autonomy_people_policy_text(activity):
-    policy = str((activity or {}).get("people_policy") or "solo")
-    if policy == "solo":
-        return "Strictly solo Xiaoxia only; no other people."
+    info = _autonomy_people_policy_info(activity)
+    policy = str(info.get("policy_key") or "private_strict_solo")
+    if policy == "private_strict_solo":
+        return (
+            "Strictly solo Xiaoxia only. No other people. No male or female bystanders. "
+            "No external hands, no partial body parts, no reflections, and no viewer substitute."
+        )
+    if policy == "autonomy_sport_no_male":
+        return (
+            "Xiaoxia must remain the clear only primary subject. Female-only incidental background people are allowed when naturally needed, "
+            "such as female classmates, female students, female coaches, or female teammates, but they must stay secondary, non-romantic, and non-interacting. "
+            "No men anywhere in the scene. No male spectators, no male coach, no male staff, no male body parts, and no boyfriend visible. Daxia is never visible."
+        )
     return (
-        "Xiaoxia must remain the clear main subject. If the scene requires people, only women, children, elderly people, female staff, female teachers, female classmates, or female volunteers may appear as non-romantic background/context. "
-        "No male companion, no male teacher, no male staff, no male hands, no male body parts, no boyfriend visible, no couple composition. Daxia is never visible."
+        "Xiaoxia must remain the clear only primary subject. In public scenes, incidental background people are allowed for realism, including men, but they must be secondary, small, non-interacting, and never companion-like. "
+        "No foreground second person, no couple composition, no male partner vibe, no interacting male, no external hands, and no boyfriend visible. Daxia is never visible."
     )
 
 
@@ -1379,6 +1433,23 @@ def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
             "No wardrobe reference is supplied. Choose an outfit that fits the activity naturally. Do not force wardrobe-like clothing if it would be inappropriate."
         )
 
+    composition_guard = ""
+    policy_key = str(_autonomy_people_policy_info(activity).get("policy_key") or "")
+    if policy_key == "private_strict_solo":
+        composition_guard = (
+            "Private/home scene guard: Xiaoxia must be alone in the frame. Do not add any other person, even blurred or distant."
+        )
+    elif policy_key == "autonomy_sport_no_male":
+        composition_guard = (
+            "Sport scene guard: Xiaoxia must be the only primary subject. If any background people appear, they must be women only, sparse, secondary, and non-interacting. No men anywhere in the scene."
+        )
+    else:
+        composition_guard = (
+            "Public scene guard: Xiaoxia must be the only primary subject. Sparse blurred background people are allowed for realism, including men, but nobody may interact with her or feel like a companion."
+        )
+    if str(activity.get("id") or "") == "culture_concert":
+        composition_guard += " For concert scenes, prefer the concert hall lobby, corridor, side foyer, entrance area, or intermission moment with Xiaoxia holding a program booklet. Avoid stage-dominant or audience-dominant compositions."
+
     return f"""
 Xiaoxia autonomy daily photo.
 
@@ -1402,6 +1473,7 @@ Wardrobe policy:
 
 Composition:
 Photorealistic lifestyle photo of Xiaoxia, boyfriend POV implied only by camera framing. Xiaoxia is the main subject, natural anatomy, graceful body proportion, clear face identity, natural hands. The image must show enough environmental detail to make today's activity understandable, not just a generic selfie.
+{composition_guard}
 """.strip()
 
 
@@ -1514,6 +1586,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             wardrobe_id = wardrobe_item.get("id")
             wardrobe_name = wardrobe_item.get("name")
 
+    policy_info = _autonomy_people_policy_info(activity)
     prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     context = {
@@ -1545,6 +1618,13 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "visual_mode": visual_mode,
             "activity": activity,
             "reward_gap_days": reward_gap,
+            "custom_people_policy": policy_info.get("policy_key"),
+            "autonomy_people_policy": policy_info.get("policy_key"),
+            "allow_background_bystanders_override": bool(policy_info.get("allow_background_bystanders")),
+            "strict_solo_required_override": bool(policy_info.get("strict_solo_required")),
+            "male_background_ok": bool(policy_info.get("male_background_ok")),
+            "female_background_ok": bool(policy_info.get("female_background_ok")),
+            "no_male_people": bool(policy_info.get("no_male_people")),
         },
     }
 
@@ -9217,7 +9297,7 @@ async def _download_image_bytes_for_vision(image_url, max_bytes=8_000_000):
 
 async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_background_bystanders=False, visual_checklist=None):
     """
-    出圖後的輕量驗圖 gate：只檢查是否混入第二人/男人/外來手腳。
+    出圖後的輕量驗圖 gate：檢查是否混入不該出現的人物、互動、男性或外來肢體。
     失敗時回傳 (False, reason)；無法檢查時為避免誤殺，回傳 (True, reason)。
     """
     if str(mode or "").lower() not in {"photo_scene", "photo_reference", "diary", "cosplay"}:
@@ -9229,10 +9309,21 @@ async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_ba
 
     visual_checklist = visual_checklist if isinstance(visual_checklist, dict) else {}
     specified_character_interaction = bool(visual_checklist.get("specified_character_interaction"))
+    people_policy = str(visual_checklist.get("people_policy") or "")
     if specified_character_interaction:
         bystander_rule = (
             "Daxia explicitly requested interaction with a specific character. Allow that specified character interaction, "
             "but do not add unrequested companions or a Daxia/viewer substitute."
+        )
+    elif people_policy == "autonomy_sport_no_male":
+        bystander_rule = (
+            "This is a sport/activity autonomy scene. Xiaoxia must be the only primary subject. Female-only incidental background people are allowed if clearly secondary and non-interacting. "
+            "No men anywhere in the scene. No foreground companion. No interacting person."
+        )
+    elif people_policy == "autonomy_public_background_ok":
+        bystander_rule = (
+            "This is a public autonomy scene. Xiaoxia must be the only primary subject. Sparse incidental background people are allowed for realism, including men, "
+            "but they must be secondary, not foreground subjects, not interacting with Xiaoxia, and not companion-like or date-like."
         )
     elif allow_background_bystanders:
         bystander_rule = (
@@ -9253,6 +9344,9 @@ Return JSON only:
   "human_count": number,
   "has_incidental_background_bystanders": true/false,
   "has_male_or_partner": true/false,
+  "has_visible_male_person": true/false,
+  "has_prominent_male_person": true/false,
+  "has_companion_or_date_vibe": true/false,
   "has_foreground_second_person": true/false,
   "has_interacting_second_person": true/false,
   "has_external_hands_or_body_parts": true/false,
@@ -9263,6 +9357,10 @@ Return JSON only:
 Rules:
 - Xiaoxia must be the only primary subject.
 - {bystander_rule}
+- "foreground second person" means a clearly visible non-Xiaoxia person close to camera or visually prominent enough to compete with Xiaoxia.
+- "visible male person" means any actual male-presenting real person in the scene, even if background.
+- "prominent male person" means a male person who is foreground, medium-shot clear, visually noticeable, interacting, or companion-like.
+- "companion_or_date_vibe" means the composition makes another person feel like Xiaoxia's companion, date, helper, escort, audience counterpart, or walking partner.
 - Always fail if Daxia/the viewer is visualized as a man, head, hand, shoulder, back, reflection, shadow, cropped body part, or photographer-like person.
 - If a specific character interaction was requested, do not fail merely because that requested character appears/interacts; fail only if extra unrequested people appear, a Daxia/viewer substitute appears, or external body parts appear.
 - A printed photo, painting, statue, mannequin, or decorative object is not a person unless it appears as a real human in the scene.
@@ -9283,14 +9381,18 @@ Rules:
             bool(result.get("has_external_hands_or_body_parts"))
             or bool(result.get("has_second_person_reflection_shadow_or_partial"))
         )
-        blocking_people = (
-            bool(result.get("has_male_or_partner"))
-            or bool(result.get("has_foreground_second_person"))
-            or bool(result.get("has_interacting_second_person"))
-            or external_or_viewer_block
-        )
+        has_visible_male = bool(result.get("has_visible_male_person")) or bool(result.get("has_male_or_partner"))
+        has_prominent_male = bool(result.get("has_prominent_male_person")) or bool(result.get("has_male_or_partner"))
+        has_companion_vibe = bool(result.get("has_companion_or_date_vibe")) or bool(result.get("has_male_or_partner"))
+        has_foreground_second = bool(result.get("has_foreground_second_person"))
+        has_interacting_second = bool(result.get("has_interacting_second_person"))
+        blocking_people = has_prominent_male or has_foreground_second or has_interacting_second or external_or_viewer_block or has_companion_vibe
         if specified_character_interaction:
             ok = bool(result.get("xiaoxia_is_only_primary_subject", True)) and not external_or_viewer_block
+        elif people_policy == "autonomy_sport_no_male":
+            ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and (not has_visible_male) and (not has_foreground_second) and (not has_interacting_second) and (not external_or_viewer_block) and (not has_companion_vibe)
+        elif people_policy == "autonomy_public_background_ok":
+            ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and (not has_prominent_male) and (not has_foreground_second) and (not has_interacting_second) and (not external_or_viewer_block) and (not has_companion_vibe)
         elif allow_background_bystanders:
             ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and not blocking_people
         else:
@@ -9509,6 +9611,55 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     }
     if current_outfit:
         checklist.setdefault("outfit_lock", str(current_outfit)[:500])
+
+    custom_people_policy = ""
+    if isinstance(trace_context, dict):
+        custom_people_policy = str(trace_context.get("custom_people_policy") or trace_context.get("autonomy_people_policy") or "").strip()
+    if custom_people_policy == "private_strict_solo":
+        checklist.update({
+            "private_scene": True,
+            "strict_solo_required": True,
+            "allow_background_bystanders": False,
+            "specified_character_interaction": False,
+            "people_policy": "private_strict_solo",
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": False,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "any additional real human figure in this private/home scene",
+        ])
+    elif custom_people_policy == "autonomy_sport_no_male":
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_sport_no_male",
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": True,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "any male person in the scene",
+            "male coach, male teammate, male staff, male spectator, or male background bystander",
+            "foreground second person or interacting companion",
+        ])
+    elif custom_people_policy == "autonomy_public_background_ok":
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_public_background_ok",
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "foreground second person or interacting companion",
+            "male partner vibe, date vibe, or companion-like composition",
+        ])
     return checklist
 
 
@@ -9520,6 +9671,9 @@ def _visual_checklist_brief(checklist, max_items=10):
         "strict_solo_required": checklist.get("strict_solo_required"),
         "allow_background_bystanders": checklist.get("allow_background_bystanders"),
         "specified_character_interaction": checklist.get("specified_character_interaction"),
+        "no_male_people": checklist.get("no_male_people"),
+        "male_background_ok": checklist.get("male_background_ok"),
+        "female_background_ok": checklist.get("female_background_ok"),
         "diary_user_constraints": checklist.get("diary_user_constraints"),
         "future_event_constraints": checklist.get("future_event_constraints"),
         "must_have": (checklist.get("must_have") or [])[:max_items],
@@ -9533,10 +9687,15 @@ def _visual_checklist_brief(checklist, max_items=10):
 
 def _seedream_people_policy_line(checklist=None):
     checklist = checklist if isinstance(checklist, dict) else {}
-    if checklist.get("strict_solo_required"):
-        return "People rule: private/solo scene. Xiaoxia must be the only human figure. No other people, no external hands, no visible viewer body parts."
+    people_policy = str(checklist.get("people_policy") or "")
+    if checklist.get("strict_solo_required") or people_policy == "private_strict_solo":
+        return "People rule: private/solo scene. Xiaoxia must be the only human figure. No other people, no external hands, and no visible viewer body parts."
     if checklist.get("specified_character_interaction"):
         return "People rule: allow the specific character interaction explicitly requested by Daxia; do not add unrequested companions. Never visualize Daxia/viewer as a male head, hand, shoulder, back, reflection, shadow, or body part."
+    if people_policy == "autonomy_sport_no_male":
+        return "People rule: Xiaoxia is the only primary subject. Female-only distant non-interacting background people may exist when needed, but no male person anywhere in the scene, no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
+    if people_policy == "autonomy_public_background_ok":
+        return "People rule: Xiaoxia is the only primary subject. Sparse distant non-interacting background people may exist for public-scene realism, including men, but nobody may interact with Xiaoxia, no one may look like her companion, there is no foreground second person, no external hands, and never visualize Daxia/viewer."
     if checklist.get("allow_background_bystanders"):
         return "People rule: Xiaoxia is the only primary subject. Distant non-interacting background bystanders may exist for public-scene realism, but no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
     return "People rule: Xiaoxia is the only primary subject. No male stand-in, no external hands, no visible viewer body parts."
@@ -10026,6 +10185,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
     trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
     trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
+    trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
     force_minimal_prompt = bool(trace_context.get("force_minimal_prompt")) if isinstance(trace_context, dict) else False
     has_figure10 = bool(trace_context.get("figure10_present")) if isinstance(trace_context, dict) else bool(discord_image_url)
     reference_minimal = str(mode or "").lower() in {"photo_scene", "photo_reference", "travel", "shopping", "world", "scene"} or force_minimal_prompt
@@ -10057,6 +10217,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
             trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
             trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
+            trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
             trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
         elif str(mode or "").lower() == "diary":
             current_prompt = _build_diary_guarded_minimal_prompt(
@@ -10068,6 +10229,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             )
             visual_checklist = _augment_diary_visual_checklist(visual_checklist, trace_context=trace_context)
             trace_context["visual_checklist"] = visual_checklist
+            trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
             trace_context["raw_seedream_mode"] = trace_context.get("raw_seedream_mode") or "diary_guarded_minimal"
         elif reference_minimal:
             current_prompt = _build_photo_reference_minimal_seedream_prompt(
