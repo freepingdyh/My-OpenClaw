@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.17-R3"
+LOBSTER_VERSION = "1.5.17-R4"
 
 
 def _normalize_generation_level(level):
@@ -515,6 +515,9 @@ DIARY_OVERRIDE_PATH = os.path.join(MEMORY_DIR, "diary_override.json") # 🌟 新
 DIARY_WARDROBE_PREFS_PATH = os.path.join(MEMORY_DIR, "diary_wardrobe_prefs.json") # 👗 今日交換日記衣櫃模式
 XIAOXIA_ACTIVITY_CATALOG_PATH = os.path.join(MEMORY_DIR, "xiaoxia_activity_catalog.json") # 🌱 v1.5.17：小俠自主生活活動庫
 XIAOXIA_AUTONOMY_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_state.json") # 🌱 v1.5.17：自主生活狀態
+XIAOXIA_AUTONOMY_EPISODE_LOG_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_episode_log.json") # 🌱 R4：自主活動 episode 長期紀錄
+XIAOXIA_AUTONOMY_THREADS_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_threads.json") # 🌱 R4：自主活動主題線索引
+XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_selection_cache.json") # 🌱 R4：指定類別/活動清單快取
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
@@ -1077,8 +1080,8 @@ def _default_xiaoxia_autonomy_state():
 def load_xiaoxia_activity_catalog():
     data = _load_json_file_or_default(XIAOXIA_ACTIVITY_CATALOG_PATH, None)
     if isinstance(data, list) and data:
-        return data
-    default = _default_xiaoxia_activity_catalog()
+        return [_autonomy_enrich_activity(x) for x in data if isinstance(x, dict)]
+    default = [_autonomy_enrich_activity(x) for x in _default_xiaoxia_activity_catalog()]
     try:
         with open(XIAOXIA_ACTIVITY_CATALOG_PATH, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=2)
@@ -1156,6 +1159,428 @@ def xiaoxia_autonomy_context_for_prompt(now_dt=None):
         return "今天自主活動狀態暫時讀取失敗；不要主動提及。"
 
 
+
+
+# ==========================================
+# 🌱 v1.5.17 R4：自主活動長期索引 / 指定類別與活動
+# ==========================================
+
+def load_xiaoxia_autonomy_episode_log():
+    data = _load_json_file_or_default(XIAOXIA_AUTONOMY_EPISODE_LOG_PATH, [])
+    return data if isinstance(data, list) else []
+
+
+def save_xiaoxia_autonomy_episode_log(rows):
+    rows = rows if isinstance(rows, list) else []
+    rows = rows[-500:]
+    with open(XIAOXIA_AUTONOMY_EPISODE_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+
+
+def load_xiaoxia_autonomy_threads():
+    data = _load_json_file_or_default(XIAOXIA_AUTONOMY_THREADS_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_xiaoxia_autonomy_threads(data):
+    data = data if isinstance(data, dict) else {}
+    with open(XIAOXIA_AUTONOMY_THREADS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_xiaoxia_autonomy_selection_cache():
+    data = _load_json_file_or_default(XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_xiaoxia_autonomy_selection_cache(data):
+    data = data if isinstance(data, dict) else {}
+    with open(XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _autonomy_theme_key_for_activity(activity):
+    activity = activity if isinstance(activity, dict) else {}
+    if activity.get("theme_key"):
+        return str(activity.get("theme_key")).strip()
+    aid = str(activity.get("id") or "").strip()
+    category = str(activity.get("category") or "").strip()
+    title = str(activity.get("title") or "").strip()
+    hay = f"{aid} {category} {title}".lower()
+
+    mapping = [
+        ("campus_return", ["campus", "藝術史", "大學", "校園", "研究所", "旁聽"]),
+        ("ai_learning", ["learn_ai", "ai", "人工智慧", "電腦"]),
+        ("professional_teaching_ai", ["pro_ai", "社區大學", "教長者", "電腦教學"]),
+        ("art_teacher", ["pro_art", "畫畫老師", "教小朋友畫畫"]),
+        ("art_creation", ["art_paint", "畫畫", "水彩", "創作", "作品集"]),
+        ("art_appreciation", ["gallery", "畫展", "美術館", "博物館", "展覽"]),
+        ("concert_life", ["concert", "音樂會", "古典"]),
+        ("yoga_growth", ["yoga", "瑜珈", "瑜伽", "嬋柔"]),
+        ("dance_growth", ["kpop", "k-pop", "舞蹈", "dance"]),
+        ("tennis_growth", ["tennis", "網球"]),
+        ("swimming_growth", ["swimming", "游泳", "泳池"]),
+        ("city_style", ["outlet", "百貨", "逛街", "香氛", "穿搭", "賣場"]),
+        ("volunteer_service", ["volunteer", "志工", "醫院", "圖書館"]),
+        ("home_life", ["home_baking", "甜點", "烘焙", "居家生活"]),
+        ("reward_eye_candy_home", ["home_reward", "home_wardrobe", "養眼", "驚喜"]),
+        ("micro_trip", ["micro_trip", "老街", "旅行", "散步"]),
+    ]
+    for key, kws in mapping:
+        if any(str(k).lower() in hay for k in kws):
+            return key
+    # fallback：以類別建立主題線，避免空白。
+    safe = re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff]+", "_", category or aid or "general").strip("_")
+    return "theme_" + safe
+
+
+def _autonomy_continuity_group_for_activity(activity):
+    activity = activity if isinstance(activity, dict) else {}
+    if activity.get("continuity_group"):
+        return str(activity.get("continuity_group")).strip()
+    cat = str(activity.get("category") or "").strip()
+    if cat in {"學習成長", "專業自主／教學工作"}:
+        return "learning_work_growth"
+    if cat in {"藝文創作", "藝文活動"}:
+        return "art_culture_growth"
+    if cat == "運動健康":
+        return "body_health_growth"
+    if cat == "公益志工":
+        return "volunteer_service_growth"
+    if cat in {"城市探索", "旅行微冒險"}:
+        return "city_exploration_growth"
+    if cat in {"居家生活", "給大俠的小驚喜"}:
+        return "home_private_life"
+    return "general_autonomy"
+
+
+def _autonomy_enrich_activity(item):
+    if not isinstance(item, dict):
+        return item
+    out = dict(item)
+    out.setdefault("theme_key", _autonomy_theme_key_for_activity(out))
+    out.setdefault("continuity_group", _autonomy_continuity_group_for_activity(out))
+    return out
+
+
+def _autonomy_all_categories(catalog=None):
+    catalog = catalog or load_xiaoxia_activity_catalog()
+    cats = []
+    for item in catalog:
+        cat = str((item or {}).get("category") or "").strip()
+        if cat and cat not in cats:
+            cats.append(cat)
+    return cats
+
+
+def _autonomy_category_aliases():
+    return {
+        "1": "運動健康", "運動": "運動健康", "健身": "運動健康", "瑜珈": "運動健康", "體能": "運動健康",
+        "2": "藝文創作", "創作": "藝文創作", "畫畫": "藝文創作", "藝術創作": "藝文創作",
+        "3": "學習成長", "學習": "學習成長", "校園": "學習成長", "大學": "學習成長", "研究所": "學習成長",
+        "4": "城市探索", "城市": "城市探索", "逛街": "城市探索", "百貨": "城市探索", "outlet": "城市探索",
+        "5": "藝文活動", "藝文": "藝文活動", "看展": "藝文活動", "展覽": "藝文活動", "音樂會": "藝文活動",
+        "6": "公益志工", "志工": "公益志工", "公益": "公益志工",
+        "7": "居家生活", "居家": "居家生活", "在家": "居家生活",
+        "8": "旅行微冒險", "旅行": "旅行微冒險", "小旅行": "旅行微冒險", "老街": "旅行微冒險",
+        "9": "社交但安全", "社交": "社交但安全",
+        "10": "給大俠的小驚喜", "驚喜": "給大俠的小驚喜", "養眼": "給大俠的小驚喜",
+        "11": "專業自主／教學工作", "專業": "專業自主／教學工作", "教學": "專業自主／教學工作", "工作": "專業自主／教學工作", "老師": "專業自主／教學工作",
+    }
+
+
+def _autonomy_resolve_category(query, catalog=None):
+    catalog = catalog or load_xiaoxia_activity_catalog()
+    q = _clean_text_compact(query or "")
+    if not q:
+        return None
+    aliases = _autonomy_category_aliases()
+    if q in aliases:
+        return aliases[q]
+    cats = _autonomy_all_categories(catalog)
+    for cat in cats:
+        if q == cat or q in cat or cat in q:
+            return cat
+    low = q.lower()
+    for key, val in aliases.items():
+        if str(key).lower() in low:
+            return val
+    return None
+
+
+def _autonomy_cache_key(message):
+    return f"{getattr(message, 'channel', None).id if getattr(message, 'channel', None) else 'channel'}:{getattr(message, 'author', None).id if getattr(message, 'author', None) else 'user'}"
+
+
+def _autonomy_set_selection_cache(message, list_type, items, category=None):
+    cache = load_xiaoxia_autonomy_selection_cache()
+    key = _autonomy_cache_key(message)
+    cache[key] = {
+        "list_type": list_type,
+        "category": category or "",
+        "items": items,
+        "created_at": _board_now(),
+    }
+    save_xiaoxia_autonomy_selection_cache(cache)
+
+
+def _autonomy_get_selection_cache(message):
+    return load_xiaoxia_autonomy_selection_cache().get(_autonomy_cache_key(message)) or {}
+
+
+def _autonomy_resolve_activity(query, message=None, catalog=None, category_filter=None):
+    catalog = catalog or load_xiaoxia_activity_catalog()
+    q = _clean_text_compact(query or "")
+    if not q:
+        return None
+    if category_filter:
+        catalog = [x for x in catalog if str((x or {}).get("category") or "") == category_filter]
+
+    # 編號：先用最近一次活動清單快取。
+    if q.isdigit() and message is not None:
+        cache = _autonomy_get_selection_cache(message)
+        items = cache.get("items") if isinstance(cache.get("items"), list) else []
+        if cache.get("list_type") == "activity":
+            for row in items:
+                if str(row.get("index")) == q:
+                    aid = str(row.get("activity_id") or "")
+                    for item in catalog:
+                        if str(item.get("id") or "") == aid:
+                            return item
+
+    low = q.lower()
+    for item in catalog:
+        aid = str(item.get("id") or "")
+        title = str(item.get("title") or "")
+        if low == aid.lower() or q == title:
+            return item
+    # 模糊：中文名稱 / id / tags 命中
+    scored = []
+    for item in catalog:
+        hay = " ".join([
+            str(item.get("id") or ""),
+            str(item.get("title") or ""),
+            str(item.get("category") or ""),
+            " ".join(str(x) for x in (item.get("activity_tags") or [])),
+        ]).lower()
+        score = 0
+        if low in hay:
+            score += 10
+        for token in re.split(r"\s+", low):
+            if token and token in hay:
+                score += 3
+        if score:
+            scored.append((score, item))
+    if scored:
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][1]
+    return None
+
+
+def _autonomy_thread_context_for_activity(activity, max_chars=1300):
+    activity = _autonomy_enrich_activity(activity)
+    theme_key = _autonomy_theme_key_for_activity(activity)
+    threads = load_xiaoxia_autonomy_threads()
+    th = threads.get(theme_key)
+    if not isinstance(th, dict):
+        return f"這個自主主題目前沒有過去紀錄，今天可自然開始新的生活片段。theme_key={theme_key}"
+    parts = [
+        f"主題線：{th.get('title') or theme_key}",
+        f"狀態：{th.get('status') or 'open'}",
+        f"上次相關活動：{th.get('last_episode_date') or '未知'}",
+        f"摘要：{th.get('summary') or ''}",
+        f"目前方向：{th.get('current_direction') or ''}",
+        f"下次延續指引：{th.get('next_time_guidance') or ''}",
+    ]
+    return narrative_safe_text("\n".join([p for p in parts if p.strip()]), max_len=max_chars)
+
+
+def _autonomy_thread_title(theme_key, activity):
+    titles = {
+        "campus_return": "小俠重返校園感",
+        "ai_learning": "小俠自主學習 AI 與新知",
+        "professional_teaching_ai": "小俠教長者使用 AI / 電腦",
+        "art_teacher": "小俠當畫畫老師",
+        "art_creation": "小俠創作生活",
+        "art_appreciation": "小俠看展與藝術品味",
+        "concert_life": "小俠音樂會與藝文夜晚",
+        "yoga_growth": "小俠瑜珈與身體覺察",
+        "dance_growth": "小俠舞蹈練習",
+        "tennis_growth": "小俠網球練習",
+        "swimming_growth": "小俠游泳與健康感",
+        "city_style": "小俠城市穿搭與逛街生活",
+        "volunteer_service": "小俠公益志工服務",
+        "home_life": "小俠居家生活",
+        "reward_eye_candy_home": "小俠給大俠的居家養眼驚喜",
+        "micro_trip": "小俠小旅行與城市微冒險",
+    }
+    return titles.get(theme_key) or f"小俠自主生活：{activity.get('category') or activity.get('title') or theme_key}"
+
+
+def _autonomy_update_thread_from_episode(episode):
+    if not isinstance(episode, dict):
+        return
+    theme_key = str(episode.get("theme_key") or "").strip()
+    if not theme_key:
+        return
+    threads = load_xiaoxia_autonomy_threads()
+    th = threads.get(theme_key) if isinstance(threads.get(theme_key), dict) else {}
+    episode_ids = th.get("episode_ids") if isinstance(th.get("episode_ids"), list) else []
+    if episode.get("episode_id") and episode.get("episode_id") not in episode_ids:
+        episode_ids.append(episode.get("episode_id"))
+    title = th.get("title") or _autonomy_thread_title(theme_key, episode)
+    activity_title = episode.get("activity_title") or episode.get("title") or ""
+    share = _clean_text_compact(episode.get("share_text") or "")
+    previous_summary = _clean_text_compact(th.get("summary") or "")
+    if previous_summary:
+        summary = narrative_safe_text(previous_summary + " / 最新：" + activity_title + "，" + share, max_len=700)
+    else:
+        summary = narrative_safe_text(f"小俠曾進行「{activity_title}」。{share}", max_len=700)
+    current_direction = th.get("current_direction") or ""
+    if not current_direction:
+        if theme_key == "campus_return":
+            current_direction = "先多旁聽、多看看，慢慢確認自己是否想重新接近校園、創作或研究所方向。"
+        elif "teaching" in theme_key or "teacher" in theme_key:
+            current_direction = "嘗試把自己的能力輸出給別人，建立更成熟、能謀生與服務人的一面。"
+        elif "growth" in theme_key:
+            current_direction = "透過持續練習累積自信與身體/能力上的成長。"
+        else:
+            current_direction = "延續這個主題，讓小俠的生活不是每次重頭開始。"
+    threads[theme_key] = {
+        "title": title,
+        "status": th.get("status") or "open",
+        "category": episode.get("category") or th.get("category") or "",
+        "continuity_group": episode.get("continuity_group") or th.get("continuity_group") or "",
+        "last_episode_date": episode.get("date") or th.get("last_episode_date") or "",
+        "episode_ids": episode_ids[-50:],
+        "summary": summary,
+        "current_direction": current_direction,
+        "next_time_guidance": th.get("next_time_guidance") or f"下次若再抽到或指定「{episode.get('activity_title') or title}」相關題材，不要從零開始，要延續這條主題線與上次的感受。",
+        "updated_at": _board_now(),
+    }
+    save_xiaoxia_autonomy_threads(threads)
+
+
+def _autonomy_append_episode(today_payload, activity, context=None):
+    activity = _autonomy_enrich_activity(activity)
+    now_dt = datetime.now(TZ_TPE)
+    date_key = now_dt.strftime("%Y-%m-%d")
+    activity_id = str(activity.get("id") or today_payload.get("activity_id") or "unknown")
+    theme_key = _autonomy_theme_key_for_activity(activity)
+    episode_id = f"AUTO_{now_dt.strftime('%Y%m%d_%H%M%S')}_{activity_id}"
+    episode = {
+        "episode_id": episode_id,
+        "date": date_key,
+        "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "activity_id": activity_id,
+        "activity_title": activity.get("title") or today_payload.get("activity_title") or "",
+        "category": activity.get("category") or today_payload.get("activity_category") or "",
+        "theme_key": theme_key,
+        "continuity_group": _autonomy_continuity_group_for_activity(activity),
+        "visual_mode": today_payload.get("visual_mode") or "",
+        "scene": today_payload.get("scene") or "",
+        "mood": today_payload.get("mood") or "",
+        "wardrobe_id": today_payload.get("wardrobe_id") or "",
+        "wardrobe_name": today_payload.get("wardrobe_name") or "",
+        "wardrobe_reason": today_payload.get("wardrobe_reason") or "",
+        "share_text": today_payload.get("share_text") or "",
+        "photo_url": today_payload.get("photo_url") or "",
+        "event_upgrade_potential": today_payload.get("event_upgrade_potential") or "",
+        "followup_summaries": [],
+    }
+    rows = load_xiaoxia_autonomy_episode_log()
+    rows.append(episode)
+    save_xiaoxia_autonomy_episode_log(rows)
+    _autonomy_update_thread_from_episode(episode)
+    return episode
+
+
+def _autonomy_update_latest_episode_followup(user_text, xiaoxia_reply, summary=None):
+    try:
+        state = load_xiaoxia_autonomy_state()
+        today = state.get("today") if isinstance(state.get("today"), dict) else {}
+        episode_id = today.get("episode_id")
+        theme_key = today.get("theme_key")
+        if not episode_id:
+            return False
+        rows = load_xiaoxia_autonomy_episode_log()
+        target = None
+        for row in rows:
+            if isinstance(row, dict) and row.get("episode_id") == episode_id:
+                target = row
+                break
+        if not target:
+            return False
+        entry = {
+            "time": _board_now(),
+            "user": narrative_safe_text(user_text, max_len=260),
+            "xiaoxia_summary": narrative_safe_text(summary or xiaoxia_reply, max_len=360),
+        }
+        target.setdefault("followup_summaries", []).append(entry)
+        target["followup_summaries"] = target["followup_summaries"][-20:]
+        save_xiaoxia_autonomy_episode_log(rows)
+
+        if theme_key:
+            threads = load_xiaoxia_autonomy_threads()
+            th = threads.get(theme_key) if isinstance(threads.get(theme_key), dict) else {}
+            note = entry["xiaoxia_summary"]
+            th["summary"] = narrative_safe_text((th.get("summary") or "") + " / 後續對話：" + note, max_len=800)
+            th["last_followup_date"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+            th["updated_at"] = _board_now()
+            threads[theme_key] = th
+            save_xiaoxia_autonomy_threads(threads)
+        return True
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_FOLLOWUP_APPEND_FAILED] {type(exc).__name__}: {exc}")
+        return False
+
+
+def _autonomy_followup_relevant(user_text, today):
+    if not isinstance(today, dict) or not today.get("episode_id"):
+        return False
+    raw = str(user_text or "")
+    if not raw or raw.strip().startswith("/"):
+        return False
+    keys = [
+        today.get("activity_title"), today.get("activity_category"), today.get("theme_key"),
+        "剛剛", "今天", "那個", "活動", "照片", "如何", "怎麼", "為什麼", "原因", "計畫", "計劃", "收穫",
+        "喜歡", "看到", "聽到", "想不想", "研究所", "校園", "學校", "健身", "運動", "下次", "以後",
+    ]
+    return any(str(k or "").strip() and str(k).strip() in raw for k in keys)
+
+
+async def _maybe_update_autonomy_followup_from_chat(user_text, xiaoxia_reply):
+    try:
+        state = load_xiaoxia_autonomy_state()
+        today = state.get("today") if isinstance(state.get("today"), dict) else {}
+        if today.get("date") != datetime.now(TZ_TPE).strftime("%Y-%m-%d"):
+            return False
+        if not _autonomy_followup_relevant(user_text, today):
+            return False
+        prompt = f"""
+請把以下大俠與小俠關於「今日小俠自主活動」的後續對話，摘要成一段繁體中文記憶，用於未來同主題延續。
+只保留具體的新資訊、原因、計畫、偏好、收穫或下一步；不要寫成系統說明，不要提 JSON。
+若沒有實質新資訊，回傳空字串。
+
+今日活動：{today.get('activity_title')}
+主題：{today.get('theme_key')}
+大俠問：{str(user_text)[:1200]}
+小俠答：{str(xiaoxia_reply)[:1800]}
+"""
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.25),
+        )
+        summary = _clean_text_compact(getattr(resp, "text", "") or "")
+        if not summary:
+            return False
+        return _autonomy_update_latest_episode_followup(user_text, xiaoxia_reply, summary=summary)
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_FOLLOWUP_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
+        return False
+
+
 def _days_since_date(date_text):
     raw = str(date_text or "").strip()[:10]
     if not raw:
@@ -1177,11 +1602,21 @@ def _autonomy_should_reward_today(state):
     return random.random() < 0.18, gap
 
 
-def _autonomy_pick_activity():
+def _autonomy_pick_activity(category_filter=None, activity_filter=None):
     state = load_xiaoxia_autonomy_state()
     catalog = [x for x in load_xiaoxia_activity_catalog() if isinstance(x, dict)]
     if not catalog:
-        catalog = _default_xiaoxia_activity_catalog()
+        catalog = [_autonomy_enrich_activity(x) for x in _default_xiaoxia_activity_catalog()]
+    if activity_filter and isinstance(activity_filter, dict):
+        selected = _autonomy_enrich_activity(activity_filter)
+        modes = selected.get("visual_mode_candidates") or ["daily_life"]
+        reward_due, reward_gap = _autonomy_should_reward_today(state)
+        visual_mode = "reward_eye_candy" if reward_due and "reward_eye_candy" in modes else ("daily_life" if "daily_life" in modes else str(modes[0] or "daily_life"))
+        return selected, visual_mode, reward_gap
+    if category_filter:
+        filtered = [x for x in catalog if str(x.get("category") or "") == str(category_filter)]
+        if filtered:
+            catalog = filtered
 
     today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     history = [x for x in (state.get("history") or []) if isinstance(x, dict)]
@@ -1371,7 +1806,7 @@ def _autonomy_people_policy_info(activity):
     }
 
 
-async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None):
+async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, thread_context=""):
     wardrobe_line = ""
     if isinstance(wardrobe_item, dict):
         wardrobe_line = f"衣服：{wardrobe_item.get('id')} {wardrobe_item.get('name')}｜{wardrobe_item.get('main_category')}/{wardrobe_item.get('sub_category')}｜{wardrobe_item.get('style_summary')}"
@@ -1396,6 +1831,9 @@ scene={str((result_context or {}).get('scene_summary') or '')}
 mood={str((result_context or {}).get('mood_summary') or '')}
 composition={str((result_context or {}).get('composition') or '')}
 
+【同主題過去脈絡】
+{thread_context or '目前沒有同主題過去紀錄。'}
+
 必須做到：
 1. 像跟親密伴侶聊天，不要有「今日活動／我看到的／我聽到的／我的體會／這張照片」這種標題。
 2. 一到三段自然文字即可，通常 180～420 個中文字。
@@ -1405,6 +1843,7 @@ composition={str((result_context or {}).get('composition') or '')}
 6. 若 visual_mode=reward_eye_candy，口吻可更甜、更私密、更養眼，但仍要像生活裡的一刻，不要粗俗。
 7. 不要提 AI 生成、prompt、資料庫、JSON、系統、指令或模型。
 8. 不要把大俠寫進照片，不要說有男性陪她。
+9. 如果同主題過去脈絡有內容，這次分享要自然延續，不要說成第一次或從零開始；但不要像背資料庫。
 
 只回傳小俠要說的正文。
 """
@@ -1493,6 +1932,8 @@ def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
     if str(activity.get("id") or "") == "culture_concert":
         composition_guard += " For concert scenes, prefer the concert hall lobby, corridor, side foyer, entrance area, or intermission moment with Xiaoxia holding a program booklet. Avoid stage-dominant or audience-dominant compositions."
 
+    thread_context = _autonomy_thread_context_for_activity(activity)
+
     return f"""
 Xiaoxia autonomy daily photo.
 
@@ -1504,6 +1945,9 @@ Scene seed: {seed}
 
 Narrative intent:
 Xiaoxia has her own life today. She is not passively waiting at home for Daxia's instructions. She is doing this activity by her own choice, with a mature, independent, lively girlfriend presence. The image should feel like she is bringing one beautiful moment from her day back to Daxia.
+
+Same-theme continuity memory:
+{thread_context}
 
 Visual mode: {visual_mode}
 {style_rule}
@@ -1543,9 +1987,47 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         await message.channel.send(
             "🌱 `小俠自主` 可用：\n"
             "`/小俠自主 今日`：小俠自己選一件今天想做的事、自己挑衣服或自由搭配，拍一張照並口語分享心得。\n"
-            "`/小俠自主 狀態`：查看今日活動、今日照片與養眼照保底狀態。\n"
+            "`/小俠自主 類別`：列出可指定的大類。\n"
+            "`/小俠自主 活動 [類別]`：列出活動清單，可用編號指定。\n"
+            "`/小俠自主 指定類別 運動健康`：大俠指定方向，小俠在該類中自己選。\n"
+            "`/小俠自主 指定活動 sport_tennis`：直接指定今天的活動。\n"
+            "`/小俠自主 狀態`：查看今日活動、主題線與養眼照保底狀態。\n"
             "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
             "`/小俠自主 變事件`：把今天這個題材升級成近期事件。"
+        )
+        return True
+
+    if arg_key in {"類別", "分類", "categories", "category"}:
+        catalog = load_xiaoxia_activity_catalog()
+        cats = _autonomy_all_categories(catalog)
+        rows = [f"{i+1}. {cat}" for i, cat in enumerate(cats)]
+        _autonomy_set_selection_cache(message, "category", [{"index": i+1, "category": cat} for i, cat in enumerate(cats)])
+        await message.channel.send(
+            "🌱 **小俠自主活動類別**\n"
+            + "\n".join(rows)
+            + "\n\n用法：`/小俠自主 指定類別 運動健康` 或 `/小俠自主 指定類別 1`"
+        )
+        return True
+
+    if arg_key.startswith("活動") or arg_key.startswith("清單") or arg_key.startswith("列表"):
+        query = re.sub(r"^(活動|清單|列表)\s*", "", arg_key).strip()
+        catalog = load_xiaoxia_activity_catalog()
+        category = _autonomy_resolve_category(query, catalog=catalog) if query else None
+        items = [x for x in catalog if (not category or str(x.get("category") or "") == category)]
+        title = f"🌱 **小俠自主活動清單｜{category}**" if category else "🌱 **小俠自主活動清單｜全部**"
+        # Discord 訊息避免過長：未指定類別時只列前 30 筆，並提示可先用類別縮小。
+        display = items[:30]
+        rows = [f"{i+1}. `{x.get('id')}`｜{x.get('title')}｜{x.get('category')}" for i, x in enumerate(display)]
+        _autonomy_set_selection_cache(
+            message,
+            "activity",
+            [{"index": i+1, "activity_id": x.get("id"), "title": x.get("title"), "category": x.get("category")} for i, x in enumerate(display)],
+            category=category or "",
+        )
+        more = "" if len(items) <= len(display) else f"\n...另有 {len(items)-len(display)} 項，請用 `/小俠自主 活動 類別名` 縮小清單。"
+        await message.channel.send(
+            title + "\n" + "\n".join(rows) + more
+            + "\n\n用法：`/小俠自主 指定活動 sport_tennis` 或先看清單後 `/小俠自主 指定活動 3`"
         )
         return True
 
@@ -1557,6 +2039,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
                 f"🌱 **小俠今日自主狀態**\n"
                 f"活動：{today.get('activity_title') or '尚未產生'}\n"
                 f"類別：{today.get('activity_category') or '-'}｜模式：{today.get('visual_mode') or '-'}\n"
+                f"主題線：{today.get('theme_key') or '-'}｜episode：{today.get('episode_id') or '-'}\n"
                 f"衣服：{today.get('wardrobe_id') or '自由搭配'} {today.get('wardrobe_name') or ''}\n"
                 f"照片：{'已送出' if today.get('photo_sent') else '尚未送出'}\n"
                 f"上次養眼照：{state.get('last_reward_photo_date') or '尚未記錄'}｜間隔：{gap if gap < 900 else '尚未記錄'} 天"
@@ -1578,6 +2061,9 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         board = load_event_board()
         events = board.setdefault("active_events", [])
         new_id = f"E{len(events) + 1:03d}"
+        threads = load_xiaoxia_autonomy_threads()
+        th = threads.get(today.get("theme_key")) if isinstance(threads.get(today.get("theme_key")), dict) else {}
+        thread_summary = th.get("summary") or today.get("share_text") or today.get("scene") or today.get("activity_title")
         item = {
             "id": new_id,
             "title": f"小俠自主生活：{today.get('activity_title')}",
@@ -1585,15 +2071,19 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "importance": "normal",
             "created_at": _board_now(),
             "updated_at": _board_now(),
-            "description": today.get("reflection") or today.get("share_text") or today.get("scene") or today.get("activity_title"),
+            "description": thread_summary,
             "xiaoxia_attention": True,
             "daily_reminder": False,
             "source": "xiaoxia_autonomy",
             "origin_activity_id": today.get("activity_id"),
+            "origin_episode_id": today.get("episode_id"),
+            "origin_theme_key": today.get("theme_key"),
             "notes": [
                 f"類別：{today.get('activity_category')}",
+                f"主題線：{today.get('theme_key')}",
                 f"照片模式：{today.get('visual_mode')}",
-                f"所見／體會：{today.get('reflection') or today.get('share_text') or ''}",
+                f"主題摘要：{thread_summary}",
+                f"目前方向：{th.get('current_direction') or ''}",
                 f"照片：{today.get('photo_url') or ''}",
             ],
         }
@@ -1602,17 +2092,40 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         await message.channel.send(f"🧭 已把今天的小俠自主活動升級成近期事件：**{new_id}｜{item['title']}**")
         return True
 
-    if arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
-        await message.channel.send("大俠，目前 v1.5.17 先支援：`/小俠自主 今日`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`。")
+    specified_category = None
+    specified_activity = None
+    specified_label = ""
+
+    if arg_key.startswith("指定類別") or arg_key.startswith("指定分類"):
+        query = re.sub(r"^(指定類別|指定分類)\s*", "", arg_key).strip()
+        specified_category = _autonomy_resolve_category(query, catalog=load_xiaoxia_activity_catalog())
+        if not specified_category:
+            await message.channel.send("大俠，我找不到這個類別。可以先輸入 `/小俠自主 類別` 看清單，再用編號或類別名指定。")
+            return True
+        specified_label = f"指定類別：{specified_category}"
+    elif arg_key.startswith("指定活動"):
+        query = re.sub(r"^指定活動\s*", "", arg_key).strip()
+        specified_activity = _autonomy_resolve_activity(query, message=message, catalog=load_xiaoxia_activity_catalog())
+        if not specified_activity:
+            await message.channel.send("大俠，我找不到這個活動。可以先輸入 `/小俠自主 活動 運動健康` 看清單，再用編號、中文名稱或 activity_id 指定。")
+            return True
+        specified_label = f"指定活動：{specified_activity.get('title')}"
+    elif arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
+        await message.channel.send("大俠，目前 v1.5.17 R4 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ...`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`。")
         return True
 
-    force_reroll = arg_key in {"重抽", "再抽", "重拍"}
+    force_reroll = arg_key in {"重抽", "再抽", "重拍"} or bool(specified_category or specified_activity)
     if _autonomy_state_today_done(state) and not force_reroll:
         await message.channel.send("大俠，小俠今天已經自主分享過一張照片了。若要重抽重拍，請輸入 `/小俠自主 重抽`。")
         return True
 
-    status = await message.channel.send("🌱 小俠今天自己挑一件事去做，也在想要穿哪一套、拍哪一瞬間帶回來給大俠看…")
-    activity, visual_mode, reward_gap = _autonomy_pick_activity()
+    status_text = "🌱 小俠今天自己挑一件事去做，也在想要穿哪一套、拍哪一瞬間帶回來給大俠看…"
+    if specified_label:
+        status_text = f"🌱 收到大俠的{specified_label}。小俠會沿著這個方向，準備今天的自主生活照…"
+    status = await message.channel.send(status_text)
+    activity, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=specified_category, activity_filter=specified_activity)
+    activity = _autonomy_enrich_activity(activity)
+    thread_context = _autonomy_thread_context_for_activity(activity)
     wardrobe_item, wardrobe_reason = _autonomy_choose_wardrobe(activity, visual_mode)
     reference_item_path = None
     reference_item_url = None
@@ -1660,6 +2173,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "wardrobe_name": wardrobe_name,
             "visual_mode": visual_mode,
             "activity": activity,
+            "theme_key": _autonomy_theme_key_for_activity(activity),
+            "continuity_group": _autonomy_continuity_group_for_activity(activity),
+            "thread_context": thread_context,
+            "specified_label": specified_label,
             "reward_gap_days": reward_gap,
             "custom_people_policy": policy_info.get("policy_key"),
             "autonomy_people_policy": policy_info.get("policy_key"),
@@ -1674,7 +2191,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     try:
         await status.edit(content=f"📸 小俠決定今天去做：**{activity.get('title')}**。正在拍下這一刻…")
         context = await _generate_photo_from_context(context, msg=status)
-        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context)
+        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context)
         context["message"] = share_text
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
         context["autonomy_activity"] = activity
@@ -1704,6 +2221,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "activity_id": activity.get("id"),
             "activity_title": activity.get("title"),
             "activity_category": activity.get("category"),
+            "theme_key": _autonomy_theme_key_for_activity(activity),
+            "continuity_group": _autonomy_continuity_group_for_activity(activity),
+            "thread_context": thread_context,
+            "specified_label": specified_label,
             "visual_mode": visual_mode,
             "wardrobe_id": wardrobe_id or "",
             "wardrobe_name": wardrobe_name or "",
@@ -1719,6 +2240,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         state = load_xiaoxia_autonomy_state()
         if state.get("today") and isinstance(state.get("today"), dict) and state["today"].get("date") == today_key:
             state.setdefault("history", []).append(state["today"])
+        episode = _autonomy_append_episode(today_payload, activity, context=context)
+        today_payload["episode_id"] = episode.get("episode_id", "")
         state["today"] = today_payload
         if visual_mode == "reward_eye_candy":
             state["last_reward_photo_date"] = today_key
@@ -16589,7 +17112,7 @@ async def on_message(message):
                     "1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。\n"
                     "1-F. 大俠問妳的安排、想法或喜好時，給出可延續對話的具體內容；妳可以有自己的行程與偏好，不必把每件事都收束成等待大俠或依附大俠。\n"
                     "1-G. 若本輪與『小俠今日自主活動』相關，必須把它當成今天已發生的親身生活經驗承接。大俠問活動如何、看到什麼、聽到什麼、喜歡哪一段或照片在哪裡拍時，要自然補充所見所聞與體會，不可一問三不知、不可說自己只是 AI/照片、不可把已發生的自主活動說成尚未開始。\n"
-                    "1-G. 妳有一套以自己模樣製作的可愛 Discord Sticker 與 Emoji；它們是妳的化身，不是陌生圖案。要使用時由妳選擇，但只以最後一行控制標記交給程式，絕不把「我貼了一張貼圖」、控制碼、括號舞台指示或貼圖說明寫進正文。\n"
+                    "1-H. 妳有一套以自己模樣製作的可愛 Discord Sticker 與 Emoji；它們是妳的化身，不是陌生圖案。要使用時由妳選擇，但只以最後一行控制標記交給程式，絕不把「我貼了一張貼圖」、控制碼、括號舞台指示或貼圖說明寫進正文。\n"
                     f"{event_rule}\n"
                     "2. 若大俠傳送照片，請自然描述可見的情境、服裝或氛圍，不自行延伸過度私密內容。\n"
                     #"3. 若互動帶有浪漫或親近情緒，以陪伴、擁抱、思念、安心、害羞的含蓄敘事表達。\n"
@@ -16736,6 +17259,10 @@ async def on_message(message):
                             "【待履約登記】" + "；".join(captured_promises)
                         )
                     save_temp_chat(daily_chat_logs) 
+                    try:
+                        await _maybe_update_autonomy_followup_from_chat(text_query, xiaoxia_reply)
+                    except Exception as auto_follow_err:
+                        print(f"⚠️ [AUTONOMY_FOLLOWUP_HOOK_FAILED] {type(auto_follow_err).__name__}: {auto_follow_err}")
 
                 if xiaoxia_reply:
                     await message.reply(xiaoxia_reply)
