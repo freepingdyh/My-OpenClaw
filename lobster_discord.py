@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.21"
+LOBSTER_VERSION = "1.5.22"
 
 
 def _normalize_generation_level(level):
@@ -2229,6 +2229,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 關`：暫停自動排程，直到 `/小俠自主 開`。\n"
             "`/小俠自主 開`：恢復自動排程並重建今日 slots。\n"
             "`/小俠自主 暫停 3天`：臨時暫停自動活動，天數可自訂，最多 30 天；不影響手動指定活動。\n"
+            "`/小俠自主 指定排程 14:00, 16:20, 18:00`：今天改用大俠指定的自動活動時間。\n"
             "自動排程：Zeabur 設 `XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT=1~6` 可讓小俠每日不定時自主活動；每次至少間隔 `XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS` 小時。"
         )
         return True
@@ -2283,6 +2284,58 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             f"🌱 已暫停 **小俠自主自動排程 {days} 天**，暫停到 **{until_date}**。\n"
             "這段期間小俠不會自動安排活動；但你仍可手動使用 `/小俠自主 指定活動 ...`。\n"
             "要提前恢復時輸入：`/小俠自主 開`。"
+        )
+        return True
+
+    if arg_key.startswith("指定排程") or arg_key.startswith("排程指定") or arg_key.startswith("schedule"):
+        raw_times = re.sub(r"^(指定排程|排程指定|schedule)\s*", "", arg_key, flags=re.IGNORECASE).strip()
+        times, errors = _parse_autonomy_manual_schedule_times(raw_times, now_dt=datetime.now(TZ_TPE), max_items=6)
+        if not times:
+            await message.channel.send(
+                "🌱 大俠，請提供今天要讓小俠自動活動的時間，例如：\n"
+                "`/小俠自主 指定排程 14:00, 16:20, 18:00`\n"
+                + ("\n".join(errors[:3]) if errors else "")
+            )
+            return True
+
+        now_dt = datetime.now(TZ_TPE)
+        slots = _autonomy_manual_schedule_slots(times, now_dt=now_dt)
+        pending_count = sum(1 for s in slots if isinstance(s, dict) and s.get("status") == "pending")
+        if pending_count <= 0:
+            await message.channel.send(
+                "🌱 大俠，這些指定時段今天都已經過了，所以沒有建立新的自動活動排程。\n"
+                "請指定接下來的時間，例如：`/小俠自主 指定排程 14:00, 16:20, 18:00`。"
+            )
+            return True
+
+        expected = _autonomy_schedule_config_snapshot()
+        scheduler = {
+            "date": now_dt.strftime("%Y-%m-%d"),
+            **expected,
+            "daily_limit": pending_count,
+            "manual_schedule": True,
+            "manual_schedule_created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "manual_schedule_source": "daxia_command",
+            "slots": slots,
+            "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "rebuilt_reason": "manual_schedule_by_daxia",
+        }
+        state["auto_enabled_override"] = True
+        state["auto_pause_until"] = ""
+        state["auto_pause_days"] = 0
+        state["auto_pause_reason"] = ""
+        state["auto_control_updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_control_updated_by"] = "daxia_manual_schedule"
+        state["auto_scheduler"] = scheduler
+        save_xiaoxia_autonomy_state(state)
+
+        slot_lines = [f"{s.get('time')}={s.get('status')}" for s in slots if isinstance(s, dict)]
+        warning = ("\n" + "\n".join(errors[:4])) if errors else ""
+        await message.channel.send(
+            "🌱 已改用 **大俠指定的今日小俠自主排程**。\n"
+            f"今日 slots：{', '.join(slot_lines)}\n"
+            "這只影響今天；明天會回到 Zeabur env 的不定時排程。"
+            + warning
         )
         return True
 
@@ -2346,9 +2399,11 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         control_label = "暫停中" if control.get("paused") else "啟用"
         if not bool(state.get("auto_enabled_override", True)):
             control_label = "關閉"
+        schedule_kind = "指定排程" if scheduler.get("manual_schedule") else "不定時排程"
         pause_note = f"｜pause_until={control.get('pause_until')}" if control.get("pause_until") else ""
+        effective_limit = scheduler.get("daily_limit") if scheduler.get("manual_schedule") else XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT
         scheduler_text = (
-            f"\n自動排程：{control_label}{pause_note}｜limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
+            f"\n自動排程：{control_label}{pause_note}｜{schedule_kind}｜limit={effective_limit}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
             + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "")
         )
         if today.get("date") == today_key and today:
@@ -18256,6 +18311,64 @@ def _parse_autonomy_pause_days(text):
     return max(1, min(days, 30))
 
 
+def _parse_autonomy_manual_schedule_times(text, now_dt=None, max_items=6):
+    """v1.5.22：解析 `/小俠自主 指定排程 14:00, 16:20, 18:00`。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    raw = str(text or "").strip()
+    raw = raw.replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
+    pieces = [x.strip() for x in re.split(r"[,\s]+", raw) if x.strip()]
+    times = []
+    errors = []
+    seen = set()
+
+    for token in pieces:
+        m = re.fullmatch(r"(?:今天)?(\d{1,2})[:：](\d{2})", token)
+        if not m:
+            errors.append(f"`{token}` 不是 HH:MM 格式")
+            continue
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            errors.append(f"`{token}` 超出 00:00～23:59")
+            continue
+        t = f"{hh:02d}:{mm:02d}"
+        if t not in seen:
+            seen.add(t)
+            times.append(t)
+
+    times = sorted(times)
+    if len(times) > max_items:
+        errors.append(f"最多只能指定 {max_items} 個時段，已忽略第 {max_items + 1} 個以後。")
+        times = times[:max_items]
+    return times, errors
+
+
+def _autonomy_manual_schedule_slots(times, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    rows = []
+    for idx, t in enumerate(times or [], 1):
+        try:
+            hh, mm = [int(x) for x in str(t).split(":", 1)]
+            slot_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        except Exception:
+            continue
+        status = "pending"
+        note = ""
+        # 手動指定只排今天。已經過去的時間不補發，避免一設定就連發舊時段。
+        if slot_dt <= now_dt:
+            status = "skipped_past_time"
+            note = "指定時段已過，不補發。"
+        rows.append({
+            "id": f"MANUAL_SLOT_{now_dt.strftime('%Y%m%d')}_{idx:02d}",
+            "time": f"{hh:02d}:{mm:02d}",
+            "status": status,
+            "manual": True,
+            "note": note,
+            "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    return rows
+
+
 def _mark_autonomy_scheduler_cancelled(state, reason="manual_pause_or_off"):
     if not isinstance(state, dict):
         return state
@@ -18372,6 +18485,9 @@ def _autonomy_ensure_auto_schedule(now_dt=None):
     state = load_xiaoxia_autonomy_state()
     scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
     expected = _autonomy_schedule_config_snapshot()
+    # v1.5.22：大俠手動指定今日排程時，當天不被亂數排程覆蓋。
+    if scheduler.get("date") == date_key and scheduler.get("manual_schedule"):
+        return scheduler
     should_rebuild = (
         scheduler.get("date") != date_key
         or _autonomy_schedule_config_changed(scheduler, expected)
@@ -18408,7 +18524,8 @@ async def xiaoxia_autonomy_auto_task():
         if not isinstance(item, dict) or item.get("status") != "pending":
             continue
         # v1.5.20-R3：若舊排程殘留在目前環境變數的允許時段外，直接跳過，不補發。
-        if not _autonomy_slot_time_in_active_window(item.get("time")):
+        # v1.5.22：但大俠手動指定排程時，以大俠指定時間為準，不套用 env window。
+        if not scheduler.get("manual_schedule") and not _autonomy_slot_time_in_active_window(item.get("time")):
             item["status"] = "skipped_outside_active_window"
             item["skipped_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
             item["active_window"] = f"{XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00"
