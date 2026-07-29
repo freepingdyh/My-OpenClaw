@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.22"
+LOBSTER_VERSION = "1.5.23"
 
 
 def _normalize_generation_level(level):
@@ -17997,24 +17997,14 @@ async def on_message(message):
                     await message.channel.send(game_ui)
 
                 # ------------------------------------------------------------
-                # 📦 寫入金庫區塊 (確保 message 正確引用)
+                # 📦 v1.5.23：停用舊版「世界企劃」自動入庫
                 # ------------------------------------------------------------
+                # 這段舊邏輯會在 /photo 完成後，把同一張照片再存成 type=project、
+                # topic=【世界企劃】...，導致雲端別墅網頁重複顯示照片。
+                # 現在 /photo 已由 PhotoResultView 的「上傳成為 Project / Diary」
+                # 按鈕明確決定是否入庫，不應再由聊天大腦自動新增世界企劃。
                 if generated_image_url and generated_image_url.startswith("http"):
-                    photo_payload = {
-                        "id": str(uuid.uuid4()),
-                        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-                        "topic": f"【世界企劃】{current_target}",
-                        "event": f"大俠在 {current_target} 為我拍下的照片",
-                        "composition": scene_prompt,
-                        "mood": "驚喜與愛意",
-                        "message": xiaoxia_reply, 
-                        "image_url": generated_image_url,
-                        "local_url": local_url,
-                        "type": "project"
-                    }
-                    photos_db = load_memory()
-                    photos_db.insert(0, photo_payload)
-                    save_memory(photos_db)
+                    print("🧹 [LEGACY_WORLD_PROJECT_AUTOSAVE_DISABLED] /photo result will not be auto-saved as 世界企劃. Use Project/Diary buttons instead.")
 
             except Exception as e:
                 print(f"❌ 聊天引擎異常: {e}")
