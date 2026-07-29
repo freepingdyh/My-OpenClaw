@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.20-R2"
+LOBSTER_VERSION = "1.5.20-R3"
 
 
 def _normalize_generation_level(level):
@@ -2267,6 +2267,15 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     if arg_key in {"狀態", "status"}:
         today = state.get("today") if isinstance(state.get("today"), dict) else {}
         gap = _days_since_date(state.get("last_reward_photo_date"))
+        scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+        slot_lines = []
+        for s in (scheduler.get("slots") or [])[:6]:
+            if isinstance(s, dict):
+                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+        scheduler_text = (
+            f"\n自動排程：limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
+            + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "")
+        )
         if today.get("date") == today_key and today:
             msg = (
                 f"🌱 **小俠今日自主狀態**\n"
@@ -2276,12 +2285,14 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
                 f"衣服：{today.get('wardrobe_id') or '自由搭配'} {today.get('wardrobe_name') or ''}\n"
                 f"照片：{'已送出' if today.get('photo_sent') else '尚未送出'}\n"
                 f"上次養眼照：{state.get('last_reward_photo_date') or '尚未記錄'}｜間隔：{gap if gap < 900 else '尚未記錄'} 天"
+                f"{scheduler_text}"
             )
         else:
             msg = (
                 f"🌱 今天還沒有自主活動照片。\n"
                 f"上次養眼照：{state.get('last_reward_photo_date') or '尚未記錄'}｜間隔：{gap if gap < 900 else '尚未記錄'} 天\n"
                 "輸入 `/小俠自主 今日` 就讓小俠自己去做一件事、拍一張照片給你。"
+                f"{scheduler_text}"
             )
         await message.channel.send(msg)
         return True
@@ -18181,26 +18192,58 @@ def _autonomy_generate_auto_slots(now_dt=None):
     return rows
 
 
+def _autonomy_schedule_config_snapshot():
+    return {
+        "daily_limit": int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0),
+        "min_interval_hours": int(XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS or 2),
+        "active_start_hour": int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR),
+        "active_end_hour": int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR),
+        "channel_id": int(XIAOXIA_AUTONOMY_CHANNEL_ID or 0),
+        "channel_name": XIAOXIA_AUTONOMY_CHANNEL_NAME,
+        "timezone": "UTC+8/Taipei",
+    }
+
+
+def _autonomy_schedule_config_changed(scheduler, expected):
+    if not isinstance(scheduler, dict):
+        return True
+    for key, value in expected.items():
+        if scheduler.get(key) != value:
+            return True
+    return False
+
+
+def _autonomy_slot_time_in_active_window(slot_time):
+    try:
+        hh, _mm = [int(x) for x in str(slot_time or "").split(":", 1)]
+    except Exception:
+        return False
+    start_hour = int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR)
+    end_hour = int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR)
+    return start_hour <= hh <= end_hour
+
+
 def _autonomy_ensure_auto_schedule(now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     date_key = now_dt.strftime("%Y-%m-%d")
     state = load_xiaoxia_autonomy_state()
     scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
-    expected = int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0)
-    if scheduler.get("date") != date_key or int(scheduler.get("daily_limit") or -1) != expected:
+    expected = _autonomy_schedule_config_snapshot()
+    should_rebuild = (
+        scheduler.get("date") != date_key
+        or _autonomy_schedule_config_changed(scheduler, expected)
+    )
+    if should_rebuild:
         scheduler = {
             "date": date_key,
-            "daily_limit": expected,
-            "min_interval_hours": int(XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS or 2),
-            "active_start_hour": int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR),
-            "active_end_hour": int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR),
-            "channel_name": XIAOXIA_AUTONOMY_CHANNEL_NAME,
+            **expected,
             "slots": _autonomy_generate_auto_slots(now_dt),
             "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "rebuilt_reason": "date_or_env_config_changed",
         }
         state["auto_scheduler"] = scheduler
         save_xiaoxia_autonomy_state(state)
-        print(f"🌱 [AUTONOMY_AUTO_SCHEDULE_CREATED] date={date_key} slots={scheduler.get('slots')}")
+        print(f"🌱 [AUTONOMY_AUTO_SCHEDULE_CREATED] date={date_key} config={expected} slots={scheduler.get('slots')}")
     return scheduler
 
 
@@ -18212,8 +18255,17 @@ async def xiaoxia_autonomy_auto_task():
     scheduler = _autonomy_ensure_auto_schedule(now_dt)
     slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
     due = []
+    changed_slots = False
     for item in slots:
         if not isinstance(item, dict) or item.get("status") != "pending":
+            continue
+        # v1.5.20-R3：若舊排程殘留在目前環境變數的允許時段外，直接跳過，不補發。
+        if not _autonomy_slot_time_in_active_window(item.get("time")):
+            item["status"] = "skipped_outside_active_window"
+            item["skipped_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            item["active_window"] = f"{XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00"
+            changed_slots = True
+            print(f"🌱 [AUTONOMY_SLOT_SKIPPED_OUTSIDE_WINDOW] slot={item.get('time')} window={item.get('active_window')}")
             continue
         try:
             hh, mm = [int(x) for x in str(item.get("time") or "").split(":", 1)]
@@ -18222,6 +18274,11 @@ async def xiaoxia_autonomy_auto_task():
             continue
         if now_dt >= slot_dt:
             due.append(item)
+    if changed_slots:
+        state = load_xiaoxia_autonomy_state()
+        scheduler["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_scheduler"] = scheduler
+        save_xiaoxia_autonomy_state(state)
     if not due:
         return
 
