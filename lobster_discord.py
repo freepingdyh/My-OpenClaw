@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.20-R3"
+LOBSTER_VERSION = "1.5.21"
 
 
 def _normalize_generation_level(level):
@@ -2226,7 +2226,77 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 狀態`：查看今日活動、主題線與養眼照保底狀態。\n"
             "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
             "`/小俠自主 變事件`：把今天這個題材升級成近期事件。\n"
+            "`/小俠自主 關`：暫停自動排程，直到 `/小俠自主 開`。\n"
+            "`/小俠自主 開`：恢復自動排程並重建今日 slots。\n"
+            "`/小俠自主 暫停 3天`：臨時暫停自動活動，天數可自訂，最多 30 天；不影響手動指定活動。\n"
             "自動排程：Zeabur 設 `XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT=1~6` 可讓小俠每日不定時自主活動；每次至少間隔 `XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS` 小時。"
+        )
+        return True
+
+    if arg_key in {"關", "停", "停止", "關閉", "off", "disable"}:
+        state["auto_enabled_override"] = False
+        state["auto_control_updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_control_updated_by"] = "daxia_command"
+        state["auto_pause_reason"] = "大俠手動關閉小俠自主自動排程"
+        state = _mark_autonomy_scheduler_cancelled(state, reason="manual_off")
+        save_xiaoxia_autonomy_state(state)
+        await message.channel.send(
+            "🌱 已關閉 **小俠自主自動排程**。\n"
+            "之後小俠不會自動跑出去安排活動；但你仍可手動使用 `/小俠自主 今日`、`/小俠自主 指定活動 ...`。\n"
+            "要恢復時輸入：`/小俠自主 開`。"
+        )
+        return True
+
+    if arg_key in {"開", "啟用", "開啟", "恢復", "on", "enable"}:
+        state["auto_enabled_override"] = True
+        state["auto_pause_until"] = ""
+        state["auto_pause_days"] = 0
+        state["auto_pause_reason"] = ""
+        state["auto_control_updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_control_updated_by"] = "daxia_command"
+        state = _clear_autonomy_auto_schedule(state)
+        save_xiaoxia_autonomy_state(state)
+        scheduler = _autonomy_ensure_auto_schedule(datetime.now(TZ_TPE)) if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 else {}
+        slot_lines = []
+        for s in (scheduler.get("slots") or [])[:6]:
+            if isinstance(s, dict):
+                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+        await message.channel.send(
+            "🌱 已恢復 **小俠自主自動排程**。\n"
+            f"目前設定：limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
+            + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "\n目前 Zeabur daily limit 為 0，所以不會自動觸發。")
+        )
+        return True
+
+    if arg_key.startswith("暫停") or arg_key.startswith("pause"):
+        days = _parse_autonomy_pause_days(arg_key)
+        until_date = (datetime.now(TZ_TPE).date() + timedelta(days=days)).strftime("%Y-%m-%d")
+        state["auto_enabled_override"] = True
+        state["auto_pause_until"] = until_date
+        state["auto_pause_days"] = days
+        state["auto_pause_reason"] = f"大俠手動暫停 {days} 天"
+        state["auto_control_updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_control_updated_by"] = "daxia_command"
+        state = _mark_autonomy_scheduler_cancelled(state, reason=f"manual_pause_{days}d")
+        save_xiaoxia_autonomy_state(state)
+        await message.channel.send(
+            f"🌱 已暫停 **小俠自主自動排程 {days} 天**，暫停到 **{until_date}**。\n"
+            "這段期間小俠不會自動安排活動；但你仍可手動使用 `/小俠自主 指定活動 ...`。\n"
+            "要提前恢復時輸入：`/小俠自主 開`。"
+        )
+        return True
+
+    if arg_key in {"排程重建", "重建排程", "重建 slots", "重建slot", "rebuild"}:
+        state = _clear_autonomy_auto_schedule(state)
+        save_xiaoxia_autonomy_state(state)
+        scheduler = _autonomy_ensure_auto_schedule(datetime.now(TZ_TPE)) if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 else {}
+        slot_lines = []
+        for s in (scheduler.get("slots") or [])[:6]:
+            if isinstance(s, dict):
+                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+        await message.channel.send(
+            "🌱 已重建今日小俠自主自動排程。"
+            + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "\n目前 Zeabur daily limit 為 0，所以沒有自動 slots。")
         )
         return True
 
@@ -2272,8 +2342,13 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         for s in (scheduler.get("slots") or [])[:6]:
             if isinstance(s, dict):
                 slot_lines.append(f"{s.get('time')}={s.get('status')}")
+        control = _autonomy_auto_control_state(state, datetime.now(TZ_TPE))
+        control_label = "暫停中" if control.get("paused") else "啟用"
+        if not bool(state.get("auto_enabled_override", True)):
+            control_label = "關閉"
+        pause_note = f"｜pause_until={control.get('pause_until')}" if control.get("pause_until") else ""
         scheduler_text = (
-            f"\n自動排程：limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
+            f"\n自動排程：{control_label}{pause_note}｜limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
             + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "")
         )
         if today.get("date") == today_key and today:
@@ -18134,6 +18209,74 @@ async def test_lyric_push(interaction: discord.Interaction):
 # ==========================================
 # 🌱 v1.5.20 小俠自主自動活動排程
 # ==========================================
+def _autonomy_auto_control_state(state=None, now_dt=None):
+    state = state if isinstance(state, dict) else load_xiaoxia_autonomy_state()
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today_key = now_dt.strftime("%Y-%m-%d")
+    auto_enabled = bool(state.get("auto_enabled_override", True))
+    pause_until = str(state.get("auto_pause_until") or "").strip()
+    paused = False
+    reason = ""
+    if not auto_enabled:
+        paused = True
+        reason = "manual_off"
+    elif pause_until:
+        try:
+            pause_date = datetime.strptime(pause_until, "%Y-%m-%d").date()
+            if now_dt.date() <= pause_date:
+                paused = True
+                reason = f"paused_until_{pause_until}"
+            else:
+                # 到期自動清掉，避免狀態永遠掛著舊字串。
+                state["auto_pause_until"] = ""
+                state["auto_pause_days"] = 0
+                state["auto_pause_reason"] = ""
+                state["auto_pause_expired_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                save_xiaoxia_autonomy_state(state)
+        except Exception:
+            state["auto_pause_until"] = ""
+            save_xiaoxia_autonomy_state(state)
+    return {
+        "auto_enabled": auto_enabled,
+        "pause_until": state.get("auto_pause_until") or "",
+        "paused": paused,
+        "reason": reason,
+        "today": today_key,
+    }
+
+
+def _parse_autonomy_pause_days(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return 1
+    m = re.search(r"(\d{1,3})", raw)
+    if not m:
+        return 1
+    days = int(m.group(1))
+    return max(1, min(days, 30))
+
+
+def _mark_autonomy_scheduler_cancelled(state, reason="manual_pause_or_off"):
+    if not isinstance(state, dict):
+        return state
+    scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+    if scheduler:
+        for slot in scheduler.get("slots") or []:
+            if isinstance(slot, dict) and slot.get("status") == "pending":
+                slot["status"] = "cancelled"
+                slot["cancelled_reason"] = reason
+                slot["cancelled_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        scheduler["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        state["auto_scheduler"] = scheduler
+    return state
+
+
+def _clear_autonomy_auto_schedule(state):
+    if isinstance(state, dict):
+        state["auto_scheduler"] = {}
+    return state
+
+
 def _get_xiaoxia_autonomy_channel_for_auto():
     channel = None
     if XIAOXIA_AUTONOMY_CHANNEL_ID:
@@ -18252,6 +18395,11 @@ async def xiaoxia_autonomy_auto_task():
     if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) <= 0:
         return
     now_dt = datetime.now(TZ_TPE)
+    state = load_xiaoxia_autonomy_state()
+    control = _autonomy_auto_control_state(state, now_dt)
+    if control.get("paused"):
+        print(f"🌱 [AUTONOMY_AUTO_PAUSED] reason={control.get('reason')} pause_until={control.get('pause_until')}")
+        return
     scheduler = _autonomy_ensure_auto_schedule(now_dt)
     slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
     due = []
