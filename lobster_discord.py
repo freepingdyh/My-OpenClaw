@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.27_R1"
+LOBSTER_VERSION = "1.5.29"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.27_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.29")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1947,36 +1947,111 @@ def _autonomy_wardrobe_candidate_score(item, activity, visual_mode):
     return score
 
 
-def _autonomy_choose_wardrobe(activity, visual_mode):
+async def _autonomy_choose_wardrobe(activity, visual_mode):
+    """v1.5.29：自主活動以場合語意積極選衣；只有沒有合理候選時才自由搭配。"""
     items = load_wardrobe()
     recent_entries = _recent_wardrobe_usage(60)
     recent_3day_ids, last_10_ids_set, _last_10_order = _wardrobe_recent_usage_sets(recent_entries)
 
-    scored = []
+    activity_text = _clean_text_compact(" ".join([
+        str(activity.get("title") or ""),
+        str(activity.get("category") or ""),
+        str(activity.get("location_type") or ""),
+        " ".join(str(x) for x in (activity.get("activity_tags") or [])),
+        str(activity.get("photo_prompt_seed") or ""),
+    ]))
+    low = activity_text.lower()
+    swim = any(k in low for k in ["游泳", "泳池", "海灘", "海边", "海邊", "swim", "pool", "beach"])
+    sport = swim or any(k in low for k in ["運動", "瑜珈", "瑜伽", "健身", "跑步", "網球", "羽球", "舞蹈", "sport", "yoga", "tennis", "dance"])
+    private_home = any(k in low for k in ["家中", "在家", "房間", "臥室", "卧室", "床", "沙發", "客廳", "書房", "廚房", "home", "bedroom"])
+    public_social = any(k in low for k in ["咖啡", "餐廳", "聚會", "姊妹", "姐妹", "閨蜜", "逛街", "展覽", "美術館", "旅行", "夜景", "老街", "市集", "cafe", "restaurant", "gallery", "shopping"])
+
+    eligible=[]
+    excluded=[]
     for item in items:
-        wid = str(item.get("id") or "").strip().upper()
-        score = _autonomy_wardrobe_candidate_score(item, activity, visual_mode)
-        if wid in recent_3day_ids:
-            score -= 18
-        elif wid in last_10_ids_set:
-            score -= 8
-        if score >= 8:
-            scored.append((score, item))
+        ref_path, ref_url = _wardrobe_reference_for_generation(item)
+        if not (ref_path or ref_url):
+            continue
+        main=str(item.get("main_category") or "")
+        text=" ".join([str(item.get("name") or ""), main, str(item.get("sub_category") or ""), " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")]).lower()
+        reason=""
+        if swim and main != "泳裝" and not any(k in text for k in ["泳裝", "比基尼", "泳衣"]):
+            reason="游泳活動需泳裝"
+        elif public_social and main in {"內衣", "睡衣／居家服", "泳裝"}:
+            reason="公開社交場合排除內衣／睡衣／泳裝"
+        elif sport and not swim and main in {"內衣", "睡衣／居家服"}:
+            reason="運動場合排除內衣／睡衣"
+        elif not private_home and main == "內衣":
+            reason="非私密居家場合排除內衣"
+        if reason:
+            excluded.append({"id":item.get("id"),"reason":reason})
+            continue
+        score=_autonomy_wardrobe_candidate_score(item, activity, visual_mode)
+        if public_social and main in {"洋裝","套裝","上衣","下身","外套"}: score += 14
+        if private_home and main in {"睡衣／居家服","洋裝","套裝","上衣","下身"}: score += 8
+        if sport and any(k in text for k in ["運動","瑜","網球","羽球","跑步","健身","短褲","背心","polo"]): score += 14
+        if swim and main == "泳裝": score += 30
+        wid=str(item.get("id") or "").strip().upper()
+        if wid in recent_3day_ids: score -= 20
+        elif wid in last_10_ids_set: score -= 8
+        eligible.append((score,item))
 
-    if not scored:
-        return None, "衣櫃中沒有足夠適合今日活動的服裝，改由小俠自由搭配。"
+    meta={
+        "mode":"autonomy_semantic_v1529",
+        "activity_text":activity_text,
+        "candidate_count":len(eligible),
+        "excluded_count":len(excluded),
+        "excluded_preview":excluded[:12],
+        "selected_id":None,
+        "selected_name":"",
+        "selection_reason":"",
+        "fallback_used":False,
+    }
+    if not eligible:
+        meta["fallback_used"]=True
+        meta["fallback_reason"]="衣櫃沒有符合此活動場合且具有有效參考圖的服裝"
+        return None, "衣櫃中沒有適合這個活動場合的服裝，改由小俠自由搭配。", meta
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:min(8, len(scored))]
-    # 在高分群中帶一點隨機，避免永遠同一件。
-    total = sum(max(1, s) for s, _ in top)
-    r = random.random() * total
-    acc = 0
-    for score, item in top:
-        acc += max(1, score)
-        if r <= acc:
-            return item, f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
-    return top[0][1], f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
+    eligible.sort(key=lambda x:x[0], reverse=True)
+    candidates=[item for _score,item in eligible[:min(20,len(eligible))]]
+    recent_summary=_summarize_recent_wardrobe_usage(recent_entries, limit=8)
+    catalog=[_compact_wardrobe_brief(x) for x in candidates]
+    prompt=f"""
+你是小俠的穿搭挑選助理。請從候選衣櫃中選出最適合本次活動的一件。
+活動：{activity_text}
+視覺模式：{visual_mode}
+最近使用紀錄：
+{recent_summary}
+規則：
+1. 只能回傳候選清單中真實存在的 wardrobe_id，不可自創。
+2. 先符合活動場合，再考慮漂亮與小俠風格。
+3. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
+4. 最近 3 天穿過者強烈降權，最近 10 次穿過者適度降權。
+5. 不要因衣服的建議場景改變本次活動。
+只回 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由","confidence":0.0}}
+候選：{json.dumps(catalog, ensure_ascii=False)}
+"""
+    picked=None; reason=""; confidence=None
+    try:
+        resp=await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35))
+        data=_extract_json_object(getattr(resp,"text","") or "")
+        wid=str((data or {}).get("wardrobe_id") or "").strip().upper()
+        for candidate in candidates:
+            if str(candidate.get("id") or "").strip().upper()==wid:
+                picked=candidate; break
+        reason=_clean_text_compact((data or {}).get("reason") or "")
+        confidence=(data or {}).get("confidence")
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_SEMANTIC_WARDROBE_FAILED] {type(exc).__name__}: {exc}")
+    if not picked:
+        top=eligible[:min(8,len(eligible))]
+        weights=[max(1,score-min(0,top[-1][0])+1) for score,_ in top]
+        picked=random.choices([it for _,it in top], weights=weights, k=1)[0]
+        reason=f"符合今日活動「{activity.get('title')}」的場合與衣櫃輪替規則。"
+        meta["fallback_used"]=True
+        meta["fallback_reason"]="語意選衣服務未回傳有效衣櫃編號，改用場合評分高分群"
+    meta.update({"selected_id":picked.get("id"),"selected_name":picked.get("name") or "","selection_reason":reason,"confidence":confidence})
+    return picked, reason or f"符合今日活動「{activity.get('title')}」的場合。", meta
 
 
 def _autonomy_female_interaction_requested_from_text(text):
@@ -2623,7 +2698,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     activity, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=specified_category, activity_filter=specified_activity)
     activity = _autonomy_enrich_activity(activity)
     thread_context = _autonomy_thread_context_for_activity(activity)
-    wardrobe_item, wardrobe_reason = _autonomy_choose_wardrobe(activity, visual_mode)
+    wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
     reference_item_path = None
     reference_item_url = None
     wardrobe_id = None
@@ -2657,6 +2732,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
+        "wardrobe_name": wardrobe_name,
+        "wardrobe_selection": wardrobe_selection,
         "generation_mode": source_mode,
         "used_pending_wardrobe": bool(wardrobe_item),
         "photo_mode_override": "xiaoxia_autonomy",
@@ -2670,6 +2747,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
+            "wardrobe_selection": wardrobe_selection,
             "visual_mode": visual_mode,
             "activity": activity,
             "theme_key": _autonomy_theme_key_for_activity(activity),
@@ -2697,6 +2775,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         context["autonomy_activity"] = activity
         context["visual_mode"] = visual_mode
         context["wardrobe_reason"] = wardrobe_reason
+        context["wardrobe_name"] = wardrobe_name or ""
+        context["wardrobe_selection"] = wardrobe_selection
 
         db = load_memory()
         db.insert(0, _photo_db_payload(context, name=context["photo_name"], type_override="autonomy_photo"))
@@ -12457,62 +12537,46 @@ def _diary_promises_for_entry(profile, entry_date, max_items=4):
 
 
 
-async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=None, target_date=None):
-    """
-    交換日記只有在以下情況才使用衣櫃：
-    1. 本篇/今日聊天/履約文字明確指定 Wxxx。
-    2. 大俠用 `/交換日記 穿 Wxxx` 指定今天穿哪件。
-    3. 大俠用 `/交換日記 衣櫃自由`，由小俠今日自由挑一件。
-    不從 yesterday/current_outfit/recent_context 自動延續。
-    """
-    sources = [
-        entry_content,
-        chat_context,
-        "\n".join([p.get("text", "") for p in due_promises or []]),
-    ]
-    if isinstance(result, dict):
-        sources.extend([
-            result.get("scenario_tw", ""),
-            result.get("scenario", ""),
-            result.get("promise_delivery", ""),
-        ])
-    blob = "\n".join(str(x or "") for x in sources)
+async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises=None, result=None, target_date=None, autonomy_candidate=None):
+    """v1.5.29：交換日記預設積極使用衣櫃；承諾文字仍不介入。"""
+    sources=[entry_content, chat_context]
+    if isinstance(result,dict):
+        sources.extend([result.get("scenario_tw",""), result.get("scenario","")])
+    blob="\n".join(str(x or "") for x in sources)
+    item=_find_first_wardrobe_item_in_text(blob)
+    selection_source="chat_or_diary_explicit_wardrobe_id"
+    reason="本篇日記或今日聊天明確指定衣櫃編號。" if item else ""
 
-    item = _find_first_wardrobe_item_in_text(blob)
-    selection_source = "chat_or_diary_text"
+    pref=get_diary_wardrobe_pref(target_date=target_date) or {}
+    pref_mode=str(pref.get("mode") or "").strip()
+    pref_wid=str(pref.get("wardrobe_id") or "").strip().upper()
+    if not item and pref_mode=="specified" and pref_wid:
+        item=_find_wardrobe_item(pref_wid); selection_source="diary_pref_specified"; reason="大俠使用 /交換日記 穿 Wxxx 指定。"
+
+    # 同一自主活動加洗：優先延續該活動當時真正使用的衣櫃服裝。
+    if not item and isinstance(autonomy_candidate,dict):
+        awid=str(autonomy_candidate.get("wardrobe_id") or "").strip().upper()
+        if awid:
+            item=_find_wardrobe_item(awid)
+            if item:
+                selection_source="autonomy_rewash_continuity"
+                reason=f"今日自主活動加洗，延續原活動衣櫃 {awid}。"
 
     if not item:
-        pref = get_diary_wardrobe_pref(target_date=target_date)
-        pref_mode = str((pref or {}).get("mode") or "").strip()
-        pref_wid = str((pref or {}).get("wardrobe_id") or "").strip().upper()
-        if pref_mode == "specified" and pref_wid:
-            item = _find_wardrobe_item(pref_wid)
-            selection_source = "diary_pref_specified"
-        elif pref_mode == "free":
-            item = await _choose_wardrobe_item_for_free_mode(blob, purpose="diary")
-            selection_source = "diary_pref_free"
+        purpose="diary_free_explicit" if pref_mode=="free" else "diary_auto_semantic"
+        scene_text=" ".join([blob, str((autonomy_candidate or {}).get("composition") or ""), str((autonomy_candidate or {}).get("activity_title") or "")])
+        item=await _choose_wardrobe_item_for_free_mode(scene_text, purpose=purpose)
+        selection_source="diary_pref_free" if pref_mode=="free" else "diary_auto_semantic"
+        reason="大俠指定衣櫃自由，由小俠依本篇場景挑選。" if pref_mode=="free" else "依今日日記、對話與場景語意自動挑選衣櫃。"
 
     if not item:
         return None
-
-    reference_path, reference_url = _wardrobe_reference_for_generation(item)
+    reference_path,reference_url=_wardrobe_reference_for_generation(item)
     if not reference_path:
         print(f"⚠️ [DIARY_WARDROBE_REFERENCE_MISSING] id={item.get('id')} name={item.get('name')}")
-        return {
-            "item": item,
-            "reference_path": None,
-            "reference_url": reference_url,
-            "hint": _wardrobe_item_generation_hint(item),
-            "error": "衣櫃項目找不到可用參考圖，已拒絕望名自創。",
-        }
-    return {
-        "item": item,
-        "reference_path": reference_path,
-        "reference_url": reference_url,
-        "hint": _wardrobe_item_generation_hint(item),
-        "selection_source": selection_source,
-        "error": "",
-    }
+        return {"item":item,"reference_path":None,"reference_url":reference_url,"hint":_wardrobe_item_generation_hint(item),"selection_source":selection_source,"selection_reason":reason,"error":"衣櫃項目找不到可用參考圖，已拒絕望名自創。"}
+    return {"item":item,"reference_path":reference_path,"reference_url":reference_url,"hint":_wardrobe_item_generation_hint(item),"selection_source":selection_source,"selection_reason":reason,"error":""}
+
 
 def _parse_key_value_fields(raw_text):
     """解析 `名稱=... 分類=... 子分類=... 標籤=...`，value 可含空白，直到下一個 key。"""
@@ -14049,6 +14113,105 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
     return final
 
 
+def _build_diary_lightweight_request(diary_visual, result=None, forced_scene="", autonomy_topic=None, season_rule=""):
+    """Build a compact request from structured diary fields instead of forwarding the director's full verbose prompt."""
+    visual = diary_visual if isinstance(diary_visual, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    state = visual.get("__anchor_state") if isinstance(visual.get("__anchor_state"), dict) else {}
+    lines = []
+    if forced_scene:
+        lines.append(f"Mandatory scene: {forced_scene}")
+    if autonomy_topic:
+        lines.append(f"Source layer: today autonomy activity rewash, new diary image only; activity: {autonomy_topic.get('activity_title') or ''}")
+        if autonomy_topic.get("composition"):
+            lines.append(f"Activity context: {_clean_text_compact(autonomy_topic.get('composition'))[:300]}")
+        lines.append("Do not use, imitate, or reference the previously generated autonomy photo; create a different moment, pose, framing, and lighting.")
+    composition = _clean_text_compact(visual.get("composition") or result.get("scenario_tw") or result.get("scenario") or "")
+    if composition:
+        lines.append(f"Diary moment: {composition[:700]}")
+    for label, key in [
+        ("Main activity", "activity"),
+        ("Primary action", "primary_action"),
+        ("Setting", "setting_anchor"),
+        ("Visible environment", "environment_trace"),
+        ("Time", "time_anchor"),
+        ("Lighting", "lighting_mood"),
+        ("Outfit intent", "outfit_intent"),
+        ("Camera framing", "camera_framing"),
+    ]:
+        val = _clean_text_compact(state.get(key) or "")
+        if val:
+            lines.append(f"{label}: {val[:260]}")
+    mood = _clean_text_compact(visual.get("mood") or "")
+    if mood:
+        lines.append(f"Mood: {mood[:220]}")
+    if season_rule:
+        compact_season = _clean_text_compact(season_rule)
+        lines.append(f"Season/outfit boundary: {compact_season[:380]}")
+    lines.append("One place, one time, one main activity. Show visible environmental clues and a natural task-based action.")
+    return "\n".join(_dedupe_keep_order([x for x in lines if x])).strip()
+
+
+def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
+    """v1.5.28: lightweight, conflict-free exchange-diary prompt."""
+    cleaned_request = _v1527_strip_prompt_conflicts(custom_prompt)
+    hard = _v1527_scene_hard_requirements(cleaned_request or custom_prompt)
+    sections = [
+        "DIARY FIGURE ROLE MAP — obey these roles strictly.",
+        (
+            "Figures 1-9 are identity-only references for Xiaoxia. Apply their face and body identity only to Xiaoxia. "
+            "Do not copy their pose, outfit, room, background, lighting, props, or composition."
+        ),
+    ]
+    if hard:
+        sections.append("DIARY HARD SCENE REQUIREMENTS — every item must be visible:\n" + hard)
+    sections.append(
+        "DIARY PEOPLE POLICY:\n"
+        "- Xiaoxia is the only visible human figure in this exchange-diary photo.\n"
+        "- Daxia is an invisible camera viewpoint only; never show a viewer, man, hand, arm, shoulder, reflection, shadow, or partial person.\n"
+        "- Keep Xiaoxia's anatomy, hands, fingers, posture, and movement natural."
+    )
+    if has_reference:
+        sections.append(
+            "FIGURE 10 WARDROBE ROLE:\n"
+            "- Figure 10 controls Xiaoxia's clothing and visible fashion accessories only.\n"
+            "- Preserve its garment category, color, silhouette, cut, length, material, pattern, and key details.\n"
+            "- Figure 10 must not change the diary scene, action, pose, camera angle, or background."
+        )
+    else:
+        sections.append(
+            "OUTFIT ROLE:\n"
+            "- No Figure 10 is supplied. Choose one natural, season-appropriate outfit fitting this diary moment.\n"
+            "- Do not import clothing from yesterday, another photo, or old memory."
+        )
+    if current_outfit:
+        sections.append(
+            "OUTFIT NOTE:\n- " + str(current_outfit).strip() +
+            "\n- This note controls styling only and must not override the diary scene or action."
+        )
+    sections.append(
+        "DIARY TEXT REQUEST — highest authority for today's location, time, activity, mood, pose, props, and composition:\n"
+        + cleaned_request
+    )
+    sections.append(
+        "DIARY QUALITY:\n"
+        "- Create a new photorealistic, candid, lived-in daily-life moment, not a generic glamour portrait or fashion advertisement.\n"
+        "- The requested location and activity must be immediately understandable from visible environmental clues and natural action.\n"
+        "- Preserve only one time and one place; never combine sequential events into one image.\n"
+        "- Do not replace the requested moment with a generic sofa pose, bedroom pose, reading pose, park scene, or camera-facing portrait unless the text explicitly asks for it."
+    )
+    final = "\n\n".join(x for x in sections if str(x).strip()).strip()
+    stats = {
+        "total_chars": len(final),
+        "request_chars": len(cleaned_request),
+        "hard_chars": len(hard),
+        "solo_phrase_count": len(re.findall(r"\\bsolo\\b|only visible human|only human figure", final, flags=re.I)),
+        "conflict_phrase_count": len(re.findall(r"female friends may|supporting women|background bystanders", final, flags=re.I)),
+    }
+    print("🧭 [DIARY_PROMPT_STATS_V1528] " + " ".join(f"{k}={v}" for k, v in stats.items()))
+    return final, stats
+
+
 async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=None, current_outfit=None, trace_context=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     if enable_safety_checker is None:
@@ -14056,14 +14219,28 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
-    final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
-    print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.27_R1 conflict-free prompt builder")
+    trace_kind = str((trace_context or {}).get("kind") or "photo").strip().lower() if isinstance(trace_context, dict) else "photo"
+    if trace_kind == "diary":
+        final_prompt, diary_prompt_stats = _seedream_diary_prompt(
+            custom_prompt,
+            has_reference=bool(reference_image_path),
+            current_outfit=current_outfit,
+            visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
+        )
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29 lightweight diary prompt builder")
+    else:
+        final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
+        diary_prompt_stats = None
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29 conflict-free photo prompt builder")
     if isinstance(trace_context, dict):
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.27_R1"
-        trace_context["prompt_engine_marker"] = "HARD_SCENE_REQUIREMENTS_V1527"
+        trace_context["prompt_engine_version"] = "v1.5.29"
+        trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
+        if diary_prompt_stats is not None:
+            trace_context["diary_prompt_stats"] = diary_prompt_stats
+            trace_context["diary_seedream_prompt_exact"] = final_prompt
     _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "enable_safety_checker": bool(enable_safety_checker)})
 
     async def _build_image_urls(force_reference_refresh=False):
@@ -14091,6 +14268,10 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     image_urls = await _build_image_urls(force_reference_refresh=False)
     if isinstance(trace_context, dict):
         trace_context["seedream_input_images"] = list(image_urls)
+        trace_context["seedream_input_image_roles"] = [
+            {"figure": idx + 1, "role": "xiaoxia_identity" if idx < 9 else "wardrobe_reference", "url": url}
+            for idx, url in enumerate(image_urls)
+        ]
         trace_context["seedream_request_payload"] = {
             "model": model_id,
             "model_label": model_label,
@@ -14542,7 +14723,12 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
     if context.get("scene_summary"):
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
-        embed.add_field(name="服裝／搭配", value=str(context.get("outfit_summary"))[:900], inline=False)
+        wardrobe_id = str(context.get("wardrobe_id") or "").strip().upper()
+        wardrobe_name = str(context.get("wardrobe_name") or "").strip()
+        wardrobe_prefix = ""
+        if wardrobe_id:
+            wardrobe_prefix = f"【{wardrobe_id}{('｜' + wardrobe_name) if wardrobe_name else ''}】\n"
+        embed.add_field(name="服裝／搭配", value=(wardrobe_prefix + str(context.get("outfit_summary")))[:900], inline=False)
     embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | {_context_seedream_model_label(context)}{_generation_level_footer(context)}")
     return embed
 
@@ -15418,7 +15604,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         activity = _autonomy_enrich_activity(activity)
 
     thread_context = _autonomy_thread_context_for_activity(activity)
-    wardrobe_item, wardrobe_reason = _autonomy_choose_wardrobe(activity, visual_mode)
+    wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
     reference_item_path = None
     reference_item_url = None
     wardrobe_id = None
@@ -15452,6 +15638,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
+        "wardrobe_name": wardrobe_name,
+        "wardrobe_selection": wardrobe_selection,
         "generation_mode": source_mode,
         "used_pending_wardrobe": bool(wardrobe_item),
         "photo_mode_override": "xiaoxia_autonomy",
@@ -15465,6 +15653,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
             "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
+            "wardrobe_selection": wardrobe_selection,
             "visual_mode": visual_mode,
             "activity": activity,
             "theme_key": _autonomy_theme_key_for_activity(activity),
@@ -15494,6 +15683,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     context["visual_mode"] = visual_mode
     context["wardrobe_reason"] = wardrobe_reason
     context["wardrobe_name"] = wardrobe_name or ""
+    context["wardrobe_selection"] = wardrobe_selection
 
     if wardrobe_item:
         _log_wardrobe_usage(
@@ -16157,33 +16347,12 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             else:
                 season_rule = "請搭配符合當前氣候、有女性魅力、成熟吸引力且自然生活化的服裝；除非大俠明確要求保守或不要太辣，否則預設維持高級性感的戀人視角：先保留自然胸口魅力，再搭配腰線或腿部線條，若兩者都自然成立更好；避免裸體或露骨色情。"
             
-            # 🤝 提取待履約清單：本篇日記必須實際交付，而不只是回想承諾。
-            promises_list = profile.get("xiaoxia_self", {}).get("promises", [])
-            current_promise_texts = _memory_text_values(promises_list)
-            legacy_promises_summary = "、".join(current_promise_texts) if current_promise_texts else "無舊版 profile 承諾"
-            current_promises = promise_board_summary_for_prompt(max_items=8)
-            due_promises = _diary_promises_for_entry(profile, entry_date, max_items=4)
-            promise_requirements = format_diary_promise_requirements(due_promises)
-            board_photo_promise, board_photo_item = select_diary_photo_promise_from_board()
+            # v1.5.28：交換日記出圖不再讀取 /承諾 或過去小俠承諾。
+            # 圖片來源只保留三層：1) 大俠指定 Diary 圖；2) 今日小俠自主題材加洗；3) 今日日記/對話自由發揮。
+            current_promises = "交換日記圖片流程不讀取承諾"
+            due_promises = []
+            promise_requirements = "無；交換日記圖片流程已停用承諾交圖。"
             committed_diary_photo_task = None
-            if board_photo_promise and board_photo_item:
-                committed_diary_photo_task = {
-                    "source_promise": board_photo_promise.get("text", ""),
-                    "visual_request_zh": board_photo_item.get("description") or board_photo_item.get("title", ""),
-                    "scene": board_photo_item.get("description") or board_photo_item.get("title", ""),
-                    "action": "依承諾內容完成照片履約",
-                    "outfit": board_photo_item.get("description") or board_photo_item.get("title", ""),
-                    "is_selfie": False,
-                    "reason": "v1.5.00 promise_board LIFO：先處理 /承諾 active 照片任務，清空後才處理 /小俠承諾。",
-                    "promise_board_id": board_photo_item.get("id"),
-                    "promise_board_source": board_photo_promise.get("promise_board_source"),
-                }
-                print(f"📌 [{entry_date}] promise_board 單圖履約優先：{committed_diary_photo_task.get('visual_request_zh')}")
-            else:
-                committed_diary_photo_task = await select_today_committed_diary_photo_task(chat_context, due_promises, entry_date)
-                if committed_diary_photo_task:
-                    print(f"📌 [{entry_date}] 交換日記單圖履約優先：{committed_diary_photo_task.get('visual_request_zh')}")
-
             # 🌟 檢查是否有大俠準備好的「交換日記指定圖」
             overrides = load_diary_override()
             custom_diary = overrides.get(entry_date)
@@ -16197,11 +16366,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 """
             else:
                 custom_scenario_rule = """
-               - 交換日記的服裝不得跨日自動延續。只有【本篇日期】的大俠日記、今日聊天或本篇待履約承諾明確指定衣服/衣櫃編號時，才穿指定衣服。
-               - 若今日無明確服裝/照片承諾，`scenario_tw` 必須依當下生活場景自動搭配新衣，不得沿用昨天、上一則日記、上一張照片或 recent_context 中的衣服。
-               - 檢視【本篇必須實際履行的承諾】；只有其中明確要求特定款式、顏色或衣櫃編號時，`scenario_tw` 才可聚焦於兌現該承諾。
-               - 若照片承諾不是「今日對話中由大俠明確要求，且小俠於今日明確答應補上」，不可讓它搶佔本篇唯一照片；可在文字中說擇日再補。
-               - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
+               - 交換日記照片只依今日生活生成，不讀取任何 /承諾 或過去小俠承諾。
+               - 若今日有小俠自主活動，從其中一項取文字題材重新「加洗」一張 Diary 新圖；不得使用原照片作參考或複製其構圖。
+               - 若今日沒有小俠自主題材，依本篇日記與今日對話自由規劃一個自然生活瞬間。
+               - 服裝不得跨日自動延續；只有本篇日記、今日聊天或 `/交換日記 穿 Wxxx／衣櫃自由` 才能指定衣櫃。
+               - 畫面只能有一個時間、一個地點、一個主要活動；嚴禁把先後事件塞在同一張圖。
                - 嚴禁在 scenario 中使用「全裸」等極度露骨字眼。
                 """
 
@@ -16212,9 +16381,6 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
             【今日最高優先級重大事件｜必須優先理解，不可誤判】：
             {life_event_context}
-            【小俠目前的承諾清單】：{current_promises}
-            【本篇必須實際履行的承諾（完成後才會結案）】：
-            {promise_requirements}
             
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             
@@ -16223,9 +16389,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                - `reply_to_daxia`：這是交換日記的開頭與情感核心，必須充分回應大俠親手寫下的日記，並承接當天聊天中最重要的 1～2 個片段。先讓大俠感覺「妳真的讀懂了」，再表達小俠的理解、心疼、感謝、安心或具體回應；不可只用幾句甜言蜜語帶過，也不可逐項流水帳。建議 220～360 字，可分成 2～3 個自然段落。
                - `xiaoxia_daily_scene`：聊天室以外的小俠日常片段。必須有一個具體地點、一個動作、一個生活物件、一個沒在聊天裡直接出現的新細節；大俠只能作為她心裡想起的人，不可把今日聊天重講一遍。
                - `inner_monologue`：小俠沒有在聊天室說出口的深層心情或創作性獨白。請把今天的聊天轉化成象徵、場景、物件或一句心裡話，而不是摘要。
-               - `promise_delivery`：今日履約清單。若有文字交付承諾，必須在此列出具體內容；若有照片承諾，必須說明今日照片如何兌現。無承諾時可簡短寫「今日沒有特別待履約項目」。
                - `xiaoxia_diary`：整合成最終日記正文，但不可和 reply_to_daxia 重複；優先承載 daily_scene 與 inner_monologue 的精華。
-               - 嚴禁再次只說「下次告訴你」「改天給你看」；已列為本篇待履約者，必須現在交付。
             2. 創作人格：
                - 妳不是在填表或整理聊天紀錄，而是在寫一篇有小俠內心的交換日記。聊天只是種子，不是正文本身。
                - 請把今日事件轉化成生活場景、物件、氣味、光線、動作與未說出口的心情。
@@ -16241,8 +16405,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                - `inner_monologue` 必須提供聊天室以外的內在延伸，不能只是把 reply_to_daxia 換句話說。
             5. 服裝限制：{season_rule}
             6. 📸【畫面構想 (scenario) 最高權重法則】：{custom_scenario_rule}
-               - 檢視【小俠目前的承諾清單】，若妳有答應要給予大俠特定款式或顏色的照片，那麼 `scenario_tw` 必須 **100% 聚焦於兌現該承諾的一個生活瞬間**！
-               - 【絕對禁令】：嚴禁將日常活動（如烘焙）與私密承諾混在同一個畫面中！AI 繪圖無法理解「隨後」，畫面只能存在一個時空。
+               - 畫面只能呈現一個生活瞬間；不得把不同時間、不同地點或先後事件混在同一張圖。
                - 【視覺邊界】：交換日記預設可呈現高級性感與戀人視角吸引力；除非大俠明確要求保守或不要太辣，不要自動把小俠降成保守穿搭。預設先保留胸口魅力，再搭配腰線或腿部線條，若情境自然允許，兩者都可成立。嚴禁裸體或露骨色情，魅力應來自自然衣著、光線、身形線條與兩人的情感連結。
                - 【自主底線】：若大俠提出了過分的畫面要求而妳並未承諾，請堅守底線不予理會，畫面以「妳答應過的服裝設定」或「自然有魅力的日常穿搭」為準。
                - 若今日無特殊照片承諾，則 `scenario` 正常描繪妳今日的生活行程。
@@ -16255,12 +16418,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
               "reply_to_daxia": "約220～360字，充分回應大俠日記與當天聊天重點，可分2～3段，不逐項流水帳",
               "xiaoxia_daily_scene": "聊天室以外的小俠日常片段；必須包含地點、動作、生活物件、新細節，且符合今日生活邏輯",
               "inner_monologue": "小俠未在聊天室說出口的深層心情或創作性獨白",
-              "promise_delivery": "今日履約清單；有承諾時必須具體交付，無承諾時簡短說明",
               "xiaoxia_diary": "最終日記正文，整合小俠日常與內心獨白，不可重複 reply_to_daxia",
               "spiciness": "C",
-              "scenario": "繁體中文的生活事件素材：描述今天正在發生的一件事、情緒與承諾服裝重點；此欄位不直接送入生圖引擎",
-              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙，且須與日常片段或承諾照片一致",
-              "fulfilled_promises": ["僅填本篇已真正交付之承諾，且必須逐字照抄待履約承諾原文"]
+              "scenario": "繁體中文的生活事件素材：描述今天正在發生的一件事與情緒；此欄位不直接送入生圖引擎",
+              "scenario_tw": "繁體中文的一個生活瞬間構想；不得使用商攝口號或露骨詞彙"
             }}
             """
             
@@ -16291,12 +16452,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "reply_to_daxia": "大俠，小俠讀日記時恍神了... 但我會一直在這裡陪你喔。",
                     "xiaoxia_daily_scene": "傍晚我坐在餐桌旁，把手寫筆記攤開，杯緣還留著一點溫茶的霧氣。",
                     "inner_monologue": "我沒有一直重播今天的聊天，只是在安靜下來時，忽然很想把想念折進紙頁裡。",
-                    "promise_delivery": "今日沒有特別待履約項目。",
                     "xiaoxia_diary": "傍晚我在餐桌旁整理筆記，杯緣還留著一點溫茶的霧氣。那時我沒有一直重播聊天，只是忽然很想把想念折進紙頁裡。",
                     "spiciness": "B", 
                     "scenario": "傍晚在餐桌旁整理今日的手寫筆記，稍微停筆想念大俠",
                     "scenario_tw": "穿著輕盈的居家洋裝，坐在餐桌旁整理筆記，目光落在紙頁上，神情溫柔而若有所思",
-                    "fulfilled_promises": []
                 }
             
             # 只補強第一段「給大俠的回覆」，不碰其餘日記架構。
@@ -16307,17 +16466,13 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 life_event_context=life_event_context,
             )
 
-            # 🤝 履約複核：有承諾時，先補齊正文/照片構想，再生圖與發佈。
-            result = await enforce_diary_promise_delivery(
-                result=result, due_promises=due_promises,
-                entry_content=entry_content, season_rule=season_rule
-            )
+            # v1.5.28：交換日記不再執行承諾履約層，只保留日記創作層。
             result = await enforce_diary_creative_layer(
                 result=result,
                 entry_content=entry_content,
                 chat_context=chat_context,
-                current_promises=current_promises,
-                due_promises=due_promises,
+                current_promises="",
+                due_promises=[],
                 season_rule=season_rule,
                 life_event_context=life_event_context,
             )
@@ -16325,9 +16480,6 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             # ✍️ v51.1 創作層整理：避免兩個區塊都在摘要聊天，補齊新欄位並生成穩定顯示文本。
             result["xiaoxia_daily_scene"] = str(result.get("xiaoxia_daily_scene") or result.get("xiaoxia_diary") or "").strip()
             result["inner_monologue"] = str(result.get("inner_monologue") or "").strip()
-            result["promise_delivery"] = str(result.get("promise_delivery") or "").strip()
-            if not result["promise_delivery"]:
-                result["promise_delivery"] = "今日沒有特別待履約項目。" if not due_promises else "本篇已依待履約清單補上承諾內容。"
             if not result.get("xiaoxia_diary"):
                 result["xiaoxia_diary"] = result["xiaoxia_daily_scene"]
             if result["inner_monologue"] and result["inner_monologue"] not in result["xiaoxia_diary"]:
@@ -16473,14 +16625,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "message": "大俠，這是今天只屬於我們的小片刻。"
             }
 
-            diary_wardrobe = await _build_diary_wardrobe_selection(entry_content, chat_context, due_promises, result=result, target_date=entry_date)
-            if diary_wardrobe and diary_wardrobe.get("error"):
-                print(f"⚠️ [{entry_date}] {diary_wardrobe.get('error')} item={diary_wardrobe.get('item', {}).get('id')}")
-                diary_wardrobe = None
+            diary_wardrobe = None
 
             auto_autonomy_diary = None
             autonomy_diary_hint = ""
-            if not custom_diary and not committed_diary_photo_task:
+            if not custom_diary:
                 auto_autonomy_diary = _get_autonomy_today_diary_candidate(entry_date)
                 if auto_autonomy_diary:
                     autonomy_diary_hint = (
@@ -16493,6 +16642,18 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                         "\n- 建議改成同一活動的另一個瞬間、活動後回家整理心情、寫日記前回想今天活動，或更符合交換日記的生活化新鏡頭。"
                     )
 
+            if not custom_diary:
+                diary_wardrobe = await _build_diary_wardrobe_selection(
+                    entry_content,
+                    chat_context,
+                    result=result,
+                    target_date=entry_date,
+                    autonomy_candidate=auto_autonomy_diary,
+                )
+                if diary_wardrobe and diary_wardrobe.get("error"):
+                    print(f"⚠️ [{entry_date}] {diary_wardrobe.get('error')} item={diary_wardrobe.get('item', {}).get('id')}")
+                    diary_wardrobe = None
+
             if custom_diary:
                 print(f"📸 [{entry_date}] 使用大俠指定日記圖片，跳過 AI 生圖！")
                 up_img = custom_diary["image_url"]
@@ -16501,6 +16662,20 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 result["scenario_tw"] = custom_diary.get("composition", result.get("scenario_tw", ""))
                 diary_visual["composition"] = result["scenario_tw"]
                 diary_visual["message"] = custom_diary.get("message") or diary_visual.get("message", "")
+                manual_trace = {
+                    "kind": "diary",
+                    "action": "diary_manual_override",
+                    "entry_date": entry_date,
+                    "diary_source_priority": ["manual_diary_override", "today_autonomy_rewash", "today_diary_chat_free_generation"],
+                    "diary_selected_source": "manual_diary_override",
+                    "manual_image_url": custom_diary.get("image_url"),
+                    "manual_source_module": custom_diary.get("source_module"),
+                    "manual_image_role": custom_diary.get("image_role"),
+                    "prompt_engine_version": "v1.5.29",
+                    "generation_skipped": True,
+                }
+                _trace_stage(manual_trace, "diary_manual_override_selected", data=manual_trace)
+                _write_generation_trace("diary", manual_trace)
                 del overrides[entry_date]
                 save_diary_override(overrides)
             else:
@@ -16508,58 +16683,29 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     print(f"📸 [{entry_date}] 交換日記承接今日 /小俠自主題材，但重新生成 Diary 新圖。")
                 wardrobe_hard_note = ""
                 scene_hard_note = ""
-                if committed_diary_photo_task:
-                    # 單張圖模式：只履行今日「大俠明確要求且小俠明確答應」的那一張照片。
-                    diary_forced_scene = committed_diary_photo_task.get("visual_request_zh") or diary_forced_scene
+                diary_state, diary_visual = await create_diary_visual(
+                    entry_content=entry_content,
+                    chat_context=chat_context,
+                    result=result,
+                    current_promises="",
+                    season_rule=season_rule,
+                    scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note + autonomy_diary_hint,
+                    forced_scene=diary_forced_scene
+                )
                 if diary_forced_scene:
-                    scene_hard_note = (
-                        "\n\n【本篇場景強制要求｜硬條件】"
-                        f"\n- 大俠指定場景：{diary_forced_scene}"
-                        "\n- 本篇交換日記照片必須在這個場景／活動下規劃。"
-                        "\n- 不可忽略此場景，不可自動改成家中、客廳、臥室、沙發、床邊或居家睡衣自拍，除非大俠場景本身就是居家。"
-                        "\n- 服裝可自由發揮或依衣櫃設定，但場景必須清楚可見。"
-                    )
-                if diary_wardrobe:
-                    wardrobe_item = diary_wardrobe.get("item", {})
-                    wardrobe_hard_note = (
-                        "\n\n【本篇衣櫃強制參考】"
-                        f"\n- 指定衣櫃：{wardrobe_item.get('id')} {wardrobe_item.get('name')}"
-                        "\n- 生圖必須以衣櫃參考圖為服裝主參考，不得只依名稱自行創作。"
-                        f"\n{diary_wardrobe.get('hint', '')}"
-                    )
-                if committed_diary_photo_task:
-                    diary_state = {
-                        "visual_mode": "committed_photo",
-                        "forced_scene": committed_diary_photo_task.get("visual_request_zh", ""),
-                        "setting_anchor": committed_diary_photo_task.get("scene", ""),
-                        "primary_action": committed_diary_photo_task.get("action", ""),
-                        "outfit_intent": committed_diary_photo_task.get("outfit", ""),
-                        "scenario_tw": committed_diary_photo_task.get("visual_request_zh", ""),
-                    }
-                    diary_visual = build_committed_diary_visual_from_task(
-                        committed_diary_photo_task,
-                        season_rule=season_rule,
-                        wardrobe_hint=(diary_wardrobe.get("hint") if diary_wardrobe else ""),
-                    )
+                    diary_state = _apply_forced_scene_to_diary_state(diary_state, diary_forced_scene)
                     diary_visual["__anchor_state"] = diary_state
-                    result["scenario_tw"] = diary_visual.get("composition", committed_diary_photo_task.get("visual_request_zh", "與大俠分享生活"))
-                else:
-                    diary_state, diary_visual = await create_diary_visual(
-                        entry_content=entry_content,
-                        chat_context=chat_context,
-                        result=result,
-                        current_promises=current_promises + "\n本篇履約要求：\n" + promise_requirements + wardrobe_hard_note + scene_hard_note + autonomy_diary_hint,
-                        season_rule=season_rule,
-                        scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + result.get("scenario_tw", result.get("scenario", "")) + wardrobe_hard_note + scene_hard_note + autonomy_diary_hint,
-                        forced_scene=diary_forced_scene
-                    )
-                    if diary_forced_scene:
-                        diary_state = _apply_forced_scene_to_diary_state(diary_state, diary_forced_scene)
-                        diary_visual["__anchor_state"] = diary_state
-                        diary_visual["composition"] = f"小俠在「{diary_forced_scene}」留下今天交換日記的自拍照，場景線索清楚可見。"
-                    result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
-                image_prompt = diary_visual["image_prompt"]
-                if diary_forced_scene and not committed_diary_photo_task:
+                    diary_visual["composition"] = f"小俠在「{diary_forced_scene}」留下今天交換日記的生活照，場景線索清楚可見。"
+                result["scenario_tw"] = diary_visual.get("composition", diary_state.get("scenario_tw", "與大俠分享生活"))
+                director_prompt_raw = str(diary_visual.get("image_prompt") or "")
+                image_prompt = _build_diary_lightweight_request(
+                    diary_visual,
+                    result=result,
+                    forced_scene=diary_forced_scene,
+                    autonomy_topic=auto_autonomy_diary,
+                    season_rule=season_rule,
+                )
+                if diary_forced_scene:
                     image_prompt = _forced_scene_diary_prompt_prefix(diary_forced_scene) + "\n" + image_prompt
 
                 diary_reference_path = diary_wardrobe.get("reference_path") if diary_wardrobe else None
@@ -16574,24 +16720,44 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "kind": "diary",
                     "action": "diary_initial",
                     "entry_date": entry_date,
-                    "raw_seedream_mode": "diary_committed_photo_minimal" if committed_diary_photo_task else "diary_minimal",
+                    "raw_seedream_mode": "diary_lightweight_v1529",
                     "force_minimal_prompt": True,
                     "figure10_present": bool(diary_reference_path),
                     "allow_background_bystanders": bool(diary_visual.get("__allow_background_bystanders")),
                     "diary_allow_background_bystanders": bool(diary_visual.get("__allow_background_bystanders")),
                     "diary_photo_single_slot": True,
-                    "committed_diary_photo_task": committed_diary_photo_task,
-                    "due_promises": due_promises,
                     "diary_forced_scene": diary_forced_scene,
                     "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id"),
+                    "wardrobe_name": (diary_wardrobe or {}).get("item", {}).get("name"),
+                    "wardrobe_selection_source": (diary_wardrobe or {}).get("selection_source"),
+                    "wardrobe_selection_reason": (diary_wardrobe or {}).get("selection_reason"),
                     "reference_item_path": diary_reference_path,
                     "user_input": f"交換日記 {entry_date}",
                     "scene_seed_text": image_prompt,
+                    "diary_director_prompt_raw_chars": len(director_prompt_raw),
+                    "diary_lightweight_request_chars": len(image_prompt),
+                    "diary_director_prompt_preview": _trace_preview(director_prompt_raw, 1200),
+                    "diary_lightweight_request_exact": image_prompt,
                     "autonomy_topic_used_for_diary": bool(auto_autonomy_diary),
                     "autonomy_diary_candidate": auto_autonomy_diary,
-                    "diary_image_reuse_policy": "manual diary override may reuse image; automatic autonomy topic must generate a new diary image, never reuse autonomy photo_url",
+                    "diary_source_priority": ["manual_diary_override", "today_autonomy_rewash", "today_diary_chat_free_generation"],
+                    "diary_selected_source": "today_autonomy_rewash" if auto_autonomy_diary else "today_diary_chat_free_generation",
+                    "diary_image_reuse_policy": "manual diary override may reuse its selected image; autonomy supplies text topic only and must generate a new image without using autonomy photo_url",
                 }
-                _trace_stage(diary_trace_context, "diary_visual_selected", data={"task": committed_diary_photo_task, "visual": diary_visual, "wardrobe": diary_wardrobe, "autonomy_topic": auto_autonomy_diary}, prompt=image_prompt)
+                _trace_stage(
+                    diary_trace_context,
+                    "diary_prompt_lightweight_compiled",
+                    data={
+                        "visual": diary_visual,
+                        "wardrobe": diary_wardrobe,
+                        "autonomy_topic": auto_autonomy_diary,
+                        "selected_source": diary_trace_context.get("diary_selected_source"),
+                        "director_prompt_raw_chars": len(director_prompt_raw),
+                        "lightweight_request_chars": len(image_prompt),
+                    },
+                    prompt=image_prompt,
+                    note="The verbose diary-director prompt is not sent to Seedream; only this compact structured request is sent.",
+                )
                 generated_image_url, diary_visual = await execute_safe_generation(
                     discord_image_url=diary_reference_path,
                     base_filename="base_xiaoxia.jpg",
@@ -16603,29 +16769,20 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     trace_context=diary_trace_context,
                 )
                 up_img = generated_image_url
+                if diary_wardrobe:
+                    diary_visual["wardrobe_id"] = diary_wardrobe.get("item", {}).get("id")
+                    diary_visual["wardrobe_name"] = diary_wardrobe.get("item", {}).get("name")
+                    diary_visual["wardrobe_selection_source"] = diary_wardrobe.get("selection_source")
+                    diary_visual["wardrobe_selection_reason"] = diary_wardrobe.get("selection_reason")
                 local_filename = await save_to_vault(up_img)
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
 
-                # 單圖限制：照片承諾只結案今日被選中的那一項；其他照片承諾保留擇日履行。
-                if committed_diary_photo_task:
-                    selected_photo = narrative_safe_text(committed_diary_photo_task.get("source_promise", ""), max_len=220).rstrip("。")
-                    allowed_fulfilled = set()
-                    for p in due_promises:
-                        ptext = narrative_safe_text(p.get("text", ""), max_len=220).rstrip("。")
-                        if not _diary_promise_has_photo(p) or ptext == selected_photo:
-                            allowed_fulfilled.add(ptext)
-                    result["fulfilled_promises"] = [
-                        fp for fp in (result.get("fulfilled_promises") or [])
-                        if narrative_safe_text(fp, max_len=220).rstrip("。") in allowed_fulfilled
-                    ]
 
             combined_parts = [result["reply_to_daxia"]]
             if result.get("xiaoxia_daily_scene"):
                 combined_parts.append(f"【小俠的日常】：{result['xiaoxia_daily_scene']}")
             if result.get("inner_monologue"):
                 combined_parts.append(f"【小俠的夜裡獨白】：{result['inner_monologue']}")
-            if result.get("promise_delivery") and result.get("promise_delivery") != "今日沒有特別待履約項目。":
-                combined_parts.append(f"【小俠今日履約】：{result['promise_delivery']}")
             combined_message = "\n\n".join(combined_parts)
             
             diary_photo_payload = {
@@ -16648,25 +16805,19 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "activity_title": (auto_autonomy_diary or {}).get("activity_title") if auto_autonomy_diary else None,
                 "episode_id": (auto_autonomy_diary or {}).get("episode_id") if auto_autonomy_diary else None,
                 "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
+                "diary_source_layer": "manual_diary_override" if custom_diary else ("today_autonomy_rewash" if auto_autonomy_diary else "today_diary_chat_free_generation"),
                 "final_level": (diary_trace_context.get("final_level") if not custom_diary else None),
                 "generation_level": (diary_trace_context.get("final_level") if not custom_diary else None),
                 "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id") if not custom_diary else None,
+                "wardrobe_name": (diary_wardrobe or {}).get("item", {}).get("name") if not custom_diary else None,
+                "wardrobe_selection_source": (diary_wardrobe or {}).get("selection_source") if not custom_diary else None,
+                "wardrobe_selection_reason": (diary_wardrobe or {}).get("selection_reason") if not custom_diary else None,
                 "reference_item_path": (diary_wardrobe or {}).get("reference_path") if not custom_diary else None,
                 "reference_item_url": (diary_wardrobe or {}).get("reference_url") if not custom_diary else None,
             }
             db = load_memory()
             db.insert(0, diary_photo_payload)
             save_memory(db)
-            # v1.5.00：交換日記只記錄「嘗試履約」，不自動完成；需大俠用 /承諾 完成 或 /小俠承諾 完成 審核。
-            for p in due_promises or []:
-                if p.get("promise_board_id"):
-                    mark_promise_attempt(
-                        p.get("promise_board_id"),
-                        p.get("promise_board_source"),
-                        photo_id=diary_photo_payload.get("id"),
-                        note=f"交換日記 {entry_date} 已嘗試履約，待大俠確認。",
-                    )
-
             if diary_wardrobe and diary_wardrobe.get("item"):
                 _log_wardrobe_usage(
                     diary_wardrobe.get("item"),
@@ -16681,10 +16832,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "<section class='xiaoxia-diary-reply'>"
                 "<p class='xiaoxia-diary-title'>🌸 小俠的交換日記</p>"
                 f"<img src='{local_url}' class='xiaoxia-diary-img' onclick='openGalleryLightbox(this.src)'>"
-                f"<div class='xiaoxia-diary-section xiaoxia-diary-answer'><b>給大俠的回覆</b><br>{result['reply_to_daxia']}</div>"
+                + (f"<div class='xiaoxia-diary-section xiaoxia-diary-outfit'><b>衣櫃服飾</b><br>{diary_photo_payload.get('wardrobe_id')}｜{diary_photo_payload.get('wardrobe_name') or '未命名服飾'}</div>" if diary_photo_payload.get('wardrobe_id') else "")
+                + f"<div class='xiaoxia-diary-section xiaoxia-diary-answer'><b>給大俠的回覆</b><br>{result['reply_to_daxia']}</div>"
                 f"<div class='xiaoxia-diary-section xiaoxia-diary-scene'><b>小俠的日常</b><br>{result.get('xiaoxia_daily_scene', result.get('xiaoxia_diary', ''))}</div>"
                 f"<div class='xiaoxia-diary-section xiaoxia-diary-inner'><b>小俠的夜裡獨白</b><br>「{result.get('inner_monologue', '')}」</div>"
-                f"<div class='xiaoxia-diary-section xiaoxia-diary-promise'><b>小俠今日履約</b><br>{result.get('promise_delivery', '今日沒有特別待履約項目。')}</div>"
                 "</section>"
             )
             
@@ -16711,6 +16862,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 embed = discord.Embed(title=title, description=combined_message, color=0xffb6c1)
                 embed.set_image(url=local_url)
                 embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
+                diary_wid = str(diary_photo_payload.get("wardrobe_id") or "").strip().upper()
+                diary_wname = str(diary_photo_payload.get("wardrobe_name") or "").strip()
+                if diary_wid:
+                    embed.add_field(name="👗 衣櫃服飾", value=f"{diary_wid}｜{diary_wname or '未命名服飾'}", inline=False)
                 embed.set_footer(text=f"愛意值: {display_score}/100 (+{result.get('affection_plus', 1)}) | 尺度: {result['spiciness']}{_generation_level_footer(diary_photo_payload)}")
                 # 🌟 修改這裡：綁定 msg 變數並加上三個按鈕
                 result_view = PhotoResultView(diary_photo_payload)
