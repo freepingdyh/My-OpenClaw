@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.23"
+LOBSTER_VERSION = "1.5.24"
 
 
 def _normalize_generation_level(level):
@@ -1682,6 +1682,8 @@ def _autonomy_append_episode(today_payload, activity, context=None):
         "activity_id": activity_id,
         "activity_title": activity.get("title") or today_payload.get("activity_title") or "",
         "category": activity.get("category") or today_payload.get("activity_category") or "",
+        "activity_mode": activity.get("activity_mode") or today_payload.get("activity_mode") or ("ad_hoc" if str(activity_id).startswith("ADHOC_") else "catalog"),
+        "source": activity.get("source") or today_payload.get("source") or "",
         "theme_key": theme_key,
         "continuity_group": _autonomy_continuity_group_for_activity(activity),
         "visual_mode": today_payload.get("visual_mode") or "",
@@ -2205,10 +2207,26 @@ def _autonomy_state_today_done(state):
 
 async def handle_xiaoxia_autonomy_command(message, user_input):
     if not _is_girlfriend_xiaoxia_channel(message.channel):
-        await message.channel.send("大俠，`/小俠自主` 先只開放在女友小俠頻道使用喔。")
+        await message.channel.send("大俠，`/小俠自主` 只開放在女友小俠頻道使用；說故事小俠姊姊頻道不使用這套自主生活。")
         return True
 
     raw = str(user_input or getattr(message, "content", "") or "").strip()
+
+    # v1.5.24：可在任一女友小俠頻道輸入，但結果集中到主生活頻道，避免散落各頻道。
+    target_channel = _get_xiaoxia_autonomy_channel_for_auto()
+    if target_channel is None:
+        await message.channel.send(
+            f"⚠️ 找不到小俠自主主頻道。請檢查 `XIAOXIA_AUTONOMY_CHANNEL_ID` 或 `XIAOXIA_AUTONOMY_CHANNEL_NAME={XIAOXIA_AUTONOMY_CHANNEL_NAME}`。"
+        )
+        return True
+    try:
+        same_channel = getattr(message.channel, "id", None) == getattr(target_channel, "id", None)
+    except Exception:
+        same_channel = False
+    if not same_channel:
+        await message.channel.send(f"🌱 收到，大俠。小俠自主生活會統一到 #{getattr(target_channel, 'name', XIAOXIA_AUTONOMY_CHANNEL_NAME)} 回應與出圖。")
+        message = _autonomy_proxy_message_to_channel(message, target_channel)
+
     arg = re.sub(r"^/小俠自主(?:\s+|$)", "", raw, flags=re.IGNORECASE).strip()
     arg_key = _clean_text_compact(arg)
 
@@ -2222,7 +2240,9 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 類別`：列出可指定的大類。\n"
             "`/小俠自主 活動 [類別]`：列出活動清單，可用編號指定。\n"
             "`/小俠自主 指定類別 運動健康`：大俠指定方向，小俠在該類中自己選。\n"
-            "`/小俠自主 指定活動 sport_tennis`：直接指定今天的活動。\n"
+            "`/小俠自主 指定活動 sport_tennis now`：直接指定活動並立刻出圖。\n"
+            "`/小俠自主 指定活動 潛水 15:30`：今天指定時間做指定活動。\n"
+            "`/小俠自主 指定活動 逛書展`：不給時間時，由小俠今天自行安排；多筆至少間隔 1 小時。\n"
             "`/小俠自主 狀態`：查看今日活動、主題線與養眼照保底狀態。\n"
             "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
             "`/小俠自主 變事件`：把今天這個題材升級成近期事件。\n"
@@ -2230,7 +2250,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 開`：恢復自動排程並重建今日 slots。\n"
             "`/小俠自主 暫停 3天`：臨時暫停自動活動，天數可自訂，最多 30 天；不影響手動指定活動。\n"
             "`/小俠自主 指定排程 14:00, 16:20, 18:00`：今天改用大俠指定的自動活動時間。\n"
-            "自動排程：Zeabur 設 `XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT=1~6` 可讓小俠每日不定時自主活動；每次至少間隔 `XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS` 小時。"
+            "自動排程：Zeabur 設 `XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT=1~6` 可讓小俠每日不定時自主活動；手動指定活動不受 daily_limit 限制。\n"
+            f"結果頻道：所有 `/小俠自主` 主要回應與出圖統一送到 `#{XIAOXIA_AUTONOMY_CHANNEL_NAME}`。"
         )
         return True
 
@@ -2259,9 +2280,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         save_xiaoxia_autonomy_state(state)
         scheduler = _autonomy_ensure_auto_schedule(datetime.now(TZ_TPE)) if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 else {}
         slot_lines = []
-        for s in (scheduler.get("slots") or [])[:6]:
+        for s in (scheduler.get("slots") or [])[:8]:
             if isinstance(s, dict):
-                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+                title_part = f"/{s.get('activity_title')}" if s.get("manual_kind") == "specified_activity" and s.get("activity_title") else ""
+                slot_lines.append(f"{s.get('time')}={s.get('status')}{title_part}")
         await message.channel.send(
             "🌱 已恢復 **小俠自主自動排程**。\n"
             f"目前設定：limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
@@ -2344,9 +2366,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         save_xiaoxia_autonomy_state(state)
         scheduler = _autonomy_ensure_auto_schedule(datetime.now(TZ_TPE)) if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 else {}
         slot_lines = []
-        for s in (scheduler.get("slots") or [])[:6]:
+        for s in (scheduler.get("slots") or [])[:8]:
             if isinstance(s, dict):
-                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+                title_part = f"/{s.get('activity_title')}" if s.get("manual_kind") == "specified_activity" and s.get("activity_title") else ""
+                slot_lines.append(f"{s.get('time')}={s.get('status')}{title_part}")
         await message.channel.send(
             "🌱 已重建今日小俠自主自動排程。"
             + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "\n目前 Zeabur daily limit 為 0，所以沒有自動 slots。")
@@ -2392,9 +2415,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         gap = _days_since_date(state.get("last_reward_photo_date"))
         scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
         slot_lines = []
-        for s in (scheduler.get("slots") or [])[:6]:
+        for s in (scheduler.get("slots") or [])[:8]:
             if isinstance(s, dict):
-                slot_lines.append(f"{s.get('time')}={s.get('status')}")
+                title_part = f"/{s.get('activity_title')}" if s.get("manual_kind") == "specified_activity" and s.get("activity_title") else ""
+                slot_lines.append(f"{s.get('time')}={s.get('status')}{title_part}")
         control = _autonomy_auto_control_state(state, datetime.now(TZ_TPE))
         control_label = "暫停中" if control.get("paused") else "啟用"
         if not bool(state.get("auto_enabled_override", True)):
@@ -2479,13 +2503,64 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         specified_label = f"指定類別：{specified_category}"
     elif arg_key.startswith("指定活動"):
         query = re.sub(r"^指定活動\s*", "", arg_key).strip()
-        specified_activity = _autonomy_resolve_activity(query, message=message, catalog=load_xiaoxia_activity_catalog())
-        if not specified_activity:
-            await message.channel.send("大俠，我找不到這個活動。可以先輸入 `/小俠自主 活動 運動健康` 看清單，再用編號、中文名稱或 activity_id 指定。")
+        parsed_activity = _parse_autonomy_specified_activity_request(query)
+        if parsed_activity.get("error") or not parsed_activity.get("activity_text"):
+            await message.channel.send(
+                "🌱 大俠，請告訴小俠要做什麼活動，例如：\n"
+                "`/小俠自主 指定活動 參加大學同學會 now`\n"
+                "`/小俠自主 指定活動 潛水 15:30`\n"
+                "`/小俠自主 指定活動 逛書展`"
+            )
             return True
+        specified_activity, is_ad_hoc_activity = _autonomy_resolve_or_create_activity(
+            parsed_activity.get("activity_text"),
+            message=message,
+            catalog=load_xiaoxia_activity_catalog(),
+        )
         specified_label = f"指定活動：{specified_activity.get('title')}"
+
+        # v1.5.24：now 才立即出圖；有 HH:MM 則建立單次 slot；沒給時間則由小俠今天自行安排。
+        if parsed_activity.get("timing_mode") == "time":
+            slot, err = _autonomy_add_specified_activity_slot(
+                specified_activity,
+                time_text=parsed_activity.get("time"),
+                now_dt=datetime.now(TZ_TPE),
+                auto_pick=False,
+            )
+            if err == "time_passed":
+                await message.channel.send(
+                    f"🌱 大俠，**{parsed_activity.get('time')}** 今天已經過了，不補發。\n"
+                    f"你可以改用：`/小俠自主 指定活動 {specified_activity.get('title')} now`，或指定今天接下來的時間。"
+                )
+                return True
+            if not slot:
+                await message.channel.send("🌱 大俠，這個時間格式好像不對，請用 `HH:MM`，例如 `15:30`。")
+                return True
+            await message.channel.send(
+                f"🌱 已安排 **{slot.get('time')}** 做：**{specified_activity.get('title')}**。\n"
+                "這是大俠指定活動，不受 daily_limit 限制；到時間會在這裡出圖與分享心得。"
+            )
+            return True
+
+        if parsed_activity.get("timing_mode") == "auto":
+            slot, err = _autonomy_add_specified_activity_slot(
+                specified_activity,
+                now_dt=datetime.now(TZ_TPE),
+                auto_pick=True,
+            )
+            if not slot:
+                await message.channel.send(
+                    f"🌱 大俠，今天剩下的可用時間不夠安排 **{specified_activity.get('title')}**。\n"
+                    f"你可以改用：`/小俠自主 指定活動 {specified_activity.get('title')} now`，或指定明確時間。"
+                )
+                return True
+            await message.channel.send(
+                f"🌱 已把 **{specified_activity.get('title')}** 加入今天的小俠自主指定活動。\n"
+                f"小俠自行安排在 **{slot.get('time')}**，並會和其他 pending 活動至少間隔 1 小時。"
+            )
+            return True
     elif arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
-        await message.channel.send("大俠，目前 v1.5.19 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ...`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
+        await message.channel.send("大俠，目前 v1.5.24 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ... [now 或 HH:MM]`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
         return True
 
     force_reroll = arg_key in {"重抽", "再抽", "重拍"} or bool(specified_category or specified_activity)
@@ -2597,6 +2672,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "activity_id": activity.get("id"),
             "activity_title": activity.get("title"),
             "activity_category": activity.get("category"),
+            "activity_mode": activity.get("activity_mode") or ("ad_hoc" if str(activity.get("id") or "").startswith("ADHOC_") else "catalog"),
+            "source": activity.get("source") or ("daxia_specified_activity" if str(activity.get("id") or "").startswith("ADHOC_") else "xiaoxia_autonomy"),
             "theme_key": _autonomy_theme_key_for_activity(activity),
             "continuity_group": _autonomy_continuity_group_for_activity(activity),
             "thread_context": thread_context,
@@ -16608,9 +16685,9 @@ async def on_ready():
         monthly_memory_review_reminder_task.start()
         print("📚 每月25日 08:00 回憶整理提醒已啟動（只提醒，不列清單）。")
 
-    if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 and not xiaoxia_autonomy_auto_task.is_running():
+    if not xiaoxia_autonomy_auto_task.is_running():
         xiaoxia_autonomy_auto_task.start()
-        print(f"🌱 小俠自主自動排程已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}")
+        print(f"🌱 小俠自主排程任務已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}；即使 daily_limit=0，也會處理大俠指定活動 slots。")
 
 @girlfriend_bot.command(name='more')
 async def more(ctx):
@@ -18392,6 +18469,226 @@ def _get_xiaoxia_autonomy_channel_for_auto():
     return channel
 
 
+def _autonomy_proxy_message_to_channel(message, target_channel):
+    """v1.5.24：/小俠自主 可從任一女友小俠頻道輸入，但主要回應統一送到主生活頻道。"""
+    proxy = type("AutonomyRoutedMessage", (), {})()
+    for attr in ("author", "content", "attachments", "guild", "id", "created_at"):
+        try:
+            setattr(proxy, attr, getattr(message, attr))
+        except Exception:
+            pass
+    proxy.channel = target_channel
+    return proxy
+
+
+def _autonomy_normalize_ad_hoc_title(title):
+    title = _clean_text_compact(title or "")
+    title = re.sub(r"^[「『\\\"']+|[」』\\\"']+$", "", title).strip()
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
+def _autonomy_ad_hoc_theme_key(title):
+    """自由文字活動的主題線 key；同名或明顯同類活動下次可延續，不從空白開始。"""
+    t = _autonomy_normalize_ad_hoc_title(title)
+    hay = t.lower()
+    if "大學" in t and "同學" in t and any(k in t for k in ("會", "聚", "吃飯", "見面")):
+        return "adhoc_college_classmates"
+    if any(k in t for k in ("書展", "書市", "書店活動")):
+        return "adhoc_book_fair"
+    if any(k in t for k in ("寵物展", "貓展", "狗展", "寵物市集")):
+        return "adhoc_pet_expo"
+    if any(k in t for k in ("潛水", "潜水", "diving", "浮潛", "水肺")):
+        return "adhoc_diving"
+    safe = re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff]+", "_", t).strip("_")
+    if len(safe) > 40:
+        safe = safe[:40].strip("_")
+    return "adhoc_" + (safe or "specified_activity")
+
+
+def _autonomy_classify_ad_hoc_activity(title):
+    t = _autonomy_normalize_ad_hoc_title(title)
+    if any(k in t for k in ("潛水", "潜水", "浮潛", "水肺", "健身", "瑜珈", "瑜伽", "跑步", "網球", "羽球", "游泳")):
+        return "運動健康", "public_sport"
+    if any(k in t for k in ("書展", "畫展", "展覽", "美術館", "博物館", "音樂會", "演奏會", "劇場", "電影")):
+        return "藝文活動", "public_culture"
+    if any(k in t for k in ("同學", "朋友", "聚會", "同學會", "餐敘", "聚餐")):
+        return "社交但安全", "public_social"
+    if any(k in t for k in ("家", "居家", "房間", "臥室", "書房", "客廳", "料理", "烘焙")):
+        return "居家生活", "home_private"
+    if any(k in t for k in ("上課", "學習", "課程", "研習", "講座")):
+        return "學習成長", "public_learning"
+    return "大俠指定活動", "public"
+
+
+def _autonomy_make_ad_hoc_activity(title, raw_query=""):
+    title = _autonomy_normalize_ad_hoc_title(title)
+    category, location_type = _autonomy_classify_ad_hoc_activity(title)
+    theme_key = _autonomy_ad_hoc_theme_key(title)
+    safe_id_tail = re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff]+", "_", title).strip("_")[:24].strip("_") or "activity"
+    now_dt = datetime.now(TZ_TPE)
+    return {
+        "id": f"ADHOC_{now_dt.strftime('%Y%m%d')}_{safe_id_tail}",
+        "title": title,
+        "category": category,
+        "source": "daxia_specified_activity",
+        "activity_mode": "ad_hoc",
+        "location_type": location_type,
+        "activity_tags": [title, "大俠指定活動", category],
+        "theme_key": theme_key,
+        "continuity_group": theme_key,
+        "photo_prompt_seed": f"小俠今天去「{title}」，用成熟自然的生活感拍下一張能讓大俠理解現場氣氛的照片；畫面要清楚呈現活動環境、她正在做的事、當下心情與服裝選擇。",
+        "event_upgrade_potential": f"大俠手動指定活動：{title}",
+        "raw_query": raw_query,
+    }
+
+
+def _autonomy_resolve_or_create_activity(query, message=None, catalog=None):
+    q = _autonomy_normalize_ad_hoc_title(query)
+    if not q:
+        return None, False
+    activity = _autonomy_resolve_activity(q, message=message, catalog=catalog or load_xiaoxia_activity_catalog())
+    if activity:
+        item = dict(activity)
+        item.setdefault("activity_mode", "catalog")
+        return item, False
+    return _autonomy_make_ad_hoc_activity(q, raw_query=query), True
+
+
+def _parse_autonomy_specified_activity_request(query):
+    """解析：指定活動 自由文字 [now|現在|立即|馬上|HH:MM]。"""
+    raw = _autonomy_normalize_ad_hoc_title(query)
+    if not raw:
+        return {"activity_text": "", "timing_mode": "", "time": "", "error": "missing_activity"}
+    m = re.search(r"\s+(now|現在|立即|馬上)\s*$", raw, flags=re.IGNORECASE)
+    if m:
+        return {
+            "activity_text": _autonomy_normalize_ad_hoc_title(raw[:m.start()]),
+            "timing_mode": "now",
+            "time": "",
+            "error": "",
+        }
+    m = re.search(r"\s+([01]?\d|2[0-3]):([0-5]\d)\s*$", raw)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        return {
+            "activity_text": _autonomy_normalize_ad_hoc_title(raw[:m.start()]),
+            "timing_mode": "time",
+            "time": f"{hh:02d}:{mm:02d}",
+            "error": "",
+        }
+    return {"activity_text": raw, "timing_mode": "auto", "time": "", "error": ""}
+
+
+def _autonomy_slot_dt_today(time_text, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    try:
+        hh, mm = [int(x) for x in str(time_text or "").split(":", 1)]
+        return now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    except Exception:
+        return None
+
+
+def _autonomy_sort_slots(slots):
+    def key(item):
+        dt = _autonomy_slot_dt_today((item or {}).get("time"))
+        return dt or datetime.max.replace(tzinfo=TZ_TPE)
+    return sorted([s for s in (slots or []) if isinstance(s, dict)], key=key)
+
+
+def _autonomy_make_specified_activity_slot(activity, time_text, now_dt=None, scheduled_by="daxia"):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    activity = _autonomy_enrich_activity(activity)
+    mode = str(activity.get("activity_mode") or ("catalog" if not str(activity.get("id") or "").startswith("ADHOC_") else "ad_hoc"))
+    return {
+        "id": f"MANUAL_ACTIVITY_{now_dt.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}",
+        "time": str(time_text),
+        "status": "pending",
+        "manual": True,
+        "manual_kind": "specified_activity",
+        "activity_mode": mode,
+        "activity_id": str(activity.get("id") or ""),
+        "activity_title": str(activity.get("title") or ""),
+        "activity_category": str(activity.get("category") or ""),
+        "theme_key": _autonomy_theme_key_for_activity(activity),
+        "source": "daxia_specified_activity",
+        "scheduled_by": scheduled_by,
+        "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _autonomy_find_auto_time_for_manual_activity(slots, now_dt=None, min_gap_minutes=60):
+    """替未給時間的手動指定活動找今天剩餘可用時間；與 pending/running slot 至少間隔 1 小時。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    start_hour = int(XIAOXIA_AUTONOMY_ACTIVE_START_HOUR)
+    end_hour = int(XIAOXIA_AUTONOMY_ACTIVE_END_HOUR)
+    if end_hour <= start_hour:
+        end_hour = min(23, start_hour + 1)
+    start_dt = now_dt.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    end_dt = now_dt.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+    earliest = max(start_dt, now_dt + timedelta(minutes=10))
+    if earliest > end_dt:
+        return None
+
+    occupied = []
+    for s in slots or []:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("status") or "") not in {"pending", "running"}:
+            continue
+        dt = _autonomy_slot_dt_today(s.get("time"), now_dt=now_dt)
+        if dt:
+            occupied.append(dt)
+
+    # 以 10 分鐘為單位，讓時間看起來比較自然；候選隨機，避免每天機械排整點。
+    start_min = ((earliest.hour * 60 + earliest.minute + 9) // 10) * 10
+    end_min = end_dt.hour * 60 + end_dt.minute
+    candidates = []
+    for minute in range(start_min, end_min + 1, 10):
+        dt = now_dt.replace(hour=minute // 60, minute=minute % 60, second=0, microsecond=0)
+        if all(abs((dt - used).total_seconds()) >= min_gap_minutes * 60 for used in occupied):
+            candidates.append(dt)
+    if not candidates:
+        return None
+    random.shuffle(candidates)
+    chosen = sorted(candidates[:min(6, len(candidates))])[0] if len(candidates) > 1 else candidates[0]
+    return chosen.strftime("%H:%M")
+
+
+def _autonomy_add_specified_activity_slot(activity, time_text=None, now_dt=None, auto_pick=False):
+    """新增一個大俠指定活動 slot；不覆蓋既有 auto slots，也不受 daily_limit 限制。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    state = load_xiaoxia_autonomy_state()
+    scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+    if scheduler.get("date") != now_dt.strftime("%Y-%m-%d"):
+        scheduler = _autonomy_ensure_auto_schedule(now_dt)
+        state = load_xiaoxia_autonomy_state()
+    slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
+
+    if auto_pick:
+        time_text = _autonomy_find_auto_time_for_manual_activity(slots, now_dt=now_dt, min_gap_minutes=60)
+        if not time_text:
+            return None, "today_time_not_enough"
+    else:
+        slot_dt = _autonomy_slot_dt_today(time_text, now_dt=now_dt)
+        if not slot_dt:
+            return None, "invalid_time"
+        if slot_dt <= now_dt:
+            return None, "time_passed"
+
+    slot = _autonomy_make_specified_activity_slot(activity, time_text, now_dt=now_dt)
+    slots.append(slot)
+    scheduler["slots"] = _autonomy_sort_slots(slots)
+    scheduler["date"] = now_dt.strftime("%Y-%m-%d")
+    scheduler["manual_activity_slots"] = True
+    scheduler["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    # 不改變大俠原本的自動排程開/關狀態；即使自動排程關閉，手動指定活動 slot 仍會被排程任務處理。
+    state["auto_scheduler"] = scheduler
+    save_xiaoxia_autonomy_state(state)
+    return slot, ""
+
+
 def _autonomy_generate_auto_slots(now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     count = int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0)
@@ -18475,18 +18772,28 @@ def _autonomy_ensure_auto_schedule(now_dt=None):
     state = load_xiaoxia_autonomy_state()
     scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
     expected = _autonomy_schedule_config_snapshot()
-    # v1.5.22：大俠手動指定今日排程時，當天不被亂數排程覆蓋。
+    # v1.5.22：大俠手動指定整日排程時，當天不被亂數排程覆蓋。
     if scheduler.get("date") == date_key and scheduler.get("manual_schedule"):
         return scheduler
+
     should_rebuild = (
         scheduler.get("date") != date_key
         or _autonomy_schedule_config_changed(scheduler, expected)
     )
     if should_rebuild:
+        old_slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
+        # v1.5.24：env 改變或 daily_limit=0 重建時，保留今天尚未完成的大俠指定活動 slots。
+        manual_activity_slots = []
+        if scheduler.get("date") == date_key:
+            for s in old_slots:
+                if isinstance(s, dict) and s.get("manual_kind") == "specified_activity" and s.get("status") in {"pending", "running"}:
+                    manual_activity_slots.append(s)
+        auto_slots = _autonomy_generate_auto_slots(now_dt) if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0 else []
         scheduler = {
             "date": date_key,
             **expected,
-            "slots": _autonomy_generate_auto_slots(now_dt),
+            "slots": _autonomy_sort_slots(auto_slots + manual_activity_slots),
+            "manual_activity_slots": bool(manual_activity_slots),
             "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
             "rebuilt_reason": "date_or_env_config_changed",
         }
@@ -18498,42 +18805,53 @@ def _autonomy_ensure_auto_schedule(now_dt=None):
 
 @tasks.loop(minutes=10)
 async def xiaoxia_autonomy_auto_task():
-    if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) <= 0:
-        return
     now_dt = datetime.now(TZ_TPE)
     state = load_xiaoxia_autonomy_state()
-    control = _autonomy_auto_control_state(state, now_dt)
-    if control.get("paused"):
-        print(f"🌱 [AUTONOMY_AUTO_PAUSED] reason={control.get('reason')} pause_until={control.get('pause_until')}")
-        return
-    scheduler = _autonomy_ensure_auto_schedule(now_dt)
+
+    # v1.5.24：任務即使 daily_limit=0 也要運作，因為大俠可能安排手動指定活動 slot。
+    if int(XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT or 0) > 0:
+        scheduler = _autonomy_ensure_auto_schedule(now_dt)
+        state = load_xiaoxia_autonomy_state()
+    else:
+        scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+        if scheduler.get("date") != now_dt.strftime("%Y-%m-%d"):
+            scheduler = _autonomy_ensure_auto_schedule(now_dt)
+            state = load_xiaoxia_autonomy_state()
+
     slots = scheduler.get("slots") if isinstance(scheduler.get("slots"), list) else []
+    control = _autonomy_auto_control_state(state, now_dt)
     due = []
     changed_slots = False
     for item in slots:
         if not isinstance(item, dict) or item.get("status") != "pending":
             continue
+        is_manual_activity = item.get("manual_kind") == "specified_activity"
         # v1.5.20-R3：若舊排程殘留在目前環境變數的允許時段外，直接跳過，不補發。
-        # v1.5.22：但大俠手動指定排程時，以大俠指定時間為準，不套用 env window。
-        if not scheduler.get("manual_schedule") and not _autonomy_slot_time_in_active_window(item.get("time")):
+        # v1.5.22：但大俠手動指定整日排程時，以大俠指定時間為準，不套用 env window。
+        # v1.5.24：大俠指定活動 slot 也不套用 env window；大俠指定優先。
+        if (not scheduler.get("manual_schedule")) and (not is_manual_activity) and not _autonomy_slot_time_in_active_window(item.get("time")):
             item["status"] = "skipped_outside_active_window"
             item["skipped_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
             item["active_window"] = f"{XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00"
             changed_slots = True
             print(f"🌱 [AUTONOMY_SLOT_SKIPPED_OUTSIDE_WINDOW] slot={item.get('time')} window={item.get('active_window')}")
             continue
-        try:
-            hh, mm = [int(x) for x in str(item.get("time") or "").split(":", 1)]
-            slot_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        except Exception:
+        slot_dt = _autonomy_slot_dt_today(item.get("time"), now_dt=now_dt)
+        if not slot_dt:
             continue
         if now_dt >= slot_dt:
+            if control.get("paused") and not is_manual_activity:
+                continue
             due.append(item)
     if changed_slots:
         state = load_xiaoxia_autonomy_state()
         scheduler["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         state["auto_scheduler"] = scheduler
         save_xiaoxia_autonomy_state(state)
+
+    if control.get("paused") and not due:
+        print(f"🌱 [AUTONOMY_AUTO_PAUSED] reason={control.get('reason')} pause_until={control.get('pause_until')}")
+        return
     if not due:
         return
 
@@ -18550,12 +18868,20 @@ async def xiaoxia_autonomy_auto_task():
     save_xiaoxia_autonomy_state(state)
 
     try:
-        await channel.send(f"🌱 小俠到了今天自己安排的生活時段（{item.get('time')}），準備去做一件事、拍一張照給大俠。")
+        is_manual_activity = item.get("manual_kind") == "specified_activity"
+        if is_manual_activity:
+            title = str(item.get("activity_title") or item.get("activity_id") or "大俠指定活動").strip()
+            await channel.send(f"🌱 小俠到了大俠指定的生活時段（{item.get('time')}），準備去做：**{title}**。")
+            command_text = f"/小俠自主 指定活動 {title} now"
+        else:
+            await channel.send(f"🌱 小俠到了今天自己安排的生活時段（{item.get('time')}），準備去做一件事、拍一張照給大俠。")
+            command_text = "/小俠自主 重抽"
+
         fake_message = type("AutonomyAutoMessage", (), {})()
         fake_message.channel = channel
         fake_message.author = getattr(girlfriend_bot, "user", None)
-        fake_message.content = "/小俠自主 重抽"
-        ok = await handle_xiaoxia_autonomy_command(fake_message, "/小俠自主 重抽")
+        fake_message.content = command_text
+        ok = await handle_xiaoxia_autonomy_command(fake_message, command_text)
         item["status"] = "sent" if ok else "failed"
         item["sent_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
     except Exception as exc:
