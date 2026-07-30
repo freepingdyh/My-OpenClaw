@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.25"
+LOBSTER_VERSION = "1.5.26"
 
 
 def _normalize_generation_level(level):
@@ -20819,6 +20819,207 @@ async def on_message(message):
                 await message.channel.send(f"💦 大俠學長，小夏暫時無法處理這個需求：{exc}")
             else:
                 await message.channel.send(f"⚠️ 架構師模組暫時無法處理此需求。錯誤：{exc}")
+
+
+
+# ==========================================
+# 👥 v1.5.26：統一人物場景政策
+# ==========================================
+# 核心原則：
+# 1. 小俠永遠是畫面主角。
+# 2. 社交／公共／活動情境可有其他人物。
+# 3. 女性可與小俠自然互動。
+# 4. 公共場合可有男性背景人物，但男性不得與小俠互動。
+# 5. 私密場合只有小俠一人。
+#
+# 本區刻意放在啟動器之前，以覆寫舊版散落於各生圖路徑的 strict-solo 規則。
+
+XIAOXIA_UNIFIED_PEOPLE_POLICY = """
+UNIFIED PEOPLE AND INTERACTION POLICY — highest priority:
+- Xiaoxia must always be the unmistakable main character, primary subject, and visual focus.
+- Xiaoxia may appear in social, public, travel, work, study, volunteer, sport, class, event, and activity scenes.
+- Female friends, sisters, classmates, colleagues, staff, students, or other female characters may appear and naturally interact with Xiaoxia when the requested scene calls for it. They must remain secondary to Xiaoxia and must not obscure or replace her identity.
+- In public places, male people may appear only as incidental environmental background figures needed for realism.
+- No male person may interact with Xiaoxia in any way: no conversation, eye contact, shared table, walking together, standing or sitting as her companion, posing together, handing objects, helping, coaching, touching, embracing, or relationship/date/partner composition.
+- A male background figure must remain clearly secondary, separated from Xiaoxia, non-interacting, non-companion-like, and never become a foreground or co-primary subject.
+- In private scenes, Xiaoxia must be the only human figure. No other woman, man, child, external hand, viewer body part, reflection, silhouette, shadow, or partial person may appear.
+- Daxia/the boyfriend is always an invisible camera viewpoint only and must never be visually depicted or substituted by any head, hand, arm, shoulder, back, reflection, shadow, or cropped body part.
+- Xiaoxia's own anatomy, hands, fingers, limbs, posture, and movement must remain natural and physically plausible.
+"""
+
+SOLO_XIAOXIA_VISUAL_RULES = XIAOXIA_UNIFIED_PEOPLE_POLICY
+STRICT_SOLO_AND_ANATOMY_PROMPT = XIAOXIA_UNIFIED_PEOPLE_POLICY
+SOLO_SCENE_REWRITE_GUARD = XIAOXIA_UNIFIED_PEOPLE_POLICY
+SOLO_NEGATIVE_MINIMAL = (
+    "Xiaoxia is always the primary subject. Female characters may interact naturally when the requested social/activity scene requires it. "
+    "Men may exist only as non-interacting incidental public background figures. No male interaction, companion/date framing, viewer body parts, or Daxia depiction. "
+    "Private scenes contain Xiaoxia alone."
+)
+
+_V1526_FEMALE_SOCIAL_WORDS = (
+    "姊妹淘", "姐妹淘", "閨蜜", "闺蜜", "女性朋友", "女朋友們", "女同學", "女同学", "女同事",
+    "姊妹", "姐妹", "女生們", "女生们", "女性學生", "女性学生", "女學生", "女学生", "女性同伴",
+    "female friend", "female friends", "women friends", "sisters", "female classmates", "female colleagues",
+    "female students", "women-only", "girls' night", "girls night"
+)
+_V1526_MALE_INTERACTION_WORDS = (
+    "和男性", "跟男性", "和男生", "跟男生", "和男人", "跟男人", "男朋友", "男友", "男性朋友",
+    "男同學", "男同学", "男同事", "男教練", "男教练", "男性教練", "男性教练", "男伴", "男性同伴",
+    "with a man", "with a male", "male friend", "boyfriend", "male colleague", "male classmate", "male coach"
+)
+
+def _v1526_contains(text, words):
+    low = str(text or "").lower()
+    return any(str(w).lower() in low for w in words)
+
+# 保留舊函式作為基礎，再集中修正人物政策。
+_v1525_build_visual_checklist = _build_visual_checklist
+
+def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, current_outfit=None, trace_context=None):
+    checklist = _v1525_build_visual_checklist(mode, user_text, visual_dict, current_outfit, trace_context)
+    checklist = dict(checklist or {})
+    source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
+    private = bool(_is_private_scene_text(source))
+    explicit_solo = bool(_explicit_solo_or_empty_scene_requested(source))
+    female_social = (not private) and _v1526_contains(source, _V1526_FEMALE_SOCIAL_WORDS)
+    male_interaction_requested = (not private) and _v1526_contains(source, _V1526_MALE_INTERACTION_WORDS)
+    public_scene = (not private) and bool(_allow_background_bystanders_from_text(source, mode=mode))
+
+    if private or explicit_solo:
+        checklist.update({
+            "private_scene": True,
+            "strict_solo_required": True,
+            "allow_background_bystanders": False,
+            "specified_character_interaction": False,
+            "people_policy": "private_strict_solo",
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": False,
+            "female_interaction_ok": False,
+        })
+    elif female_social:
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_female_interaction_ok",
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+            "female_interaction_ok": True,
+        })
+    elif male_interaction_requested:
+        # 使用者文字即使提到男性互動，也不得把它變成畫面互動；男性只能降為公共背景。
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_public_background_ok",
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+            "female_interaction_ok": False,
+            "male_interaction_forbidden": True,
+        })
+    elif public_scene or checklist.get("allow_background_bystanders"):
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_public_background_ok",
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+            "female_interaction_ok": False,
+        })
+    else:
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "specified_character_interaction": False,
+            "people_policy": "solo_primary_subject",
+            "no_male_people": False,
+            "male_background_ok": False,
+            "female_background_ok": False,
+            "female_interaction_ok": False,
+        })
+
+    must_not = list(checklist.get("must_not_have") or [])
+    # 移除會誤殺女性社交互動的舊禁項。
+    if checklist.get("female_interaction_ok"):
+        must_not = [x for x in must_not if "interacting companion" not in str(x).lower() and "second person" not in str(x).lower()]
+    must_not += [
+        "any male person interacting with Xiaoxia by talking, eye contact, shared table, walking together, posing together, passing objects, helping, coaching, touching, or companion/date framing",
+        "Daxia/viewer visually depicted as a head, hand, arm, shoulder, back, reflection, shadow, silhouette, or cropped body part",
+        "any other person becoming co-primary or more visually prominent than Xiaoxia",
+    ]
+    if checklist.get("strict_solo_required"):
+        must_not.append("any additional human figure in the private or explicitly solo scene")
+    checklist["must_not_have"] = _dedupe_keep_order(must_not)
+    return checklist
+
+
+def _seedream_people_policy_line(checklist=None):
+    c = checklist if isinstance(checklist, dict) else {}
+    policy = str(c.get("people_policy") or "")
+    if c.get("strict_solo_required") or policy == "private_strict_solo":
+        return "People rule: PRIVATE OR EXPLICIT SOLO SCENE. Xiaoxia is the only human figure. No other woman, man, child, external hand, viewer body part, reflection, shadow, silhouette, or partial person. Daxia remains an invisible camera viewpoint only."
+    if policy == "autonomy_female_interaction_ok" or c.get("female_interaction_ok"):
+        return "People rule: Xiaoxia is the unmistakable main character and visual focus. Female friends/sisters/classmates/colleagues may naturally interact with her as required by the scene, while remaining secondary. Men may appear only as distant incidental public background and may not talk to, look at, sit with, walk with, pose with, help, touch, or otherwise interact with Xiaoxia. No male companion/date framing. Never visualize Daxia/viewer."
+    if policy == "autonomy_sport_no_male":
+        return "People rule: Xiaoxia is the unmistakable main character. Female-only secondary people may appear when the activity needs them. No male person anywhere, no external hands, and never visualize Daxia/viewer."
+    if policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"} or c.get("allow_background_bystanders"):
+        return "People rule: Xiaoxia is the unmistakable main character and only primary subject. Public background people may appear for realism, including men. Any man must remain incidental, distant/secondary, and completely non-interacting with Xiaoxia: no conversation, eye contact, shared table, walking together, posing, passing objects, helping, coaching, touching, or companion/date composition. Female background people may be present but do not interact unless the scene explicitly calls for female social interaction. Never visualize Daxia/viewer."
+    return "People rule: Xiaoxia is the unmistakable main character and only primary subject. Do not add a companion. No male may interact with Xiaoxia. Never visualize Daxia/viewer or external body parts."
+
+
+def _v1526_relax_old_solo_text(prompt, checklist=None):
+    """移除舊版殘留的『所有情境只能一人』語句，再注入單一政策。"""
+    text = str(prompt or "")
+    replacements = {
+        "Create a new solo photorealistic lifestyle image of Xiaoxia.": "Create a new photorealistic lifestyle image centered unmistakably on Xiaoxia.",
+        "- Natural anatomy, single person only, candid lifestyle photo.": "- Natural anatomy and candid lifestyle photography. Apply the people rule above exactly.",
+        "- Character visibility rule: strictly only Xiaoxia appears in the image; Xiaoxia is the only human figure.": "- Character priority rule: Xiaoxia must remain the unmistakable main character and only primary subject; apply the scene-specific people policy.",
+        "- Forbidden visual intrusions: no external hands, people, external feet, or any visible body part of the viewer.": "- Forbidden visual intrusions: no external hands/feet or visible body part of the viewer; other people are governed only by the scene-specific people policy.",
+        "- Strictly solo Xiaoxia only; no man, no other people, no visible viewer body parts, no foreground hands/arms/shoulders, no male silhouette or reflection.": "- Xiaoxia must be the unmistakable main character. Never show viewer body parts or a male interacting/companion figure; apply the scene-specific people policy.",
+        "No other people of any gender.": "No unrequested co-primary subject.",
+        "Strictly solo focus on Xiaoxia.": "Keep unmistakable primary focus on Xiaoxia.",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # 清除最常造成女性角色被整批消除的固定長句。
+    text = text.replace("NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections.",
+                        "No external viewer body parts or Daxia depiction. Men may appear only as non-interacting incidental public background when allowed by the people policy; no male interaction or companion framing.")
+    policy_line = _seedream_people_policy_line(checklist)
+    return f"{XIAOXIA_UNIFIED_PEOPLE_POLICY.strip()}\n{policy_line}\n\n{text}".strip()
+
+_v1525_build_hard_anchor_block = _build_hard_anchor_block
+
+def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
+    base = _v1525_build_hard_anchor_block(mode, visual_dict, initial_prompt)
+    checklist = None
+    if isinstance(visual_dict, dict):
+        checklist = visual_dict.get("__visual_checklist")
+        if not isinstance(checklist, dict):
+            tc = visual_dict.get("__trace_context")
+            if isinstance(tc, dict):
+                checklist = tc.get("visual_checklist")
+    return _v1526_relax_old_solo_text(base, checklist)
+
+_v1525_build_pose_critical_seedream_prompt = _build_pose_critical_seedream_prompt
+
+def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason="", visual_checklist=None):
+    base = _v1525_build_pose_critical_seedream_prompt(user_request, has_reference, current_outfit, retry_reason, visual_checklist)
+    return _v1526_relax_old_solo_text(base, visual_checklist)
+
+_v1525_build_photo_reference_minimal_seedream_prompt = _build_photo_reference_minimal_seedream_prompt
+
+def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True, visual_checklist=None):
+    base = _v1525_build_photo_reference_minimal_seedream_prompt(user_request, current_outfit, retry_reason, has_figure10, visual_checklist)
+    return _v1526_relax_old_solo_text(base, visual_checklist)
 
 
 # ==========================================
