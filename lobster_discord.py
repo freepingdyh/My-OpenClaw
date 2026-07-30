@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.26_R1"
+LOBSTER_VERSION = "1.5.26_R2"
 
 
 def _normalize_generation_level(level):
@@ -20861,6 +20861,10 @@ UNIFIED PEOPLE AND INTERACTION POLICY — highest priority:
 - Xiaoxia must always be the unmistakable main character, primary subject, and visual focus.
 - Xiaoxia may appear in social, public, travel, work, study, volunteer, sport, class, event, and activity scenes.
 - Female friends, sisters, classmates, colleagues, staff, students, or other female characters may appear and naturally interact with Xiaoxia when the requested scene calls for it. They must remain secondary to Xiaoxia and must not obscure or replace her identity.
+- Xiaoxia is the only identity-locked subject. Figures/Images 1-9 and all Xiaoxia appearance anchors apply exclusively to Xiaoxia, never to supporting women.
+- Supporting women must be clearly different individuals, not Xiaoxia clones, twins, duplicates, or alternate versions. Give them visibly different face shapes, facial features, hairstyles or hair lengths, clothing colors/silhouettes, and natural body builds.
+- Supporting women must use ordinary natural styling and lower visual emphasis. They must not receive Xiaoxia's signature face, long brown hairstyle, body proportions, bust emphasis, hourglass styling, glamour treatment, strongest lighting, sharpest detail, or central composition.
+- Xiaoxia must remain the most recognizable, visually prominent, attractive, sharply rendered, and compositionally dominant woman. Supporting women may be appealing, but must not have more emphasized curves, bust prominence, glamour styling, lighting priority, or visual weight than Xiaoxia.
 - In public places, male people may appear only as incidental environmental background figures needed for realism.
 - No male person may interact with Xiaoxia in any way: no conversation, eye contact, shared table, walking together, standing or sitting as her companion, posing together, handing objects, helping, coaching, touching, embracing, or relationship/date/partner composition.
 - A male background figure must remain clearly secondary, separated from Xiaoxia, non-interacting, non-companion-like, and never become a foreground or co-primary subject.
@@ -20874,9 +20878,21 @@ STRICT_SOLO_AND_ANATOMY_PROMPT = XIAOXIA_UNIFIED_PEOPLE_POLICY
 SOLO_SCENE_REWRITE_GUARD = XIAOXIA_UNIFIED_PEOPLE_POLICY
 SOLO_NEGATIVE_MINIMAL = (
     "Xiaoxia is always the primary subject. Female characters may interact naturally when the requested social/activity scene requires it. "
+    "Supporting women must be clearly different individuals and must never inherit Xiaoxia's identity, face, hairstyle, body anchors, glamour styling, or visual priority. "
     "Men may exist only as non-interacting incidental public background figures. No male interaction, companion/date framing, viewer body parts, or Daxia depiction. "
     "Private scenes contain Xiaoxia alone."
 )
+
+XIAOXIA_SUPPORTING_WOMEN_IDENTITY_ISOLATION = """
+SUPPORTING WOMEN IDENTITY ISOLATION — mandatory whenever another woman appears:
+- Xiaoxia is the only identity-locked person. Apply Figures/Images 1-9, Xiaoxia's face identity, long brown hair identity, fair luminous skin anchor, tall-slim-curvy body anchor, bust/waist emphasis, and Xiaoxia Aesthetic exclusively to Xiaoxia.
+- Never transfer, blend, clone, average, or repeat Xiaoxia's identity or body design onto a supporting woman. Supporting women are separate people, not twins, duplicates, lookalikes, reflections, or alternate Xiaoxias.
+- Make each supporting woman visibly distinct through a different face shape, eyes/nose/mouth arrangement, hairstyle or hair length, hair texture, clothing color and silhouette, and a natural individual body build.
+- Prefer obvious differentiation such as one shoulder-length or tied hairstyle and one shorter/straighter hairstyle; avoid giving every woman the same long wavy brown hair.
+- Supporting women should have ordinary, natural, scene-appropriate proportions and styling. Do not emphasize their bust, curves, cleavage, glamour, or fashion more strongly than Xiaoxia.
+- Xiaoxia must occupy the strongest focal position through central or compositionally dominant placement, clearest face visibility, sharpest detail, best lighting, strongest eye guidance, and the most refined styling.
+- Supporting women remain secondary in framing, lighting, detail, pose prominence, and visual weight, while still looking like natural friends who genuinely interact with Xiaoxia.
+"""
 
 _V1526_FEMALE_SOCIAL_WORDS = (
     "姊妹淘", "姐妹淘", "閨蜜", "闺蜜", "女性朋友", "女朋友們", "女同學", "女同学", "女同事",
@@ -20990,7 +21006,7 @@ def _seedream_people_policy_line(checklist=None):
     if c.get("strict_solo_required") or policy == "private_strict_solo":
         return "People rule: PRIVATE OR EXPLICIT SOLO SCENE. Xiaoxia is the only human figure. No other woman, man, child, external hand, viewer body part, reflection, shadow, silhouette, or partial person. Daxia remains an invisible camera viewpoint only."
     if policy == "autonomy_female_interaction_ok" or c.get("female_interaction_ok"):
-        return "People rule: Xiaoxia is the unmistakable main character and visual focus. Female friends/sisters/classmates/colleagues may naturally interact with her as required by the scene, while remaining secondary. Men may appear only as distant incidental public background and may not talk to, look at, sit with, walk with, pose with, help, touch, or otherwise interact with Xiaoxia. No male companion/date framing. Never visualize Daxia/viewer."
+        return "People rule: Xiaoxia is the unmistakable main character and visual focus. Female friends/sisters/classmates/colleagues may naturally interact with her as required by the scene, while remaining secondary and visibly distinct. Xiaoxia alone may inherit Figures/Images 1-9 and all Xiaoxia face, hair, body, bust/waist, and aesthetic anchors. Supporting women must have different faces, hairstyles/hair lengths, outfits, and natural body builds; they must not be Xiaoxia clones and must not receive stronger curves, bust emphasis, glamour, lighting, detail, or compositional weight than Xiaoxia. Men may appear only as distant incidental public background and may not talk to, look at, sit with, walk with, pose with, help, touch, or otherwise interact with Xiaoxia. No male companion/date framing. Never visualize Daxia/viewer."
     if policy == "autonomy_sport_no_male":
         return "People rule: Xiaoxia is the unmistakable main character. Female-only secondary people may appear when the activity needs them. No male person anywhere, no external hands, and never visualize Daxia/viewer."
     if policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"} or c.get("allow_background_bystanders"):
@@ -21016,7 +21032,11 @@ def _v1526_relax_old_solo_text(prompt, checklist=None):
     text = text.replace("NO external hands, people, external feet, men, male heads, male faces, male hair, male shoulders, male backs, male body parts, visible viewer body parts, foreground hands/arms/shoulders, blurred foreground male figures, silhouettes, cropped people, or reflections.",
                         "No external viewer body parts or Daxia depiction. Men may appear only as non-interacting incidental public background when allowed by the people policy; no male interaction or companion framing.")
     policy_line = _seedream_people_policy_line(checklist)
-    return f"{XIAOXIA_UNIFIED_PEOPLE_POLICY.strip()}\n{policy_line}\n\n{text}".strip()
+    c = checklist if isinstance(checklist, dict) else {}
+    supporting_block = ""
+    if c.get("female_interaction_ok") or str(c.get("people_policy") or "") == "autonomy_female_interaction_ok":
+        supporting_block = XIAOXIA_SUPPORTING_WOMEN_IDENTITY_ISOLATION.strip() + "\n"
+    return f"{XIAOXIA_UNIFIED_PEOPLE_POLICY.strip()}\n{supporting_block}{policy_line}\n\n{text}".strip()
 
 _v1525_build_hard_anchor_block = _build_hard_anchor_block
 
