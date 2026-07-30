@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.26"
+LOBSTER_VERSION = "1.5.26_R1"
 
 
 def _normalize_generation_level(level):
@@ -560,6 +560,13 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 
 # 衣櫃去人化仍保留獨立開關，預設 true；若之後要連去人化也關，可設 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER=false。
 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER", True)
+
+# 🧪 v1.5.26_R1：生圖後人物／指令遵循 Gate 總開關。
+# Zeabur 環境變數：PHOTO_ENABLE_GATE=on / off（亦支援 true/false、1/0）。
+# 預設 off：直接採用 Seedream 首張成功結果，不執行 solo gate、adherence gate、gate 重拍或 gate 最終拒絕。
+# 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
+PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
+print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -11284,6 +11291,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
     trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
     trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
+    trace_context["photo_gate_enabled"] = bool(PHOTO_ENABLE_GATE)
     force_minimal_prompt = bool(trace_context.get("force_minimal_prompt")) if isinstance(trace_context, dict) else False
     has_figure10 = bool(trace_context.get("figure10_present")) if isinstance(trace_context, dict) else bool(discord_image_url)
     reference_minimal = str(mode or "").lower() in {"photo_scene", "photo_reference", "travel", "shopping", "world", "scene"} or force_minimal_prompt
@@ -11377,7 +11385,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
 
         _trace_stage(trace_context, f"generation_result_L{level}", data={"ok": True, "result_url": generated_image_url})
 
-        if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
+        if PHOTO_ENABLE_GATE and str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
             allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
             solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(
                 generated_image_url,
@@ -11446,6 +11454,13 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                 _write_generation_trace(trace_context.get("kind"), trace_context)
                 raise Exception(f"ADHERENCE_GATE_FINAL_REJECTED：重拍後仍不符合大俠指令，所以不發錯圖。原因：{adherence_reason}")
 
+        if not PHOTO_ENABLE_GATE and str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
+            trace_context["photo_gate_enabled"] = False
+            trace_context["solo_gate_result"] = {"skipped": True, "reason": "PHOTO_ENABLE_GATE=off"}
+            trace_context["adherence_gate_result"] = {"skipped": True, "reason": "PHOTO_ENABLE_GATE=off"}
+            _trace_stage(trace_context, f"gates_skipped_L{level}", data={"PHOTO_ENABLE_GATE": False, "result_url": generated_image_url})
+            print(f"🧪 [PHOTO_GATES_SKIPPED] mode={mode} L{level} PHOTO_ENABLE_GATE=OFF")
+
         if isinstance(visual_dict, dict):
             visual_dict["engine"] = engine_name
             visual_dict["seedream_model_id"] = trace_context.get("seedream_model_id") or _context_seedream_model_id(trace_context=trace_context)
@@ -11469,7 +11484,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     if not final_url or not str(final_url).startswith("http"):
         raise Exception(f"最終保底生圖依然失敗：{final_url}")
 
-    if str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
+    if PHOTO_ENABLE_GATE and str(mode or "").lower() in {"photo_scene", "photo_reference", "diary", "cosplay"}:
         allow_background_bystanders = bool(trace_context.get("allow_background_bystanders") or trace_context.get("diary_allow_background_bystanders"))
         solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(final_url, mode=mode, allow_background_bystanders=allow_background_bystanders, visual_checklist=trace_context.get("visual_checklist"))
         if not solo_ok:
@@ -14600,13 +14615,20 @@ async def handle_photo_raw_command(message, user_input):
         if not generated_image_url or not str(generated_image_url).startswith("http"):
             raise Exception(str(generated_image_url))
         _trace_stage(trace_context, "photo_raw_generation_result", data={"result_url": generated_image_url})
-        solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode="photo_scene", allow_background_bystanders=False)
-        adherence_ok, adherence_reason, adherence_detail = await _vision_check_instruction_adherence_image_url(generated_image_url, final_prompt, mode="photo_scene", trace_context=trace_context)
-        trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason}
-        trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason}
-        if isinstance(adherence_detail, dict) and adherence_detail.get("violations"):
-            trace_context["adherence_gate_violation"] = adherence_detail.get("violations")
-        _trace_stage(trace_context, "photo_raw_gates", data={"solo_ok":solo_ok,"solo_reason":solo_reason,"adherence_ok":adherence_ok,"adherence_reason":adherence_reason,"adherence_detail":adherence_detail})
+        if PHOTO_ENABLE_GATE:
+            solo_ok, solo_reason = await _vision_check_solo_xiaoxia_image_url(generated_image_url, mode="photo_scene", allow_background_bystanders=False)
+            adherence_ok, adherence_reason, adherence_detail = await _vision_check_instruction_adherence_image_url(generated_image_url, final_prompt, mode="photo_scene", trace_context=trace_context)
+            trace_context["solo_gate_result"] = {"ok": solo_ok, "reason": solo_reason}
+            trace_context["adherence_gate_result"] = {"ok": adherence_ok, "reason": adherence_reason}
+            if isinstance(adherence_detail, dict) and adherence_detail.get("violations"):
+                trace_context["adherence_gate_violation"] = adherence_detail.get("violations")
+            _trace_stage(trace_context, "photo_raw_gates", data={"enabled":True,"solo_ok":solo_ok,"solo_reason":solo_reason,"adherence_ok":adherence_ok,"adherence_reason":adherence_reason,"adherence_detail":adherence_detail})
+        else:
+            trace_context["photo_gate_enabled"] = False
+            trace_context["solo_gate_result"] = {"skipped": True, "reason": "PHOTO_ENABLE_GATE=off"}
+            trace_context["adherence_gate_result"] = {"skipped": True, "reason": "PHOTO_ENABLE_GATE=off"}
+            _trace_stage(trace_context, "photo_raw_gates_skipped", data={"enabled":False,"reason":"PHOTO_ENABLE_GATE=off"})
+            print("🧪 [PHOTO_RAW_GATES_SKIPPED] PHOTO_ENABLE_GATE=OFF")
         local_filename = await save_to_vault(generated_image_url)
         local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
         context = {"mode":"photo_scene","source_mode":"photo_raw","scene_text":raw_prompt[:120],"scene_summary":"photo_raw playground 等價測試","outfit_summary":"依原始 prompt","mood_summary":"Seedream raw test","message":"大俠用 `/photo_raw` 直接測 Seedream，不經過 planner / 衣櫃 / 美感包裝。","image_url":generated_image_url,"local_url":local_url,"local_filename":local_filename,"local_path":os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,"created_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),"trace_id":trace_context.get("trace_id"),"final_level":"RAW","generation_level":"RAW"}
