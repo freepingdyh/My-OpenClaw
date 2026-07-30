@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.24"
+LOBSTER_VERSION = "1.5.25"
 
 
 def _normalize_generation_level(level):
@@ -1971,13 +1971,28 @@ def _autonomy_choose_wardrobe(activity, visual_mode):
     return top[0][1], f"符合今日活動「{activity.get('title')}」與 {visual_mode} 氛圍。"
 
 
+def _autonomy_female_interaction_requested_from_text(text):
+    """v1.5.25：辨識大俠指定的女性社交互動情境。"""
+    raw = str(text or "").lower()
+    female_terms = [
+        "姊妹淘", "姐妹淘", "閨蜜", "闺蜜", "姐妹", "姊妹", "女性朋友", "女生朋友", "女朋友們", "女同學", "女同学", "女同事", "學姊", "学姐", "學妹", "学妹",
+        "female friend", "female friends", "girlfriend group", "girl friends", "girls' day", "girls day",
+    ]
+    interaction_terms = [
+        "聊天", "閒聊", "闲聊", "對話", "谈话", "談話", "喝咖啡", "下午茶", "吃飯", "聚餐", "聚會", "同學會", "同学会", "逛街", "同行", "一起", "見面", "碰面",
+        "chat", "talk", "coffee", "cafe", "brunch", "lunch", "dinner", "gathering", "reunion", "hang out", "meet up",
+    ]
+    return any(k in raw for k in female_terms) and any(k in raw for k in interaction_terms)
+
+
 def _autonomy_people_policy_info(activity):
     activity = activity if isinstance(activity, dict) else {}
     category = str(activity.get("category") or "").strip()
     location_type = str(activity.get("location_type") or "").strip().lower()
     title = str(activity.get("title") or "")
     tags = " ".join(str(x) for x in (activity.get("activity_tags") or []))
-    hay = f"{category} {location_type} {title} {tags}".lower()
+    seed = str(activity.get("photo_prompt_seed") or "")
+    hay = f"{category} {location_type} {title} {tags} {seed}".lower()
 
     private_locs = {"home", "home_private", "home_study", "library_or_home"}
     sport_keywords = ["運動", "瑜珈", "瑜伽", "網球", "羽球", "跑步", "游泳", "泳", "健身", "k-pop", "dance", "sport", "yoga", "swim", "tennis", "badminton", "run"]
@@ -1990,7 +2005,20 @@ def _autonomy_people_policy_info(activity):
             "no_male_people": True,
             "male_background_ok": False,
             "female_background_ok": False,
+            "female_interaction_ok": False,
             "zh": "家中／私密環境，只有小俠一人。",
+        }
+
+    if _autonomy_female_interaction_requested_from_text(hay):
+        return {
+            "policy_key": "autonomy_female_interaction_ok",
+            "allow_background_bystanders": True,
+            "strict_solo_required": False,
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+            "female_interaction_ok": True,
+            "zh": "女性社交互動場景：可有女性朋友／姊妹淘與小俠自然互動；男性只能是遠景背景點綴且不得互動。",
         }
 
     if category == "運動健康" or any(k in hay for k in sport_keywords):
@@ -2001,6 +2029,7 @@ def _autonomy_people_policy_info(activity):
             "no_male_people": True,
             "male_background_ok": False,
             "female_background_ok": True,
+            "female_interaction_ok": False,
             "zh": "運動類場景不可有男性；可有非主體女性背景人物。",
         }
 
@@ -2011,9 +2040,9 @@ def _autonomy_people_policy_info(activity):
         "no_male_people": False,
         "male_background_ok": True,
         "female_background_ok": True,
+        "female_interaction_ok": False,
         "zh": "公開場景可有背景路人，男性也可存在，但只能是非主體背景人物且不可互動。",
     }
-
 
 async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, thread_context=""):
     wardrobe_line = ""
@@ -2082,6 +2111,13 @@ def _autonomy_people_policy_text(activity):
             "Strictly solo Xiaoxia only. No other people. No male or female bystanders. "
             "No external hands, no partial body parts, no reflections, and no viewer substitute."
         )
+    if policy == "autonomy_female_interaction_ok":
+        return (
+            "Xiaoxia must remain the clear primary subject. This is a non-private female social interaction scene: 1 to 3 female friends / girl friends / female classmates may appear and naturally chat, drink coffee, sit at the same table, or interact with Xiaoxia. "
+            "The female friends must be secondary and non-romantic; do not make them look like Xiaoxia clones or confuse Xiaoxia's identity. "
+            "Men, if present in a public location, may only be distant incidental background bystanders and must never interact with Xiaoxia, sit with her, touch her, face her as a companion, or create a date/partner vibe. "
+            "No male partner, no boyfriend visible, no Daxia/viewer body parts, no external hands, and no viewer substitute."
+        )
     if policy == "autonomy_sport_no_male":
         return (
             "Xiaoxia must remain the clear only primary subject. Female-only incidental background people are allowed when naturally needed, "
@@ -2092,7 +2128,6 @@ def _autonomy_people_policy_text(activity):
         "Xiaoxia must remain the clear only primary subject. In public scenes, incidental background people are allowed for realism, including men, but they must be secondary, small, non-interacting, and never companion-like. "
         "No foreground second person, no couple composition, no male partner vibe, no interacting male, no external hands, and no boyfriend visible. Daxia is never visible."
     )
-
 
 def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
     title = str(activity.get("title") or "小俠自主生活")
@@ -2129,6 +2164,11 @@ def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
     if policy_key == "private_strict_solo":
         composition_guard = (
             "Private/home scene guard: Xiaoxia must be alone in the frame. Do not add any other person, even blurred or distant."
+        )
+    elif policy_key == "autonomy_female_interaction_ok":
+        composition_guard = (
+            "Female social scene guard: Xiaoxia must be the clear primary subject. It is allowed to show 1 to 3 female friends / sisters / female classmates naturally chatting or having coffee with Xiaoxia. "
+            "Keep them secondary and non-romantic. Men may only appear as distant incidental public background and must not interact with Xiaoxia or feel like companions. No boyfriend/Daxia/viewer body parts."
         )
     elif policy_key == "autonomy_sport_no_male":
         composition_guard = (
@@ -2635,6 +2675,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "strict_solo_required_override": bool(policy_info.get("strict_solo_required")),
             "male_background_ok": bool(policy_info.get("male_background_ok")),
             "female_background_ok": bool(policy_info.get("female_background_ok")),
+            "female_interaction_ok": bool(policy_info.get("female_interaction_ok")),
             "no_male_people": bool(policy_info.get("no_male_people")),
         },
     }
@@ -10337,6 +10378,11 @@ async def _vision_check_solo_xiaoxia_image_url(image_url, mode="photo", allow_ba
             "Daxia explicitly requested interaction with a specific character. Allow that specified character interaction, "
             "but do not add unrequested companions or a Daxia/viewer substitute."
         )
+    elif people_policy == "autonomy_female_interaction_ok":
+        bystander_rule = (
+            "This is a female social autonomy scene. Xiaoxia must be the clear primary subject. 1 to 3 female friends / sisters / female classmates may appear and naturally interact with Xiaoxia, such as chatting, drinking coffee, sitting at the same table, or walking together. "
+            "Do not fail merely because female friends appear or interact, as long as Xiaoxia remains the clear primary subject and the interaction is non-romantic. Men may appear only as distant incidental background; any male interacting with Xiaoxia, sitting with her, touching her, or looking like a companion/partner must fail."
+        )
     elif people_policy == "autonomy_sport_no_male":
         bystander_rule = (
             "This is a sport/activity autonomy scene. Xiaoxia must be the only primary subject. Female-only incidental background people are allowed if clearly secondary and non-interacting. "
@@ -10411,6 +10457,9 @@ Rules:
         blocking_people = has_prominent_male or has_foreground_second or has_interacting_second or external_or_viewer_block or has_companion_vibe
         if specified_character_interaction:
             ok = bool(result.get("xiaoxia_is_only_primary_subject", True)) and not external_or_viewer_block
+        elif people_policy == "autonomy_female_interaction_ok":
+            # 女性社交互動允許女性朋友入鏡與互動；只擋男性互動/伴侶感、Daxia/觀者替身、外部手腳，以及小俠失去主體。
+            ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and (not has_prominent_male) and (not external_or_viewer_block)
         elif people_policy == "autonomy_sport_no_male":
             ok = bool(result.get("xiaoxia_is_only_primary_subject", result.get("solo_xiaoxia_only", True))) and (not has_visible_male) and (not has_foreground_second) and (not has_interacting_second) and (not external_or_viewer_block) and (not has_companion_vibe)
         elif people_policy == "autonomy_public_background_ok":
@@ -10497,11 +10546,10 @@ def _explicit_solo_or_empty_scene_requested(text):
 def _explicit_character_interaction_requested(text):
     raw = str(text or "")
     patterns = [
-        r"(?:與|和|跟)\s*[^，。,.、\n]{1,30}\s*(?:互動|合照|對話|並肩|一起|牽手|打鬥|戰鬥|跳舞|握手|擁抱)",
-        r"(?:with|interacting with|posing with|standing with)\s+[A-Za-z][A-Za-z0-9 _'\-]{1,40}",
+        r"(?:與|和|跟)\s*[^，。,.、\n]{1,30}\s*(?:互動|合照|對話|聊天|閒聊|並肩|一起|同行|聚會|聚餐|吃飯|喝咖啡|逛街|牽手|打鬥|戰鬥|跳舞|握手|擁抱)",
+        r"(?:with|interacting with|chatting with|talking with|having coffee with|posing with|standing with|walking with|hanging out with)\s+[A-Za-z][A-Za-z0-9 _'\-]{1,40}",
     ]
     return any(re.search(p, raw, flags=re.I) for p in patterns)
-
 
 def _allow_background_bystanders_from_text(text, mode="photo"):
     # 私密空間永遠小俠獨照；使用者明確要求空景/完全獨照時也不允許路人。
@@ -10651,6 +10699,29 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
         checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
             "any additional real human figure in this private/home scene",
         ])
+    elif custom_people_policy == "autonomy_female_interaction_ok":
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": False,
+            "allow_background_bystanders": True,
+            "specified_character_interaction": False,
+            "people_policy": "autonomy_female_interaction_ok",
+            "no_male_people": False,
+            "male_background_ok": True,
+            "female_background_ok": True,
+            "female_interaction_ok": True,
+        })
+        # 移除通用的「互動同伴」禁項，女性社交活動本來就允許女性朋友互動。
+        checklist["must_not_have"] = [
+            x for x in (checklist.get("must_not_have") or [])
+            if "interacting companion" not in str(x).lower()
+        ]
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "Daxia/viewer visually depicted as a man, head, hand, shoulder, back, reflection, shadow, or cropped body part",
+            "male person interacting with Xiaoxia or sitting/standing as her companion",
+            "male partner vibe, date vibe, boyfriend substitute, or romantic/couple composition",
+            "female companions becoming the primary subject or confusing Xiaoxia identity",
+        ])
     elif custom_people_policy == "autonomy_sport_no_male":
         checklist.update({
             "private_scene": False,
@@ -10661,6 +10732,7 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
             "no_male_people": True,
             "male_background_ok": False,
             "female_background_ok": True,
+            "female_interaction_ok": False,
         })
         checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
             "any male person in the scene",
@@ -10677,6 +10749,7 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
             "no_male_people": False,
             "male_background_ok": True,
             "female_background_ok": True,
+            "female_interaction_ok": False,
         })
         checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
             "foreground second person or interacting companion",
@@ -10696,6 +10769,7 @@ def _visual_checklist_brief(checklist, max_items=10):
         "no_male_people": checklist.get("no_male_people"),
         "male_background_ok": checklist.get("male_background_ok"),
         "female_background_ok": checklist.get("female_background_ok"),
+        "female_interaction_ok": checklist.get("female_interaction_ok"),
         "diary_user_constraints": checklist.get("diary_user_constraints"),
         "future_event_constraints": checklist.get("future_event_constraints"),
         "must_have": (checklist.get("must_have") or [])[:max_items],
@@ -10714,6 +10788,8 @@ def _seedream_people_policy_line(checklist=None):
         return "People rule: private/solo scene. Xiaoxia must be the only human figure. No other people, no external hands, and no visible viewer body parts."
     if checklist.get("specified_character_interaction"):
         return "People rule: allow the specific character interaction explicitly requested by Daxia; do not add unrequested companions. Never visualize Daxia/viewer as a male head, hand, shoulder, back, reflection, shadow, or body part."
+    if people_policy == "autonomy_female_interaction_ok":
+        return "People rule: Xiaoxia is the clear primary subject. 1 to 3 female friends/classmates/sisters may naturally interact with Xiaoxia in this public female-social scene. Female companions must stay secondary and non-romantic. Men may appear only as distant incidental background; no male may interact with Xiaoxia or appear as companion/partner. No external hands and never visualize Daxia/viewer."
     if people_policy == "autonomy_sport_no_male":
         return "People rule: Xiaoxia is the only primary subject. Female-only distant non-interacting background people may exist when needed, but no male person anywhere in the scene, no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
     if people_policy == "autonomy_public_background_ok":
@@ -15268,6 +15344,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
             "strict_solo_required_override": bool(policy_info.get("strict_solo_required")),
             "male_background_ok": bool(policy_info.get("male_background_ok")),
             "female_background_ok": bool(policy_info.get("female_background_ok")),
+            "female_interaction_ok": bool(policy_info.get("female_interaction_ok")),
             "no_male_people": bool(policy_info.get("no_male_people")),
         },
     }
