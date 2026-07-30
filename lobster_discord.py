@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.26_R2"
+LOBSTER_VERSION = "1.5.27_R1"
 
 
 def _normalize_generation_level(level):
@@ -567,6 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.27_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -13911,33 +13912,141 @@ async def _seedream_upload_single_file(path):
     return await asyncio.to_thread(fal_client.upload_file, upload_path)
 
 
-def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
-    """v1.4.86: concise Figure role map; pass through playground-style raw prompts."""
-    custom_prompt = str(custom_prompt or "").strip()
-    if custom_prompt.startswith("FIGURE ROLE MAP") and "TEXT REQUEST" in custom_prompt:
-        return custom_prompt
-    base = (
-        "FIGURE ROLE MAP — obey these roles strictly.\n\n"
-        "Figures 1-9 are identity-only reference images of Xiaoxia.\n"
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.\n"
-        "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.\n\n"
-        "Create a new solo photorealistic lifestyle image of Xiaoxia.\n"
-        "Only Xiaoxia appears. No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person.\n"
+def _v1527_scene_hard_requirements(text):
+    """Extract only decisive scene/time locks and place them at the top of the Seedream prompt."""
+    raw = str(text or "")
+    low = raw.lower()
+    rules = []
+
+    night_terms = ("晚間", "晚上", "夜裡", "夜晚", "深夜", "night", "evening", "22:", "21:", "20:", "19:")
+    day_terms = ("白天", "上午", "早上", "午後", "下午", "daytime", "morning", "afternoon")
+    if any(x in low for x in night_terms):
+        rules += [
+            "The scene MUST visibly take place at night/evening.",
+            "Daylight, sunshine, bright daytime windows, morning light, and afternoon light are incorrect.",
+            "If windows or outdoor areas are visible, show darkness, night reflections, or night city lights.",
+            "Use believable indoor evening illumination such as warm cafe lamps or ceiling lights."
+        ]
+    elif any(x in low for x in day_terms):
+        rules.append("The scene MUST visibly match the requested daytime period; do not turn it into a night scene.")
+
+    if any(x in low for x in ("咖啡廳", "咖啡店", "cafe", "coffee shop")):
+        rules.append("The location MUST clearly read as a cafe/coffee shop, with recognizable tables, drinks, seating, and cafe interior details.")
+    if any(x in low for x in ("姊妹淘", "姐妹淘", "閨蜜", "闺蜜", "female friends", "girls' night", "girls night")):
+        rules.append("The requested female-friends social interaction MUST be visibly present; do not replace it with a solo reading, walking, or park scene.")
+    if any(x in low for x in ("聊天", "交談", "談話", "chatting", "conversation")):
+        rules.append("Show a natural active conversation through seating, gaze, expressions, and gestures; do not depict an unrelated solitary activity.")
+    return "\n".join(f"- {x}" for x in rules)
+
+
+def _v1527_strip_prompt_conflicts(prompt):
+    """Remove historical duplicated/contradictory people blocks without deleting the requested scene."""
+    text = str(prompt or "").strip()
+
+    # When an older builder already wrapped the request in a Figure Role Map, keep only its TEXT REQUEST payload.
+    if text.startswith("FIGURE ROLE MAP") and "TEXT REQUEST" in text:
+        text = text.split("TEXT REQUEST", 1)[1]
+        text = re.sub(r"^\s*[—–-]*\s*this controls[^\n]*\n*", "", text, flags=re.I)
+
+    # Remove exact large policy blocks added by v1.5.26/R2; v1.5.27 adds one concise policy later.
+    for block_name in ("XIAOXIA_UNIFIED_PEOPLE_POLICY", "XIAOXIA_SUPPORTING_WOMEN_IDENTITY_ISOLATION"):
+        block = globals().get(block_name)
+        if block:
+            text = text.replace(str(block).strip(), "")
+
+    # Remove repeated one-line people summaries and legacy universal solo instructions.
+    text = re.sub(r"(?mi)^People rule:.*$", "", text)
+    text = re.sub(r"(?mi)^Female social scene guard:.*$", "", text)
+    conflict_patterns = [
+        r"Create a new solo photorealistic lifestyle image of Xiaoxia\.?",
+        r"Only Xiaoxia appears\.?\s*No man, no second person, no external hands, no viewer body parts, no reflections or shadows of another person\.?",
+        r"Strictly solo Xiaoxia only\.?",
+        r"Strictly only Xiaoxia appears in the image\.?",
+        r"The frame must contain exactly one human figure:\s*Xiaoxia\.?",
+        r"No other people of any gender\.?",
+        r"No second person\.?",
+    ]
+    for pat in conflict_patterns:
+        text = re.sub(pat, "", text, flags=re.I)
+
+    # Remove duplicated headings left empty after block removal.
+    text = re.sub(r"(?mi)^UNIFIED PEOPLE AND INTERACTION POLICY[^\n]*\n?", "", text)
+    text = re.sub(r"(?mi)^SUPPORTING WOMEN IDENTITY ISOLATION[^\n]*\n?", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _v1527_concise_people_policy(checklist=None):
+    c = checklist if isinstance(checklist, dict) else {}
+    policy = str(c.get("people_policy") or "")
+    if c.get("strict_solo_required") or policy == "private_strict_solo":
+        return (
+            "- Private/explicit-solo scene: Xiaoxia is the only human figure.\n"
+            "- Never show Daxia/viewer body parts, another person, reflection, shadow, or partial figure."
+        )
+    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
+        return (
+            "- Xiaoxia is the unmistakable main character and strongest visual focus.\n"
+            "- Show 1-3 female friends naturally interacting with Xiaoxia when requested; they remain secondary.\n"
+            "- Figures 1-9 define Xiaoxia only. Supporting women must have clearly different faces, hairstyles, outfits, and natural body builds; no clones or twins.\n"
+            "- Supporting women must not receive stronger glamour, curves, lighting, sharpness, or compositional weight than Xiaoxia.\n"
+            "- Men may exist only as incidental public background and must not interact with Xiaoxia in any way.\n"
+            "- Never visualize Daxia/viewer or external viewer body parts."
+        )
+    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
+        return (
+            "- Xiaoxia is the unmistakable main character and only primary subject.\n"
+            "- Public background people may appear for realism. Men must remain incidental and completely non-interacting with Xiaoxia.\n"
+            "- No companion/date framing and never visualize Daxia/viewer body parts."
+        )
+    return (
+        "- Xiaoxia is the unmistakable main character and only primary subject.\n"
+        "- Do not add a companion. No male interaction. Never visualize Daxia/viewer body parts."
     )
+
+
+def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
+    """v1.5.27: one concise, conflict-free Figure Role Map for every /photo request."""
+    cleaned_request = _v1527_strip_prompt_conflicts(custom_prompt)
+    hard = _v1527_scene_hard_requirements(cleaned_request or custom_prompt)
+    people = _v1527_concise_people_policy(visual_checklist)
+
+    sections = [
+        "FIGURE ROLE MAP — obey these roles strictly.",
+        (
+            "Figures 1-9 are identity-only references for Xiaoxia. Apply their face/body identity only to Xiaoxia. "
+            "Do not copy their pose, outfit, background, lighting, or composition."
+        ),
+    ]
+    if hard:
+        sections.append("HARD SCENE REQUIREMENTS — failure on any item is incorrect:\n" + hard)
+    sections.append("PEOPLE POLICY:\n" + people)
+
     if has_reference:
-        base += (
-            "\nFigure 10 is a wardrobe styling reference board, not only a single garment.\n"
-            "Figure 10 may contain clothing, bag, shoes, necklace, earrings, bracelet, scarf, hat, sunglasses, hair accessories, belt, or other visible fashion accessories.\n"
-            "Use Figure 10 as the complete styling reference: match the main clothing first, then preserve major visible accessories, then add smaller styling details when possible.\n"
-            "If the text request mentions a bag or accessory from Figure 10, that item must be clearly visible in the final image and must not be omitted.\n"
-            "Preserve Figure 10's item category, color, silhouette, cut, length, material feeling, pattern, and key decorative details.\n"
-            "Do NOT let Figure 10 control the final scene, pose, background, camera angle, or composition.\n"
+        sections.append(
+            "FIGURE 10 WARDROBE ROLE:\n"
+            "- Figure 10 controls clothing and visible fashion accessories only.\n"
+            "- Preserve its category, color, silhouette, cut, length, material, pattern, and key details.\n"
+            "- Figure 10 must not control scene, pose, background, camera angle, or composition."
         )
     else:
-        base += "\nNo Figure 10 is supplied. Choose clothing only from the explicit text request or a simple natural outfit suitable for the scene.\n"
+        sections.append("OUTFIT ROLE:\n- No Figure 10 is supplied; use the explicit outfit request or a simple scene-appropriate outfit.")
+
     if current_outfit:
-        base += f"\nCurrent outfit continuity, styling only: {str(current_outfit).strip()}. It may include clothing and accessories, but must not override the text-request scene or pose.\n"
-    return base + "\nTEXT REQUEST — this controls the final scene, pose, action, and composition:\n\n" + custom_prompt
+        sections.append(f"OUTFIT CONTINUITY:\n- {str(current_outfit).strip()}\n- Styling continuity must not override the requested scene or action.")
+
+    sections.append("TEXT REQUEST — highest authority for scene, time, action, pose, and composition:\n" + cleaned_request)
+    sections.append(
+        "QUALITY:\n"
+        "- Photorealistic lifestyle photography, natural anatomy and hands, clear activity context, believable lighting.\n"
+        "- Do not substitute a generic park, reading, walking, or solo portrait when a specific location or social action is requested."
+    )
+    final = "\n\n".join(s for s in sections if str(s).strip()).strip()
+    print(
+        f"🧭 [PROMPT_STATS_V1527] total_chars={len(final)} "
+        f"request_chars={len(cleaned_request)} hard_chars={len(hard)} people_chars={len(people)}"
+    )
+    return final
 
 
 async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=None, current_outfit=None, trace_context=None):
@@ -13948,10 +14057,13 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
     final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
+    print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.27_R1 conflict-free prompt builder")
     if isinstance(trace_context, dict):
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
+        trace_context["prompt_engine_version"] = "v1.5.27_R1"
+        trace_context["prompt_engine_marker"] = "HARD_SCENE_REQUIREMENTS_V1527"
     _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "enable_safety_checker": bool(enable_safety_checker)})
 
     async def _build_image_urls(force_reference_refresh=False):
