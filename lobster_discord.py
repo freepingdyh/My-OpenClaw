@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.33_R3"
+LOBSTER_VERSION = "1.5.33_R4"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R3")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R4")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -13184,6 +13184,27 @@ def _wardrobe_is_low_value_accessory_tag(tag):
     generic_endings = ("包", "包包", "手提包", "肩背包", "斜背包", "高跟鞋", "尖頭鞋", "平底鞋", "休閒鞋", "白鞋", "短靴", "涼鞋")
     return any(t.endswith(k) for k in generic_endings)
 
+def _sanitize_wardrobe_name_hint(value):
+    """只保留使用者真正輸入的名稱；排除 Discord/暫存附件檔名與 opaque file id。"""
+    raw = _clean_text_compact(value)
+    if not raw:
+        return ""
+    base = os.path.basename(raw)
+    stem, ext = os.path.splitext(base)
+    lower = raw.lower()
+    # 常見附件或系統暫存名稱：file_000..., image.png, IMG_1234.jpg、純雜湊等。
+    if re.fullmatch(r"file_[a-z0-9_\-]{8,}(?:\.[a-z0-9]{2,5})?", lower):
+        return ""
+    if ext.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic"}:
+        if re.fullmatch(r"(?:img|image|photo|screenshot|upload|attachment)?[_\-]?[a-z0-9_\-]{4,}", stem, flags=re.IGNORECASE):
+            return ""
+        # 即使是有語意的圖片檔名，也不把副檔名當成衣服名稱。
+        raw = stem.strip(" _-")
+    if re.fullmatch(r"[0-9a-f]{12,}", raw, flags=re.IGNORECASE):
+        return ""
+    return _clean_text_compact(raw)
+
+
 def _wardrobe_analysis_prompt(name_hint=""):
     return f"""
 你是「小俠衣櫃」的專業服裝商品編目員。請只根據圖片中真正可見的服裝、鞋包與飾品，填入既有衣櫃 JSON 欄位；不得新增欄位。
@@ -13259,7 +13280,7 @@ def _wardrobe_analysis_prompt(name_hint=""):
 def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
     raw = raw if isinstance(raw, dict) else {}
     corrections = []
-    hinted = _clean_text_compact(name_hint)
+    hinted = _sanitize_wardrobe_name_hint(name_hint)
     generated_name = _clean_text_compact(raw.get("name") or "")
     name = hinted or generated_name or "未命名服飾"
     if hinted and generated_name and hinted != generated_name:
@@ -13434,7 +13455,8 @@ async def _classify_wardrobe_with_gemini(local_path, name_hint=""):
 
 
 async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
-    fallback_name = _clean_text_compact(name_hint or "未命名服飾")
+    clean_name_hint = _sanitize_wardrobe_name_hint(name_hint)
+    fallback_name = clean_name_hint or "未命名服飾"
     if not local_path or not os.path.exists(str(local_path)):
         print(f"⚠️ [WARDROBE_CLASSIFY_NO_IMAGE] path={local_path}")
         return _infer_wardrobe_meta_from_name(fallback_name)
@@ -13443,12 +13465,12 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
     attempts = []
     for provider in provider_order:
         try:
-            raw = await (_classify_wardrobe_with_openai(local_path, name_hint) if provider == "openai" else _classify_wardrobe_with_gemini(local_path, name_hint))
-            normalized = _normalize_wardrobe_analysis(raw, name_hint=name_hint, provider=provider)
+            raw = await (_classify_wardrobe_with_openai(local_path, clean_name_hint) if provider == "openai" else _classify_wardrobe_with_gemini(local_path, clean_name_hint))
+            normalized = _normalize_wardrobe_analysis(raw, name_hint=clean_name_hint, provider=provider)
             _write_wardrobe_analysis_trace({
                 "status": "success", "provider": provider,
                 "model": WARDROBE_OPENAI_MODEL if provider == "openai" else WARDROBE_GEMINI_MODEL,
-                "name_hint": name_hint, "image_path": str(local_path),
+                "name_hint": clean_name_hint, "image_path": str(local_path),
                 "raw_result": raw, "normalized_result": normalized["meta"],
                 "corrections": normalized["corrections"], "fallback_used": bool(attempts),
                 "attempts": attempts,
@@ -13461,7 +13483,7 @@ async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
 
     fallback = _infer_wardrobe_meta_from_name(fallback_name or Path(str(local_path)).stem)
     _write_wardrobe_analysis_trace({
-        "status": "fallback", "provider": "name_rules", "name_hint": name_hint,
+        "status": "fallback", "provider": "name_rules", "name_hint": clean_name_hint,
         "image_path": str(local_path), "normalized_result": fallback,
         "fallback_used": True, "attempts": attempts,
     })
@@ -13996,7 +14018,7 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
         await ctx.send("大俠，要新增到衣櫃時，請附上一張衣服、飾品或回覆含有單張圖片的訊息喔。")
         return
 
-    name_hint = _clean_text_compact(args)
+    name_hint = _sanitize_wardrobe_name_hint(args)
     status = await ctx.send("👗 小俠正在用圖片辨識整理名稱、分類、標籤與視覺摘要..." if not remove_person else "👗 小俠正在先幫你把人物去掉，再用圖片辨識整理衣櫃資料...")
 
     try:
@@ -14013,7 +14035,8 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
             else:
                 raise RuntimeError("WARDROBE_DIRECT_LOCAL_SAVE_FAILED：無法將 Discord 圖片轉存到 Zeabur。")
 
-            meta = await _classify_wardrobe_item_from_image(reference_path, name_hint=name_hint or getattr(attachment, "filename", "") or "")
+            # 未輸入名稱時必須讓 Vision 自行命名；附件檔名通常是 file_000...，不可當衣服名稱。
+            meta = await _classify_wardrobe_item_from_image(reference_path, name_hint=name_hint)
             pending_payload = {
                 "source_path": source_url,
                 "source_attachment_url": source_url,
