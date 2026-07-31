@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.33"
+LOBSTER_VERSION = "1.5.33_R2"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R2")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1921,17 +1921,73 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
 
     today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     history = [x for x in (state.get("history") or []) if isinstance(x, dict)]
-    recent_ids = {str(x.get("activity_id") or x.get("id") or "") for x in history[-10:]}
-    recent_categories = [str(x.get("activity_category") or x.get("category") or "") for x in history[-6:]]
+
+    # v1.5.33_R1：近期防重複不能只看 history。
+    # 最新一次自主活動仍放在 state["today"]，要等下一次活動完成後才會移入 history；
+    # 若選擇階段漏看 today，同一天重抽就可能再次抽到完全相同的活動。
+    current_today = state.get("today") if isinstance(state.get("today"), dict) else None
+    if current_today and str(current_today.get("date") or "") != today_key:
+        current_today = None
+
+    recent_rows = list(history[-10:])
+    if current_today:
+        recent_rows.append(current_today)
+
+    def _activity_id_from_row(row):
+        return str((row or {}).get("activity_id") or (row or {}).get("id") or "").strip()
+
+    today_activity_id = _activity_id_from_row(current_today)
+    last_three_ids = {
+        _activity_id_from_row(row)
+        for row in recent_rows[-3:]
+        if _activity_id_from_row(row)
+    }
+    recent_ten_ids = {
+        _activity_id_from_row(row)
+        for row in recent_rows[-10:]
+        if _activity_id_from_row(row)
+    }
+    recent_categories = [
+        str(row.get("activity_category") or row.get("category") or "")
+        for row in recent_rows[-6:]
+    ]
+
+    # 當天已出現與最近三筆活動優先直接排除；若指定類別的候選太少，
+    # 先放寬「最近三筆」，但仍盡量不重複今天最新活動；只有完全沒有替代項時才最後回退。
+    hard_block_ids = set(last_three_ids)
+    if today_activity_id:
+        hard_block_ids.add(today_activity_id)
+
+    candidate_catalog = [
+        item for item in catalog
+        if str(item.get("id") or "").strip() not in hard_block_ids
+    ]
+    repeat_guard_mode = "exclude_today_and_last3"
+    if not candidate_catalog:
+        candidate_catalog = [
+            item for item in catalog
+            if str(item.get("id") or "").strip() != today_activity_id
+        ]
+        repeat_guard_mode = "relax_last3_keep_today_excluded"
+    if not candidate_catalog:
+        candidate_catalog = list(catalog)
+        repeat_guard_mode = "forced_fallback_no_alternative"
+
+    print(
+        "🔁 [AUTONOMY_REPEAT_GUARD] "
+        f"mode={repeat_guard_mode} today_id={today_activity_id or '-'} "
+        f"last3={sorted(last_three_ids)} candidates={len(candidate_catalog)}/{len(catalog)}"
+    )
 
     reward_due, reward_gap = _autonomy_should_reward_today(state)
     pool = []
-    for item in catalog:
+    for item in candidate_catalog:
         modes = item.get("visual_mode_candidates") or ["daily_life"]
         item_id = str(item.get("id") or "")
         category = str(item.get("category") or "")
         score = 1.0
-        if item_id in recent_ids:
+        # 第 4～10 筆近期活動仍可再出現，但顯著降權；最近三筆已在上方優先排除。
+        if item_id in recent_ten_ids:
             score *= 0.25
         if recent_categories.count(category) >= 2:
             score *= 0.55
@@ -12297,7 +12353,7 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None,
 # 👗 衣櫃 / 當日衣著連貫性
 # ==========================================
 WARDROBE_MAIN_CATEGORIES = [
-    "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
+    "洋裝", "連身褲", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
 ]
 
 # v1.5.33：沿用固定分類與性感小心機辨識，新增配件重要性分級。
@@ -12305,6 +12361,7 @@ WARDROBE_MAIN_CATEGORIES = [
 # 不再讓 AI 自由發明 sub_category，避免同類服裝被拆成大量近義分類。
 WARDROBE_SUBCATEGORY_OPTIONS = {
     "洋裝": ["洋裝", "短洋裝", "長洋裝", "禮服"],
+    "連身褲": ["連身褲", "短連身褲", "長連身褲"],
     "上衣": ["T恤", "襯衫", "針織衫", "背心", "罩衫", "上衣"],
     "下身": ["短裙", "長裙", "半身裙", "褲子", "短褲", "褲裙", "下身"],
     "套裝": ["裙裝套裝", "褲裝套裝", "褲裙套裝", "運動套裝", "居家套裝", "圍裙套裝", "上下身套裝", "套裝"],
@@ -12321,6 +12378,7 @@ WARDROBE_SUBCATEGORY_OPTIONS = {
 WARDROBE_CATEGORY_ALIASES = {
     "睡衣/居家服": "睡衣／居家服", "睡衣／居家": "睡衣／居家服", "睡衣": "睡衣／居家服", "居家服": "睡衣／居家服", "居家": "睡衣／居家服",
     "cosplay": "Cosplay／特殊服裝", "Cosplay": "Cosplay／特殊服裝", "特殊服裝": "Cosplay／特殊服裝", "角色服": "Cosplay／特殊服裝",
+    "連體褲": "連身褲", "連衣褲": "連身褲", "jumpsuit": "連身褲", "romper": "連身褲",
     "鞋": "鞋子", "包": "包包", "飾品": "配件", "配飾": "配件",
 }
 
@@ -12351,6 +12409,8 @@ def _normalize_wardrobe_sub_category(main_category, value):
         "小洋裝": "短洋裝", "迷你洋裝": "短洋裝", "連身短洋裝": "短洋裝",
         "中長洋裝": "洋裝", "茶歇裙": "洋裝", "日常洋裝": "洋裝",
         "小禮服": "禮服", "晚宴禮服": "禮服", "舞台洋裝": "禮服",
+        "連體褲": "連身褲", "連衣褲": "連身褲", "短連體褲": "短連身褲", "短連衣褲": "短連身褲",
+        "長連體褲": "長連身褲", "長連衣褲": "長連身褲", "jumpsuit": "連身褲", "romper": "短連身褲",
         "半裙": "半身裙", "裙": "半身裙", "褲裙": "褲裙",
         "短裙套裝": "裙裝套裝", "百褶裙套裝": "裙裝套裝", "長裙套裝": "裙裝套裝",
         "連衣裙套裝": "裙裝套裝", "上衣長裙套裝": "裙裝套裝", "蓬裙套裝": "裙裝套裝",
@@ -12371,6 +12431,10 @@ def _normalize_wardrobe_sub_category(main_category, value):
         if any(k in raw for k in ("短", "迷你")): return "短洋裝"
         if any(k in raw for k in ("長", "及踝", "拖地")): return "長洋裝"
         return "洋裝"
+    if main_category == "連身褲":
+        if any(k in raw.lower() for k in ("短", "romper", "playsuit")): return "短連身褲"
+        if any(k in raw.lower() for k in ("長", "及踝", "寬褲", "jumpsuit")): return "長連身褲"
+        return "連身褲"
     if main_category == "套裝":
         if "運動" in raw: return "運動套裝"
         if "居家" in raw: return "居家套裝"
@@ -12838,6 +12902,14 @@ def _infer_wardrobe_meta_from_name(name_hint="", category_hint=""):
             sub = "睡衣套裝"
         else:
             sub = "居家服"
+    elif any(k in hay.lower() for k in ("連身褲", "連體褲", "連衣褲", "jumpsuit", "romper", "playsuit")):
+        main = "連身褲"
+        if any(k in hay.lower() for k in ("短連身褲", "短連體褲", "短連衣褲", "romper", "playsuit")):
+            sub = "短連身褲"
+        elif any(k in hay.lower() for k in ("長連身褲", "長連體褲", "長連衣褲", "寬褲", "及踝", "jumpsuit")):
+            sub = "長連身褲"
+        else:
+            sub = "連身褲"
     elif any(k in hay for k in ("套裝", "整套", "搭配套裝", "兩件式", "三件式")):
         main = "套裝"
         if any(k in hay for k in ("裙", "裙裝", "洋裝")):
@@ -13036,10 +13108,12 @@ def _wardrobe_analysis_prompt(name_hint=""):
 
 【分類硬規則】
 - 連衣裙、連身裙、小洋裝、禮服：main_category=洋裝。
+- 上下身連成同一件，且下半部可清楚看見左右分開的褲管：main_category=連身褲；依長度選短連身褲、連身褲或長連身褲。
+- 連身褲即使外觀像長洋裝，只要可見兩條獨立褲管，就不得判為洋裝或套裝。
 - 只有「兩件以上可分離的主要穿著衣物」（例如上衣＋裙、上衣＋褲）才可判為 main_category=套裝。
 - 一件洋裝搭配鞋、包、項鍊、帽子等配件，仍是 main_category=洋裝；配件只寫入 tags 與 style_summary，絕不可因配件數量改判套裝。
 - 判斷分類時先找核心穿著主體，不可用圖片中的物件總數代替服裝結構判斷。
-- 只有單件裙、褲、短褲才是下身；不可把連衣裙歸為下身。
+- 只有單件裙、褲、短褲才是下身；不可把連衣裙或連身褲歸為下身。
 - 胸罩、內褲、吊帶內衣、內衣成套：main_category=內衣。
 - 比基尼、連身泳衣：main_category=泳裝。
 - 睡裙、睡袍、居家套裝：main_category=睡衣／居家服。
