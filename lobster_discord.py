@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.29_R1"
+LOBSTER_VERSION = "1.5.30"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.29_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.30")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -14226,16 +14226,16 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             current_outfit=current_outfit,
             visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
         )
-        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29_R1 lightweight diary prompt builder")
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.30 lightweight diary prompt builder")
     else:
         final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
         diary_prompt_stats = None
-        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29_R1 conflict-free photo prompt builder")
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.30 conflict-free photo prompt builder")
     if isinstance(trace_context, dict):
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.29_R1"
+        trace_context["prompt_engine_version"] = "v1.5.30"
         trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
@@ -14403,9 +14403,77 @@ def _seedream_repair_mode_block(context):
     return "\n".join(lines)
 
 
-def _seedream_repair_prompt(custom_prompt, context=None):
+REPAIR_AESTHETIC_GUARD = """
+REVISION AESTHETIC GUARD:
+- Treat comparative appearance requests as controlled refinements, not maximum-strength transformations.
+- All requested body and beauty adjustments must remain subtle, natural, elegant, and anatomically plausible unless Daxia explicitly asks for an extreme change.
+- Preserve Xiaoxia's established overall proportions, facial identity, posture, clothing structure, fabric behavior, and scene continuity.
+- When changing bust, waist, body slimness, leg length, or skin appearance, adjust only the requested characteristic and keep surrounding anatomy naturally integrated.
+- Avoid exaggerated anatomy, balloon-like volume, extreme waist compression, unnaturally stretched limbs, plastic skin, or clothing that no longer fits or behaves realistically.
+""".strip()
+
+
+def _rewrite_repair_request_for_aesthetics(custom_prompt):
+    """v1.5.30：將常見外貌微調語句改寫為小幅、自然且可追蹤的修圖指令。"""
+    original = _repair_clean_line(custom_prompt, 500)
+    if not original:
+        return {
+            "original": "",
+            "rewritten": "",
+            "matched_adjustments": [],
+            "aesthetic_rewrite_applied": False,
+        }
+
+    rewritten = original
+    matched = []
+    substitutions = [
+        (r"(?:上圍|胸部|胸型|胸圍)(?:再|更)?(?:雄偉|豐滿|豐盈|飽滿|大)(?:一點|一些|些|點)?",
+         "subtly and naturally enhance her bust volume by a modest amount while preserving realistic anatomy, balanced bust-to-waist proportions, natural clothing fit, fabric drape, posture, and overall elegance",
+         "bust_subtle_enhancement"),
+        (r"(?:上圍|胸部|胸型|胸圍)(?:再|更)?(?:小|縮小|收斂)(?:一點|一些|些|點)?",
+         "subtly reduce her bust volume by a modest amount while preserving realistic anatomy, balanced proportions, natural clothing fit, posture, and overall elegance",
+         "bust_subtle_reduction"),
+        (r"(?:身材|身形|體態)(?:再|更)?(?:苗條|纖細|瘦)(?:一點|一些|些|點)?|(?:再|更)(?:苗條|纖細|瘦)(?:一點|一些|些|點)?",
+         "slightly refine and slim her silhouette while preserving a healthy feminine figure, realistic anatomy, natural curves, and the original pose",
+         "silhouette_subtle_slimming"),
+        (r"(?:腰|腰身|腰線)(?:再|更)?(?:細|纖細|收窄)(?:一點|一些|些|點)?",
+         "slightly refine her waistline while preserving realistic torso anatomy, natural ribcage and hip proportions, and a balanced elegant silhouette",
+         "waist_subtle_refinement"),
+        (r"(?:小腿|腿部|雙腿|腿)(?:再|更)?(?:長|修長)(?:一點|一些|些|點)?",
+         "slightly lengthen the requested leg proportions while preserving realistic joints, balanced thigh-to-lower-leg ratios, the original pose, and natural body scale",
+         "legs_subtle_lengthening"),
+        (r"(?:皮膚|膚色|肌膚)(?:再|更)?(?:白皙|白|亮|透亮)(?:一點|一些|些|點)?|(?:再|更)(?:白皙|白|亮)(?:一點|一些|些|點)?",
+         "slightly brighten her fair luminous skin while preserving natural skin texture, realistic tonal variation, and the original lighting direction",
+         "skin_subtle_brightening"),
+        (r"(?:皮膚|肌膚)(?:再|更)?(?:水嫩|水潤|細緻)(?:一點|一些|些|點)?|(?:再|更)?(?:水嫩|水潤)(?:一點|一些|些|點)?",
+         "subtly improve healthy skin hydration and refinement while preserving natural pores, texture, and realistic lighting, avoiding a plastic or over-smoothed look",
+         "skin_subtle_refinement"),
+    ]
+    for pattern, replacement, tag in substitutions:
+        rewritten_new, count = re.subn(pattern, replacement, rewritten, flags=re.IGNORECASE)
+        if count:
+            rewritten = rewritten_new
+            if tag not in matched:
+                matched.append(tag)
+    rewritten = re.sub(r"\s+", " ", rewritten).strip()
+    if matched:
+        rewritten += (
+            ". This is a controlled refinement only: make the smallest clearly visible change needed, "
+            "keep the result natural and elegant, and preserve every unrequested element of Image 10."
+        )
+    return {
+        "original": original,
+        "rewritten": rewritten,
+        "matched_adjustments": matched,
+        "aesthetic_rewrite_applied": bool(matched),
+    }
+
+
+def _seedream_repair_prompt(custom_prompt, context=None, interpreted_request=None):
     context = context or {}
-    repair_history = _repair_collect_history(context, custom_prompt, limit=4)
+    interpreted_request = interpreted_request or _rewrite_repair_request_for_aesthetics(custom_prompt)
+    rewritten_request = str(interpreted_request.get("rewritten") or custom_prompt or "").strip()
+    repair_history = _repair_collect_history(context, rewritten_request, limit=4)
     history_block = ""
     if repair_history:
         history_lines = [f"- {item}" for item in repair_history]
@@ -14422,10 +14490,12 @@ def _seedream_repair_prompt(custom_prompt, context=None):
         "If correcting anatomy, keep exactly two arms and two hands only, connected naturally to the correct wrists and arms. No duplicate hands, no extra limbs, no malformed fingers. "
         "Avoid repair drift: do not solve one defect by breaking another key requirement. "
         "Preserve the identity locks, scene locks, and mode-specific requirements below as hard constraints.\n\n"
+        + REPAIR_AESTHETIC_GUARD
+        + "\n\n"
         + mode_block
         + history_block
-        + "\nCURRENT DAXIA REPAIR REQUEST:\n"
-        + str(custom_prompt or "").strip()
+        + "\nCURRENT DAXIA REPAIR REQUEST (AESTHETICALLY INTERPRETED):\n"
+        + rewritten_request
     )
 
 
@@ -14442,7 +14512,25 @@ async def generate_seedream_v45_repair(original_image_path, repair_request, enab
     image_urls = await _seedream_upload_reference_images()
     image_urls.append(await _seedream_upload_single_file(original_image_path))
     image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
-    final_prompt = _seedream_repair_prompt(repair_request, context=source_context)
+    interpreted_request = _rewrite_repair_request_for_aesthetics(repair_request)
+    if isinstance(trace_context, dict):
+        trace_context["user_revision_text"] = interpreted_request.get("original")
+        trace_context["rewritten_revision_prompt"] = interpreted_request.get("rewritten")
+        trace_context["revision_aesthetic_rewrite_applied"] = bool(interpreted_request.get("aesthetic_rewrite_applied"))
+        trace_context["revision_aesthetic_matches"] = list(interpreted_request.get("matched_adjustments") or [])
+        trace_context["revision_aesthetic_guard"] = REPAIR_AESTHETIC_GUARD
+    _trace_stage(
+        trace_context,
+        "repair_aesthetic_interpreter",
+        prompt=interpreted_request.get("rewritten"),
+        data={
+            "user_revision_text": interpreted_request.get("original"),
+            "rewritten_revision_prompt": interpreted_request.get("rewritten"),
+            "matched_adjustments": interpreted_request.get("matched_adjustments"),
+            "aesthetic_rewrite_applied": interpreted_request.get("aesthetic_rewrite_applied"),
+        },
+    )
+    final_prompt = _seedream_repair_prompt(repair_request, context=source_context, interpreted_request=interpreted_request)
     _trace_stage(trace_context, "seedream_repair_final_prompt", prompt=final_prompt, data={"original_image_path": original_image_path, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE})
 
     def _subscribe():
@@ -16670,7 +16758,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "manual_image_url": custom_diary.get("image_url"),
                     "manual_source_module": custom_diary.get("source_module"),
                     "manual_image_role": custom_diary.get("image_role"),
-                    "prompt_engine_version": "v1.5.29_R1",
+                    "prompt_engine_version": "v1.5.30",
                     "generation_skipped": True,
                 }
                 _trace_stage(manual_trace, "diary_manual_override_selected", data=manual_trace)
