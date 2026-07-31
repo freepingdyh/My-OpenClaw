@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.29"
+LOBSTER_VERSION = "1.5.29_R1"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.29")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.29_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -14050,16 +14050,15 @@ def _v1527_concise_people_policy(checklist=None):
         )
     if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
         return (
-            "- Xiaoxia is the unmistakable main character and strongest visual focus.\n"
+            "- Xiaoxia is the unmistakable visual protagonist, with the most refined facial beauty and elegant styling. Supporting people remain attractive, natural, and role-appropriate, while Xiaoxia remains the primary visual focus.\n"
             "- Show 1-3 female friends naturally interacting with Xiaoxia when requested; they remain secondary.\n"
             "- Figures 1-9 define Xiaoxia only. Supporting women must have clearly different faces, hairstyles, outfits, and natural body builds; no clones or twins.\n"
-            "- Supporting women must not receive stronger glamour, curves, lighting, sharpness, or compositional weight than Xiaoxia.\n"
             "- Men may exist only as incidental public background and must not interact with Xiaoxia in any way.\n"
             "- Never visualize Daxia/viewer or external viewer body parts."
         )
     if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
         return (
-            "- Xiaoxia is the unmistakable main character and only primary subject.\n"
+            "- Xiaoxia is the unmistakable visual protagonist, with the most refined facial beauty and elegant styling. Supporting people remain attractive, natural, and role-appropriate, while Xiaoxia remains the primary visual focus.\n"
             "- Public background people may appear for realism. Men must remain incidental and completely non-interacting with Xiaoxia.\n"
             "- No companion/date framing and never visualize Daxia/viewer body parts."
         )
@@ -14227,16 +14226,16 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             current_outfit=current_outfit,
             visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
         )
-        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29 lightweight diary prompt builder")
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29_R1 lightweight diary prompt builder")
     else:
         final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
         diary_prompt_stats = None
-        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29 conflict-free photo prompt builder")
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.29_R1 conflict-free photo prompt builder")
     if isinstance(trace_context, dict):
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.29"
+        trace_context["prompt_engine_version"] = "v1.5.29_R1"
         trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
@@ -16671,7 +16670,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "manual_image_url": custom_diary.get("image_url"),
                     "manual_source_module": custom_diary.get("source_module"),
                     "manual_image_role": custom_diary.get("image_role"),
-                    "prompt_engine_version": "v1.5.29",
+                    "prompt_engine_version": "v1.5.29_R1",
                     "generation_skipped": True,
                 }
                 _trace_stage(manual_trace, "diary_manual_override_selected", data=manual_trace)
