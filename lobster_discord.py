@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.32_R2"
+LOBSTER_VERSION = "1.5.33"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.32_R2")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -12300,7 +12300,7 @@ WARDROBE_MAIN_CATEGORIES = [
     "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
 ]
 
-# v1.5.32_R2：沿用固定分類白名單，並強化可見性感小心機結構辨識。
+# v1.5.33：沿用固定分類與性感小心機辨識，新增配件重要性分級。
 # 細節（如貼身吊帶、茶歇裙、百褶、極短）應放在 tags / style_summary，
 # 不再讓 AI 自由發明 sub_category，避免同類服裝被拆成大量近義分類。
 WARDROBE_SUBCATEGORY_OPTIONS = {
@@ -12928,7 +12928,7 @@ def _wardrobe_image_mime_type(local_path):
     }.get(ext, "image/jpeg")
 
 
-# v1.5.32_R2：從 Vision 已明確辨識的文字中，收斂「性感小心機」結構標籤。
+# v1.5.33：從 Vision 已明確辨識的文字中，收斂「性感小心機」結構標籤。
 # 只根據模型已寫出的可見證據補標籤，不憑名稱或程式自行幻想。
 def _wardrobe_allure_detail_tags(evidence):
     text = str(evidence or "").lower()
@@ -12968,6 +12968,59 @@ def _wardrobe_allure_detail_tags(evidence):
     return found
 
 
+
+# v1.5.33：配件只保留「有辨識度、會影響整體造型或是服裝固定結構」者。
+# 一般素色包、普通高跟鞋、普通白鞋不應占用有限 tags；仍可在摘要末句簡短帶過。
+def _wardrobe_distinctive_accessory_tags(evidence):
+    text = str(evidence or "").lower()
+    rules = [
+        (("鍊條肩帶", "鏈條肩帶", "鍊肩帶", "鏈肩帶"), "鍊條肩帶"),
+        (("珍珠肩帶",), "珍珠肩帶"),
+        (("腰鏈", "腰鍊", "珠腰鏈", "珠腰鍊"), "腰鍊"),
+        (("鏈條包", "鍊條包", "金鏈包", "金鍊包"), "鍊條包"),
+        (("菱格包", "菱格紋包", "菱格紋鏈條包", "菱格紋鍊條包"), "菱格包"),
+        (("編織包", "草編包", "藤編包"), "編織包"),
+        (("圓筒包",), "圓筒包"),
+        (("流蘇包",), "流蘇包"),
+        (("透明包",), "透明包"),
+        (("牛仔靴", "西部靴", "western boots", "cowboy boots"), "牛仔靴"),
+        (("瑪莉珍", "mary jane"), "瑪莉珍鞋"),
+        (("厚底鞋", "厚底靴", "厚底涼鞋"), "厚底鞋"),
+        (("t字鞋", "t 字鞋", "t字細帶", "t 字細帶"), "T字鞋"),
+        (("繞踝鞋", "繞踝高跟鞋", "踝帶鞋"), "繞踝鞋"),
+        (("後空鞋", "slingback"), "後空鞋"),
+        (("珍珠鞋", "珍珠點綴"), "珍珠鞋飾"),
+        (("鉚釘鞋", "鉚釘點綴"), "鉚釘鞋飾"),
+        (("漁夫帽",), "漁夫帽"),
+        (("貝雷帽",), "貝雷帽"),
+        (("寬簷帽", "草帽"), "寬簷帽"),
+        (("長手套", "蕾絲手套"), "特色手套"),
+        (("珍珠項鍊", "珍珠耳環"), "珍珠飾品"),
+        (("頸鍊", "choker"), "頸鍊"),
+        (("大蝴蝶結髮飾", "蝴蝶結髮飾"), "蝴蝶結髮飾"),
+    ]
+    found = []
+    for aliases, canonical in rules:
+        if any(alias in text for alias in aliases) and canonical not in found:
+            found.append(canonical)
+    return found
+
+
+def _wardrobe_is_low_value_accessory_tag(tag):
+    """辨識普通、低資訊量配件 tag；只從 tags 移除，不刪除摘要中的客觀描述。"""
+    t = _clean_text_compact(tag).lower()
+    if not t:
+        return False
+    distinctive = (
+        "鍊", "鏈", "珍珠", "水鑽", "鉚釘", "流蘇", "編織", "草編", "藤編",
+        "菱格", "圓筒", "透明", "牛仔", "西部", "瑪莉珍", "厚底", "t字", "t 字",
+        "繞踝", "踝帶", "後空", "漁夫", "貝雷", "寬簷", "蕾絲手套", "頸鍊", "choker"
+    )
+    if any(k in t for k in distinctive):
+        return False
+    generic_endings = ("包", "包包", "手提包", "肩背包", "斜背包", "高跟鞋", "尖頭鞋", "平底鞋", "休閒鞋", "白鞋", "短靴", "涼鞋")
+    return any(t.endswith(k) for k in generic_endings)
+
 def _wardrobe_analysis_prompt(name_hint=""):
     return f"""
 你是「小俠衣櫃」的專業服裝商品編目員。請只根據圖片中真正可見的服裝、鞋包與飾品，填入既有衣櫃 JSON 欄位；不得新增欄位。
@@ -13002,8 +13055,15 @@ def _wardrobe_analysis_prompt(name_hint=""):
 - 這些是服裝結構辨識詞，不要只用「性感」「甜美」等泛稱取代。
 - 若圖片有正面與背面，必須同時比對；背面的露背、交叉背、肩帶與扣帶結構不可漏掉。
 
+【配件重要性分級】
+- 衣服本體與固定結構永遠優先。腰帶、鍊條肩帶、珠飾肩帶等若屬服裝本體設計，視為服裝結構，不是可省略的一般配件。
+- tags 只保留會明顯改變造型、具有辨識度或可供穿搭搜尋的配件，例如：牛仔靴、瑪莉珍鞋、厚底鞋、菱格鍊條包、編織包、漁夫帽、貝雷帽、頸鍊、珍珠飾品。
+- 普通素色手提包、一般肩背包、普通白鞋、普通高跟鞋等低辨識度配件，不要占用 tags；需要時僅在 style_summary 最後簡短寫「搭配米白肩背包與短靴」。
+- 配件不得搶過衣服本體；先完整描述服裝，再補最重要的 0～3 件配件。
+- 圖片看不清配件類型時，不要因顏色自行猜成牛仔靴、名牌包或特定材質。
+
 【tags】
-- 產出 8～14 個短詞，盡量涵蓋：主色、材質、服裝結構、長短、風格、正式程度、季節、場合屬性、特殊設計、配件。
+- 產出 8～14 個短詞，盡量涵蓋：主色、材質、服裝結構、長短、風格、正式程度、季節、場合屬性、特殊設計；配件只有具辨識度時才加入。
 - 若存在上述「性感小心機」結構，至少保留 1～4 個最具辨識力的具體結構標籤，優先於空泛風格詞。
 - 正式程度只能優先使用：居家、休閒、Smart Casual、輕正式、正式、禮服。
 - 季節只能優先使用：春夏、秋冬、四季。
@@ -13013,7 +13073,8 @@ def _wardrobe_analysis_prompt(name_hint=""):
 - 圖中明確可見的透明、蕾絲、鏤空、無肉色內布／無內襯、露背、極短、高腰、低腰、不對稱、綁帶等關鍵特徵不可省略。
 
 【style_summary】
-- 一句完整中文視覺摘要：先忠實描述件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯、特殊結構、鞋包飾品；句尾再用極短詞說明整體穿搭屬性，例如「呈現輕正式、優雅的社交穿搭」。
+- 一句完整中文視覺摘要：先忠實描述件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯與特殊結構；最後才以短句補充最重要的鞋包飾品，並用極短詞說明整體穿搭屬性。
+- 普通配件可簡寫，不必逐一描述顏色、扣件與材質；特色配件才具體描述。
 - 圖中若有性感小心機結構，摘要必須明說其位置與形式，例如「兩側腰身採挖空拼接」「背部為大面積露背與交叉肩帶」，不可只寫成「性感設計」。
 - 這段文字會直接提供給生圖模型，必須具體、可視覺化。
 - 不得憑空加入品牌、人物身材、姿勢、動作或具體場景。
@@ -13090,23 +13151,32 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
     sub = _normalize_wardrobe_sub_category(main, forced_sub or sub_raw)
 
     stop_tags = {"漂亮", "好看", "時尚", "衣服", "服飾", "服裝", "百搭", "高級", "性感"}
-    # 先抓具體小心機結構，避免它們被一般顏色／場合詞擠出 14 個上限。
+    # 先抓具體小心機結構與高辨識度配件，避免被一般顏色／場合詞擠出 14 個上限。
     allure_tags = _wardrobe_allure_detail_tags(evidence)
+    accessory_tags = _wardrobe_distinctive_accessory_tags(evidence)
     tags = []
-    for tag in allure_tags:
+    for tag in allure_tags + accessory_tags:
         if tag and tag not in tags:
             tags.append(tag)
+    dropped_generic_accessories = []
     for value in tags_raw:
         tag = _clean_text_compact(value)
         if not tag or tag in stop_tags or tag in tags:
             continue
         if len(tag) > 16:
             continue
+        if _wardrobe_is_low_value_accessory_tag(tag):
+            dropped_generic_accessories.append(tag)
+            continue
         tags.append(tag)
         if len(tags) >= 14:
             break
     if allure_tags:
         corrections.append("allure_details:" + ",".join(allure_tags))
+    if accessory_tags:
+        corrections.append("distinctive_accessories:" + ",".join(accessory_tags))
+    if dropped_generic_accessories:
+        corrections.append("generic_accessories_removed:" + ",".join(dropped_generic_accessories[:6]))
 
     if len(tags) < 8:
         for tag in _wardrobe_tags_from_text(name, main, sub, summary, limit=14):
