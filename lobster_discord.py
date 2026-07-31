@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.33_R2"
+LOBSTER_VERSION = "1.5.33_R3"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R2")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R3")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -12773,9 +12773,13 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
 
 
 def _parse_key_value_fields(raw_text):
-    """解析 `名稱=... 分類=... 子分類=... 標籤=...`，value 可含空白，直到下一個 key。"""
+    """解析衣櫃修正欄位；value 可含空白，直到下一個 key。"""
     raw = str(raw_text or "").strip()
-    key_re = re.compile(r"(名稱|名字|name|分類|主分類|category|main_category|子分類|sub_category|標籤|tags|tag)\s*[=＝:]\s*", re.IGNORECASE)
+    key_re = re.compile(
+        r"(名稱|名字|name|分類|主分類|category|main_category|子分類|sub_category|"
+        r"標籤|tags|tag|敘述|描述|摘要|style_summary|summary)\s*[=＝:]\s*",
+        re.IGNORECASE,
+    )
     matches = list(key_re.finditer(raw))
     fields = {}
     if not matches:
@@ -12793,7 +12797,69 @@ def _parse_key_value_fields(raw_text):
             fields["sub_category"] = value
         elif key in {"標籤", "tags", "tag"}:
             fields["tags"] = [x.strip() for x in re.split(r"[,，、/／\s]+", value) if x.strip()]
+        elif key in {"敘述", "描述", "摘要", "style_summary", "summary"}:
+            fields["style_summary"] = value
     return fields
+
+
+def _wardrobe_category_conflict_terms(main_category):
+    """回傳改分類時應從舊 tags 移除的互斥服裝類型詞。"""
+    groups = {
+        "洋裝": {"連身褲", "短連身褲", "長連身褲", "連體褲", "連衣褲", "jumpsuit", "romper", "playsuit", "套裝", "褲裝套裝"},
+        "連身褲": {"洋裝", "短洋裝", "長洋裝", "連衣裙", "連身裙", "禮服", "套裝", "裙裝套裝", "褲裝套裝", "上下身套裝"},
+        "套裝": {"洋裝", "短洋裝", "長洋裝", "連身褲", "短連身褲", "長連身褲", "連體褲", "連衣褲", "jumpsuit", "romper", "playsuit"},
+    }
+    return groups.get(str(main_category or ""), set())
+
+
+def _wardrobe_reconcile_tags_for_category(tags, main_category, sub_category, limit=14):
+    """分類被手動修正時，清掉互斥類型標籤並補上正確主／子分類標籤。"""
+    conflicts = {x.lower() for x in _wardrobe_category_conflict_terms(main_category)}
+    result = []
+    for raw_tag in tags or []:
+        tag = _clean_text_compact(raw_tag)
+        if not tag:
+            continue
+        low = tag.lower()
+        if low in conflicts:
+            continue
+        if tag not in result:
+            result.append(tag)
+    for required in (sub_category, main_category):
+        required = _clean_text_compact(required)
+        if required and required not in result:
+            result.insert(0, required)
+    return result[:limit]
+
+
+def _wardrobe_rewrite_summary_category_terms(summary, old_main, old_sub, new_main, new_sub):
+    """未提供新敘述時，只替換明確衝突的服裝類型詞，保留其餘視覺細節。"""
+    text = _clean_text_compact(summary)
+    if not text:
+        return ""
+    replacements = []
+    if new_main == "連身褲":
+        replacements.extend([
+            ("長洋裝", new_sub if new_sub in {"長連身褲", "短連身褲"} else "連身褲"),
+            ("短洋裝", new_sub if new_sub in {"長連身褲", "短連身褲"} else "連身褲"),
+            ("連身洋裝", "連身褲"), ("連衣裙", "連身褲"), ("連身裙", "連身褲"), ("洋裝", "連身褲"),
+            ("褲裝套裝", new_sub or "連身褲"), ("上下身套裝", new_sub or "連身褲"), ("套裝", new_sub or "連身褲"),
+        ])
+    elif new_main == "洋裝":
+        target = new_sub or "洋裝"
+        replacements.extend([
+            ("長連身褲", target), ("短連身褲", target), ("連身褲", target),
+            ("連體褲", target), ("連衣褲", target), ("jumpsuit", target),
+        ])
+    elif new_main == "套裝":
+        target = new_sub or "套裝"
+        replacements.extend([
+            ("長連身褲", target), ("短連身褲", target), ("連身褲", target),
+            ("長洋裝", target), ("短洋裝", target), ("洋裝", target),
+        ])
+    for old, new in replacements:
+        text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+    return _clean_text_compact(text)
 
 
 def _update_wardrobe_item_from_command(payload):
@@ -12818,7 +12884,7 @@ def _update_wardrobe_item_from_command(payload):
             fields["name"] = rest
 
     if not fields:
-        return False, "請提供要修正的欄位，例如：`名稱=...`、`分類=...`、`子分類=...`、`標籤=...`"
+        return False, "請提供要修正的欄位，例如：`名稱=...`、`分類=...`、`子分類=...`、`標籤=...`、`敘述=...`"
 
     items = load_wardrobe()
     for item in items:
@@ -12842,14 +12908,39 @@ def _update_wardrobe_item_from_command(payload):
             else:
                 item["sub_category"] = _normalize_wardrobe_sub_category(main_category, item.get("sub_category") or main_category)
 
+            category_changed = (
+                "main_category" in fields
+                or "sub_category" in fields
+                or old_main != main_category
+            )
             if "tags" in fields:
-                item["tags"] = [_clean_text_compact(x) for x in fields.get("tags", []) if _clean_text_compact(x)][:8]
+                item["tags"] = _wardrobe_reconcile_tags_for_category(
+                    [_clean_text_compact(x) for x in fields.get("tags", []) if _clean_text_compact(x)],
+                    main_category,
+                    item.get("sub_category"),
+                )
+            elif category_changed:
+                item["tags"] = _wardrobe_reconcile_tags_for_category(
+                    item.get("tags") or [],
+                    main_category,
+                    item.get("sub_category"),
+                )
             elif not item.get("tags") or str(item.get("name", "")).startswith("去人化服飾"):
                 item["tags"] = _wardrobe_tags_from_text(item.get("name"), item.get("main_category"), item.get("sub_category"))
 
-            item["style_summary"] = _clean_text_compact(
-                fields.get("style_summary") or f"{item.get('name')}｜{item.get('main_category')}／{item.get('sub_category')}"
-            )
+            if "style_summary" in fields:
+                item["style_summary"] = _clean_text_compact(fields.get("style_summary"))
+            elif category_changed:
+                rewritten = _wardrobe_rewrite_summary_category_terms(
+                    item.get("style_summary"),
+                    old_main,
+                    item.get("sub_category"),
+                    main_category,
+                    item.get("sub_category"),
+                )
+                item["style_summary"] = rewritten or f"{item.get('name')}｜{item.get('main_category')}／{item.get('sub_category')}"
+            elif not item.get("style_summary"):
+                item["style_summary"] = f"{item.get('name')}｜{item.get('main_category')}／{item.get('sub_category')}"
             item["updated_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
             save_wardrobe(items)
             return True, item
