@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.31"
+LOBSTER_VERSION = "1.5.32_R1"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.31")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.32_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -588,6 +588,8 @@ WARDROBE_VISION_PROVIDER = (os.environ.get("WARDROBE_VISION_PROVIDER", "openai")
 WARDROBE_OPENAI_MODEL = (os.environ.get("WARDROBE_OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini").strip()
 WARDROBE_GEMINI_MODEL = (os.environ.get("WARDROBE_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
 WARDROBE_ANALYSIS_TRACE_PATH = os.path.join(MEMORY_DIR, "wardrobe_analysis_trace.jsonl")
+# 👗 v1.5.32：不修改衣櫃 JSON schema，另建語意快取供選衣器使用。
+WARDROBE_SEMANTIC_CACHE_PATH = os.path.join(MEMORY_DIR, "wardrobe_semantic_cache.json")
 GENERATION_TRACE_DIR = os.path.join(MEMORY_DIR, "generation_trace")  # 🧭 v1.4.82：生圖決策鏈追溯
 GENERATION_TRACE_LATEST_PATH = os.path.join(GENERATION_TRACE_DIR, "latest.json")
 GENERATION_TRACE_ALL_PATH = os.path.join(GENERATION_TRACE_DIR, "all_trace.jsonl")
@@ -908,16 +910,91 @@ def get_latest_diary_scene_pref(max_age_hours=36):
     return latest
 
 
-def _compact_wardrobe_brief(item):
+WARDROBE_FORMALITY_TAGS = ("居家", "休閒", "Smart Casual", "輕正式", "正式", "禮服")
+WARDROBE_SEASON_TAGS = ("春夏", "秋冬", "四季")
+WARDROBE_OCCASION_TAGS = ("社交", "休閒", "居家", "商務", "正式", "晚宴", "旅遊", "運動", "泳裝", "睡眠", "內著", "Cosplay")
+
+
+def _wardrobe_semantic_profile(item):
+    """由既有欄位推導選衣語意；不回寫 xiaoxia_wardrobe.json。"""
+    if not isinstance(item, dict):
+        return {"formality": [], "season": [], "occasion": [], "style": []}
+    text = " ".join([
+        str(item.get("name") or ""), str(item.get("main_category") or ""),
+        str(item.get("sub_category") or ""), " ".join(str(x) for x in (item.get("tags") or [])),
+        str(item.get("style_summary") or ""),
+    ]).lower()
+    main = str(item.get("main_category") or "")
+    formality=[]; season=[]; occasion=[]; style=[]
+    def add(bucket, value):
+        if value and value not in bucket: bucket.append(value)
+    if any(k in text for k in ["禮服", "晚宴", "宴會", "華麗"]): add(formality,"禮服"); add(occasion,"晚宴")
+    elif any(k in text for k in ["西裝", "正式", "商務", "套裝", "襯衫"]): add(formality,"正式" if "正式" in text or "商務" in text else "輕正式")
+    elif any(k in text for k in ["優雅", "知性", "精緻", "高跟鞋", "洋裝", "裙裝套裝"]): add(formality,"輕正式")
+    elif main in {"睡衣／居家服", "內衣"}: add(formality,"居家")
+    else: add(formality,"休閒")
+    if any(k in text for k in ["毛呢", "針織", "長袖", "厚實", "羊毛", "冬", "保暖"]): add(season,"秋冬")
+    elif any(k in text for k in ["雪紡", "薄紗", "無袖", "短袖", "細肩帶", "春夏", "清涼"]): add(season,"春夏")
+    else: add(season,"四季")
+    if main == "內衣": add(occasion,"內著")
+    elif main == "泳裝": add(occasion,"泳裝")
+    elif main == "睡衣／居家服": add(occasion,"睡眠" if any(k in text for k in ["睡衣","睡裙","睡袍"]) else "居家")
+    elif any(k in text for k in ["運動", "瑜伽", "瑜珈", "健身", "網球", "泳"]): add(occasion,"運動")
+    elif any(k in text for k in ["商務", "辦公", "職場", "西裝"]): add(occasion,"商務")
+    elif any(k in text for k in ["晚宴", "禮服", "宴會"]): add(occasion,"晚宴")
+    elif any(k in text for k in ["旅行", "度假", "旅遊", "戶外"]): add(occasion,"旅遊")
+    elif main in {"洋裝","套裝","上衣","下身","外套","鞋子","包包","配件"}: add(occasion,"社交" if any(k in text for k in ["優雅","知性","精緻","高跟鞋","鍊條包","洋裝"]) else "休閒")
+    for label, kws in {
+        "優雅":["優雅","柔美","雪紡","百褶"], "甜美":["甜美","蝴蝶結","荷葉","粉色"],
+        "知性":["知性","襯衫","學院"], "性感":["性感","蕾絲","鏤空","透膚","低胸"],
+        "休閒":["休閒","牛仔","t恤","棉質"], "俐落":["俐落","西裝","剪裁"],
+    }.items():
+        if any(k in text for k in kws): add(style,label)
+    return {"formality":formality[:2], "season":season[:1], "occasion":occasion[:2], "style":style[:4]}
+
+
+def _wardrobe_semantic_fingerprint(item):
+    raw = json.dumps({k:item.get(k) for k in ("id","name","main_category","sub_category","tags","style_summary")}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _load_or_refresh_wardrobe_semantic_cache(items=None):
+    items = items if isinstance(items, list) else load_wardrobe()
+    cache = _load_json_file_or_default(WARDROBE_SEMANTIC_CACHE_PATH, {})
+    if not isinstance(cache, dict): cache = {}
+    changed=False; valid_ids=set()
+    for item in items:
+        if not isinstance(item, dict): continue
+        wid=str(item.get("id") or "").strip().upper()
+        if not wid: continue
+        valid_ids.add(wid); fp=_wardrobe_semantic_fingerprint(item)
+        row=cache.get(wid) if isinstance(cache.get(wid),dict) else {}
+        if row.get("fingerprint") != fp:
+            cache[wid]={"fingerprint":fp, "semantic":_wardrobe_semantic_profile(item), "updated_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")}
+            changed=True
+    for wid in list(cache):
+        if wid not in valid_ids: del cache[wid]; changed=True
+    if changed:
+        try:
+            with open(WARDROBE_SEMANTIC_CACHE_PATH,"w",encoding="utf-8") as f: json.dump(cache,f,ensure_ascii=False,indent=2)
+        except Exception as exc: print(f"⚠️ [WARDROBE_SEMANTIC_CACHE_WRITE_FAILED] {type(exc).__name__}: {exc}")
+    return cache
+
+
+def _compact_wardrobe_brief(item, semantic_cache=None):
     if not isinstance(item, dict):
         return {}
+    wid=str(item.get("id") or "").strip().upper()
+    semantic_cache = semantic_cache if isinstance(semantic_cache,dict) else _load_or_refresh_wardrobe_semantic_cache([item])
+    semantic=((semantic_cache.get(wid) or {}).get("semantic") if isinstance(semantic_cache.get(wid),dict) else None) or _wardrobe_semantic_profile(item)
     return {
-        "id": str(item.get("id") or "").strip(),
+        "id": wid,
         "name": str(item.get("name") or "").strip(),
         "main_category": str(item.get("main_category") or "").strip(),
         "sub_category": str(item.get("sub_category") or "").strip(),
-        "tags": [str(x).strip() for x in (item.get("tags") or []) if str(x).strip()][:6],
+        "tags": [str(x).strip() for x in (item.get("tags") or []) if str(x).strip()][:14],
         "style_summary": str(item.get("style_summary") or "").strip(),
+        "semantic": semantic,
     }
 
 
@@ -1051,7 +1128,8 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
     recent_3day_ids, last_10_ids_set, last_10_ids_ordered = _wardrobe_recent_usage_sets(recent_entries)
     candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in recent_3day_ids] or usable
 
-    catalog = [_compact_wardrobe_brief(item) for item in candidate_items]
+    semantic_cache = _load_or_refresh_wardrobe_semantic_cache(usable)
+    catalog = [_compact_wardrobe_brief(item, semantic_cache) for item in candidate_items]
     recent_summary = _summarize_recent_wardrobe_usage(recent_entries, limit=8)
     prompt = f"""
 你是小俠的穿搭挑選助理。請根據需求，從衣櫃中挑出最適合的一件。
@@ -1067,9 +1145,10 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
 2. 不可自創不存在的 W 編號。
 3. 最近 3 天穿過的同一件，原則上不要再選，除非候選非常少。
 4. 最近 10 次內出現過的衣服，請降低優先權，讓整體更有輪替感。
-5. 若場景偏居家、床邊、燭光、夜晚、交換日記，可優先考慮睡衣／居家服或內衣，但仍需看整體氣氛。
-6. 若場景偏外出、餐廳、夜景、約會，可優先考慮洋裝、套裝或適合外出的造型。
-7. 回答必須是 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由"}}
+5. 先從需求推論「場合屬性」，再判斷「正式程度」，接著判斷「季節與功能」，最後才考慮風格與顏色；不要只比對相同關鍵字。
+6. 居家私密情境才可考慮睡衣／居家服或內衣；公開社交情境優先社交、休閒、Smart Casual 或輕正式服裝。
+7. 候選中的 semantic.formality／season／occasion／style 是程式從既有 JSON 推導的穿搭語意，可直接用於判斷，但不得讓衣服反過來改變本次場景。
+8. 回答必須是 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由"}}
 
 本次可選衣櫃清單：
 {json.dumps(catalog, ensure_ascii=False)}
@@ -1897,6 +1976,8 @@ def _autonomy_wardrobe_candidate_score(item, activity, visual_mode):
         str(item.get("style_summary") or ""),
     ]).lower()
     main = str(item.get("main_category") or "")
+    semantic = _wardrobe_semantic_profile(item)
+    text += " " + " ".join(sum([semantic.get("formality", []), semantic.get("season", []), semantic.get("occasion", []), semantic.get("style", [])], [])).lower()
     activity_tags = [str(x).lower() for x in (activity.get("activity_tags") or [])]
     preferred = [str(x).lower() for x in (activity.get("preferred_wardrobe_tags") or [])]
     forbidden = [str(x).lower() for x in (activity.get("forbidden_wardrobe_tags") or [])]
@@ -2020,7 +2101,8 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
     eligible.sort(key=lambda x:x[0], reverse=True)
     candidates=[item for _score,item in eligible[:min(20,len(eligible))]]
     recent_summary=_summarize_recent_wardrobe_usage(recent_entries, limit=8)
-    catalog=[_compact_wardrobe_brief(x) for x in candidates]
+    semantic_cache=_load_or_refresh_wardrobe_semantic_cache(items)
+    catalog=[_compact_wardrobe_brief(x, semantic_cache) for x in candidates]
     prompt=f"""
 你是小俠的穿搭挑選助理。請從候選衣櫃中選出最適合本次活動的一件。
 活動：{activity_text}
@@ -2029,10 +2111,11 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
 {recent_summary}
 規則：
 1. 只能回傳候選清單中真實存在的 wardrobe_id，不可自創。
-2. 先符合活動場合，再考慮漂亮與小俠風格。
-3. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
-4. 最近 3 天穿過者強烈降權，最近 10 次穿過者適度降權。
-5. 不要因衣服的建議場景改變本次活動。
+2. 不要只找與活動文字完全相同的詞。請依序推論：場合屬性 → 正式程度 → 季節／功能 → 風格 → 顏色。
+3. 候選中的 semantic.formality／season／occasion／style 是程式由現有 JSON 推導的語意資料，應優先用於判斷。
+4. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
+5. 最近 3 天穿過者強烈降權，最近 10 次穿過者適度降權。
+6. 不要因衣服的建議場景改變本次活動。
 只回 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由","confidence":0.0}}
 候選：{json.dumps(catalog, ensure_ascii=False)}
 """
@@ -12217,11 +12300,14 @@ WARDROBE_MAIN_CATEGORIES = [
     "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
 ]
 
+# v1.5.32_R1：新資料使用固定分類白名單；舊衣櫃資料不遷移、不改寫。
+# 細節（如貼身吊帶、茶歇裙、百褶、極短）應放在 tags / style_summary，
+# 不再讓 AI 自由發明 sub_category，避免同類服裝被拆成大量近義分類。
 WARDROBE_SUBCATEGORY_OPTIONS = {
-    "洋裝": ["洋裝", "短洋裝", "長洋裝", "連衣裙", "禮服"],
+    "洋裝": ["洋裝", "短洋裝", "長洋裝", "禮服"],
     "上衣": ["T恤", "襯衫", "針織衫", "背心", "罩衫", "上衣"],
-    "下身": ["短裙", "長裙", "半身裙", "褲子", "短褲", "下身"],
-    "套裝": ["裙裝套裝", "褲裝套裝", "居家套裝", "圍裙套裝", "上下身套裝", "套裝"],
+    "下身": ["短裙", "長裙", "半身裙", "褲子", "短褲", "褲裙", "下身"],
+    "套裝": ["裙裝套裝", "褲裝套裝", "褲裙套裝", "運動套裝", "居家套裝", "圍裙套裝", "上下身套裝", "套裝"],
     "外套": ["外套", "罩衫", "大衣", "針織外套"],
     "睡衣／居家服": ["睡裙", "睡袍", "睡衣套裝", "居家套裝", "居家服"],
     "內衣": ["內衣套裝", "胸罩", "內褲", "吊帶內衣", "內衣"],
@@ -12253,15 +12339,54 @@ def _normalize_wardrobe_main_category(value, fallback=None):
 
 
 def _normalize_wardrobe_sub_category(main_category, value):
+    """將新資料的子分類收斂到固定白名單；不會批次改寫既有衣櫃 JSON。"""
     main_category = _normalize_wardrobe_main_category(main_category, fallback="上衣") or "上衣"
+    options = WARDROBE_SUBCATEGORY_OPTIONS.get(main_category, [main_category])
     raw = _clean_text_compact(value)
     if not raw:
-        return WARDROBE_SUBCATEGORY_OPTIONS.get(main_category, [main_category])[0]
+        return options[0]
+
     aliases = {
-        "連身裙": "連衣裙", "連身洋裝": "洋裝", "睡衣": "睡衣套裝", "睡袍／罩衫": "睡袍",
-        "半裙": "半身裙", "裙": "半身裙", "衣服": main_category,
+        "連衣裙": "洋裝", "連身裙": "洋裝", "連身洋裝": "洋裝", "背心裙": "洋裝",
+        "小洋裝": "短洋裝", "迷你洋裝": "短洋裝", "連身短洋裝": "短洋裝",
+        "中長洋裝": "洋裝", "茶歇裙": "洋裝", "日常洋裝": "洋裝",
+        "小禮服": "禮服", "晚宴禮服": "禮服", "舞台洋裝": "禮服",
+        "半裙": "半身裙", "裙": "半身裙", "褲裙": "褲裙",
+        "短裙套裝": "裙裝套裝", "百褶裙套裝": "裙裝套裝", "長裙套裝": "裙裝套裝",
+        "連衣裙套裝": "裙裝套裝", "上衣長裙套裝": "裙裝套裝", "蓬裙套裝": "裙裝套裝",
+        "短褲套裝": "褲裝套裝", "甜美褲裝套裝": "褲裝套裝",
+        "運動服裝套裝": "運動套裝", "運動居家套裝": "運動套裝",
+        "兩件式套裝": "上下身套裝", "三件式套裝": "上下身套裝",
+        "休閒套裝": "上下身套裝", "甜美套裝": "上下身套裝", "休閒時尚套裝": "上下身套裝",
+        "睡衣": "睡衣套裝", "性感睡衣": "睡衣套裝", "睡袍／罩衫": "睡袍",
+        "居家長洋裝": "居家服", "衣服": options[0],
     }
-    return aliases.get(raw, raw)
+    normalized = aliases.get(raw, raw)
+    if normalized in options:
+        return normalized
+
+    # 對 AI 產生的自由文字做有限關鍵字歸併，仍只輸出白名單值。
+    if main_category == "洋裝":
+        if any(k in raw for k in ("禮服", "晚宴", "舞台")): return "禮服"
+        if any(k in raw for k in ("短", "迷你")): return "短洋裝"
+        if any(k in raw for k in ("長", "及踝", "拖地")): return "長洋裝"
+        return "洋裝"
+    if main_category == "套裝":
+        if "運動" in raw: return "運動套裝"
+        if "居家" in raw: return "居家套裝"
+        if "圍裙" in raw: return "圍裙套裝"
+        if "褲裙" in raw: return "褲裙套裝"
+        if "裙" in raw: return "裙裝套裝"
+        if "褲" in raw: return "褲裝套裝"
+        return "上下身套裝"
+    if main_category == "下身":
+        if "褲裙" in raw: return "褲裙"
+        if "短裙" in raw: return "短裙"
+        if "長裙" in raw: return "長裙"
+        if "裙" in raw: return "半身裙"
+        if "短褲" in raw: return "短褲"
+        if "褲" in raw: return "褲子"
+    return options[0]
 
 
 def _wardrobe_tags_from_text(*parts, limit=8):
@@ -12814,11 +12939,13 @@ def _wardrobe_analysis_prompt(name_hint=""):
 
 使用者名稱提示：{name_hint or '無'}
 可用 main_category 只能從：{', '.join(WARDROBE_MAIN_CATEGORIES)}
-可參考 sub_category：{json.dumps(WARDROBE_SUBCATEGORY_OPTIONS, ensure_ascii=False)}
+可用 sub_category 必須嚴格從對應白名單選取，不得自行發明近義名稱：{json.dumps(WARDROBE_SUBCATEGORY_OPTIONS, ensure_ascii=False)}
 
 【分類硬規則】
 - 連衣裙、連身裙、小洋裝、禮服：main_category=洋裝。
-- 明顯的上衣＋裙／褲，或含鞋包配件的完整搭配：main_category=套裝。
+- 只有「兩件以上可分離的主要穿著衣物」（例如上衣＋裙、上衣＋褲）才可判為 main_category=套裝。
+- 一件洋裝搭配鞋、包、項鍊、帽子等配件，仍是 main_category=洋裝；配件只寫入 tags 與 style_summary，絕不可因配件數量改判套裝。
+- 判斷分類時先找核心穿著主體，不可用圖片中的物件總數代替服裝結構判斷。
 - 只有單件裙、褲、短褲才是下身；不可把連衣裙歸為下身。
 - 胸罩、內褲、吊帶內衣、內衣成套：main_category=內衣。
 - 比基尼、連身泳衣：main_category=泳裝。
@@ -12830,22 +12957,26 @@ def _wardrobe_analysis_prompt(name_hint=""):
 - 不得使用「未命名服飾」「去人化服飾」等無辨識力名稱。
 
 【tags】
-- 4～8 個短詞，優先順序：主色、材質、服裝結構、長短、風格、特殊設計、配件、適用場合。
-- 不要寫「漂亮、好看、時尚、衣服」等空泛詞。
+- 產出 8～14 個短詞，盡量涵蓋：主色、材質、服裝結構、長短、風格、正式程度、季節、場合屬性、特殊設計、配件。
+- 正式程度只能優先使用：居家、休閒、Smart Casual、輕正式、正式、禮服。
+- 季節只能優先使用：春夏、秋冬、四季。
+- 場合屬性只能優先使用：社交、休閒、居家、商務、正式、晚宴、旅遊、運動、泳裝、睡眠、內著、Cosplay。
+- 場合屬性是抽象穿搭用途，不得寫死「咖啡廳、餐廳、美術館、公園」等具體地點。
+- 不要寫「漂亮、好看、時尚、衣服、百搭」等空泛詞。
 - 圖中明確可見的透明、蕾絲、鏤空、無肉色內布／無內襯、露背、極短、高腰、低腰、不對稱、綁帶等關鍵特徵不可省略。
 
 【style_summary】
-- 一句完整中文視覺摘要，優先描述：件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯、特殊結構、鞋包飾品。
+- 一句完整中文視覺摘要：先忠實描述件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯、特殊結構、鞋包飾品；句尾再用極短詞說明整體穿搭屬性，例如「呈現輕正式、優雅的社交穿搭」。
 - 這段文字會直接提供給生圖模型，必須具體、可視覺化。
-- 不得憑空加入品牌、人物身材、姿勢、場景或圖片中看不到的細節。
-- 場景建議不是必要內容；若寫，只能放句尾且很短。
+- 不得憑空加入品牌、人物身材、姿勢、動作或具體場景。
+- 不要列舉咖啡廳、約會、婚禮等地點清單；只使用社交、休閒、商務、正式、晚宴、旅遊等抽象場合屬性。
 
 只回傳以下 JSON，不要 Markdown：
 {{
   "name": "中文名稱",
   "main_category": "合法主分類",
-  "sub_category": "細分類",
-  "tags": ["4至8個短詞"],
+  "sub_category": "對應白名單中的細分類",
+  "tags": ["8至14個短詞"],
   "style_summary": "具體視覺摘要"
 }}
 """.strip()
@@ -12876,13 +13007,30 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
     elif any(k in evidence for k in ["睡裙", "睡袍", "睡衣套裝", "居家套裝"]):
         forced_main = "睡衣／居家服"
         forced_sub = "睡裙" if "睡裙" in evidence else "睡袍" if "睡袍" in evidence else "睡衣套裝"
-    elif any(k in evidence for k in ["連衣裙", "連身裙", "連身洋裝", "小洋裝", "禮服"]):
+    elif any(k in evidence for k in ["洋裝", "連衣裙", "連身裙", "連身洋裝", "小洋裝", "迷你洋裝", "背心裙", "禮服", "dress", "gown"]):
+        # 一件完整連身衣物即屬洋裝；鞋包飾品不會把它變成套裝。
         forced_main = "洋裝"
-        forced_sub = "禮服" if "禮服" in evidence else "連衣裙"
-    elif any(k in evidence for k in ["上衣搭配", "上衣＋", "上衣+", "兩件式", "三件式", "成套", "套組"]):
+        if any(k in evidence for k in ["禮服", "晚宴", "gown"]):
+            forced_sub = "禮服"
+        elif any(k in evidence for k in ["短洋裝", "迷你", "mini dress"]):
+            forced_sub = "短洋裝"
+        elif any(k in evidence for k in ["長洋裝", "及踝", "拖地", "maxi"]):
+            forced_sub = "長洋裝"
+        else:
+            forced_sub = "洋裝"
+    elif any(k in evidence for k in ["上衣搭配", "上衣＋", "上衣+", "上衣與", "上衣和", "兩件式", "三件式"]):
         if not any(k in evidence for k in ["內衣", "泳裝", "睡衣"]):
             forced_main = "套裝"
-            forced_sub = "裙裝套裝" if any(k in evidence for k in ["裙", "skirt"]) else "褲裝套裝" if any(k in evidence for k in ["褲", "pants", "shorts"]) else "套裝"
+            if "運動" in evidence:
+                forced_sub = "運動套裝"
+            elif "褲裙" in evidence:
+                forced_sub = "褲裙套裝"
+            elif any(k in evidence for k in ["裙", "skirt"]):
+                forced_sub = "裙裝套裝"
+            elif any(k in evidence for k in ["褲", "pants", "shorts"]):
+                forced_sub = "褲裝套裝"
+            else:
+                forced_sub = "上下身套裝"
 
     if forced_main and main != forced_main:
         corrections.append(f"main_category:{main or 'None'}->{forced_main}")
@@ -12902,14 +13050,22 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
         if len(tag) > 16:
             continue
         tags.append(tag)
-        if len(tags) >= 8:
+        if len(tags) >= 14:
             break
-    if len(tags) < 4:
-        for tag in _wardrobe_tags_from_text(name, main, sub, summary, limit=8):
+    if len(tags) < 8:
+        for tag in _wardrobe_tags_from_text(name, main, sub, summary, limit=14):
             if tag and tag not in stop_tags and tag not in tags and len(tag) <= 16:
                 tags.append(tag)
-            if len(tags) >= 6:
+            if len(tags) >= 10:
                 break
+
+    # v1.5.32：補入正式程度、季節與抽象場合屬性，避免只能靠具體場景關鍵字選衣。
+    semantic_seed = {"name":name,"main_category":main,"sub_category":sub,"tags":tags,"style_summary":summary}
+    semantic = _wardrobe_semantic_profile(semantic_seed)
+    for group in (semantic.get("style") or [], semantic.get("formality") or [], semantic.get("season") or [], semantic.get("occasion") or []):
+        for tag in group:
+            if tag and tag not in tags and len(tags) < 14:
+                tags.append(tag)
 
     # 去除常見的空泛場景宣傳句，保留真正視覺描述。
     summary = re.sub(r"(?:，|。|；)?\s*(?:非常|十分)?適合[^。；]*[。；]?", "", summary).strip(" ，。；")
@@ -12925,7 +13081,7 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
             "name": name,
             "main_category": main,
             "sub_category": sub,
-            "tags": tags[:8],
+            "tags": tags[:14],
             "style_summary": summary[:500],
         },
         "corrections": corrections,
