@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.32_R1"
+LOBSTER_VERSION = "1.5.32_R2"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.32_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.32_R2")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -12300,7 +12300,7 @@ WARDROBE_MAIN_CATEGORIES = [
     "洋裝", "上衣", "下身", "套裝", "外套", "睡衣／居家服", "內衣", "泳裝", "鞋子", "包包", "配件", "Cosplay／特殊服裝"
 ]
 
-# v1.5.32_R1：新資料使用固定分類白名單；舊衣櫃資料不遷移、不改寫。
+# v1.5.32_R2：沿用固定分類白名單，並強化可見性感小心機結構辨識。
 # 細節（如貼身吊帶、茶歇裙、百褶、極短）應放在 tags / style_summary，
 # 不再讓 AI 自由發明 sub_category，避免同類服裝被拆成大量近義分類。
 WARDROBE_SUBCATEGORY_OPTIONS = {
@@ -12928,6 +12928,46 @@ def _wardrobe_image_mime_type(local_path):
     }.get(ext, "image/jpeg")
 
 
+# v1.5.32_R2：從 Vision 已明確辨識的文字中，收斂「性感小心機」結構標籤。
+# 只根據模型已寫出的可見證據補標籤，不憑名稱或程式自行幻想。
+def _wardrobe_allure_detail_tags(evidence):
+    text = str(evidence or "").lower()
+    rules = [
+        (("側腰挖空", "腰側挖空", "側腰鏤空", "腰側鏤空"), "側腰挖空"),
+        (("胸前挖空", "胸口挖空", "胸前鏤空", "胸口鏤空"), "胸前挖空"),
+        (("腹部挖空", "腹部鏤空", "前腹挖空"), "腹部挖空"),
+        (("側腰拼接", "腰側拼接"), "側腰拼接"),
+        (("透膚拼接", "透明拼接", "網紗拼接", "薄紗拼接"), "透膚拼接"),
+        (("蕾絲透視", "透視蕾絲", "透膚蕾絲"), "蕾絲透視"),
+        (("大面積露背", "大片露背", "深露背"), "大面積露背"),
+        (("露背", "美背"), "露背"),
+        (("交叉背", "背部交叉", "交叉肩帶"), "交叉背"),
+        (("深v", "深 v", "低胸v領", "低胸 v 領"), "深V領"),
+        (("低胸", "低領口"), "低胸剪裁"),
+        (("一字領", "露肩", "平口"), "露肩剪裁"),
+        (("露腰", "短版露腰"), "露腰"),
+        (("側開衩", "側邊開衩"), "側開衩"),
+        (("高開衩", "高衩"), "高開衩"),
+        (("不對稱挖空",), "不對稱挖空"),
+        (("綁帶", "繫帶"), "綁帶設計"),
+        (("細肩帶",), "細肩帶"),
+        (("鍊條肩帶", "鏈條肩帶", "鍊肩帶", "鏈肩帶"), "鍊條肩帶"),
+        (("立體罩杯", "罩杯立體", "胸杯立體"), "立體罩杯"),
+        (("蝴蝶結收腰", "蝴蝶結腰帶", "腰間蝴蝶結"), "蝴蝶結收腰"),
+        (("包臀", "貼臀"), "包臀剪裁"),
+        (("貼身剪裁", "修身剪裁", "合身剪裁"), "貼身剪裁"),
+        (("臀部抓皺", "臀線抓皺", "提臀抓皺"), "臀部抓皺"),
+        (("大腿綁帶", "腿部綁帶"), "大腿綁帶"),
+        (("吊襪帶",), "吊襪帶感"),
+        (("高腰收束", "高腰收腰", "高腰線"), "高腰收束"),
+    ]
+    found = []
+    for aliases, canonical in rules:
+        if any(alias in text for alias in aliases) and canonical not in found:
+            found.append(canonical)
+    return found
+
+
 def _wardrobe_analysis_prompt(name_hint=""):
     return f"""
 你是「小俠衣櫃」的專業服裝商品編目員。請只根據圖片中真正可見的服裝、鞋包與飾品，填入既有衣櫃 JSON 欄位；不得新增欄位。
@@ -12956,8 +12996,15 @@ def _wardrobe_analysis_prompt(name_hint=""):
 - 有名稱提示時優先完整保留；沒有時取 8～18 字中文名稱。
 - 不得使用「未命名服飾」「去人化服飾」等無辨識力名稱。
 
+【性感小心機結構檢查】
+- 必須逐項檢查圖片是否明確可見：側腰／胸前／腹部挖空或鏤空、側腰拼接、透膚或薄紗拼接、蕾絲透視、大面積露背、交叉背、深V或低胸、露肩、露腰、側開衩或高開衩、不對稱挖空、綁帶、細肩帶、鍊條肩帶、立體罩杯、蝴蝶結收腰、包臀貼身、臀部抓皺、大腿綁帶、吊襪帶感。
+- 看得到才寫；看不到、被遮住或無法確認時絕對不要猜。
+- 這些是服裝結構辨識詞，不要只用「性感」「甜美」等泛稱取代。
+- 若圖片有正面與背面，必須同時比對；背面的露背、交叉背、肩帶與扣帶結構不可漏掉。
+
 【tags】
 - 產出 8～14 個短詞，盡量涵蓋：主色、材質、服裝結構、長短、風格、正式程度、季節、場合屬性、特殊設計、配件。
+- 若存在上述「性感小心機」結構，至少保留 1～4 個最具辨識力的具體結構標籤，優先於空泛風格詞。
 - 正式程度只能優先使用：居家、休閒、Smart Casual、輕正式、正式、禮服。
 - 季節只能優先使用：春夏、秋冬、四季。
 - 場合屬性只能優先使用：社交、休閒、居家、商務、正式、晚宴、旅遊、運動、泳裝、睡眠、內著、Cosplay。
@@ -12967,6 +13014,7 @@ def _wardrobe_analysis_prompt(name_hint=""):
 
 【style_summary】
 - 一句完整中文視覺摘要：先忠實描述件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯、特殊結構、鞋包飾品；句尾再用極短詞說明整體穿搭屬性，例如「呈現輕正式、優雅的社交穿搭」。
+- 圖中若有性感小心機結構，摘要必須明說其位置與形式，例如「兩側腰身採挖空拼接」「背部為大面積露背與交叉肩帶」，不可只寫成「性感設計」。
 - 這段文字會直接提供給生圖模型，必須具體、可視覺化。
 - 不得憑空加入品牌、人物身材、姿勢、動作或具體場景。
 - 不要列舉咖啡廳、約會、婚禮等地點清單；只使用社交、休閒、商務、正式、晚宴、旅遊等抽象場合屬性。
@@ -13042,7 +13090,12 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
     sub = _normalize_wardrobe_sub_category(main, forced_sub or sub_raw)
 
     stop_tags = {"漂亮", "好看", "時尚", "衣服", "服飾", "服裝", "百搭", "高級", "性感"}
+    # 先抓具體小心機結構，避免它們被一般顏色／場合詞擠出 14 個上限。
+    allure_tags = _wardrobe_allure_detail_tags(evidence)
     tags = []
+    for tag in allure_tags:
+        if tag and tag not in tags:
+            tags.append(tag)
     for value in tags_raw:
         tag = _clean_text_compact(value)
         if not tag or tag in stop_tags or tag in tags:
@@ -13052,6 +13105,9 @@ def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
         tags.append(tag)
         if len(tags) >= 14:
             break
+    if allure_tags:
+        corrections.append("allure_details:" + ",".join(allure_tags))
+
     if len(tags) < 8:
         for tag in _wardrobe_tags_from_text(name, main, sub, summary, limit=14):
             if tag and tag not in stop_tags and tag not in tags and len(tag) <= 16:
