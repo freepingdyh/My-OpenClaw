@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.30"
+LOBSTER_VERSION = "1.5.31"
 
 
 def _normalize_generation_level(level):
@@ -567,7 +567,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.30")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.31")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -583,6 +583,11 @@ WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
 # 🎴 今晚命運牌 v2：卡面圖與 cosplay 角色宇宙，皆放在 Zeabur persistent volume。
 COSPLAY_ROLES_PATH = os.path.join(MEMORY_DIR, "cosplay_roles.json")
 WARDROBE_USAGE_LOG_PATH = os.path.join(MEMORY_DIR, "wardrobe_usage_log.json")
+# 👗 v1.5.31：衣櫃圖片 metadata 以 OpenAI vision 為主，Gemini 為備援；不改既有 JSON schema。
+WARDROBE_VISION_PROVIDER = (os.environ.get("WARDROBE_VISION_PROVIDER", "openai") or "openai").strip().lower()
+WARDROBE_OPENAI_MODEL = (os.environ.get("WARDROBE_OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini").strip()
+WARDROBE_GEMINI_MODEL = (os.environ.get("WARDROBE_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+WARDROBE_ANALYSIS_TRACE_PATH = os.path.join(MEMORY_DIR, "wardrobe_analysis_trace.jsonl")
 GENERATION_TRACE_DIR = os.path.join(MEMORY_DIR, "generation_trace")  # 🧭 v1.4.82：生圖決策鏈追溯
 GENERATION_TRACE_LATEST_PATH = os.path.join(GENERATION_TRACE_DIR, "latest.json")
 GENERATION_TRACE_ALL_PATH = os.path.join(GENERATION_TRACE_DIR, "all_trace.jsonl")
@@ -12790,83 +12795,230 @@ def _wardrobe_category_counts(items):
     return counts
 
 
+def _wardrobe_image_mime_type(local_path):
+    ext = Path(str(local_path or "")).suffix.lower()
+    return {
+        ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    }.get(ext, "image/jpeg")
+
+
+def _wardrobe_analysis_prompt(name_hint=""):
+    return f"""
+你是「小俠衣櫃」的專業服裝商品編目員。請只根據圖片中真正可見的服裝、鞋包與飾品，填入既有衣櫃 JSON 欄位；不得新增欄位。
+
+【證據優先順序】
+1. 圖片是服裝結構、品項、顏色、材質、長短、透明度、內襯與正背面差異的最高依據。
+2. 使用者名稱提示原則上保留作為 name；但分類、tags、style_summary 仍須忠於圖片，不得被名稱誤導。
+3. 看不清楚的材質或結構不要猜；可用「疑似」但盡量少用。
+
+使用者名稱提示：{name_hint or '無'}
+可用 main_category 只能從：{', '.join(WARDROBE_MAIN_CATEGORIES)}
+可參考 sub_category：{json.dumps(WARDROBE_SUBCATEGORY_OPTIONS, ensure_ascii=False)}
+
+【分類硬規則】
+- 連衣裙、連身裙、小洋裝、禮服：main_category=洋裝。
+- 明顯的上衣＋裙／褲，或含鞋包配件的完整搭配：main_category=套裝。
+- 只有單件裙、褲、短褲才是下身；不可把連衣裙歸為下身。
+- 胸罩、內褲、吊帶內衣、內衣成套：main_category=內衣。
+- 比基尼、連身泳衣：main_category=泳裝。
+- 睡裙、睡袍、居家套裝：main_category=睡衣／居家服。
+- 只有鞋、包或飾品時，分別歸鞋子、包包、配件。
+
+【name】
+- 有名稱提示時優先完整保留；沒有時取 8～18 字中文名稱。
+- 不得使用「未命名服飾」「去人化服飾」等無辨識力名稱。
+
+【tags】
+- 4～8 個短詞，優先順序：主色、材質、服裝結構、長短、風格、特殊設計、配件、適用場合。
+- 不要寫「漂亮、好看、時尚、衣服」等空泛詞。
+- 圖中明確可見的透明、蕾絲、鏤空、無肉色內布／無內襯、露背、極短、高腰、低腰、不對稱、綁帶等關鍵特徵不可省略。
+
+【style_summary】
+- 一句完整中文視覺摘要，優先描述：件數與組成、顏色、材質、領口／袖型、腰線、裙褲長度、透明／內襯、特殊結構、鞋包飾品。
+- 這段文字會直接提供給生圖模型，必須具體、可視覺化。
+- 不得憑空加入品牌、人物身材、姿勢、場景或圖片中看不到的細節。
+- 場景建議不是必要內容；若寫，只能放句尾且很短。
+
+只回傳以下 JSON，不要 Markdown：
+{{
+  "name": "中文名稱",
+  "main_category": "合法主分類",
+  "sub_category": "細分類",
+  "tags": ["4至8個短詞"],
+  "style_summary": "具體視覺摘要"
+}}
+""".strip()
+
+
+def _normalize_wardrobe_analysis(raw, name_hint="", provider="unknown"):
+    raw = raw if isinstance(raw, dict) else {}
+    corrections = []
+    hinted = _clean_text_compact(name_hint)
+    generated_name = _clean_text_compact(raw.get("name") or "")
+    name = hinted or generated_name or "未命名服飾"
+    if hinted and generated_name and hinted != generated_name:
+        corrections.append("name_preserved_from_user_hint")
+
+    main = _normalize_wardrobe_main_category(raw.get("main_category"), fallback=None)
+    sub_raw = _clean_text_compact(raw.get("sub_category") or "")
+    tags_raw = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+    summary = _clean_text_compact(raw.get("style_summary") or "")
+    evidence = " ".join([name, sub_raw, " ".join(str(x) for x in tags_raw), summary]).lower()
+
+    forced_main = None
+    forced_sub = None
+    if any(k in evidence for k in ["胸罩", "內褲", "內衣套裝", "吊帶內衣", "bra", "bralette"]):
+        forced_main, forced_sub = "內衣", "內衣套裝"
+    elif any(k in evidence for k in ["比基尼", "連身泳衣", "泳裝", "泳衣"]):
+        forced_main = "泳裝"
+        forced_sub = "比基尼" if "比基尼" in evidence else "連身泳衣" if "連身泳衣" in evidence else "泳裝"
+    elif any(k in evidence for k in ["睡裙", "睡袍", "睡衣套裝", "居家套裝"]):
+        forced_main = "睡衣／居家服"
+        forced_sub = "睡裙" if "睡裙" in evidence else "睡袍" if "睡袍" in evidence else "睡衣套裝"
+    elif any(k in evidence for k in ["連衣裙", "連身裙", "連身洋裝", "小洋裝", "禮服"]):
+        forced_main = "洋裝"
+        forced_sub = "禮服" if "禮服" in evidence else "連衣裙"
+    elif any(k in evidence for k in ["上衣搭配", "上衣＋", "上衣+", "兩件式", "三件式", "成套", "套組"]):
+        if not any(k in evidence for k in ["內衣", "泳裝", "睡衣"]):
+            forced_main = "套裝"
+            forced_sub = "裙裝套裝" if any(k in evidence for k in ["裙", "skirt"]) else "褲裝套裝" if any(k in evidence for k in ["褲", "pants", "shorts"]) else "套裝"
+
+    if forced_main and main != forced_main:
+        corrections.append(f"main_category:{main or 'None'}->{forced_main}")
+        main = forced_main
+    if not main:
+        inferred = _infer_wardrobe_meta_from_name(name)
+        main = inferred.get("main_category", "上衣")
+        corrections.append(f"main_category_fallback->{main}")
+    sub = _normalize_wardrobe_sub_category(main, forced_sub or sub_raw)
+
+    stop_tags = {"漂亮", "好看", "時尚", "衣服", "服飾", "服裝", "百搭", "高級", "性感"}
+    tags = []
+    for value in tags_raw:
+        tag = _clean_text_compact(value)
+        if not tag or tag in stop_tags or tag in tags:
+            continue
+        if len(tag) > 16:
+            continue
+        tags.append(tag)
+        if len(tags) >= 8:
+            break
+    if len(tags) < 4:
+        for tag in _wardrobe_tags_from_text(name, main, sub, summary, limit=8):
+            if tag and tag not in stop_tags and tag not in tags and len(tag) <= 16:
+                tags.append(tag)
+            if len(tags) >= 6:
+                break
+
+    # 去除常見的空泛場景宣傳句，保留真正視覺描述。
+    summary = re.sub(r"(?:，|。|；)?\s*(?:非常|十分)?適合[^。；]*[。；]?", "", summary).strip(" ，。；")
+    if not summary:
+        summary = f"{name}，{main}／{sub}；主要特徵包含{'、'.join(tags[:6])}。"
+        corrections.append("style_summary_generated_fallback")
+    if len(summary) < 18:
+        summary = f"{summary.rstrip('。')}；主要特徵包含{'、'.join(tags[:6])}。"
+        corrections.append("style_summary_expanded")
+
+    return {
+        "meta": {
+            "name": name,
+            "main_category": main,
+            "sub_category": sub,
+            "tags": tags[:8],
+            "style_summary": summary[:500],
+        },
+        "corrections": corrections,
+        "provider": provider,
+    }
+
+
+def _write_wardrobe_analysis_trace(payload):
+    try:
+        os.makedirs(os.path.dirname(WARDROBE_ANALYSIS_TRACE_PATH), exist_ok=True)
+        row = {"timestamp": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"), **(payload or {})}
+        with open(WARDROBE_ANALYSIS_TRACE_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_trace_sanitize(row), ensure_ascii=False) + "\n")
+    except Exception as exc:
+        print(f"⚠️ [WARDROBE_ANALYSIS_TRACE_FAILED] {type(exc).__name__}: {exc}")
+
+
+async def _classify_wardrobe_with_openai(local_path, name_hint=""):
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY_NOT_SET")
+    with open(str(local_path), "rb") as f:
+        image_b64 = base64.b64encode(f.read()).decode("ascii")
+    data_url = f"data:{_wardrobe_image_mime_type(local_path)};base64,{image_b64}"
+    prompt = _wardrobe_analysis_prompt(name_hint)
+    response = await openai_client.chat.completions.create(
+        model=WARDROBE_OPENAI_MODEL,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "你是嚴謹的服裝商品編目員。只能依圖片證據與指定 schema 回傳 JSON。"},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+            ]},
+        ],
+    )
+    content = response.choices[0].message.content if response.choices else ""
+    data = _extract_json_object(content)
+    if not isinstance(data, dict):
+        raise RuntimeError("OPENAI_WARDROBE_JSON_INVALID")
+    return data
+
+
+async def _classify_wardrobe_with_gemini(local_path, name_hint=""):
+    with open(str(local_path), "rb") as f:
+        image_data = f.read()
+    response = await gemini_client.aio.models.generate_content(
+        model=WARDROBE_GEMINI_MODEL,
+        contents=[
+            types.Part.from_bytes(data=image_data, mime_type=_wardrobe_image_mime_type(local_path)),
+            _wardrobe_analysis_prompt(name_hint),
+        ],
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+    )
+    data = _extract_json_object(response.text)
+    if not isinstance(data, dict):
+        raise RuntimeError("GEMINI_WARDROBE_JSON_INVALID")
+    return data
+
+
 async def _classify_wardrobe_item_from_image(local_path, name_hint=""):
     fallback_name = _clean_text_compact(name_hint or "未命名服飾")
     if not local_path or not os.path.exists(str(local_path)):
         print(f"⚠️ [WARDROBE_CLASSIFY_NO_IMAGE] path={local_path}")
-        return {
-            "name": fallback_name,
-            "main_category": "配件",
-            "sub_category": "未分類",
-            "tags": [],
-            "style_summary": fallback_name,
-        }
-    try:
-        with open(str(local_path), "rb") as f:
-            data = f.read()
-        prompt = f"""
-你是小俠衣櫃整理員。請根據這張服飾/配件參考圖，整理成結構化衣櫃資料。
-請用「整套造型／衣櫃收藏」角度分類，不要把連衣裙誤判成下身。
-若使用者有提供名稱，優先保留該名稱；若沒有名稱，請依圖片取一個 8~18 字的中文衣服名稱，不要使用「去人化服飾」。
+        return _infer_wardrobe_meta_from_name(fallback_name)
 
-使用者名稱提示：{name_hint or '無'}
-可用主分類只能從以下挑一個：{', '.join(WARDROBE_MAIN_CATEGORIES)}
-子分類建議：{json.dumps(WARDROBE_SUBCATEGORY_OPTIONS, ensure_ascii=False)}
+    provider_order = ["openai", "gemini"] if WARDROBE_VISION_PROVIDER != "gemini" else ["gemini", "openai"]
+    attempts = []
+    for provider in provider_order:
+        try:
+            raw = await (_classify_wardrobe_with_openai(local_path, name_hint) if provider == "openai" else _classify_wardrobe_with_gemini(local_path, name_hint))
+            normalized = _normalize_wardrobe_analysis(raw, name_hint=name_hint, provider=provider)
+            _write_wardrobe_analysis_trace({
+                "status": "success", "provider": provider,
+                "model": WARDROBE_OPENAI_MODEL if provider == "openai" else WARDROBE_GEMINI_MODEL,
+                "name_hint": name_hint, "image_path": str(local_path),
+                "raw_result": raw, "normalized_result": normalized["meta"],
+                "corrections": normalized["corrections"], "fallback_used": bool(attempts),
+                "attempts": attempts,
+            })
+            print(f"✅ [WARDROBE_CLASSIFY_OK] provider={provider} model={WARDROBE_OPENAI_MODEL if provider == 'openai' else WARDROBE_GEMINI_MODEL} name={normalized['meta'].get('name')}")
+            return normalized["meta"]
+        except Exception as exc:
+            attempts.append({"provider": provider, "error": f"{type(exc).__name__}: {str(exc)[:500]}"})
+            print(f"⚠️ [WARDROBE_CLASSIFY_{provider.upper()}_FAILED] {type(exc).__name__}: {exc}")
 
-分類規則：
-- 連衣裙、連身裙、小洋裝、禮服 → 洋裝。
-- 明顯上下身一起搭配、含包鞋配件的整套造型 → 套裝。
-- 睡裙、睡袍、居家套裝 → 睡衣／居家服。
-- 胸罩、內褲、吊帶、內衣套組 → 內衣。
-- 比基尼、泳衣 → 泳裝。
-- 只有單件裙子、褲子、短褲才歸下身；不要把連衣裙歸下身。
-
-只回傳 JSON：
-{{
-  "name": "中文衣服名稱",
-  "main_category": "上方主分類之一",
-  "sub_category": "更細的子分類，例如：連衣裙、裙裝套裝、睡裙、內衣套裝",
-  "tags": ["顏色", "材質", "風格", "用途"],
-  "style_summary": "一句中文說明這件服飾/配件的特色與適用場景"
-}}
-"""
-        resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=data, mime_type="image/png" if str(local_path).lower().endswith(".png") else ("image/webp" if str(local_path).lower().endswith(".webp") else "image/jpeg")),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
-        )
-        data = _extract_json_object(resp.text)
-        if isinstance(data, dict):
-            name = _clean_text_compact(name_hint or data.get("name") or "未命名服飾")
-            if name in {"去人化服飾", "未命名服飾"}:
-                name = _clean_text_compact(data.get("name") or name)
-            main_category = _normalize_wardrobe_main_category(data.get("main_category"), fallback=None)
-            if not main_category:
-                main_category = _infer_wardrobe_meta_from_name(name).get("main_category", "上衣")
-            sub_category = _normalize_wardrobe_sub_category(main_category, data.get("sub_category") or "")
-            tags = [ _clean_text_compact(x) for x in (data.get("tags") or []) if _clean_text_compact(x) ]
-            if not tags:
-                tags = _wardrobe_tags_from_text(name, main_category, sub_category)
-            return {
-                "name": name,
-                "main_category": main_category,
-                "sub_category": sub_category,
-                "tags": tags[:8],
-                "style_summary": _clean_text_compact(data.get("style_summary") or f"{name}｜{main_category}／{sub_category}"),
-            }
-    except Exception as exc:
-        print(f"⚠️ [WARDROBE_CLASSIFY_FAILED] {type(exc).__name__}: {exc}")
-    fallback_name = _clean_text_compact(name_hint or (Path(str(local_path)).stem if local_path else "未命名服飾") or "未命名服飾")
-    return {
-        "name": fallback_name,
-        "main_category": "配件",
-        "sub_category": "未分類",
-        "tags": [],
-        "style_summary": fallback_name,
-    }
+    fallback = _infer_wardrobe_meta_from_name(fallback_name or Path(str(local_path)).stem)
+    _write_wardrobe_analysis_trace({
+        "status": "fallback", "provider": "name_rules", "name_hint": name_hint,
+        "image_path": str(local_path), "normalized_result": fallback,
+        "fallback_used": True, "attempts": attempts,
+    })
+    return fallback
 
 
 def _is_fal_content_policy_error(exc):
@@ -13398,7 +13550,7 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
         return
 
     name_hint = _clean_text_compact(args)
-    status = await ctx.send("👗 小俠正在整理這件收藏，請稍等一下..." if not remove_person else "👗 小俠正在先幫你把人物去掉，再整理這件收藏...")
+    status = await ctx.send("👗 小俠正在用圖片辨識整理名稱、分類、標籤與視覺摘要..." if not remove_person else "👗 小俠正在先幫你把人物去掉，再用圖片辨識整理衣櫃資料...")
 
     try:
         source_url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
@@ -13414,7 +13566,7 @@ async def _handle_wardrobe_add_command(ctx, args, remove_person=False):
             else:
                 raise RuntimeError("WARDROBE_DIRECT_LOCAL_SAVE_FAILED：無法將 Discord 圖片轉存到 Zeabur。")
 
-            meta = _infer_wardrobe_meta_from_name(name_hint or getattr(attachment, "filename", "") or "未命名服飾")
+            meta = await _classify_wardrobe_item_from_image(reference_path, name_hint=name_hint or getattr(attachment, "filename", "") or "")
             pending_payload = {
                 "source_path": source_url,
                 "source_attachment_url": source_url,
