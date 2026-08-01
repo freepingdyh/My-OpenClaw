@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.34_R1"
+LOBSTER_VERSION = "1.5.34_R2"
 
 
 def _normalize_generation_level(level):
@@ -303,6 +303,64 @@ def _asset_catalog_for_prompt() -> str:
         "6. 若大俠送來上述小俠 Sticker，妳要知道那是他拿妳自己的可愛化身和妳互動；要自然回應畫面與情緒，不可說看不懂或問他傳了什麼。"
     )
 
+def _sanitize_visible_reply_text(reply_text: str) -> str:
+    """只保留要顯示給使用者的最終正文；不碰 Sticker / Emoji 控制碼本身。"""
+    text = str(reply_text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return ""
+
+    # 若模型自己標出「正式回覆」分界，只取分界後內容；控制碼若在正文中會完整保留。
+    final_markers = (
+        "好的，那就這樣回覆：", "好的，那就這樣回覆:",
+        "那就這樣回覆：", "那就這樣回覆:",
+        "最終回覆：", "最終回覆:", "最後回覆：", "最後回覆:",
+        "正式回覆：", "正式回覆:", "Final answer:", "Final response:", "Response:",
+    )
+    marker_pos = -1
+    marker_len = 0
+    for marker in final_markers:
+        pos = text.lower().rfind(marker.lower())
+        if pos > marker_pos:
+            marker_pos = pos
+            marker_len = len(marker)
+    if marker_pos >= 0:
+        candidate = text[marker_pos + marker_len:].strip()
+        if candidate:
+            text = candidate
+
+    # 沒有明確分界時，移除開頭整段規劃區；僅針對「位於回覆開頭」的內部標籤。
+    internal_heading = re.compile(
+        r"^\\s*(?:[#>*-]\\s*)?(?:"
+        r"Thinking\\s*Process|Draft(?:\\s*\\d+)?|Analysis|Final\\s*check|Critique|Reasoning|Plan|"
+        r"思緒|思考|分析|推理|草稿|回覆策略|回覆規劃|回答規劃|回應規劃|內部備註|步驟|選擇表情"
+        r")\\s*[：:]",
+        flags=re.IGNORECASE,
+    )
+    if internal_heading.search(text):
+        # 找第一個像自然正文的段落；若找不到，避免把分析內容送出。
+        blocks = [b.strip() for b in re.split(r"\\n\\s*\\n+", text) if b.strip()]
+        natural = []
+        for block in blocks:
+            if internal_heading.match(block):
+                continue
+            if re.match(r"^\\s*(?:\\d+[.、)]|[-*•])\\s+", block):
+                continue
+            if any(k in block for k in ("直接回答", "具體說明", "再次感謝", "選擇表情", "控制碼", "使用 emoji", "使用貼圖")):
+                continue
+            natural.append(block)
+        text = "\n\n".join(natural).strip()
+
+    # 清掉偶發殘留的單行英文/中文標籤，但保留正文與其中的自訂 Emoji 控制碼。
+    text = re.sub(
+        r"(?im)^\\s*(?:Thinking\\s*Process|Draft(?:\\s*\\d+)?|Analysis|Final\\s*check|Critique|Reasoning|Plan|"
+        r"思緒|思考|分析|推理|草稿|回覆策略|回覆規劃|回答規劃|回應規劃|內部備註|選擇表情)\\s*[：:].*$",
+        "",
+        text,
+    )
+    text = re.sub(r"\\n[ \\t]*\\n[ \\t]*\\n+", "\n\n", text).strip()
+    return text.strip('"').strip('「').strip('」').strip()
+
+
 def _extract_xiaoxia_expression_directives(reply_text: str):
     """剝離內部控制碼；相容舊版外漏的 [小俠使用sticker:xia_03_hug]。"""
     raw = str(reply_text or "")
@@ -568,7 +626,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.34_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.34_R2")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -19160,7 +19218,7 @@ async def on_message(message):
                     "6. 成人向互動請用含蓄、詩意、比喻、留白與情緒描寫呈現，例如夜晚的靠近、彼此信任、難忘的親密時光；可以承認自己也有成熟的渴望與感受。\n"
                     #"7. 不把成人內容寫成露骨細節、器官描寫、具體性行為步驟、粗俗詞彙或強烈生理反應；聊天可以有成熟感，但不要讓對話只剩成人話題。\n"
                     "7. 不把成人內容寫成粗俗詞彙；聊天可以有成熟感，但不要讓對話只剩成人話題。\n"
-                    "8. 不輸出任何 Thinking Process、Draft、系統規則或幕後處理等內部內容。\n"
+                    "8. 只輸出真正要對大俠說的最終正文；禁止輸出任何 Thinking Process、Draft、Analysis、思緒、思考、推理、分析、草稿、回覆策略、回覆規劃、回答規劃、步驟、選擇表情、系統規則或幕後處理內容，也不要寫『好的，那就這樣回覆』等分界語。\n"
                     "9. 若妳答應要在交換日記提供菜單、照片、穿搭、行程或任何內容，必須是下一篇日記真的能完成的具體交付；不要為了哄大俠而隨口承諾，因為系統會登記並驗收履約。"
                 )
 
@@ -19172,7 +19230,9 @@ async def on_message(message):
                     current_time_str=current_time_str,
                     full_system_instruction=sys_instruct,
                 )
-                # 🎭 從 LLM 回覆剝離視覺資產控制碼，避免控制碼、舞台指示或舊式標記外漏。
+                # 先移除模型外漏的思緒／規劃區，再解析 Sticker / Emoji 控制碼。
+                # Sanitizer 不辨識、不替換 xia_* 控制碼，確保小俠自訂 Emoji / Sticker 完整保留。
+                xiaoxia_reply = _sanitize_visible_reply_text(xiaoxia_reply)
                 xiaoxia_reply, selected_sticker_key, selected_emoji_name = (
                     _extract_xiaoxia_expression_directives(xiaoxia_reply)
                 )
@@ -19197,27 +19257,8 @@ async def on_message(message):
                         f"path={gemini_path} repeated_markers={repeated_count} reply={xiaoxia_reply[:220]!r}"
                     )
 
-                # 清除可能外漏的分析標籤。
-                xiaoxia_reply = re.sub(
-                    r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+',
-                    '',
-                    str(xiaoxia_reply or ''),
-                    flags=re.DOTALL | re.MULTILINE,
-                ).strip()
-                patterns_to_remove = [
-                    r'^Thinking Process:.*?\n',
-                    r'^Draft.*?:.*?\n',
-                    r'^Final check.*?:.*?\n',
-                    r'^Analysis:.*?\n',
-                ]
-                for pattern in patterns_to_remove:
-                    xiaoxia_reply = re.sub(
-                        pattern,
-                        '',
-                        xiaoxia_reply,
-                        flags=re.IGNORECASE | re.DOTALL,
-                    ).strip()
-                xiaoxia_reply = xiaoxia_reply.strip('"').strip('「').strip('」').strip()
+                # 最終保險：前段已清理內部規劃；此處只整理引號與空白。
+                xiaoxia_reply = str(xiaoxia_reply or "").strip().strip('"').strip('「').strip('」').strip()
                 if not xiaoxia_reply:
                     xiaoxia_reply = "大俠，剛剛訊息沒有順利送達，再跟小俠說一次好嗎？🥺"
 
@@ -21757,14 +21798,7 @@ PUBLIC_XIA_SYSTEM_PROMPT = (
 )
 
 def _clean_xia_reply(reply: str) -> str:
-    reply = str(reply or "").strip()
-    reply = re.sub(
-        r'(?i)^(Thinking Process|Draft|Analysis|Final check|Critique):.*?\n+',
-        '',
-        reply,
-        flags=re.DOTALL | re.MULTILINE,
-    ).strip()
-    reply = reply.strip('"').strip('「').strip('」').strip()
+    reply = _sanitize_visible_reply_text(reply)
     if len(reply) > 1900:
         reply = reply[:1850] + "\n\n(內容過長，已截斷；請指定需要檢視的區段。)"
     return reply
