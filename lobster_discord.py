@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.33_R4"
+LOBSTER_VERSION = "1.5.34_R1"
 
 
 def _normalize_generation_level(level):
@@ -519,6 +519,7 @@ XIAOXIA_AUTONOMY_EPISODE_LOG_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_e
 XIAOXIA_AUTONOMY_THREADS_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_threads.json") # 🌱 R4：自主活動主題線索引
 XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_selection_cache.json") # 🌱 R4：指定類別/活動清單快取
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
+XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_promise_daily_report_state.json")
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
 MEMORY_DIRECTIVES_PATH = os.path.join(MEMORY_DIR, "memory_directives.json")
 MEMORY_UPDATE_BACKUP_DIR = os.path.join(MEMORY_DIR, "memory_update_backups")
@@ -567,7 +568,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.33_R4")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.34_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -3810,7 +3811,9 @@ def _conversation_log_text(role, content, has_image=False, max_chars=5000):
     if len(value) > max_chars:
         value = value[:max_chars].rstrip() + "…"
     suffix = "（附帶圖片）" if has_image else ""
-    return f"{role}: {value}{suffix}"
+    # v1.5.34：新寫入的 temp_chat 加上日期時間，交換日記才能真正只讀目標日期。
+    stamp = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M")
+    return f"【{stamp}】{role}: {value}{suffix}"
 
 
 def _is_internal_chat_marker(value):
@@ -7483,6 +7486,71 @@ async def capture_xiaoxia_promises_from_diary_result(result, entry_content="", e
     blob = "\n".join(parts)
     if not blob.strip(): return []
     return await capture_xiaoxia_promises_to_board_from_text(blob, origin=f"diary:{entry_date or _today_str_tpe()}", user_text=entry_content, max_items=4)
+
+async def auto_close_xiaoxia_promises_from_text(source_text, *, origin="chat", max_items=4):
+    source_text = str(source_text or "").strip()
+    if not source_text:
+        return []
+    board = load_promise_board()
+    active = [p for p in (board.get("xiaoxia_promises") or []) if isinstance(p, dict) and str(p.get("status") or PROMISE_STATUS_ACTIVE) == PROMISE_STATUS_ACTIVE]
+    if not active or not re.search(r"(完成|做好|整理好|已經.*(?:給|放|附|寫|整理|拍)|這(?:張|份|篇)就是|交給你|給你看|放進日記|附上|履行|兌現)", source_text):
+        return []
+    candidates = [{"id":p.get("id"),"title":p.get("title"),"description":p.get("description"),"requirements":p.get("requirements") or []} for p in active[:20]]
+    prompt = f"""你是小俠單方面承諾的結案審核員。只有本次文字已實際交付可驗收成果才結案；準備中、之後會做、再次提到都不可結案。
+來源：{origin}
+active：{json.dumps(candidates, ensure_ascii=False)}
+本次文字：{source_text[-2400:]}
+只回 JSON：{{"completed_ids":[],"reasons":{{}}}}"""
+    try:
+        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
+        data = _extract_json_object(getattr(response, "text", "") or "")
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_PROMISE_AUTO_CLOSE_FAILED] {type(exc).__name__}: {exc}")
+        return []
+    reasons = data.get("reasons") if isinstance(data.get("reasons"), dict) else {}
+    completed=[]
+    for pid in [str(x).strip().upper() for x in (data.get("completed_ids") or [])][:max_items]:
+        board=load_promise_board()
+        item=next((x for x in (board.get("xiaoxia_promises") or []) if str(x.get("id") or "").upper()==pid),None)
+        if not item: continue
+        ok,moved=move_promise_to_archive("xiaoxia_promises",item,PROMISE_STATUS_DONE,reason=narrative_safe_text(reasons.get(pid) or "小俠已自行完成並交付。",max_len=220),actor_name="小俠自行完成")
+        if ok: completed.append(moved)
+    return completed
+
+def _promise_daily_report_rows(date_key):
+    board=load_promise_board(); rows=[]
+    for item in board.get("xiaoxia_promises") or []:
+        if isinstance(item,dict) and str(item.get("created_at") or "")[:10]==date_key:
+            r=dict(item); r["report_status"]="active"; rows.append(r)
+    for item in board.get("archive") or []:
+        if isinstance(item,dict) and str(item.get("id") or "").startswith("XP") and str(item.get("created_at") or "")[:10]==date_key:
+            r=dict(item); r["report_status"]=str(item.get("status") or ""); rows.append(r)
+    d={}
+    pri={"active":1,PROMISE_STATUS_PAUSED:2,PROMISE_STATUS_DELETED:3,PROMISE_STATUS_DONE:4}
+    for r in rows:
+        pid=str(r.get("id") or ""); old=d.get(pid)
+        if pid and (old is None or pri.get(str(r.get("report_status")),0)>=pri.get(str(old.get("report_status")),0)): d[pid]=r
+    return sorted(d.values(),key=lambda x:str(x.get("created_at") or ""))
+
+def _format_xiaoxia_promise_daily_report(date_key, rows):
+    title=f"🌙 **今日小俠新承諾盤點｜{date_key}**"
+    if not rows: return title+"\n\n今天沒有新增小俠承諾。"
+    labels={"active":"進行中",PROMISE_STATUS_DONE:"今日已完成",PROMISE_STATUS_DELETED:"今日已取消",PROMISE_STATUS_PAUSED:"暫停"}
+    lines=[title,""]
+    for i,x in enumerate(rows,1):
+        st=str(x.get("report_status") or "active"); created=str(x.get("created_at") or ""); origin=str(x.get("origin") or "chat")
+        src="交換日記" if origin.startswith("diary:") else "今日聊天" if origin=="chat" else origin
+        lines += [f"{i}. **{x.get('id')}｜{x.get('title')}**",f"　狀態：{labels.get(st,st)}｜成立：{created[11:16]}｜來源：{src}"]
+        if x.get("description"): lines.append("　"+_clean_text_compact(x.get("description"))[:220])
+    lines.append("\n小俠可自行立案與完成；大俠仍可用 `/小俠承諾 修改`、`/小俠承諾 完成`、`/小俠承諾 刪除` 介入管理。")
+    return "\n".join(lines)[:1900]
+
+def _load_xiaoxia_promise_report_state():
+    d=_load_json_file_or_default(XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH,{})
+    return d if isinstance(d,dict) else {}
+
+def _save_xiaoxia_promise_report_state(data):
+    _atomic_write_json(XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH,data if isinstance(data,dict) else {})
 
 def get_due_diary_promises(profile=None, max_items=4):
     """v1.5.00：交換日記待履約來源改為 promise_board；不再從 daxia_profile.xiaoxia_self.promises 主動撈舊承諾。"""
@@ -16901,6 +16969,91 @@ async def strengthen_diary_reply_to_daxia(result, entry_content, chat_context, l
     return result
 
 
+
+
+def _diary_temp_chat_for_date(logs, date_key, *, retry_mode=False):
+    """v1.5.34：交換日記只取目標日期 temp_chat；舊版無時間戳資料只在當日日記有限度兼容。"""
+    if retry_mode:
+        return ""
+    date_key = str(date_key or "").strip()
+    today_key = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    dated, legacy = [], []
+    stamp_re = re.compile(r"^【(\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}(?::\d{2})?)?】")
+    for raw in _clean_temp_chat_logs(logs):
+        line = str(raw or "").strip()
+        if not line or _is_internal_chat_marker(line):
+            continue
+        m = stamp_re.match(line)
+        if m:
+            if m.group(1) == date_key:
+                dated.append(line)
+        elif date_key == today_key:
+            legacy.append(line)
+    selected = dated if dated else legacy[-40:]
+    return "\n".join(selected)[-18000:]
+
+
+def _diary_life_event_context_for_date(date_key):
+    """只讀目標日期已發生的 life_event facts；不讀歷史 reply_guidance、followup 語氣或過期未來式。"""
+    date_key = str(date_key or "").strip()
+    doc = load_life_events_doc()
+    rows = []
+    for event in doc.get("major_life_events", []) or []:
+        if not isinstance(event, dict):
+            continue
+        anchor = str(event.get("anchor_date") or "")[:10]
+        created = str(event.get("created_at") or "")[:10]
+        if date_key not in {anchor, created}:
+            continue
+        facts = []
+        for fact in event.get("facts", []) or []:
+            text = _clean_text_compact(fact)
+            if not text:
+                continue
+            if re.search(r"今晚將|明天將|等你回家|待大俠|可以詢問|應該|承諾會", text):
+                continue
+            facts.append(text)
+        if facts:
+            rows.append(f"【{event.get('title') or '今日事件'}】" + "；".join(facts[:6]))
+    for item in doc.get("daily_life_log", []) or []:
+        if not isinstance(item, dict) or str(item.get("anchor_date") or "")[:10] != date_key:
+            continue
+        facts = [_clean_text_compact(x) for x in (item.get("facts") or []) if _clean_text_compact(x)]
+        if facts:
+            rows.append(f"【{item.get('title') or '今日生活摘要'}】" + "；".join(facts[:6]))
+    return "\n".join(rows[:8]) if rows else "今日 life_events 沒有可用的已發生事實。"
+
+
+def _diary_autonomy_context_for_date(date_key):
+    try:
+        state = load_xiaoxia_autonomy_state()
+    except Exception:
+        return "今日沒有小俠自主活動。"
+    candidates = []
+    today = state.get("today") if isinstance(state, dict) else None
+    if isinstance(today, dict) and str(today.get("date") or "") == str(date_key):
+        candidates.append(today)
+    for row in (state.get("history") or []) if isinstance(state, dict) else []:
+        if isinstance(row, dict) and str(row.get("date") or "") == str(date_key):
+            candidates.append(row)
+    seen, lines = set(), []
+    for row in candidates:
+        key = str(row.get("episode_id") or row.get("activity_id") or row.get("activity_title") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {row.get('activity_title') or '自主活動'}：{_clean_text_compact(row.get('scene') or row.get('share_text') or '')[:420]}")
+    return "\n".join(lines[:5]) if lines else "今日沒有小俠自主活動。"
+
+
+def _diary_stable_background(profile):
+    """長期資料只供人格與關係背景，不提供今天事件、待辦或未來承諾。"""
+    profile = profile if isinstance(profile, dict) else {}
+    daxia = safe_memory_join(profile.get("daxia_traits", []), max_items=4, max_chars=520)
+    xiaoxia = _balanced_xiaoxia_traits_for_prompt(profile, max_items=4, max_chars=520)
+    shared = safe_memory_join(profile.get("shared_knowledge", []), max_items=3, max_chars=420)
+    return f"大俠穩定偏好：{daxia or '無'}\n小俠穩定人格：{xiaoxia or '無'}\n兩人穩定共識：{shared or '無'}"
+
 async def process_diary_reply(channel, target_date=None, retry_mode=False):
     global daily_chat_logs
     
@@ -16908,10 +17061,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
     try:
         app_state = load_state()
         profile = load_profile()
-        active_life_events, life_changed = refresh_life_events(profile=profile)
-        if life_changed:
-            save_profile(profile)
-        life_event_context = format_life_event_context(active_life_events)
+        # v1.5.34：交換日記不再載入跨日 active/followup life_events。
+        life_event_context = ""
     except Exception as e:
         if channel: await channel.send(f"⚠️ 狀態或記憶庫損毀: {e}")
         return
@@ -16934,15 +17085,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
         else:
             if not entry.get("is_replied", False):
                 unreplied.append(entry)
-                
-    # 補救舊日記時，不混入今天的新聊天，也不重複觸發聊天記憶萃取。
-    chat_context = "" if retry_mode else "\n".join(daily_chat_logs)
-    narrative_chat_context = (
-        "\n".join(
-            safe_line for safe_line in [narrative_safe_text(line, max_len=360) for line in daily_chat_logs] if safe_line
-        )
-        if not retry_mode else ""
-    )
+    # v1.5.34：chat_context 必須依每篇 entry_date 重建，不能把跨日 temp_chat 全部灌入。
+    chat_context = ""
+    narrative_chat_context = ""
     today_str = datetime.now(TZ_TPE).strftime("%Y-%m-%d")
     
     if not unreplied and not chat_context:
@@ -17039,11 +17184,20 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             current_score = app_state.get("affection_score", 80)
             entry_date = entry['date']
             entry_content = entry['content']
+            # v1.5.34：今日事實層 + 手動 active 板 + 只讀長期背景。
+            chat_context = _diary_temp_chat_for_date(daily_chat_logs, entry_date, retry_mode=retry_mode)
+            narrative_chat_context = "\n".join(
+                safe_line for safe_line in [narrative_safe_text(line, max_len=360) for line in chat_context.splitlines()] if safe_line
+            )
+            life_event_context = _diary_life_event_context_for_date(entry_date)
+            autonomy_context = _diary_autonomy_context_for_date(entry_date)
+            manual_event_context = event_board_summary_for_prompt(max_items=5)
+            manual_promise_context = promise_board_summary_for_prompt(max_items=6)
+            stable_background = _diary_stable_background(profile)
+            print(f"🧭 [DIARY_TODAY_ONLY_CONTEXT] date={entry_date} chat_chars={len(chat_context)} life_chars={len(life_event_context)} autonomy_chars={len(autonomy_context)}")
             # 首次執行若已寫入分數/記憶後生圖失敗，後續重跑自動切為補救模式。
             entry_retry_mode = retry_mode or bool(entry.get("reply_effects_applied", False))
-            recent_activities = "、".join(
-                _memory_text_values(profile.get("recent_context", []))
-            ) or "無"
+            recent_activities = autonomy_context
             # 取得當前月份
             current_month = datetime.now(TZ_TPE).month
             
@@ -17080,16 +17234,23 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                - 若今日沒有小俠自主題材，依本篇日記與今日對話自由規劃一個自然生活瞬間。
                - 服裝不得跨日自動延續；只有本篇日記、今日聊天或 `/交換日記 穿 Wxxx／衣櫃自由` 才能指定衣櫃。
                - 畫面只能有一個時間、一個地點、一個主要活動；嚴禁把先後事件塞在同一張圖。
+               - 自由發揮只可改變同一事件的時刻、姿勢、構圖、光線與穿著，不得創造新的行程、表演、承諾或已完成事件續集。
                - 嚴禁在 scenario 中使用「全裸」等極度露骨字眼。
                 """
 
             # 🌟 升級版：強制雙向日記、性感限制與【承諾/指定畫面優先權】
             eval_prompt = f"""
-            【大俠的日記 ({entry_date})】：{entry_content}
-            【今日聊天紀錄】：{chat_context if chat_context else '無紀錄'}
-            【小俠近期記憶/活動】：{recent_activities if recent_activities else '無紀錄'}
-            【今日最高優先級重大事件｜必須優先理解，不可誤判】：
+            【大俠的日記 ({entry_date})｜今日第一手來源】：{entry_content}
+            【同日 temp_chat｜只含 {entry_date}】：{chat_context if chat_context else '無紀錄'}
+            【同日小俠自主活動】：{autonomy_context}
+            【同日 life_events 已發生 facts｜不含 reply_guidance/followup】：
             {life_event_context}
+            【大俠手動 active 事件板｜允許跨日】：
+            {manual_event_context}
+            【大俠手動 active 承諾板｜允許跨日】：
+            {manual_promise_context}
+            【長期人格與關係背景｜只能調整理解與語氣，不得供應今日事件】：
+            {stable_background}
             
             妳是懂事女友小俠，當前愛意值：{current_score}/100。請執行「真實交換日記」。
             
@@ -17103,11 +17264,12 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                - 妳不是在填表或整理聊天紀錄，而是在寫一篇有小俠內心的交換日記。聊天只是種子，不是正文本身。
                - 請把今日事件轉化成生活場景、物件、氣味、光線、動作與未說出口的心情。
                - 可以溫柔、成熟、有戀人感，但不要把整篇寫成空泛甜言蜜語。
-            3. 生活連貫性：
-               - 必須優先遵守【今日最高優先級重大事件】；若重大事件顯示大俠與小俠正在搬家、北上、入職、面試或安頓新生活，日記、日常片段與照片構想都必須圍繞該事件自然延伸。
-               - `xiaoxia_daily_scene` 必須從今日已知狀態自然延伸。
-               - 若今日聊天或承諾顯示小俠在家準備晚宴，場景應在家中、廚房、餐桌、陽台、玄關、附近超市或回家路上；不得突然跳到海邊、畫廊、旅行地點，除非今日聊天明確提到她去了那裡。
-               - 合理補完空白可以，隨機更換人生場景不可以。
+            3. 今日事實與生活連貫性：
+               - 今日內容只能由：大俠本篇日記、同日 temp_chat、同日自主活動、同日 life_event facts、以及大俠手動 active 事件/承諾板決定。
+               - 長期人格、歷史日記、已封存事件只能幫助理解兩人的關係，不得重新變成今天、今晚、明天或尚待履行的活動。
+               - 不得自行把以前完成的 K-pop、旅行、驚喜、約會、照片或承諾寫成今天要再做一次；除非今日來源或手動 active 板明確再次提出。
+               - `xiaoxia_daily_scene` 必須從今日已知狀態自然延伸；合理補完一個小動作、物件或光線可以，創造新的行程、表演、約定或待辦不可以。
+               - 若今日資料顯示小俠在家準備晚宴，場景應在家中、廚房、餐桌、陽台、玄關、附近超市或回家路上；不得突然跳到海邊、畫廊、旅行地點，除非今日來源明確提到。
             4. 反濫竽充數規則：
                - 同一句聊天內容不得同時出現在 `reply_to_daxia` 與 `xiaoxia_daily_scene`。
                - `xiaoxia_daily_scene` 不得以「今天大俠提醒我」「今天我們聊到」開頭。
@@ -17557,14 +17719,11 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 json.dump(diary_db, f, ensure_ascii=False, indent=2)
 
                         # 🤝 v1.5.00：小俠或 LLM 不得自動結案。完成需由大俠執行 `/承諾 完成` 或 `/小俠承諾 完成`。
-            closed_promises = []
-            new_xiaoxia_promises = await capture_xiaoxia_promises_from_diary_result(
-                result,
-                entry_content=entry_content,
-                entry_date=entry_date,
-            )
+            new_xiaoxia_promises = await capture_xiaoxia_promises_from_diary_result(result, entry_content=entry_content, entry_date=entry_date)
             if new_xiaoxia_promises:
-                print(f"🤝 [{entry_date}] 已從交換日記登記小俠單方面承諾：{[p.get('id') for p in new_xiaoxia_promises]}")
+                print(f"🤝 [{entry_date}] 已從交換日記自主登記 /小俠承諾：{[p.get('id') for p in new_xiaoxia_promises]}")
+            diary_promise_blob = "\n".join(str(result.get(k) or "") for k in ("reply_to_daxia", "xiaoxia_daily_scene", "inner_monologue", "promise_delivery", "xiaoxia_diary"))
+            closed_promises = await auto_close_xiaoxia_promises_from_text(diary_promise_blob, origin=f"diary:{entry_date}")
 
             if channel:
                 title = f"💖 小俠的交換日記 [{entry_date}] (盲盒大獎！)" if is_jackpot else f"💌 小俠的交換日記 [{entry_date}]"
@@ -17759,6 +17918,9 @@ async def on_ready():
     if not monthly_memory_review_reminder_task.is_running():
         monthly_memory_review_reminder_task.start()
         print("📚 每月25日 08:00 回憶整理提醒已啟動（只提醒，不列清單）。")
+    if not xiaoxia_promise_daily_report_task.is_running():
+        xiaoxia_promise_daily_report_task.start()
+        print("🌙 每日 23:50 小俠承諾盤點已啟動（#唐分糕）。")
 
     if not xiaoxia_autonomy_auto_task.is_running():
         xiaoxia_autonomy_auto_task.start()
@@ -19101,6 +19263,8 @@ async def on_message(message):
                             added_items.append(item)
                     if added_items:
                         print(f"🤝 已立即登記 {len(added_items)} 項 /小俠承諾：{[it.get('id') for it in added_items]}")
+                if not intimate_mode and not game_turn:
+                    await auto_close_xiaoxia_promises_from_text(xiaoxia_reply, origin="chat")
 
                 # 🎭 小俠已選擇的視覺資產在此真正執行：
                 # - Emoji 會嵌進正文。
@@ -19982,6 +20146,21 @@ async def auto_cosplay_task():
 async def midnight_feedback_task():
     channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="岱而瑞")
     if channel: await process_diary_reply(channel)
+
+@tasks.loop(time=time(hour=23, minute=50, tzinfo=TZ_TPE))
+async def xiaoxia_promise_daily_report_task():
+    date_key=datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+    state=_load_xiaoxia_promise_report_state()
+    if str(state.get("last_sent_date") or "")==date_key: return
+    channel=discord.utils.get(girlfriend_bot.get_all_channels(),name="唐分糕")
+    if channel is None and XIAOXIA_AUTONOMY_CHANNEL_ID: channel=girlfriend_bot.get_channel(XIAOXIA_AUTONOMY_CHANNEL_ID)
+    if channel is None:
+        print("⚠️ [XIAOXIA_PROMISE_DAILY_REPORT] 找不到 #唐分糕")
+        return
+    rows=_promise_daily_report_rows(date_key)
+    await channel.send(_format_xiaoxia_promise_daily_report(date_key,rows))
+    _save_xiaoxia_promise_report_state({"last_sent_date":date_key,"last_sent_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),"reported_ids":[str(x.get("id") or "") for x in rows],"channel_id":getattr(channel,"id",None)})
+    print(f"🌙 [XIAOXIA_PROMISE_DAILY_REPORT_SENT] date={date_key} count={len(rows)}")
 
 # 🌟 新增凌晨 0 點大腦巡邏
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=TZ_TPE))
