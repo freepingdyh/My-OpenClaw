@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.34_R2"
+LOBSTER_VERSION = "1.5.35_R1"
 
 
 def _normalize_generation_level(level):
@@ -626,7 +626,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.34_R2")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.35_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -11194,6 +11194,33 @@ def _seedream_request_args(model_id, final_prompt, image_urls, enable_safety_che
         args["max_images"] = 1
     return args
 
+WARDROBE_FIGURE10_FIDELITY_RULES = """
+FIGURE 10 WARDROBE IDENTITY — HIGH OUTFIT PRIORITY:
+- Figure 10 is the authoritative visual source for which garment or styling set Xiaoxia wears. Preserve its recognizable category, piece count, main colors, pattern, material/opacity, neckline, straps or sleeves, major cut-outs/slits, and signature decorations.
+- Figures 1-9 remain authoritative for Xiaoxia's face and established tall, slim, curvy body. Never copy a mannequin, flat-lay width, original model body, or distorted garment-board proportions onto Xiaoxia.
+- Fit the garment naturally to Xiaoxia. Preserve the design intention (fitted, loose, high-waisted, mini, short, midi, long, wide-leg, etc.) rather than exact pixel dimensions, exact waist width, or exact hem position from the reference image.
+- Do not invent unrelated garments, extra layers, lining, or prominent decorations. Natural wearing-state changes are allowed when suitable: fabric folds, ties, drape, movement, and a few upper buttons left open for tasteful feminine styling, without changing the garment's identity.
+- If Figure 10 is a front/back product board, treat it as multiple views of one wearable item; never duplicate the garment on Xiaoxia.
+- Figure 10 controls clothing identity only. The text request controls scene, action, pose, camera, lighting, and composition. Xiaoxia's established feminine charm and body identity must remain intact.
+"""
+
+WARDROBE_FIGURE10_MINIMAL_RULES = """
+- Use Figure 10 as the clothing reference and preserve its recognizable design, main colors, material/opacity, and signature details.
+- Fit it naturally to Xiaoxia's established tall, slim, curvy body and the requested pose; do not copy mannequin/flat-lay body proportions or add unrelated clothing or decorations.
+- Natural drape and tasteful wearing-state variation are allowed, including a few upper buttons left open when appropriate, while keeping the same garment identity.
+"""
+
+
+def _wardrobe_reference_required(trace_context=None):
+    ctx = trace_context if isinstance(trace_context, dict) else {}
+    return bool(ctx.get("wardrobe_id") or ctx.get("used_pending_wardrobe") or ctx.get("figure10_required"))
+
+
+def _append_figure10_fidelity(lines, minimal=False):
+    rules = WARDROBE_FIGURE10_MINIMAL_RULES if minimal else WARDROBE_FIGURE10_FIDELITY_RULES
+    lines.extend(["", rules.strip()])
+
+
 def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason="", visual_checklist=None):
     user_request = _clean_text_compact(user_request or "")
     retry_reason = _clean_text_compact(retry_reason or "")
@@ -11217,6 +11244,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
             "If Figure 10 clearly shows a bag or accessory and the text request mentions it, it must be visibly included in the final image.",
             "Do not let Figure 10 control the pose, background, camera angle, or composition.",
         ]
+        _append_figure10_fidelity(lines, minimal=True)
     else:
         lines += ["", "No Figure 10 is supplied. Choose clothing only from the explicit text request or a simple natural outfit suitable for the scene."]
     if current_outfit:
@@ -11252,6 +11280,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
             "Preserve Figure 10's item category, color, silhouette, cut, length, material feeling, pattern, and key decorative details.",
             "Do NOT let Figure 10 control the final scene, pose, background, camera angle, or composition.",
         ]
+        _append_figure10_fidelity(lines, minimal=True)
     if current_outfit:
         lines += ["", f"Current outfit continuity, styling only: {str(current_outfit).strip()}. It may include clothing and visible accessories, but must not override the text-request scene or pose."]
     if retry_reason:
@@ -14838,7 +14867,8 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             "FIGURE 10 WARDROBE ROLE:\n"
             "- Figure 10 controls clothing and visible fashion accessories only.\n"
             "- Preserve its category, color, silhouette, cut, length, material, pattern, and key details.\n"
-            "- Figure 10 must not control scene, pose, background, camera angle, or composition."
+            "- Figure 10 must not control scene, pose, background, camera angle, or composition.\n"
+            + WARDROBE_FIGURE10_FIDELITY_RULES.strip()
         )
     else:
         sections.append("OUTFIT ROLE:\n- No Figure 10 is supplied; use the explicit outfit request or a simple scene-appropriate outfit.")
@@ -14923,7 +14953,8 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
             "FIGURE 10 WARDROBE ROLE:\n"
             "- Figure 10 controls Xiaoxia's clothing and visible fashion accessories only.\n"
             "- Preserve its garment category, color, silhouette, cut, length, material, pattern, and key details.\n"
-            "- Figure 10 must not change the diary scene, action, pose, camera angle, or background."
+            "- Figure 10 must not change the diary scene, action, pose, camera angle, or background.\n"
+            + WARDROBE_FIGURE10_FIDELITY_RULES.strip()
         )
     else:
         sections.append(
@@ -14983,7 +15014,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.30"
+        trace_context["prompt_engine_version"] = "v1.5.35_R1"
         trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
@@ -14991,11 +15022,19 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     _trace_stage(trace_context, "seedream_photo_final_prompt", prompt=final_prompt, data={"has_reference": bool(reference_image_path), "current_outfit": current_outfit, "model": model_id, "model_label": model_label, "image_size": SEEDREAM_V45_IMAGE_SIZE, "enable_safety_checker": bool(enable_safety_checker)})
 
     async def _build_image_urls(force_reference_refresh=False):
-        urls = await _seedream_upload_reference_images(force_refresh=force_reference_refresh)
+        identity_urls = list(await _seedream_upload_reference_images(force_refresh=force_reference_refresh))
+        # Figure 角色固定化：1-9 永遠只放小俠身份底圖；選定衣櫃時，第 10 張永遠只放該衣櫃原圖。
+        identity_urls = identity_urls[:9]
+        if len(identity_urls) < 9:
+            raise RuntimeError(f"SEEDREAM_IDENTITY_REFERENCE_INCOMPLETE：預期 9 張小俠身份底圖，實際只有 {len(identity_urls)} 張。")
         if reference_image_path:
-            # 不直接把外部 URL 丟給 Seedream；先由本機下載後再上傳到 fal，避免 Discord CDN / 外部圖床過期。
-            urls.append(await _seedream_upload_single_file(reference_image_path))
-        return urls[-10:] if len(urls) > 10 else urls
+            wardrobe_url = await _seedream_upload_single_file(reference_image_path)
+            if not wardrobe_url:
+                raise RuntimeError("SEEDREAM_WARDROBE_REFERENCE_UPLOAD_FAILED：衣櫃 Figure 10 上傳失敗。")
+            return identity_urls + [wardrobe_url]
+        if _wardrobe_reference_required(trace_context):
+            raise RuntimeError("SEEDREAM_WARDROBE_REFERENCE_REQUIRED：本次已指定衣櫃項目，但沒有可用的 Figure 10；拒絕只靠名稱或文字描述生成。")
+        return identity_urls
 
     def _subscribe(image_urls):
         def on_queue_update(update):
@@ -15016,9 +15055,12 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     if isinstance(trace_context, dict):
         trace_context["seedream_input_images"] = list(image_urls)
         trace_context["seedream_input_image_roles"] = [
-            {"figure": idx + 1, "role": "xiaoxia_identity" if idx < 9 else "wardrobe_reference", "url": url}
+            {"figure": idx + 1, "role": "xiaoxia_identity" if idx < 9 else "wardrobe_reference_authoritative", "url": url}
             for idx, url in enumerate(image_urls)
         ]
+        trace_context["figure10_required"] = _wardrobe_reference_required(trace_context)
+        trace_context["figure10_present"] = len(image_urls) == 10
+        trace_context["figure10_fidelity_policy"] = "garment_identity_authoritative_body_pose_flexible"
         trace_context["seedream_request_payload"] = {
             "model": model_id,
             "model_label": model_label,
@@ -15644,6 +15686,7 @@ async def _generate_photo_from_context(context, msg=None):
         "generation_mode": context.get("generation_mode") or context.get("source_mode", "photo_scene"),
         "force_minimal_prompt": bool(context.get("force_minimal_prompt")),
         "figure10_present": bool(context.get("reference_item_path")),
+        "figure10_required": bool(context.get("figure10_required") or context.get("wardrobe_id")),
         "seedream_model_id_override": context.get("seedream_model_id_override"),
         "seedream_model_label": context.get("seedream_model_label"),
     }
@@ -15679,6 +15722,7 @@ async def _generate_photo_from_context(context, msg=None):
     _trace_stage(trace_context, "photo_visual_dict", data=visual)
     generation_mode = context.get("generation_mode") or context.get("source_mode", "photo_scene")
     trace_context["figure10_present"] = bool(context.get("reference_item_path"))
+    trace_context["figure10_required"] = bool(context.get("figure10_required") or context.get("wardrobe_id"))
     print(f"🎬 [PHOTO_SEEDREAM_START] mode={generation_mode} source_mode={context.get('source_mode', 'photo_scene')} trace_id={trace_context.get('trace_id')}")
     generated_image_url, visual = await execute_safe_generation(
         discord_image_url=context.get("reference_item_path"),
@@ -15923,6 +15967,7 @@ async def handle_unified_photo_command(message, user_input):
         "used_pending_wardrobe": bool(pending_wardrobe),
         "wardrobe_mode": "wardrobe_free" if photo_mode_override == "wardrobe_free" else ("pending_fixed" if pending_wardrobe else "none"),
         "wardrobe_id": wardrobe_id,
+        "figure10_required": bool(pending_wardrobe or current_outfit_reference_reused),
         "wardrobe_name": pending_wardrobe.get("name") if pending_wardrobe else "",
         "wardrobe_style_summary_raw": pending_wardrobe.get("style_summary") if pending_wardrobe else "",
         "wardrobe_visual_summary_used": _wardrobe_visual_summary_only(pending_wardrobe) if pending_wardrobe else "",
@@ -15948,6 +15993,7 @@ async def handle_unified_photo_command(message, user_input):
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
+        "figure10_required": bool(pending_wardrobe or current_outfit_reference_reused),
         "generation_mode": generation_mode,
         "force_minimal_prompt": force_minimal_prompt,
         "current_outfit_reference_reused": current_outfit_reference_reused,
@@ -17643,7 +17689,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                         image_prompt
                         + "\n\nWARDROBE REFERENCE OVERRIDE FOR DIARY:\n"
                         + diary_wardrobe.get("hint", "")
-                        + "\nImage 10 is the exact wardrobe reference. The clothing style, cut, material, color, category, and silhouette must follow Image 10. Do not invent a different garment from the item name."
+                        + "\nImage 10 is the authoritative exact wardrobe reference. Follow it visually rather than redesigning from the wardrobe name or summary. Preserve its category, piece count, color, pattern, material appearance, transparency, silhouette, neckline, straps/sleeves, length, cut-outs, slits, lace/mesh, bows, ties, flowers, buttons, and all distinctive construction details. Do not add, remove, cover, lengthen, shorten, recolor, simplify, censor, or embellish anything unless Daxia explicitly requests that change."
                     )
                 diary_trace_context = {
                     "kind": "diary",
@@ -17657,6 +17703,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     "diary_photo_single_slot": True,
                     "diary_forced_scene": diary_forced_scene,
                     "wardrobe_id": (diary_wardrobe or {}).get("item", {}).get("id"),
+                    "figure10_required": bool(diary_wardrobe),
                     "wardrobe_name": (diary_wardrobe or {}).get("item", {}).get("name"),
                     "wardrobe_selection_source": (diary_wardrobe or {}).get("selection_source"),
                     "wardrobe_selection_reason": (diary_wardrobe or {}).get("selection_reason"),
