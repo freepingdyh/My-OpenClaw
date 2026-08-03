@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.37_R1"
+LOBSTER_VERSION = "1.5.37_R2"
 
 
 def _normalize_generation_level(level):
@@ -103,6 +103,9 @@ Even in full-body, long-shot, or side-facing compositions, preserve her strong b
 Preserve her long-hair feminine aura and photorealistic lifestyle feel.
 """
 
+XIAOXIA_CLOTHING_FLATTER_RULE = "Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it."
+
+
 XIAOXIA_HAIR_RULE_GENERAL = """
 For everyday, diary, and general /photo scenes: keep Xiaoxia's recognizable long-hair identity and natural brown-family hair color.
 Hairstyle may vary naturally to fit the scene, such as loose soft waves, straight loose hair, ponytail, low ponytail, princess half-up, relaxed tied hair, or a simple updo.
@@ -147,6 +150,7 @@ def _appearance_anchor_block(mode):
         lines.append(f"- {XIAOXIA_HAIR_RULE_GENERAL.strip()}")
     lines.append("- Keep Xiaoxia tall and slim with a clearly defined waist, a naturally very full and elegant bust, a strong bust-to-waist contrast, a soft hourglass silhouette, and a graceful leg line; do not weaken or flatten these traits unless the user explicitly asks for a change.")
     lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, flatter, or childlike silhouette.")
+    lines.append(f"- {XIAOXIA_CLOTHING_FLATTER_RULE}")
     lines.append(f"- {XIAOXIA_USER_PRIORITY_RULES.strip()}")
     return "\n".join(lines)
 
@@ -627,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.37_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.37_R2")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -7765,7 +7769,7 @@ def build_committed_diary_visual_from_task(task, season_rule="", wardrobe_hint="
     image_prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
 
 Figures 1-9 are identity-only reference images of Xiaoxia.
-Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy.
+Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy. Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it.
 Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.
 
 DIARY SINGLE-PHOTO TASK — this is the only photo promise to fulfill today.
@@ -11204,7 +11208,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
         "FIGURE ROLE MAP — obey these roles strictly.",
         "",
         "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy.",
+        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy. Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it.",
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
