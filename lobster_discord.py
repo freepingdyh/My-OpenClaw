@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.35_R1"
+LOBSTER_VERSION = "1.5.36"
 
 
 def _normalize_generation_level(level):
@@ -95,12 +95,15 @@ SOLO_NEGATIVE_MINIMAL = (
 )
 
 
-XIAOXIA_APPEARANCE_CORE = """
-Xiaoxia is a recognizable adult fictional East Asian woman with fair skin, a sweet refined face, a tall and slim yet clearly curvy figure, a defined waist, graceful feminine curves, a naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette.
-Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, heavier, flatter, older, or like a different woman.
-Her bust-to-waist contrast should stay visibly substantial even in side-facing or three-quarter poses, while keeping anatomy natural and elegant.
-Preserve her long-hair feminine aura and photorealistic lifestyle feel.
+XIAOXIA_IDENTITY_CORE = """
+Xiaoxia is a recognizable adult fictional East Asian woman with fair luminous skin and a sweet refined face.
+Keep Xiaoxia tall and slim with a clearly defined waist, a naturally very full and elegant bust, a strong bust-to-waist contrast, and a soft hourglass silhouette.
+Keep her long graceful legs, especially elegant lower-leg proportions, and her natural brown-family long-hair feminine identity.
+Her face and body identity must remain consistent: do not make her shorter, broader, heavier, flatter, older, childlike, or like a different woman.
+Keep anatomy natural and elegant; this identity core controls Xiaoxia's body, while garment references control clothing only.
 """
+
+XIAOXIA_APPEARANCE_CORE = XIAOXIA_IDENTITY_CORE
 
 XIAOXIA_HAIR_RULE_GENERAL = """
 For everyday, diary, and general /photo scenes: keep Xiaoxia's recognizable long-hair identity and natural brown-family hair color.
@@ -114,11 +117,22 @@ Hairstyle and hair color may adapt to the role when needed for recognizable cosp
 Even when the hair changes for the role, the result must still read clearly as Xiaoxia cosplaying the character, not the original actor or an entirely different woman.
 """
 
+
+def _xiaoxia_identity_core_block(mode="general"):
+    """Single shared identity anchor for every Xiaoxia image-generation route."""
+    cosplay_like = str(mode or "").lower() == "cosplay"
+    hair = XIAOXIA_HAIR_RULE_COSPLAY if cosplay_like else XIAOXIA_HAIR_RULE_GENERAL
+    return (
+        "XIAOXIA IDENTITY CORE — mandatory for every generated Xiaoxia image:\n"
+        + XIAOXIA_IDENTITY_CORE.strip()
+        + "\n" + hair.strip()
+    )
+
 XIAOXIA_AESTHETIC_BASELINE = """
 Xiaoxia Aesthetic Baseline:
 - Xiaoxia should consistently feel like a beautiful adult East Asian woman with fair luminous skin, a sweet refined face, long feminine brown-family hair, and a photorealistic lifestyle aura.
-- Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally full, prominent, and visually commanding bust, a soft hourglass silhouette, and long legs with especially graceful lower-leg proportions.
-- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep a full, prominent bust presence as the primary charm point, then choose the most suitable secondary charm point between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood.
+- Her body baseline should stay tall, slim, elegant, and feminine, with a clearly defined waist, graceful curves, a naturally very full and elegant bust, a strong bust-to-waist contrast, a soft hourglass silhouette, and long legs with especially graceful lower-leg proportions.
+- By default, maximize Xiaoxia's refined feminine charm rather than flattening it: keep the naturally very full and elegant bust with strong bust-to-waist contrast as the primary charm point, then choose the most suitable secondary charm point between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood.
 - The result should feel alluring, elegant, and highly attractive, but never vulgar, anatomically distorted, or disconnected from the requested scene.
 """
 
@@ -136,7 +150,7 @@ def _appearance_anchor_block(mode):
     cosplay_like = str(mode or '').lower() == 'cosplay'
     lines = [
         "APPEARANCE ANCHORS — preserve these identity facts at every safety level:",
-        f"- {XIAOXIA_APPEARANCE_CORE.strip()}",
+        f"- {_xiaoxia_identity_core_block(mode)}",
         f"- {XIAOXIA_AESTHETIC_BASELINE.strip()}",
     ]
     if cosplay_like:
@@ -144,7 +158,7 @@ def _appearance_anchor_block(mode):
         lines.append("- In cosplay, preserve the role's recognizable visual identity while still clearly reading as Xiaoxia cosplaying the role.")
     else:
         lines.append(f"- {XIAOXIA_HAIR_RULE_GENERAL.strip()}")
-    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim yet clearly curvy, with a defined waist, graceful leg line, a naturally full, prominent, and visually commanding bust proportion, and a soft hourglass silhouette; do not weaken or flatten these traits unless the user explicitly asks for a change.")
+    lines.append("- Keep Xiaoxia visually adult, feminine, tall-and-slim yet clearly curvy, with a defined waist, graceful leg line, a naturally very full and elegant bust, a strong bust-to-waist contrast, and a soft hourglass silhouette; do not weaken or flatten these traits unless the user explicitly asks for a change.")
     lines.append("- Preserve a natural neck, shoulders, upper torso, and body scale so she does not drift into a shorter, broader, heavier, flatter, or childlike silhouette.")
     lines.append(f"- {XIAOXIA_USER_PRIORITY_RULES.strip()}")
     return "\n".join(lines)
@@ -626,7 +640,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.35_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.36")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -11228,7 +11242,8 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
         "FIGURE ROLE MAP — obey these roles strictly.",
         "",
         "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.",
+        _xiaoxia_identity_core_block("photo"),
+        "Use Figures 1-9 only to preserve Xiaoxia's identity core. Do not weaken the tall-slim body, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, fair luminous skin, or long graceful legs.",
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
@@ -11262,7 +11277,8 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
         "FIGURE ROLE MAP — obey these roles strictly.",
         "",
         "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.",
+        _xiaoxia_identity_core_block("photo"),
+        "Use Figures 1-9 only to preserve Xiaoxia's identity core. Do not weaken the tall-slim body, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, fair luminous skin, or long graceful legs.",
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
@@ -11593,7 +11609,8 @@ def _build_cosplay_minimal_seedream_prompt(initial_prompt, visual_dict=None, tra
     prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
 
 Figures 1-9 are identity-only reference images of Xiaoxia.
-Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, tall slim feminine body, defined waist, and overall Xiaoxia look.
+{_xiaoxia_identity_core_block("cosplay")}
+Use Figures 1-9 only to preserve Xiaoxia's identity core. Do not weaken her tall-slim body, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, fair luminous skin, or long graceful legs.
 Do NOT copy pose, background, outfit, lighting setup, or composition from Figures 1-9.
 
 COSPLAY TASK — create Xiaoxia's sexy but canon-recognizable cosplay reinterpretation, not the original actor/character and not a generic glamour portrait.
@@ -12183,8 +12200,8 @@ async def _seedream_upload_reference_images(force_refresh=False):
 def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
-        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, a naturally full and visually impressive bust with a soft hourglass silhouette as part of Xiaoxia's core body identity, a full, prominent bust presence as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
+        + _xiaoxia_identity_core_block("cosplay") + " "
+        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, a naturally very full and elegant bust, a strong bust-to-waist contrast, and a soft hourglass silhouette as part of Xiaoxia's core body identity, with the bust-to-waist contrast as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
         "Daxia's current request still overrides this baseline. If Daxia asks for stronger role fidelity, fuller bust, slimmer body, longer lower legs, or another targeted adjustment, obey that request first while still keeping Xiaoxia recognizable. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
@@ -12377,7 +12394,8 @@ def _build_diary_guarded_minimal_prompt(initial_prompt="", visual_dict=None, tra
         "FIGURE ROLE MAP — obey these roles strictly.",
         "",
         "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's recognizable face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall Xiaoxia look.",
+        _xiaoxia_identity_core_block("diary"),
+        "Use Figures 1-9 only to preserve Xiaoxia's identity core, including her tall-slim body, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, fair luminous skin, and long graceful legs.",
         "Do NOT copy pose, background, room, outfit, lighting setup, or composition from Figures 1-9.",
         "",
         "DIARY VISUAL REQUEST — obey literally. This controls the final scene, action, outfit, mood, and composition.",
@@ -14857,6 +14875,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Figures 1-9 are identity-only references for Xiaoxia. Apply their face/body identity only to Xiaoxia. "
             "Do not copy their pose, outfit, background, lighting, or composition."
         ),
+        _xiaoxia_identity_core_block("photo"),
     ]
     if hard:
         sections.append("HARD SCENE REQUIREMENTS — failure on any item is incorrect:\n" + hard)
@@ -14939,6 +14958,7 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Figures 1-9 are identity-only references for Xiaoxia. Apply their face and body identity only to Xiaoxia. "
             "Do not copy their pose, outfit, room, background, lighting, props, or composition."
         ),
+        _xiaoxia_identity_core_block("diary"),
     ]
     if hard:
         sections.append("DIARY HARD SCENE REQUIREMENTS — every item must be visible:\n" + hard)
@@ -15014,7 +15034,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.35_R1"
+        trace_context["prompt_engine_version"] = "v1.5.36"
         trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
