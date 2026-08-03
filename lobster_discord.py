@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.37"
+LOBSTER_VERSION = "1.5.37_R1"
 
 
 def _normalize_generation_level(level):
@@ -99,6 +99,7 @@ XIAOXIA_APPEARANCE_CORE = """
 Xiaoxia is a recognizable adult fictional East Asian woman with fair luminous skin and a sweet refined face. Keep Xiaoxia tall and slim with a clearly defined waist, a naturally very full and elegant bust, a strong bust-to-waist contrast, and a soft hourglass silhouette.
 Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, heavier, flatter, older, or like a different woman.
 Her bust-to-waist contrast should stay visibly substantial even in side-facing or three-quarter poses, while keeping anatomy natural and elegant.
+Even in full-body, long-shot, or side-facing compositions, preserve her strong bust-to-waist contrast so it remains clearly visible through the clothing, without changing the garment design or exaggerating anatomy.
 Preserve her long-hair feminine aura and photorealistic lifestyle feel.
 """
 
@@ -626,7 +627,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.37")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.37_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -2438,6 +2439,7 @@ def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
         outfit_rule = (
             f"Use Figure 10 as Xiaoxia's outfit/styling reference: {wardrobe_item.get('id')} {wardrobe_item.get('name')}. "
             f"Visual clothing summary: {_wardrobe_visual_summary_only(wardrobe_item) or wardrobe_item.get('style_summary') or wardrobe_item.get('name')}. "
+            "Follow the wardrobe reference faithfully; do not simplify, redesign, replace, or reinterpret its distinctive outfit elements unless explicitly instructed. "
             "Keep the activity, place, and pose from the text request; do not let the clothing reference change the scene."
         )
     else:
@@ -7763,7 +7765,7 @@ def build_committed_diary_visual_from_task(task, season_rule="", wardrobe_hint="
     image_prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
 
 Figures 1-9 are identity-only reference images of Xiaoxia.
-Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.
+Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy.
 Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.
 
 DIARY SINGLE-PHOTO TASK — this is the only photo promise to fulfill today.
@@ -11202,7 +11204,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
         "FIGURE ROLE MAP — obey these roles strictly.",
         "",
         "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.",
+        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy.",
         "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, or composition from Figures 1-9.",
         "",
         "Create a new solo photorealistic lifestyle image of Xiaoxia.",
@@ -11211,7 +11213,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
     if has_reference:
         lines += [
             "",
-            "Use Figure 10 as the primary garment and styling reference. Preserve its recognizable clothing design and any explicitly requested major accessory without redesigning them.",
+            "Use Figure 10 as the primary garment and styling reference. Follow it faithfully: do not simplify, redesign, replace, or reinterpret the outfit or its distinctive design elements unless explicitly instructed.",
             "The text request remains authoritative for the scene, action, pose, camera, lighting, and composition; Figure 10 must not redirect or weaken them.",
         ]
     else:
@@ -11240,7 +11242,7 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
     if has_figure10:
         lines += [
             "",
-            "Use Figure 10 as the primary garment and styling reference. Preserve its recognizable clothing design and any explicitly requested major accessory without redesigning them.",
+            "Use Figure 10 as the primary garment and styling reference. Follow it faithfully: do not simplify, redesign, replace, or reinterpret the outfit or its distinctive design elements unless explicitly instructed.",
             "The text request remains authoritative for the scene, action, pose, camera, lighting, and composition; Figure 10 must not redirect or weaken them.",
         ]
     if current_outfit:
