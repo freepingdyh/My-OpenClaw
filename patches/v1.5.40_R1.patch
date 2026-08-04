@@ -1,0 +1,207 @@
+--- a/lobster_discord.py	2026-08-04 05:30:31.452292845 +0000
++++ b/lobster_discord.py	2026-08-04 05:30:31.960292861 +0000
+@@ -9,7 +9,7 @@
+ import math
+ import traceback
+ 
+-LOBSTER_VERSION = "1.5.39_R1"
++LOBSTER_VERSION = "1.5.40_R1"
+ 
+ 
+ def _normalize_generation_level(level):
+@@ -631,7 +631,7 @@
+ # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
+ PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
+ print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
+-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.39_R1")
++print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.40_R1")
+ 
+ # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
+ XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
+@@ -16682,9 +16682,11 @@
+         context.pop("__trace_context", None)
+         context["trace_action"] = "photo_more"
+         context["user_input"] = "More button from previous photo"
++        root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
++        context["root_prompt_base"] = root_prompt
+         context["prompt_base"] = (
+-            context.get("prompt_base", "")
+-            + "\nCreate a new variation of the same moment: same scene, same outfit/accessory reference, same mood, but with a different natural pose, camera angle, facial expression, and composition."
++            root_prompt
++            + "\nCONTINUATION: Keep the same story, scene, activity, people boundary, and outfit. Create one fresh natural variation in pose, expression, camera angle, and composition only."
+         )
+         try:
+             new_context = await _generate_photo_from_context(context)
+@@ -16715,9 +16717,11 @@
+         context.pop("__trace_context", None)
+         context["trace_action"] = "photo_reroll_replace"
+         context["user_input"] = "骰子取代 from previous photo"
++        root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
++        context["root_prompt_base"] = root_prompt
+         context["prompt_base"] = (
+-            context.get("prompt_base", "")
+-            + "\nReroll this image while preserving the same core scene, outfit/accessory reference, and mood. Improve naturalness and composition."
++            root_prompt
++            + "\nREROLL: Keep the same core story, activity, people boundary, outfit, time of day, and mood. Recompose freely, but do not change the subject or invent a new scene."
+         )
+         try:
+             old_url = context.get("local_url") or context.get("image_url")
+@@ -22527,6 +22531,158 @@
+     return _v1526_relax_old_solo_text(base, visual_checklist)
+ 
+ 
++
++# ==========================================
++# 🪶 v1.5.40_R1 — Seedream compact prompt layer
++# Goal: preserve only non-negotiable boundaries; leave pose, expression, and visual staging to Seedream.
++# Covers first generation, 修正這張 / 再修一次, More, 骰子取代, and reroll paths.
++# ==========================================
++
++def _v1540_people_rule(checklist=None):
++    c = checklist if isinstance(checklist, dict) else {}
++    policy = str(c.get("people_policy") or "")
++    if c.get("strict_solo_required") or policy == "private_strict_solo":
++        return "People: Xiaoxia only. Never show Daxia/viewer or any extra person/body part."
++    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
++        return (
++            "People: Xiaoxia is the unmistakable heroine. Female friends may interact naturally but remain supporting characters and must not outshine or appear more voluptuous than Xiaoxia. "
++            "Men may appear only as incidental non-interacting public background; never conversation, eye contact, shared table, companionship, touching, or date framing with Xiaoxia. Never show Daxia/viewer."
++        )
++    if policy == "autonomy_sport_no_male":
++        return "People: Xiaoxia is the unmistakable heroine. Female-only supporting people may appear if needed. No men and never show Daxia/viewer."
++    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
++        return (
++            "People: Xiaoxia is the only primary subject. Public bystanders may support realism. Men must remain incidental and completely non-interacting with Xiaoxia. "
++            "No companion/date framing and never show Daxia/viewer."
++        )
++    return "People: Xiaoxia is the only primary subject. Do not add a companion; no man may interact with her; never show Daxia/viewer."
++
++
++def _v1540_compact_identity_line():
++    return (
++        "Identity: preserve Xiaoxia's recognizable adult East Asian face, fair luminous skin, long brown hair, tall slim figure, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, and long graceful legs."
++    )
++
++
++def _v1540_extract_request(text):
++    text = str(text or "").strip()
++    markers = [
++        "TEXT REQUEST — this controls the final scene, pose, action, and composition:",
++        "TEXT REQUEST:",
++        "CURRENT DAXIA REPAIR REQUEST (AESTHETICALLY INTERPRETED):",
++    ]
++    for marker in markers:
++        if marker in text:
++            text = text.split(marker, 1)[1].strip()
++            break
++    # Remove old fixed-tail sections if they were already embedded by a previous continuation.
++    for marker in ["Mandatory obedience rules:", "PREVIOUS OUTPUT WAS REJECTED:"]:
++        if marker in text:
++            text = text.split(marker, 1)[0].strip()
++    return re.sub(r"\n{3,}", "\n\n", text).strip()
++
++
++def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason="", visual_checklist=None):
++    request = _v1540_extract_request(user_request)
++    lines = [
++        "FIGURE ROLES: Figures 1-9 identify Xiaoxia only; never copy their pose, room, background, or composition.",
++        _v1540_compact_identity_line(),
++        _v1540_people_rule(visual_checklist),
++    ]
++    if has_reference:
++        lines.append("Outfit: Figure 10 is the clothing reference. Preserve its distinctive design; text controls scene, action, pose, and camera.")
++    elif current_outfit:
++        lines.append(f"Outfit continuity: {str(current_outfit).strip()}")
++    lines += [
++        f"Request: {request}",
++        "Priority: make the requested pose/action unmistakable; keep anatomy natural and do not substitute a generic fashion pose or another location.",
++    ]
++    if retry_reason:
++        lines.append(f"Retry correction: {str(retry_reason).strip()}")
++    return "\n".join(x for x in lines if x).strip()
++
++
++def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True, visual_checklist=None):
++    request = _v1540_extract_request(user_request)
++    lines = [
++        "FIGURE ROLES: Figures 1-9 identify Xiaoxia only; never copy their pose, setting, outfit, or composition.",
++        _v1540_compact_identity_line(),
++        _v1540_people_rule(visual_checklist),
++    ]
++    if has_figure10:
++        lines.append("Outfit: use Figure 10 faithfully for the garment and distinctive visible accessories; do not let it override the requested scene or action.")
++    elif current_outfit:
++        lines.append(f"Outfit continuity: {str(current_outfit).strip()}")
++    lines += [
++        f"Request: {request}",
++        "Priority: show the requested scene and main action clearly. Keep the image natural; do not replace it with a generic portrait or invent another location.",
++    ]
++    if retry_reason:
++        lines.append(f"Retry correction: {str(retry_reason).strip()}")
++    return "\n".join(x for x in lines if x).strip()
++
++
++def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
++    visual_dict = visual_dict if isinstance(visual_dict, dict) else {}
++    checklist = visual_dict.get("__visual_checklist")
++    if not isinstance(checklist, dict):
++        tc = visual_dict.get("__trace_context")
++        checklist = tc.get("visual_checklist") if isinstance(tc, dict) else {}
++    request = _v1540_extract_request(initial_prompt)
++    anchors = []
++    for key, label in [
++        ("scene_summary", "Scene"), ("setting_anchor", "Scene"), ("time_anchor", "Time"),
++        ("activity", "Activity"), ("primary_action", "Action"), ("outfit_intent", "Outfit"),
++    ]:
++        value = _clean_text_compact(visual_dict.get(key))
++        if value and all(value.lower() not in x.lower() for x in anchors):
++            anchors.append(f"{label}: {value}")
++    lines = [
++        _v1540_compact_identity_line(),
++        _v1540_people_rule(checklist),
++    ]
++    lines.extend(anchors[:5])
++    if request:
++        lines.append(f"Request: {request}")
++    lines.append("Priority: preserve the requested story and activity; Xiaoxia remains the clear protagonist. Leave natural pose, expression, lighting nuance, and composition to Seedream unless explicitly specified.")
++    return "\n".join(lines).strip()
++
++
++def _seedream_repair_mode_block(context):
++    context = context if isinstance(context, dict) else {}
++    mode = _repair_context_mode(context)
++    scene = _repair_clean_line(context.get("scene_summary") or context.get("composition") or context.get("scene_text"), 180)
++    action = _repair_clean_line(context.get("action_summary"), 160)
++    outfit = _repair_clean_line(context.get("outfit_summary"), 160)
++    if mode == "cosplay":
++        state = context.get("cosplay_state") if isinstance(context.get("cosplay_state"), dict) else {}
++        role = _repair_clean_line(context.get("cosplay_character_name") or state.get("character_name") or state.get("role_name"), 100)
++        work = _repair_clean_line(context.get("cosplay_work_title") or state.get("work_title") or state.get("source_title"), 100)
++        return " | ".join(x for x in [f"Keep cosplay role: {role or work or 'requested role'}", f"Scene: {scene}" if scene else "", f"Action: {action}" if action else "", "Keep Xiaoxia solo unless Daxia explicitly requests otherwise"] if x)
++    parts = []
++    if scene: parts.append(f"Scene: {scene}")
++    if action: parts.append(f"Action: {action}")
++    if outfit: parts.append(f"Outfit: {outfit}")
++    return " | ".join(parts)
++
++
++def _seedream_repair_prompt(custom_prompt, context=None, interpreted_request=None):
++    context = context if isinstance(context, dict) else {}
++    interpreted = interpreted_request or _rewrite_repair_request_for_aesthetics(custom_prompt)
++    request = str(interpreted.get("rewritten") or custom_prompt or "").strip()
++    mode_lock = _seedream_repair_mode_block(context)
++    checklist = context.get("visual_checklist") if isinstance(context.get("visual_checklist"), dict) else {}
++    return "\n".join([
++        "FIGURE ROLES: Figures 1-9 identify Xiaoxia. Image 10 is the source photo to edit.",
++        _v1540_compact_identity_line(),
++        _v1540_people_rule(checklist),
++        "KEEP: Image 10's scene, activity, time of day, composition, lighting, outfit, atmosphere, and surrounding-participant density unless Daxia explicitly asks to change one of them.",
++        f"Context: {mode_lock}" if mode_lock else "",
++        f"CHANGE ONLY: {request}",
++        "Do not redesign the image. Make the smallest clearly visible correction and preserve every unrequested element. Keep anatomy natural.",
++    ]).strip()
++
++
+ # ==========================================
+ # 🚀 終極啟動器
+ # ==========================================
