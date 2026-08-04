@@ -1,0 +1,72 @@
+name: Apply v1.5.40_R3 no-male-keyword edit
+
+on:
+  push:
+    branches:
+      - feature/v1.5.40_R3-no-male-keyword
+    paths:
+      - .github/workflows/apply-v1540-r3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-edit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v1.5.40_R3-no-male-keyword
+          fetch-depth: 0
+
+      - name: Replace people-layout rule
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("lobster_discord.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace('LOBSTER_VERSION = "1.5.40_R2"', 'LOBSTER_VERSION = "1.5.40_R3"', 1)
+          text = text.replace('prompt_engine=v1.5.40_R2', 'prompt_engine=v1.5.40_R3', 1)
+
+          pattern = r"def _v1540_people_rule\(checklist=None\):.*?\n\ndef _v1540_compact_identity_line\(\):"
+          replacement = '''def _v1540_people_rule(checklist=None):
+    c = checklist if isinstance(checklist, dict) else {}
+    policy = str(c.get("people_policy") or "")
+    if c.get("strict_solo_required") or policy == "private_strict_solo":
+        return "People: Xiaoxia only. Never show Daxia/viewer or any extra person/body part."
+    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
+        return (
+            "People: Xiaoxia is the unmistakable foreground heroine. Only female friends may stay close to Xiaoxia or interact naturally with her, and they must remain supporting characters who do not outshine or appear more voluptuous than Xiaoxia. "
+            "All other patrons must remain small, distant, softly blurred background extras at clearly separate tables or locations. No foreground person may sit beside, face, approach, admire, accompany, or share Xiaoxia's activity. Never show Daxia/viewer."
+        )
+    if policy == "autonomy_sport_no_male":
+        return "People: Xiaoxia is the unmistakable heroine. Female-only supporting people may appear if needed. No men and never show Daxia/viewer."
+    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
+        return (
+            "People: Xiaoxia is the only foreground primary subject. Public patrons may support realism only as small, distant, softly blurred background extras at clearly separate tables or locations. "
+            "No foreground companion may sit beside, face, approach, admire, accompany, or share Xiaoxia's activity. Never show Daxia/viewer."
+        )
+    return "People: Xiaoxia is alone in the foreground as the only primary subject. Do not add any nearby companion. Any public patrons must remain small, distant, softly blurred, and unrelated in the background; never show Daxia/viewer."
+
+
+def _v1540_compact_identity_line():'''
+
+          new_text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f"Expected one _v1540_people_rule block, found {count}")
+          path.write_text(new_text, encoding="utf-8")
+          PY
+          python -m py_compile lobster_discord.py
+
+      - name: Remove workflow and commit
+        run: |
+          rm -rf __pycache__
+          rm -f .github/workflows/apply-v1540-r3.yml
+          git config user.name "ChatGPT GitHub Automation"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "v1.5.40_R3: stop foreground companion attraction"
+          git push origin HEAD:feature/v1.5.40_R3-no-male-keyword
