@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.42_R1"
+LOBSTER_VERSION = "1.5.42_R2"
 
 
 def _normalize_generation_level(level):
@@ -631,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.42_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.42_R2")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -14936,6 +14936,7 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Figures 1-9 are identity-only references for Xiaoxia. Apply their face and body identity only to Xiaoxia. "
             "Do not copy their pose, outfit, room, background, lighting, props, or composition."
         ),
+        _v1540_compact_identity_line(),
     ]
     if hard:
         sections.append("DIARY HARD SCENE REQUIREMENTS — every item must be visible:\n" + hard)
@@ -15001,7 +15002,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             current_outfit=current_outfit,
             visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
         )
-        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.30 lightweight diary prompt builder")
+        print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.42_R2 diary prompt + shared compact identity")
     else:
         final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
         diary_prompt_stats = None
@@ -15010,8 +15011,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.30"
-        trace_context["prompt_engine_marker"] = "DIARY_LIGHTWEIGHT_V1528" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
+        trace_context["prompt_engine_version"] = "v1.5.42_R2"
+        trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
             trace_context["diary_seedream_prompt_exact"] = final_prompt
