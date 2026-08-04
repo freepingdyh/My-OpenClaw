@@ -1,0 +1,42 @@
+name: Apply v1.5.39_R1 patch
+
+on:
+  push:
+    branches:
+      - feature/v1.5.39_R1-hero-weight
+    paths:
+      - patches/v1.5.39_R1.patch
+      - .github/workflows/apply-v1539-r1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v1.5.39_R1-hero-weight
+          fetch-depth: 0
+
+      - name: Apply code patch
+        run: |
+          git apply --check patches/v1.5.39_R1.patch
+          git apply patches/v1.5.39_R1.patch
+          python -m py_compile lobster_discord.py
+
+      - name: Remove one-time patch machinery
+        run: |
+          rm -f patches/v1.5.39_R1.patch
+          rm -f .github/workflows/apply-v1539-r1.yml
+          rmdir patches 2>/dev/null || true
+
+      - name: Commit updated source
+        run: |
+          git config user.name "ChatGPT GitHub Automation"
+          git config user.email "actions@github.com"
+          git add lobster_discord.py patches .github/workflows/apply-v1539-r1.yml
+          git commit -m "v1.5.39_R1: strengthen Xiaoxia hero weight and repair scene lock"
+          git push origin HEAD:feature/v1.5.39_R1-hero-weight
