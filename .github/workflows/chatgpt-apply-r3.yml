@@ -1,5 +1,6 @@
 name: ChatGPT apply v1.5.41_R1
 
+# Trigger clean feature-branch source update.
 on:
   push:
     branches: [main]
@@ -14,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/v1.5.40_R3-no-male-keyword
+          ref: feature/v1.5.41_R1-female-positive
           fetch-depth: 0
       - name: Apply positive female-only people rule
         run: |
@@ -59,9 +60,8 @@ def _v1540_compact_identity_line():'''
       - name: Commit feature branch
         run: |
           rm -rf __pycache__
-          rm -f .github/workflows/apply-v1540-r3.yml
           git config user.name 'ChatGPT GitHub Automation'
           git config user.email 'actions@github.com'
-          git add -A
+          git add lobster_discord.py
           git commit -m 'v1.5.41_R1: use positive female-only people guidance'
-          git push origin HEAD:feature/v1.5.40_R3-no-male-keyword
+          git push origin HEAD:feature/v1.5.41_R1-female-positive
