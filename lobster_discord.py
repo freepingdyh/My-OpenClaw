@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.40_R1"
+LOBSTER_VERSION = "1.5.41_R1"
 
 
 def _normalize_generation_level(level):
@@ -631,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.40_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.41_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -22541,21 +22541,44 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 def _v1540_people_rule(checklist=None):
     c = checklist if isinstance(checklist, dict) else {}
     policy = str(c.get("people_policy") or "")
+
     if c.get("strict_solo_required") or policy == "private_strict_solo":
-        return "People: Xiaoxia only. Never show Daxia/viewer or any extra person/body part."
+        return "People: Xiaoxia alone. She is the only visible person."
+
     if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
         return (
-            "People: Xiaoxia is the unmistakable heroine. Female friends may interact naturally but remain supporting characters and must not outshine or appear more voluptuous than Xiaoxia. "
-            "Men may appear only as incidental non-interacting public background; never conversation, eye contact, shared table, companionship, touching, or date framing with Xiaoxia. Never show Daxia/viewer."
+            "People: Xiaoxia is the unmistakable foreground heroine. "
+            "Nearby people, if any, are female friends. "
+            "Female friends may interact naturally, but they remain supporting characters "
+            "and must not outshine or appear more voluptuous than Xiaoxia. "
+            "Background patrons are women and blend naturally into the environment. "
+            "Xiaoxia remains the clear visual focus."
         )
+
     if policy == "autonomy_sport_no_male":
-        return "People: Xiaoxia is the unmistakable heroine. Female-only supporting people may appear if needed. No men and never show Daxia/viewer."
-    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
         return (
-            "People: Xiaoxia is the only primary subject. Public bystanders may support realism. Men must remain incidental and completely non-interacting with Xiaoxia. "
-            "No companion/date framing and never show Daxia/viewer."
+            "People: Xiaoxia is the unmistakable heroine. "
+            "Supporting participants, if needed, are women. "
+            "Xiaoxia remains the clear visual focus."
         )
-    return "People: Xiaoxia is the only primary subject. Do not add a companion; no man may interact with her; never show Daxia/viewer."
+
+    if c.get("allow_background_bystanders") or policy in {
+        "autonomy_public_background_ok",
+        "public_background_bystanders_allowed",
+    }:
+        return (
+            "People: Xiaoxia is the foreground heroine. "
+            "Nearby people, if any, are women. "
+            "Background patrons are women and blend naturally into the environment. "
+            "Xiaoxia remains the clear visual focus."
+        )
+
+    return (
+        "People: Xiaoxia is the foreground heroine. "
+        "Nearby people, if any, are women. "
+        "Background patrons are women and blend naturally into the environment. "
+        "Xiaoxia remains the clear visual focus."
+    )
 
 
 def _v1540_compact_identity_line():
