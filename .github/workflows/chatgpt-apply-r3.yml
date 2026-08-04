@@ -1,16 +1,15 @@
 name: ChatGPT apply v1.5.41_R1
 
-# Trigger clean feature-branch source update.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/chatgpt-apply-r3.yml]
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.event.issue.title == 'TRIGGER_V1541_R1'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +26,6 @@ jobs:
           s = p.read_text(encoding='utf-8')
           s = re.sub(r'LOBSTER_VERSION = "[^"]+"', 'LOBSTER_VERSION = "1.5.41_R1"', s, count=1)
           s = re.sub(r'prompt_engine=v[^"\s]+', 'prompt_engine=v1.5.41_R1', s, count=1)
-
           pattern = r'def _v1540_people_rule\(checklist=None\):.*?\n\ndef _v1540_compact_identity_line\(\):'
           replacement = '''def _v1540_people_rule(checklist=None):
     c = checklist if isinstance(checklist, dict) else {}
