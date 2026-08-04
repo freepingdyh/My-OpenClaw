@@ -1,15 +1,15 @@
 name: ChatGPT apply v1.5.41_R1
 
 on:
-  issues:
-    types: [opened]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.event.issue.title == 'TRIGGER_V1541_R1'
+    if: github.head_ref == 'feature/v1.5.41_R1-female-positive'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
