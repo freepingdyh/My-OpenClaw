@@ -32,12 +32,20 @@ jobs:
               ('LOBSTER_VERSION = "1.5.40_R1"', 'LOBSTER_VERSION = "1.5.40_R2"'),
               ('prompt_engine=v1.5.40_R1', 'prompt_engine=v1.5.40_R2'),
               (
-                  'People: Xiaoxia is the unmistakable heroine. Female friends may interact naturally but remain supporting characters and must not outshine or appear more voluptuous than Xiaoxia. Men may appear only as incidental non-interacting public background; never conversation, eye contact, shared table, companionship, touching, or date framing with Xiaoxia. Never show Daxia/viewer.',
-                  'People: Xiaoxia is the unmistakable foreground heroine. Only female friends may stay near Xiaoxia or interact naturally with her, and they must remain supporting characters who do not outshine or appear more voluptuous than Xiaoxia. Men must never be near Xiaoxia and may appear only as small distant background extras at clearly separate tables or locations. Never show Daxia/viewer.'
+                  'People: Xiaoxia is the unmistakable heroine. Female friends may interact naturally but remain supporting characters and must not outshine or appear more voluptuous than Xiaoxia. ',
+                  'People: Xiaoxia is the unmistakable foreground heroine. Only female friends may stay near Xiaoxia or interact naturally with her, and they must remain supporting characters who do not outshine or appear more voluptuous than Xiaoxia. '
               ),
               (
-                  'People: Xiaoxia is the only primary subject. Public bystanders may support realism. Men must remain incidental and completely non-interacting with Xiaoxia. No companion/date framing and never show Daxia/viewer.',
-                  'People: Xiaoxia is the only foreground primary subject. Public bystanders may support realism. Men must never be near Xiaoxia and may appear only as small distant background extras at clearly separate tables or locations. No male companion framing and never show Daxia/viewer.'
+                  'Men may appear only as incidental non-interacting public background; never conversation, eye contact, shared table, companionship, touching, or date framing with Xiaoxia. Never show Daxia/viewer.',
+                  'Men must never be near Xiaoxia and may appear only as small distant background extras at clearly separate tables or locations. Never show Daxia/viewer.'
+              ),
+              (
+                  'People: Xiaoxia is the only primary subject. Public bystanders may support realism. Men must remain incidental and completely non-interacting with Xiaoxia. ',
+                  'People: Xiaoxia is the only foreground primary subject. Public bystanders may support realism. Men must never be near Xiaoxia and may appear only as small distant background extras at clearly separate tables or locations. '
+              ),
+              (
+                  'No companion/date framing and never show Daxia/viewer.',
+                  'No male companion framing and never show Daxia/viewer.'
               ),
               (
                   'People: Xiaoxia is the only primary subject. Do not add a companion; no man may interact with her; never show Daxia/viewer.',
@@ -48,7 +56,7 @@ jobs:
           for old, new in replacements:
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"Expected exactly one match, found {count}: {old[:90]}")
+                  raise SystemExit(f"Expected exactly one match, found {count}: {old[:100]}")
               text = text.replace(old, new, 1)
 
           path.write_text(text, encoding="utf-8")
