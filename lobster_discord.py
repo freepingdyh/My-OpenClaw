@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.41_R1"
+LOBSTER_VERSION = "1.5.42_R1"
 
 
 def _normalize_generation_level(level):
@@ -96,11 +96,11 @@ SOLO_NEGATIVE_MINIMAL = (
 
 
 XIAOXIA_APPEARANCE_CORE = """
-Xiaoxia is a recognizable adult fictional East Asian woman with fair luminous skin and a sweet refined face. Keep Xiaoxia tall and slim with a clearly defined waist, a naturally very full and elegant bust, a strong bust-to-waist contrast, and a soft hourglass silhouette.
-Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, heavier, flatter, older, or like a different woman.
-Her bust-to-waist contrast should stay visibly substantial even in side-facing or three-quarter poses, while keeping anatomy natural and elegant.
-Even in full-body, long-shot, or side-facing compositions, preserve her strong bust-to-waist contrast so it remains clearly visible through the clothing, without changing the garment design or exaggerating anatomy.
-Preserve her long-hair feminine aura and photorealistic lifestyle feel.
+Xiaoxia is a recognizable adult fictional East Asian woman with fair luminous skin and a sweet refined face. Keep Xiaoxia tall and slim with a distinctly narrow waist, a naturally very full and visibly prominent elegant bust, a strong bust-to-waist contrast, and a refined hourglass silhouette.
+Her face identity and core body identity must remain consistent across generations: she should not drift into looking shorter, broader, heavier, flatter, older, or like a different woman.
+Her fuller upper-body silhouette and narrow waist must remain clearly readable in front-facing, side-facing, three-quarter, seated, standing, full-body, and multi-person compositions, while keeping anatomy natural and elegant.
+Preserve her strong bust-to-waist contrast through the clothing without changing the garment design, adding unsupported padding, or creating exaggerated anatomy.
+Preserve her long-hair feminine aura, long graceful legs, and photorealistic lifestyle feel.
 """
 
 XIAOXIA_CLOTHING_FLATTER_RULE = "Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it."
@@ -631,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.41_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.42_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -11120,6 +11120,40 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
             "foreground second person or interacting companion",
             "male partner vibe, date vibe, or companion-like composition",
         ])
+
+    # v1.5.42_R1 — Daxia writes the story; the program supplies the people guard.
+    # Unless the actual request explicitly describes another interacting character,
+    # every generation defaults to a solo Xiaoxia photograph, regardless of public venue or activity catalog.
+    explicit_character = bool(character_interaction)
+    checklist["specified_character_interaction"] = explicit_character
+    if explicit_character:
+        checklist.update({
+            "strict_solo_required": False,
+            "allow_background_bystanders": False,
+            "people_policy": "specified_character_interaction_allowed",
+            "female_interaction_ok": False,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order([
+            x for x in (checklist.get("must_not_have") or [])
+            if "interacting companion" not in str(x).lower()
+        ] + [
+            "any person not explicitly described in Daxia's request",
+            "additional people becoming more visually prominent or more voluptuous than Xiaoxia",
+            "Daxia/viewer visually depicted as a person or body part",
+        ])
+    else:
+        checklist.update({
+            "strict_solo_required": True,
+            "allow_background_bystanders": False,
+            "people_policy": "default_strict_solo",
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": False,
+            "female_interaction_ok": False,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "any additional human figure, companion, bystander, external hand, reflection, or visible viewer body part",
+        ])
     return checklist
 
 
@@ -11148,20 +11182,16 @@ def _visual_checklist_brief(checklist, max_items=10):
 
 def _seedream_people_policy_line(checklist=None):
     checklist = checklist if isinstance(checklist, dict) else {}
-    people_policy = str(checklist.get("people_policy") or "")
-    if checklist.get("strict_solo_required") or people_policy == "private_strict_solo":
-        return "People rule: private/solo scene. Xiaoxia must be the only human figure. No other people, no external hands, and no visible viewer body parts."
     if checklist.get("specified_character_interaction"):
-        return "People rule: allow the specific character interaction explicitly requested by Daxia; do not add unrequested companions. Never visualize Daxia/viewer as a male head, hand, shoulder, back, reflection, shadow, or body part."
-    if people_policy == "autonomy_female_interaction_ok":
-        return "People rule: Xiaoxia is the clear primary subject. 1 to 3 female friends/classmates/sisters may naturally interact with Xiaoxia in this public female-social scene. Female companions must stay secondary and non-romantic. Men may appear only as distant incidental background; no male may interact with Xiaoxia or appear as companion/partner. No external hands and never visualize Daxia/viewer."
-    if people_policy == "autonomy_sport_no_male":
-        return "People rule: Xiaoxia is the only primary subject. Female-only distant non-interacting background people may exist when needed, but no male person anywhere in the scene, no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
-    if people_policy == "autonomy_public_background_ok":
-        return "People rule: Xiaoxia is the only primary subject. Sparse distant non-interacting background people may exist for public-scene realism, including men, but nobody may interact with Xiaoxia, no one may look like her companion, there is no foreground second person, no external hands, and never visualize Daxia/viewer."
-    if checklist.get("allow_background_bystanders"):
-        return "People rule: Xiaoxia is the only primary subject. Distant non-interacting background bystanders may exist for public-scene realism, but no companion, no foreground second person, no external hands, and never visualize Daxia/viewer."
-    return "People rule: Xiaoxia is the only primary subject. No male stand-in, no external hands, no visible viewer body parts."
+        return (
+            "People rule: include only the character or characters explicitly described in Daxia's request. "
+            "All additional people are understated supporting characters. Xiaoxia remains the most eye-catching subject, "
+            "with the strongest full-bust, narrow-waist hourglass silhouette. Do not add anyone else and never visualize Daxia/viewer."
+        )
+    return (
+        "People rule: solo Xiaoxia only. Xiaoxia is the only visible human figure. "
+        "No companions, bystanders, external hands, reflections of another person, or visible viewer body parts."
+    )
 
 
 def _context_seedream_model_id(context=None, trace_context=None):
@@ -22539,51 +22569,31 @@ def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=
 # ==========================================
 
 def _v1540_people_rule(checklist=None):
+    """v1.5.42_R1: default solo; only an explicitly requested character may join."""
     c = checklist if isinstance(checklist, dict) else {}
-    policy = str(c.get("people_policy") or "")
+    explicit_companion = bool(c.get("specified_character_interaction"))
 
-    if c.get("strict_solo_required") or policy == "private_strict_solo":
-        return "People: Xiaoxia alone. She is the only visible person."
-
-    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
+    if not explicit_companion:
         return (
-            "People: Xiaoxia is the unmistakable foreground heroine. "
-            "Nearby people, if any, are female friends. "
-            "Female friends may interact naturally, but they remain supporting characters "
-            "and must not outshine or appear more voluptuous than Xiaoxia. "
-            "Background patrons are women and blend naturally into the environment. "
-            "Xiaoxia remains the clear visual focus."
-        )
-
-    if policy == "autonomy_sport_no_male":
-        return (
-            "People: Xiaoxia is the unmistakable heroine. "
-            "Supporting participants, if needed, are women. "
-            "Xiaoxia remains the clear visual focus."
-        )
-
-    if c.get("allow_background_bystanders") or policy in {
-        "autonomy_public_background_ok",
-        "public_background_bystanders_allowed",
-    }:
-        return (
-            "People: Xiaoxia is the foreground heroine. "
-            "Nearby people, if any, are women. "
-            "Background patrons are women and blend naturally into the environment. "
-            "Xiaoxia remains the clear visual focus."
+            "People: Xiaoxia alone. She is the only visible human figure. "
+            "Do not add companions, bystanders, external hands, or visible viewer body parts."
         )
 
     return (
-        "People: Xiaoxia is the foreground heroine. "
-        "Nearby people, if any, are women. "
-        "Background patrons are women and blend naturally into the environment. "
-        "Xiaoxia remains the clear visual focus."
+        "People: include only the additional character or characters explicitly described in Daxia's request. "
+        "All additional people are supporting characters with understated styling and non-prominent figures. "
+        "Xiaoxia remains the most eye-catching visual focus and retains the strongest feminine hourglass silhouette. "
+        "Do not add anyone else and never visualize Daxia/viewer."
     )
 
 
 def _v1540_compact_identity_line():
     return (
-        "Identity: preserve Xiaoxia's recognizable adult East Asian face, fair luminous skin, long brown hair, tall slim figure, defined waist, naturally very full elegant bust, strong bust-to-waist contrast, and long graceful legs."
+        "Identity: preserve Xiaoxia's recognizable adult East Asian face, fair luminous skin, long brown hair, "
+        "tall slim figure, distinctly narrow waist, naturally very full and visibly prominent elegant bust, "
+        "strong bust-to-waist contrast, refined hourglass silhouette, and long graceful legs. "
+        "Her fuller upper-body silhouette and narrow waist must remain clearly readable through the clothing "
+        "in seated, standing, full-body, side-facing, and multi-person compositions, while anatomy stays natural."
     )
 
 
