@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.38"
+LOBSTER_VERSION = "1.5.38_R1"
 
 
 def _normalize_generation_level(level):
@@ -631,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.38")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.38_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -17098,15 +17098,15 @@ async def select_diary_photo_memory(
 【共同要求】
 1. 只選一個時間、一個地點、一個主要動作，必須能被拍成單張照片。
 2. selected_memory 是內部除錯用的簡短名稱；不另建資料庫。
-3. why_this_photo 必須用小俠第一人稱寫成 70～160 個繁體中文字，清楚說明「為什麼今晚放這張照片」，並可直接放進多年後閱讀的交換日記。
-4. why_this_photo 必須與實際選定畫面一致；若是自拍，必須明說當時為何想自拍或留下自己的樣子。
+3. why_this_photo 必須用小俠第一人稱寫成 70～160 個繁體中文字，像交換日記自然收尾的 2～4 句內心話；不要使用「選圖理由」「為什麼放這張照片」等系統式標題，也不要寫成報告。
+4. why_this_photo 必須與實際選定畫面一致，至少自然點出照片中的一項具體場景、動作或物件，以及想留下它的心情；若是自拍，必須明說當時為何想自拍或留下自己的樣子。
 5. scene、action、camera、mood、outfit 要具體但精簡，供後續 Seedream 規劃；不得寫商攝口號。
 6. 不得把不同時段事件混成一張圖，不得讓照片理由與畫面各說各話。
 
 只回傳 JSON：
 {{
   "selected_memory": "今天最想留住的一幕，40字內",
-  "why_this_photo": "小俠第一人稱的放圖理由，70～160字",
+  "why_this_photo": "自然融入日記收尾的第一人稱內心話，70～160字",
   "scene": "單一場景與時間",
   "action": "一個主要動作，可含一個小動作",
   "camera": "生活照鏡位；除非理由成立，不預設自拍",
@@ -17136,6 +17136,96 @@ async def select_diary_photo_memory(
     if len(cleaned["why_this_photo"]) < 30:
         cleaned["why_this_photo"] = fallback["why_this_photo"]
     return cleaned
+
+
+async def evaluate_diary_photo_alignment(image_url, selection, *, manual_override=False):
+    """v1.5.38_R1：出圖後用 Vision 對照 Photo Selector 決策，回傳簡短圖文一致標籤。
+
+    不重新生圖、不啟動 Gate，也不建立新資料庫；結果只進本次日記、照片 payload 與既有 diary trace。
+    """
+    selection = selection if isinstance(selection, dict) else {}
+    expected = {
+        "selected_memory": _clean_text_compact(selection.get("selected_memory")),
+        "scene": _clean_text_compact(selection.get("scene")),
+        "action": _clean_text_compact(selection.get("action")),
+        "camera": _clean_text_compact(selection.get("camera")),
+        "mood": _clean_text_compact(selection.get("mood")),
+        "outfit": _clean_text_compact(selection.get("outfit")),
+    }
+    fallback = {
+        "status": "unknown",
+        "score": None,
+        "label": "🟡 待確認｜影像檢查暫時無法完成",
+        "matched_points": [],
+        "missing_points": [],
+        "summary": "影像檢查暫時無法完成，請直接查看照片與日記內容。",
+    }
+    data, mime = await _download_image_bytes_for_vision(image_url)
+    if not data:
+        return fallback
+
+    prompt = f"""
+你是交換日記照片的輕量圖文一致性檢查員。請查看附圖，並對照原本的單張照片決策。
+這不是審美評分，也不是安全審查；只判斷圖片是否正常反映原定畫面。
+
+【原定畫面】
+selected_memory：{expected['selected_memory'] or '未提供'}
+scene：{expected['scene'] or '未提供'}
+action：{expected['action'] or '未提供'}
+camera：{expected['camera'] or '未提供'}
+mood：{expected['mood'] or '未提供'}
+outfit：{expected['outfit'] or '未提供'}
+照片來源：{'大俠指定照片' if manual_override else 'Seedream 新生成照片'}
+
+只檢查四類：
+1. 場景與時間是否大致正確。
+2. 主要動作是否可辨識。
+3. 原定關鍵物件是否出現；若原定沒有關鍵物件，不要自行要求。
+4. 穿著意圖是否大致吻合；不要苛求細小飾品、精確布料紋理或鏡頭角度。
+
+判定：
+- green：主要場景與主要動作均有反映，少量非核心差異可接受。
+- yellow：主題大致相符，但有一項核心內容缺漏或表現不清。
+- red：主要場景、時間或動作明顯偏離，像是生成了另一張題材。
+
+請避免過度嚴格。只回傳 JSON：
+{{
+  "status": "green|yellow|red",
+  "score": 0,
+  "matched_points": ["最多3個短句"],
+  "missing_points": ["最多2個短句"],
+  "summary": "12至35個繁體中文字，明確說出有反映什麼或漏了什麼"
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        raw = _safe_json_from_text(response.text, {})
+        status = str(raw.get("status") or "").strip().lower()
+        if status not in {"green", "yellow", "red"}:
+            return fallback
+        try:
+            score = max(0, min(100, int(raw.get("score"))))
+        except Exception:
+            score = {"green": 90, "yellow": 65, "red": 30}[status]
+        summary = _clean_text_compact(raw.get("summary"))[:80]
+        if not summary:
+            summary = {"green": "主要場景與動作均有反映", "yellow": "主題大致相符，但有核心細節未完整呈現", "red": "生成結果明顯偏離原定畫面"}[status]
+        prefix = {"green": "🟢 已反映", "yellow": "🟡 部分反映", "red": "🔴 未反映"}[status]
+        return {
+            "status": status,
+            "score": score,
+            "label": f"{prefix}｜{summary}",
+            "matched_points": [_clean_text_compact(x)[:80] for x in (raw.get("matched_points") or [])[:3] if _clean_text_compact(x)],
+            "missing_points": [_clean_text_compact(x)[:80] for x in (raw.get("missing_points") or [])[:2] if _clean_text_compact(x)],
+            "summary": summary,
+        }
+    except Exception as exc:
+        print(f"⚠️ [DIARY_PHOTO_ALIGNMENT_CHECK_FAILED] {type(exc).__name__}: {exc}")
+        return fallback
 
 
 def _diary_photo_selector_hint(selection):
@@ -17852,13 +17942,38 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else up_img
 
 
+            # 🔎 v1.5.38_R1：照片完成後，以 Vision 對照 Photo Selector 的 scene/action/outfit，給大俠一眼可讀的安心標籤。
+            diary_photo_alignment = await evaluate_diary_photo_alignment(
+                up_img,
+                diary_photo_selection,
+                manual_override=bool(custom_diary),
+            )
+            result["photo_alignment"] = diary_photo_alignment
+            result["photo_alignment_label"] = diary_photo_alignment.get("label", "")
+            diary_trace_context["photo_alignment"] = diary_photo_alignment
+            _trace_stage(
+                diary_trace_context,
+                "diary_photo_alignment_check",
+                data={
+                    "selection": diary_photo_selection,
+                    "alignment": diary_photo_alignment,
+                },
+                note="Post-generation Vision check; informational only, no automatic regeneration.",
+            )
+            print(
+                f"🔎 [DIARY_PHOTO_ALIGNMENT] date={entry_date} "
+                f"status={diary_photo_alignment.get('status')} "
+                f"score={diary_photo_alignment.get('score')} "
+                f"label={diary_photo_alignment.get('label')}"
+            )
+
             combined_parts = [result["reply_to_daxia"]]
             if result.get("xiaoxia_daily_scene"):
                 combined_parts.append(f"【小俠的日常】：{result['xiaoxia_daily_scene']}")
             if result.get("inner_monologue"):
                 combined_parts.append(f"【小俠的夜裡獨白】：{result['inner_monologue']}")
             if result.get("why_this_photo"):
-                combined_parts.append(f"【今晚為什麼放這張照片】：{result['why_this_photo']}")
+                combined_parts.append(result["why_this_photo"])
             combined_message = "\n\n".join(combined_parts)
             
             diary_photo_payload = {
@@ -17882,6 +17997,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "episode_id": None,
                 "selected_memory": result.get("selected_memory"),
                 "why_this_photo": result.get("why_this_photo"),
+                "photo_alignment": result.get("photo_alignment"),
+                "photo_alignment_label": result.get("photo_alignment_label"),
                 "prompt_base": image_prompt if not custom_diary else result.get("scenario_tw", ""),
                 "diary_source_layer": "manual_diary_override" if custom_diary else "xiaoxia_free_photo_selector",
                 "final_level": (diary_trace_context.get("final_level") if not custom_diary else None),
@@ -17914,8 +18031,9 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 + f"<div class='xiaoxia-diary-section xiaoxia-diary-answer'><b>給大俠的回覆</b><br>{result['reply_to_daxia']}</div>"
                 f"<div class='xiaoxia-diary-section xiaoxia-diary-scene'><b>小俠的日常</b><br>{result.get('xiaoxia_daily_scene', result.get('xiaoxia_diary', ''))}</div>"
                 f"<div class='xiaoxia-diary-section xiaoxia-diary-inner'><b>小俠的夜裡獨白</b><br>「{result.get('inner_monologue', '')}」</div>"
-                f"<div class='xiaoxia-diary-section xiaoxia-diary-photo-reason'><b>今晚為什麼放這張照片</b><br>{result.get('why_this_photo', '')}</div>"
-                "</section>"
+                f"<div class='xiaoxia-diary-section xiaoxia-diary-photo-reason'>{result.get('why_this_photo', '')}</div>"
+                + (f"<div class='xiaoxia-diary-section xiaoxia-diary-photo-alignment'><small>{result.get('photo_alignment_label', '')}</small></div>" if result.get('photo_alignment_label') else "")
+                + "</section>"
             )
             
             entry["content"] += reply_html
@@ -17938,8 +18056,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 embed = discord.Embed(title=title, description=combined_message, color=0xffb6c1)
                 embed.set_image(url=local_url)
                 embed.add_field(name="📸 寫真構想", value=result.get("scenario_tw", ""), inline=False)
-                if result.get("why_this_photo"):
-                    embed.add_field(name="📝 今晚為什麼放這張照片", value=result.get("why_this_photo", "")[:1024], inline=False)
+                if result.get("photo_alignment_label"):
+                    embed.add_field(name="🔎 照片反映檢查", value=result.get("photo_alignment_label", "")[:1024], inline=False)
                 diary_wid = str(diary_photo_payload.get("wardrobe_id") or "").strip().upper()
                 diary_wname = str(diary_photo_payload.get("wardrobe_name") or "").strip()
                 if diary_wid:
