@@ -1,0 +1,56 @@
+--- a/lobster_discord.py
++++ b/lobster_discord.py
+@@ -9,7 +9,7 @@
+ import math
+ import traceback
+ 
+-LOBSTER_VERSION = "1.5.38_R1"
++LOBSTER_VERSION = "1.5.39_R1"
+ 
+ 
+ def _normalize_generation_level(level):
+@@ -631,7 +631,7 @@
+ # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
+ PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
+ print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
+-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.38_R1")
++print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.39_R1")
+ 
+ # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
+ XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
+@@ -15144,7 +15144,8 @@
+         lines.append("- Never introduce a male partner stand-in, no foreground extra person, no companion interaction, and no external hands, head, shoulder, or body part standing in for Daxia.")
+     else:
+         lines.append("- Strictly solo Xiaoxia only. No other people, no companion, and no external body parts, unless Daxia explicitly asked to keep harmless public bystanders.")
+-    lines.append("- Keep repairs local whenever possible: fix the defect while preserving the scene, pose, outfit, and mood.")
++    lines.append("- Preserve the original activity, composition, atmosphere, lighting, time of day, and surrounding participants unless Daxia explicitly requests otherwise.")
++    lines.append("- Keep repairs local whenever possible: fix the defect while preserving the scene, pose, outfit, mood, group density, and activity context.")
+     return "\n".join(lines)
+ 
+ 
+@@ -15226,11 +15227,11 @@
+     mode_block = _seedream_repair_mode_block(context)
+     return (
+         "Use Images 1-9 as identity reference sheets for Xiaoxia. Image 10 is the exact generated photo that needs correction. "
+-        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, and atmosphere as much as possible. "
++        "Preserve Image 10's overall composition, camera angle, framing, Xiaoxia's face identity, hairstyle, outfit, lighting, background, mood, atmosphere, time of day, original activity, and surrounding-participant density as hard constraints unless Daxia explicitly asks to change them. "
+         "Preserve her fair luminous skin, tall slim feminine figure, defined waist, naturally full and attractive bust proportion, and long graceful legs with an elegant lower-leg line; do not drift into a shorter, heavier, flatter, or different-looking woman. "
+         "Keep Xiaoxia Aesthetic as the default baseline, but Daxia's current repair request has absolute priority over any default. "
+         "If Daxia explicitly requests fuller bust, a slimmer body, longer lower legs, stronger role fidelity, or a scene/action fix, obey that request first while preserving everything else. "
+-        "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. "
++        "Do not redesign the image, do not change Xiaoxia into another person, and do not change the outfit unless explicitly requested. Do not turn daytime into nighttime, do not remove the original group/activity atmosphere, and do not convert a public gathering into a private two-person scene unless Daxia explicitly requests that change. "
+         "Apply only the correction requested by Daxia. If the request is local (for example extra hand, bad fingers, awkward anatomy, missing ear, wrong hair color, or missing prop), fix that local defect first and preserve all other correct elements. "
+         "If correcting anatomy, keep exactly two arms and two hands only, connected naturally to the correct wrists and arms. No duplicate hands, no extra limbs, no malformed fingers. "
+         "Avoid repair drift: do not solve one defect by breaking another key requirement. "
+@@ -22323,7 +22324,10 @@
+ - Xiaoxia is the only identity-locked subject. Figures/Images 1-9 and all Xiaoxia appearance anchors apply exclusively to Xiaoxia, never to supporting women.
+ - Supporting women must be clearly different individuals, not Xiaoxia clones, twins, duplicates, or alternate versions. Give them visibly different face shapes, facial features, hairstyles or hair lengths, clothing colors/silhouettes, and natural body builds.
+ - Supporting women must use ordinary natural styling and lower visual emphasis. They must not receive Xiaoxia's signature face, long brown hairstyle, body proportions, bust emphasis, hourglass styling, glamour treatment, strongest lighting, sharpest detail, or central composition.
+-- Xiaoxia must remain the most recognizable, visually prominent, attractive, sharply rendered, and compositionally dominant woman. Supporting women may be appealing, but must not have more emphasized curves, bust prominence, glamour styling, lighting priority, or visual weight than Xiaoxia.
++- Every other person exists only to support Xiaoxia's story. Xiaoxia must remain the unmistakable heroine and the first person the viewer notices.
++- Xiaoxia must remain the most recognizable, visually prominent, attractive, sharply rendered, and compositionally dominant woman. Supporting women may be appealing, but must not have more emphasized curves, bust prominence, glamour styling, lighting priority, fashion emphasis, or visual weight than Xiaoxia.
++- When a female companion interacts with Xiaoxia, frame her as a supporting friend rather than a second heroine; composition, lighting, focus, styling, and body emphasis must lead attention back to Xiaoxia.
++- Nearby women must never appear more voluptuous or more bust-emphasized than Xiaoxia.
+ - In public places, male people may appear only as incidental environmental background figures needed for realism.
+ - No male person may interact with Xiaoxia in any way: no conversation, eye contact, shared table, walking together, standing or sitting as her companion, posing together, handing objects, helping, coaching, touching, embracing, or relationship/date/partner composition.
+ - A male background figure must remain clearly secondary, separated from Xiaoxia, non-interacting, non-companion-like, and never become a foreground or co-primary subject.
