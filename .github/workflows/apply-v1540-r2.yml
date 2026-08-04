@@ -1,7 +1,7 @@
 name: Apply v1.5.40_R2 patch
 
-# Trigger commit for the feature branch after workflow creation.
 on:
+  workflow_dispatch:
   push:
     branches:
       - feature/v1.5.40_R2-male-distance
