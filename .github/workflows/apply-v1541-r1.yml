@@ -1,6 +1,8 @@
 name: Build v1.5.41_R1 downloadable code
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches:
       - feature/v1.5.41_R1-female-positive
