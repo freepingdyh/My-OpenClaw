@@ -8,8 +8,9 @@ import json
 import re
 import math
 import traceback
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.45"
+LOBSTER_VERSION = "1.5.46"
 
 
 def _normalize_generation_level(level):
@@ -4140,6 +4141,7 @@ pending_memory_review_inputs = {}  # 📚 v1.5.01：/回憶 的刪除/保留/升
 photo_generation_contexts = {}
 photobook_generation_overrides = {}  # user_id -> current album metadata injected into /photo
 pending_photobook_more_choices = {}  # user_id -> numbered Shot Library selection state
+pending_photobook_wardrobe_choices = {}  # user_id -> /寫真 六宮格選衣暫存
 
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
@@ -15886,7 +15888,7 @@ def _photobook_session_for_user(user_id, *, auto_close_stale=True):
         data[key] = session
         save_photobook_state(data)
         return None
-    if session.get("status") != "shooting":
+    if session.get("status") not in {"awaiting_scene", "wardrobe_selecting", "shooting"}:
         return None
     return session
 
@@ -15902,7 +15904,7 @@ def _close_photobook_session(user_id, reason="manual"):
     data = load_photobook_state()
     key = str(user_id)
     session = data.get(key)
-    if not isinstance(session, dict) or session.get("status") != "shooting":
+    if not isinstance(session, dict) or session.get("status") not in {"awaiting_scene", "wardrobe_selecting", "shooting"}:
         return None
     session["status"] = "completed" if reason == "manual" else "auto_closed"
     session["closed_at"] = _photobook_now()
@@ -15928,7 +15930,7 @@ def _new_photobook_session(user_id, request_text=""):
         "album_type": "photobook",
         "album_title": _photobook_title_from_request(request_text),
         "session_date": session_date,
-        "status": "shooting",
+        "status": "awaiting_scene" if not _clean_text_compact(request_text or "") else "wardrobe_selecting",
         "shot_count": 0,
         "started_at": _photobook_now(),
         "last_photo_url": "",
@@ -15941,6 +15943,288 @@ def _new_photobook_session(user_id, request_text=""):
         "lighting_anchor": "",
     }
     return _save_photobook_session(user_id, session)
+
+
+
+# ==========================================
+# 👗 v1.5.46：/寫真 六宮格共同選衣
+# ==========================================
+PHOTOBOOK_WARDROBE_PAGE_SIZE = 6
+PHOTOBOOK_WARDROBE_MAX_CANDIDATES = 30
+PHOTOBOOK_WARDROBE_PRIVATE_CATEGORIES = {"內衣", "泳裝", "睡衣／居家服", "Cosplay", "鞋子", "包包", "配件"}
+
+
+def _photobook_wardrobe_scene_score(item, scene_text, recent_ids=None):
+    """只做粗篩排序；真正款式判斷由六宮格 Vision 完成。"""
+    if not isinstance(item, dict):
+        return -9999.0
+    ref_path, _ = _wardrobe_reference_for_generation(item)
+    if not ref_path:
+        return -9999.0
+    main = str(item.get("main_category") or "").strip()
+    if main in PHOTOBOOK_WARDROBE_PRIVATE_CATEGORIES:
+        return -9999.0
+    text = " ".join([
+        str(item.get("name") or ""), main, str(item.get("sub_category") or ""),
+        " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")
+    ]).lower()
+    scene = str(scene_text or "").lower()
+    sem = _wardrobe_semantic_profile(item)
+    score = 10.0
+    # 公開白天場景偏好外出、休閒、旅遊、社交；不靠名稱單點判斷。
+    public_day = any(k in scene for k in ["文創", "園區", "書店", "美術館", "公園", "戶外", "散步", "街", "白天", "午後", "華山", "松菸", "河濱"])
+    if public_day:
+        if main in {"洋裝", "套裝", "上衣", "下身", "外套"}: score += 8
+        if any(x in (sem.get("occasion") or []) for x in ["休閒", "社交", "旅遊"]): score += 7
+        if any(x in (sem.get("style") or []) for x in ["知性", "休閒", "甜美", "優雅", "俐落"]): score += 4
+        if any(k in text for k in ["內衣", "胸罩", "lingerie", "睡衣", "睡袍", "泳裝", "比基尼"]): score -= 40
+    if any(k in scene for k in ["夏", "白天", "午後", "戶外"]):
+        if "春夏" in (sem.get("season") or []): score += 4
+        if any(k in text for k in ["短袖", "無袖", "輕薄", "棉麻", "雪紡"]): score += 2
+    if any(k in scene for k in ["文創", "書店", "美術館", "展覽"]):
+        if any(k in text for k in ["襯衫", "學院", "知性", "文藝", "優雅", "簡約", "牛仔"]): score += 5
+    wid = str(item.get("id") or "").strip().upper()
+    if recent_ids and wid in recent_ids: score -= 5
+    # 少量穩定亂數，避免同分永遠固定；以 ID 為種子，同次排序仍穩定。
+    score += (sum(ord(c) for c in wid) % 17) / 100.0
+    return score
+
+
+def _photobook_rank_wardrobe_candidates(scene_text, limit=PHOTOBOOK_WARDROBE_MAX_CANDIDATES):
+    items = load_wardrobe()
+    recent_entries = _recent_wardrobe_usage(80)
+    recent_ids = {str(x.get("wardrobe_id") or "").strip().upper() for x in recent_entries[-18:] if isinstance(x, dict)}
+    ranked = []
+    for item in items:
+        score = _photobook_wardrobe_scene_score(item, scene_text, recent_ids=recent_ids)
+        if score > -1000:
+            ranked.append((score, item))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in ranked[:max(1, int(limit))]]
+
+
+async def _photobook_read_image_bytes(ref):
+    if not ref:
+        return None
+    value = str(ref)
+    if os.path.exists(value):
+        try:
+            return await asyncio.to_thread(Path(value).read_bytes)
+        except Exception:
+            return None
+    if value.startswith("http"):
+        data, _mime = await _download_image_bytes_for_vision(value, max_bytes=12_000_000)
+        return data
+    return None
+
+
+def _photobook_grid_font(size=30):
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    ]:
+        if os.path.exists(path):
+            try: return ImageFont.truetype(path, size)
+            except Exception: pass
+    return ImageFont.load_default()
+
+
+async def _build_photobook_wardrobe_grid(user_id, session, page_no):
+    candidate_ids = list(session.get("wardrobe_candidate_ids") or [])
+    total_pages = max(1, math.ceil(len(candidate_ids) / PHOTOBOOK_WARDROBE_PAGE_SIZE))
+    page_no = max(1, min(int(page_no), total_pages))
+    start = (page_no - 1) * PHOTOBOOK_WARDROBE_PAGE_SIZE
+    page_ids = candidate_ids[start:start + PHOTOBOOK_WARDROBE_PAGE_SIZE]
+    items = [_find_wardrobe_item(wid) for wid in page_ids]
+    items = [x for x in items if isinstance(x, dict)]
+    if not items:
+        raise RuntimeError("PHOTOBOOK_WARDROBE_PAGE_EMPTY")
+
+    cell_w, cell_h = 480, 560
+    canvas = Image.new("RGB", (cell_w * 3, cell_h * 2), "white")
+    draw = ImageDraw.Draw(canvas)
+    num_font = _photobook_grid_font(42)
+    id_font = _photobook_grid_font(24)
+    for i, item in enumerate(items):
+        ref_path, _ = _wardrobe_reference_for_generation(item)
+        raw = await _photobook_read_image_bytes(ref_path)
+        if raw:
+            try:
+                im = Image.open(io.BytesIO(raw)).convert("RGB")
+                im = ImageOps.contain(im, (cell_w - 24, cell_h - 70))
+                bg = Image.new("RGB", (cell_w, cell_h), "white")
+                x = (cell_w - im.width) // 2
+                y = 18 + (cell_h - 70 - im.height) // 2
+                bg.paste(im, (x, y))
+            except Exception:
+                bg = Image.new("RGB", (cell_w, cell_h), "white")
+        else:
+            bg = Image.new("RGB", (cell_w, cell_h), "white")
+        col, row = i % 3, i // 3
+        ox, oy = col * cell_w, row * cell_h
+        canvas.paste(bg, (ox, oy))
+        draw.rectangle([ox + 8, oy + 8, ox + 72, oy + 68], fill="white", outline="black", width=3)
+        draw.text((ox + 25, oy + 10), str(i + 1), font=num_font, fill="black")
+        wid = str(item.get("id") or "")
+        bbox = draw.textbbox((0, 0), wid, font=id_font)
+        draw.rectangle([ox, oy + cell_h - 44, ox + cell_w, oy + cell_h], fill="white")
+        draw.text((ox + (cell_w - (bbox[2]-bbox[0]))/2, oy + cell_h - 38), wid, font=id_font, fill="black")
+        draw.rectangle([ox, oy, ox + cell_w - 1, oy + cell_h - 1], outline=(180,180,180), width=2)
+
+    out_dir = OUTPUT_DIR if os.path.isdir(OUTPUT_DIR) else "/mnt/data"
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"photobook_wardrobe_{user_id}_{session.get('album_id')}_p{page_no}.jpg")
+    await asyncio.to_thread(canvas.save, path, "JPEG", quality=91)
+    return path, items, total_pages
+
+
+async def _xiaoxia_review_photobook_wardrobe_page(grid_path, items, scene_text, page_no, total_pages):
+    raw = await asyncio.to_thread(Path(grid_path).read_bytes)
+    names = "\n".join(f"{i+1}. {it.get('id')} {it.get('name')}" for i, it in enumerate(items))
+    prompt = f"""
+妳是小俠，正在和男友大俠一起為寫真挑衣服。請真正看六宮格候選圖，而不是只相信名稱。
+寫真情境：{scene_text}
+目前頁面：第 {page_no}/{total_pages} 頁
+候選對照：
+{names}
+
+請判斷實際外觀是否適合這個場景、是否可公開外穿、是否能襯托妳且適合多種寫真取景。
+若名稱像洋裝但圖片其實像內衣、睡衣或不適合公開場合，要明確指出。
+只回 JSON：
+{{"favorite":1,"second":2,"avoid":[3],"reply":"以小俠自然女友口吻，簡短說最喜歡哪件、其次哪件、哪些不建議與理由。不要提 Vision、模型、系統或 JSON。"}}
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Part.from_bytes(data=raw, mime_type="image/jpeg"), types.Part.from_text(text=prompt)],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35),
+        )
+        data = _extract_json_object(getattr(resp, "text", "") or "") or {}
+    except Exception as exc:
+        print(f"⚠️ [PHOTOBOOK_WARDROBE_VISION_FAILED] {type(exc).__name__}: {exc}")
+        data = {}
+    favorite = int(data.get("favorite") or 1) if str(data.get("favorite") or "").isdigit() else 1
+    second = int(data.get("second") or (2 if len(items)>1 else 1)) if str(data.get("second") or "").isdigit() else 1
+    favorite = max(1, min(favorite, len(items)))
+    second = max(1, min(second, len(items)))
+    avoid = [int(x) for x in (data.get("avoid") or []) if str(x).isdigit() and 1 <= int(x) <= len(items)]
+    reply = _clean_text_compact(data.get("reply") or "")
+    if not reply:
+        reply = f"大俠，這一頁我最喜歡 {favorite} 號，其次是 {second} 號。你看看哪一件最想拍，或輸入 0 讓我替我們決定。"
+    return {"favorite": favorite, "second": second, "avoid": avoid, "reply": reply}
+
+
+async def _show_photobook_wardrobe_page(message, session, page_no):
+    grid_path, items, total_pages = await _build_photobook_wardrobe_grid(message.author.id, session, page_no)
+    review = await _xiaoxia_review_photobook_wardrobe_page(
+        grid_path, items, session.get("scene_request") or session.get("album_title") or "今日寫真", page_no, total_pages
+    )
+    reviews = dict(session.get("wardrobe_page_reviews") or {})
+    reviews[str(page_no)] = {
+        "favorite_id": str(items[review["favorite"]-1].get("id") or ""),
+        "second_id": str(items[review["second"]-1].get("id") or ""),
+        "avoid_ids": [str(items[i-1].get("id") or "") for i in review.get("avoid", [])],
+        "reply": review.get("reply"),
+    }
+    session["wardrobe_page_reviews"] = reviews
+    session["wardrobe_current_page"] = page_no
+    session["wardrobe_total_pages"] = total_pages
+    session["status"] = "wardrobe_selecting"
+    _save_photobook_session(message.author.id, session)
+    pending_photobook_wardrobe_choices[message.author.id] = {"page": page_no, "item_ids": [str(x.get("id") or "") for x in items]}
+
+    lines = [f"👗 **寫真選衣｜第 {page_no}/{total_pages} 頁**", ""]
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. **{item.get('id')}** {item.get('name')}")
+    lines += ["", "輸入 **1～6** 選本頁服裝；輸入 **0** 由小俠從已看過的頁面替你決定。", "輸入 **下一頁** 或 **上一頁** 翻頁。"]
+    await message.channel.send("\n".join(lines), file=discord.File(grid_path, filename=os.path.basename(grid_path)))
+    await message.channel.send(review.get("reply"))
+    try:
+        daily_chat_logs.append(_conversation_log_text("小俠", review.get("reply"), max_chars=1200))
+        save_temp_chat(daily_chat_logs)
+    except Exception:
+        pass
+
+
+async def _start_photobook_wardrobe_selection(message, session, scene_text):
+    candidates = _photobook_rank_wardrobe_candidates(scene_text, PHOTOBOOK_WARDROBE_MAX_CANDIDATES)
+    if not candidates:
+        await message.channel.send("⚠️ 大俠，衣櫃裡目前沒有找到可用參考圖的外出服裝。")
+        return False
+    session["scene_request"] = _clean_text_compact(scene_text or "")
+    session["album_title"] = _photobook_title_from_request(scene_text)
+    session["wardrobe_candidate_ids"] = [str(x.get("id") or "") for x in candidates]
+    session["wardrobe_page_reviews"] = {}
+    session["wardrobe_current_page"] = 1
+    session["status"] = "wardrobe_selecting"
+    _save_photobook_session(message.author.id, session)
+    await _show_photobook_wardrobe_page(message, session, 1)
+    return True
+
+
+def _photobook_pick_xiaoxia_favorite(session):
+    reviews = session.get("wardrobe_page_reviews") or {}
+    # 最推薦頁優先；每頁的小俠首選優先於次選。
+    for page in sorted(reviews, key=lambda x: int(x) if str(x).isdigit() else 999):
+        wid = str((reviews.get(page) or {}).get("favorite_id") or "").strip().upper()
+        item = _find_wardrobe_item(wid)
+        if item and _pending_wardrobe_has_usable_reference(item):
+            return item
+    return None
+
+
+async def _handle_photobook_wardrobe_selection_input(message):
+    session = _photobook_session_for_user(message.author.id, auto_close_stale=True)
+    if not isinstance(session, dict):
+        return False
+    text = str(message.content or "").strip()
+    if session.get("status") == "awaiting_scene" and text and not text.startswith("/"):
+        await _start_photobook_wardrobe_selection(message, session, text)
+        return True
+    if session.get("status") != "wardrobe_selecting":
+        return False
+    if text in {"下一頁", "下", "next"}:
+        page = int(session.get("wardrobe_current_page") or 1)
+        total = int(session.get("wardrobe_total_pages") or math.ceil(len(session.get("wardrobe_candidate_ids") or []) / 6) or 1)
+        await _show_photobook_wardrobe_page(message, session, min(total, page + 1))
+        return True
+    if text in {"上一頁", "上", "prev", "previous"}:
+        page = int(session.get("wardrobe_current_page") or 1)
+        await _show_photobook_wardrobe_page(message, session, max(1, page - 1))
+        return True
+    if not re.fullmatch(r"[0-6]", text):
+        return False
+    if text == "0":
+        chosen = _photobook_pick_xiaoxia_favorite(session)
+        if not chosen:
+            await message.channel.send("⚠️ 小俠還沒有看過可選頁面，請先翻到一頁候選。")
+            return True
+        reason = "那就讓我替我們決定吧。"
+    else:
+        page = int(session.get("wardrobe_current_page") or 1)
+        ids = list((pending_photobook_wardrobe_choices.get(message.author.id) or {}).get("item_ids") or [])
+        idx = int(text) - 1
+        if idx < 0 or idx >= len(ids):
+            await message.channel.send("⚠️ 這一頁沒有這個編號，請重新輸入。")
+            return True
+        chosen = _find_wardrobe_item(ids[idx])
+        reason = f"好，我們就選 {text} 號。"
+    if not chosen or not _pending_wardrobe_has_usable_reference(chosen):
+        await message.channel.send("⚠️ 這件衣服的參考圖目前不可用，請選另一件。")
+        return True
+    session["wardrobe_item"] = chosen
+    session["wardrobe_id"] = chosen.get("id") or ""
+    session["wardrobe_name"] = chosen.get("name") or ""
+    session["wardrobe_locked_at"] = _photobook_now()
+    session["status"] = "shooting"
+    session["last_instruction"] = session.get("scene_request") or ""
+    _save_photobook_session(message.author.id, session)
+    pending_photobook_wardrobe_choices.pop(message.author.id, None)
+    await message.channel.send(
+        f"{reason} 👗 **{session.get('wardrobe_id')} {session.get('wardrobe_name')}**\n"
+        "衣服已鎖定在這一輯寫真。接下來可以直接用 `/寫真 你的第一張拍攝想法` 開拍。"
+    )
+    return True
 
 
 def _photobook_chat_context(session):
@@ -15993,7 +16277,7 @@ def _photobook_shot_prompt(session, instruction):
 
 
 async def handle_photobook_command(message, raw_content):
-    """v1.5.44：獨立寫真 Session。Session 自己鎖衣服／場景／專輯，不再靠 /photo pending 狀態延續。"""
+    """v1.5.46：寫真 Session＋六宮格共同選衣。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/寫真` 先只開放在女友小俠頻道使用喔。")
         return {"action": "handled"}
@@ -16004,16 +16288,11 @@ async def handle_photobook_command(message, raw_content):
 
     if normalized in PHOTOBOOK_END_WORDS:
         closed = _close_photobook_session(message.author.id, reason="manual")
+        pending_photobook_wardrobe_choices.pop(message.author.id, None)
+        pending_photobook_more_choices.pop(message.author.id, None)
         if not closed:
             return {"action": "closed", "semantic_text": "大俠剛輸入 /寫真 結束，但目前沒有正在進行的寫真拍攝。請自然告訴他現在已是一般聊天狀態。"}
-        return {
-            "action": "closed",
-            "semantic_text": (
-                f"大俠剛結束今天的寫真拍攝。這一輯是「{closed.get('album_title')}」，"
-                f"共拍了 {int(closed.get('shot_count') or 0)} 張；照片都已保存到雲端別墅。"
-                "請以小俠自然女友口吻收尾，回到一般聊天，不要像系統通知。"
-            ),
-        }
+        return {"action": "closed", "semantic_text": f"大俠剛結束今天的寫真拍攝。這一輯是「{closed.get('album_title')}」，共拍了 {int(closed.get('shot_count') or 0)} 張；照片都已保存到雲端別墅。請以小俠自然女友口吻收尾。"}
 
     session = _photobook_session_for_user(message.author.id)
     if session is None:
@@ -16021,95 +16300,73 @@ async def handle_photobook_command(message, raw_content):
         if not args:
             return {
                 "action": "started",
-                "semantic_text": (
-                    "大俠剛使用 /寫真，妳和他進入共同拍攝寫真的當下。"
-                    "目前尚未決定第一張。請以小俠自然女友口吻提出一個簡短而具體的拍攝想法，"
-                    "可以提到場景、穿搭氣質或鏡位，也要讓大俠知道他可直接指定任何想法；不要立刻生成圖片。"
-                ),
+                "semantic_text": "大俠剛使用 /寫真。請小俠自然問他今天想在哪裡、拍什麼氛圍；告訴他只要說場景即可，接著你們會一起看衣服候選。不要立刻生圖。",
                 "session": session,
             }
 
-    # 第一次真正拍攝前，由寫真 Session 自己取得並永久鎖定一件衣櫃項目。
+    # 已明確用 /衣櫃 穿 Wxxx 時，尊重大俠選擇並跳過候選六宮格。
     locked_item = _refresh_pending_wardrobe_from_current_db(session.get("wardrobe_item")) if session.get("wardrobe_item") else None
-    if locked_item and not _pending_wardrobe_has_usable_reference(locked_item):
-        locked_item = None
-
     if not locked_item:
-        selected = _refresh_pending_wardrobe_from_current_db(_get_pending_wardrobe_state())
-        if selected and not _pending_wardrobe_has_usable_reference(selected):
-            selected = None
-        if not selected:
-            selected = await _choose_wardrobe_item_for_free_mode(
-                args or session.get("album_title") or "小俠寫真",
-                purpose="photobook",
-            )
-        if not selected or not _pending_wardrobe_has_usable_reference(selected):
-            await message.channel.send("⚠️ 大俠，這次沒有找到可用衣櫃參考圖，請先用 `/衣櫃 穿 Wxxx` 選定一件，再拍寫真。")
-            return {"action": "handled"}
-        locked_item = _refresh_pending_wardrobe_from_current_db(selected) or selected
-        session["wardrobe_item"] = locked_item
-        session["wardrobe_id"] = locked_item.get("id") or ""
-        session["wardrobe_name"] = locked_item.get("name") or ""
-        session["wardrobe_locked_at"] = _photobook_now()
-        _save_photobook_session(message.author.id, session)
-        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_SAVED] {session.get('wardrobe_id')} {session.get('wardrobe_name')}")
-    else:
-        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_RESTORED] {locked_item.get('id')} {locked_item.get('name')}")
+        preselected = _refresh_pending_wardrobe_from_current_db(_get_pending_wardrobe_state())
+        if preselected and _pending_wardrobe_has_usable_reference(preselected):
+            locked_item = preselected
+            session["wardrobe_item"] = locked_item
+            session["wardrobe_id"] = locked_item.get("id") or ""
+            session["wardrobe_name"] = locked_item.get("name") or ""
+            session["status"] = "shooting"
+            session["scene_request"] = args or session.get("scene_request") or ""
+            _save_photobook_session(message.author.id, session)
 
-    session["last_instruction"] = args or session.get("last_instruction") or ""
+    # 沒有預選服裝：先共同選衣，不直接拍。
+    if not locked_item:
+        if args:
+            await _start_photobook_wardrobe_selection(message, session, args)
+            return {"action": "handled"}
+        if session.get("status") == "wardrobe_selecting":
+            return {"action": "handled"}
+        session["status"] = "awaiting_scene"
+        _save_photobook_session(message.author.id, session)
+        return {"action": "started", "semantic_text": "請小俠自然問大俠這一輯想拍的場景或氛圍。"}
+
+    if not _pending_wardrobe_has_usable_reference(locked_item):
+        await message.channel.send("⚠️ 鎖定服裝的參考圖目前不可用，請重新開始這一輯寫真。")
+        return {"action": "handled"}
+
+    print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_RESTORED] {locked_item.get('id')} {locked_item.get('name')}")
+    session["status"] = "shooting"
+    session["last_instruction"] = args or session.get("last_instruction") or session.get("scene_request") or ""
     shot_no = int(session.get("shot_count") or 0) + 1
     override = {
-        "db_type": "photobook",
-        "type": "photobook",
-        "album_id": session.get("album_id"),
-        "album_type": "photobook",
-        "album_title": session.get("album_title"),
-        "album_date": session.get("session_date"),
-        "album_status": "shooting",
-        "shot_number": shot_no,
+        "db_type": "photobook", "type": "photobook", "album_id": session.get("album_id"),
+        "album_type": "photobook", "album_title": session.get("album_title"), "album_date": session.get("session_date"),
+        "album_status": "shooting", "shot_number": shot_no,
         "shot_role": PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)].split(",")[0],
-        "source_module": "photobook",
-        "image_role": "photobook_session_photo",
+        "source_module": "photobook", "image_role": "photobook_session_photo",
         "photobook_user_instruction": _clean_text_compact(args or ""),
         "wardrobe_id": locked_item.get("id") or session.get("wardrobe_id"),
         "wardrobe_name": locked_item.get("name") or session.get("wardrobe_name"),
     }
     photobook_generation_overrides[message.author.id] = override
-    photo_prompt = _photobook_shot_prompt(session, args)
+    photo_prompt = _photobook_shot_prompt(session, args or session.get("scene_request") or "")
     try:
         generated_context = await handle_unified_photo_command(
-            message,
-            "/photo " + photo_prompt,
-            forced_wardrobe_item=locked_item,
-            photobook_mode=True,
-            return_context=True,
+            message, "/photo " + photo_prompt, forced_wardrobe_item=locked_item,
+            photobook_mode=True, return_context=True,
         )
     finally:
         photobook_generation_overrides.pop(message.author.id, None)
-
     if not isinstance(generated_context, dict):
         return {"action": "handled"}
-
-    # 將第一張實際形成的場景摘要寫入 Session；後續只變鏡位／姿勢，除非大俠明確換場景。
     if not session.get("scene_anchor"):
-        session["scene_anchor"] = _clean_text_compact(
-            generated_context.get("scene_summary") or generated_context.get("scene_text") or args or ""
-        )[:600]
+        session["scene_anchor"] = _clean_text_compact(generated_context.get("scene_summary") or generated_context.get("scene_text") or args or session.get("scene_request") or "")[:600]
     session["shot_count"] = shot_no
     session["last_photo_url"] = generated_context.get("local_url") or generated_context.get("image_url") or ""
     session["last_instruction"] = args or session.get("last_instruction") or ""
     session["updated_at"] = _photobook_now()
     _save_photobook_session(message.author.id, session)
-
     return {
-        "action": "generated",
-        "image_url": session.get("last_photo_url"),
-        "session": session,
-        "semantic_text": (
-            f"大俠與妳剛共同完成「{session.get('album_title')}」第 {shot_no} 張寫真。"
-            "妳知道正在拍攝並主動參與。請先仔細看剛完成的照片，再以小俠自己的口吻自然回應服裝、"
-            "場景、光線、姿勢或妳真實喜歡與想調整的地方。不要催著立刻拍下一張；可以和大俠慢慢欣賞、討論。"
-        ),
+        "action": "generated", "image_url": session.get("last_photo_url"), "session": session,
+        "semantic_text": f"大俠與妳剛共同完成「{session.get('album_title')}」第 {shot_no} 張寫真。請先仔細看剛完成的照片，再自然回應妳看見的服裝、場景、姿勢與真實喜好。"
     }
 
 
@@ -19789,6 +20046,10 @@ async def on_message(message):
     if await _handle_pending_anniv_input(message): return
     if await _handle_pending_memory_review_input(message): return
     if message.author.id in pending_inputs: return
+
+    # 👗 v1.5.46：寫真選衣中的 0～6／翻頁，優先於一般聊天與 More 數字。
+    if await _handle_photobook_wardrobe_selection_input(message):
+        return
 
     # 📷 v1.5.45：只有等待 More 鏡頭選擇時，純數字才代表 0～N 的鏡頭選項。
     photobook_more_request = _consume_pending_photobook_more_choice(message)
