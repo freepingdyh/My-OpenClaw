@@ -1,0 +1,165 @@
+name: Apply v1.5.50 wardrobe fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v1550-r1.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-v1550:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v1.5.50 patch
+        shell: bash
+        run: |
+          cat > /tmp/v1550.patch <<'PATCH'
+--- a/lobster_discord.py
++++ b/lobster_discord.py
+@@ -10,7 +10,7 @@
+ import traceback
+ from PIL import Image, ImageDraw, ImageFont, ImageOps
+ 
+-LOBSTER_VERSION = "1.5.48"
++LOBSTER_VERSION = "1.5.50"
+ 
+ 
+ def _normalize_generation_level(level):
+@@ -16049,7 +16049,36 @@
+ # ==========================================
+ PHOTOBOOK_WARDROBE_PAGE_SIZE = 6
+ PHOTOBOOK_WARDROBE_MAX_CANDIDATES = 30
+-PHOTOBOOK_WARDROBE_PRIVATE_CATEGORIES = {"內衣", "泳裝", "睡衣／居家服", "Cosplay", "鞋子", "包包", "配件"}
++PHOTOBOOK_WARDROBE_ALWAYS_EXCLUDE_CATEGORIES = {"鞋子", "包包", "配件"}
++PHOTOBOOK_WARDROBE_USUALLY_PRIVATE_CATEGORIES = {"內衣", "泳裝", "睡衣／居家服"}
++PHOTOBOOK_WARDROBE_SCENE_PRIVATE_HINTS = [
++    "在家", "家中", "家裡", "臥室", "房間", "客廳", "沙發", "床邊", "床上", "私密", "只能在家中穿",
++    "居家", "晚安", "睡前", "夜晚", "晚上", "夜裡", "晨起", "剛睡醒"
++]
++PHOTOBOOK_WARDROBE_SCENE_PUBLIC_HINTS = [
++    "文創", "園區", "書店", "美術館", "公園", "戶外", "散步", "街", "白天", "午後", "華山", "松菸", "河濱",
++    "咖啡", "展覽", "校園", "巷弄", "百貨", "車站"
++]
++PHOTOBOOK_WARDROBE_SCENE_SOFT_SEXY_HINTS = [
++    "溫柔", "性感", "害羞", "微性感", "柔軟", "慵懶", "曖昧", "撒嬌", "親密", "女友感"
++]
++
++
++def _photobook_scene_profile(scene_text):
++    scene = str(scene_text or "").strip().lower()
++    private_home = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_PRIVATE_HINTS)
++    public_outdoor = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_PUBLIC_HINTS)
++    soft_sexy = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_SOFT_SEXY_HINTS)
++    swim_related = any(k in scene for k in ["泳", "泳池", "海邊", "沙灘", "溫泉", "泡湯"])
++    formal_event = any(k in scene for k in ["宴會", "晚宴", "婚禮", "典禮", "記者會"])
++    return {
++        "scene": scene,
++        "private_home": private_home,
++        "public_outdoor": public_outdoor,
++        "soft_sexy": soft_sexy,
++        "swim_related": swim_related,
++        "formal_event": formal_event,
++    }
+ 
+ 
+ def _photobook_wardrobe_scene_score(item, scene_text, recent_ids=None):
+@@ -16060,29 +16089,51 @@
+     if not ref_path:
+         return -9999.0
+     main = str(item.get("main_category") or "").strip()
+-    if main in PHOTOBOOK_WARDROBE_PRIVATE_CATEGORIES:
++    if main in PHOTOBOOK_WARDROBE_ALWAYS_EXCLUDE_CATEGORIES:
+         return -9999.0
++    if main == "Cosplay":
++        return -9999.0
++
+     text = " ".join([
+         str(item.get("name") or ""), main, str(item.get("sub_category") or ""),
+         " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")
+     ]).lower()
+-    scene = str(scene_text or "").lower()
+     sem = _wardrobe_semantic_profile(item)
++    scene_profile = _photobook_scene_profile(scene_text)
+     score = 10.0
+-    # 公開白天場景偏好外出、休閒、旅遊、社交；不靠名稱單點判斷。
+-    public_day = any(k in scene for k in ["文創", "園區", "書店", "美術館", "公園", "戶外", "散步", "街", "白天", "午後", "華山", "松菸", "河濱"])
+-    if public_day:
++
++    # 公開白天場景：偏外出、休閒、旅遊、社交；私密服裝大幅扣分。
++    if scene_profile["public_outdoor"] and not scene_profile["private_home"]:
+         if main in {"洋裝", "套裝", "上衣", "下身", "外套"}: score += 8
+         if any(x in (sem.get("occasion") or []) for x in ["休閒", "社交", "旅遊"]): score += 7
+         if any(x in (sem.get("style") or []) for x in ["知性", "休閒", "甜美", "優雅", "俐落"]): score += 4
+-        if any(k in text for k in ["內衣", "胸罩", "lingerie", "睡衣", "睡袍", "泳裝", "比基尼"]): score -= 40
+-    if any(k in scene for k in ["夏", "白天", "午後", "戶外"]):
++        if main in PHOTOBOOK_WARDROBE_USUALLY_PRIVATE_CATEGORIES: score -= 42
++        if any(k in text for k in ["內衣", "胸罩", "lingerie", "睡衣", "睡袍", "比基尼"]): score -= 24
++
++    # 居家私密場景：允許內衣／睡袍／睡衣／居家服進榜，反而優先這些衣服。
++    if scene_profile["private_home"]:
++        if main in {"內衣", "睡衣／居家服", "洋裝", "套裝", "上衣", "下身"}: score += 6
++        if main in {"內衣", "睡衣／居家服"}: score += 18
++        if any(x in (sem.get("occasion") or []) for x in ["內著", "睡眠", "居家"]): score += 12
++        if any(x in (sem.get("style") or []) for x in ["性感", "甜美", "優雅"]): score += 6
++        if scene_profile["soft_sexy"] and any(k in text for k in ["蕾絲", "透膚", "細肩帶", "吊帶", "睡袍", "睡裙", "睡衣", "晨袍", "絲質", "緞面", "柔軟", "居家"]):
++            score += 9
++        if any(k in text for k in ["商務", "辦公", "西裝", "職場", "制服", "套裝"]): score -= 18
++        if any(k in text for k in ["厚重", "大衣", "羽絨", "風衣"]): score -= 10
++        if main == "泳裝" and not scene_profile["swim_related"]: score -= 22
++
++    if any(k in scene_profile["scene"] for k in ["夏", "白天", "午後", "戶外"]):
+         if "春夏" in (sem.get("season") or []): score += 4
+         if any(k in text for k in ["短袖", "無袖", "輕薄", "棉麻", "雪紡"]): score += 2
+-    if any(k in scene for k in ["文創", "書店", "美術館", "展覽"]):
++    if any(k in scene_profile["scene"] for k in ["文創", "書店", "美術館", "展覽"]):
+         if any(k in text for k in ["襯衫", "學院", "知性", "文藝", "優雅", "簡約", "牛仔"]): score += 5
++    if scene_profile["formal_event"]:
++        if any(x in (sem.get("formality") or []) for x in ["輕正式", "禮服", "正式"]): score += 8
++        if any(x in (sem.get("style") or []) for x in ["優雅", "俐落"]): score += 3
++
+     wid = str(item.get("id") or "").strip().upper()
+-    if recent_ids and wid in recent_ids: score -= 5
++    if recent_ids and wid in recent_ids:
++        score -= 5
+     # 少量穩定亂數，避免同分永遠固定；以 ID 為種子，同次排序仍穩定。
+     score += (sum(ord(c) for c in wid) % 17) / 100.0
+     return score
+@@ -16179,6 +16230,11 @@
+ async def _xiaoxia_review_photobook_wardrobe_page(grid_path, items, scene_text, page_no, total_pages):
+     raw = await asyncio.to_thread(Path(grid_path).read_bytes)
+     names = "\n".join(f"{i+1}. {it.get('id')} {it.get('name')}" for i, it in enumerate(items))
++    scene_profile = _photobook_scene_profile(scene_text)
++    if scene_profile.get("private_home"):
++        fit_rule = "請判斷實際外觀是否適合這個家中私密寫真場景，是否有溫柔、微性感、害羞或放鬆的女友感。內衣、睡袍、睡衣、居家服都可以，只要真的適合在家穿、畫面好看、能襯托她。若圖片其實太像正式外出、上班、晚宴或完全不符合『只能在家中穿』，要明確指出。"
++    else:
++        fit_rule = "請判斷實際外觀是否適合這個場景、是否可公開外穿、是否能襯托妳且適合多種寫真取景。若名稱像洋裝但圖片其實像內衣、睡衣或不適合公開場合，要明確指出。"
+     prompt = f"""
+ 妳是小俠，正在和男友大俠一起為寫真挑衣服。請真正看六宮格候選圖，而不是只相信名稱。
+ 寫真情境：{scene_text}
+@@ -16186,8 +16242,7 @@
+ 候選對照：
+ {names}
+ 
+-請判斷實際外觀是否適合這個場景、是否可公開外穿、是否能襯托妳且適合多種寫真取景。
+-若名稱像洋裝但圖片其實像內衣、睡衣或不適合公開場合，要明確指出。
++{fit_rule}
+ 只回 JSON：
+ {{"favorite":1,"second":2,"avoid":[3],"reply":"以小俠自然女友口吻，簡短說最喜歡哪件、其次哪件、哪些不建議與理由。不要提 Vision、模型、系統或 JSON。"}}
+ """
+PATCH
+          git apply --check /tmp/v1550.patch
+          git apply /tmp/v1550.patch
+          python -m py_compile lobster_discord.py
+      - name: Commit replacement
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lobster_discord.py
+          git commit -m "v1.5.50"
+          git push
