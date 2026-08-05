@@ -1,7 +1,7 @@
 # Lobster Discord Bot Core
 python-dotenv>=1.0.1
 
-# Async Network 
+# Async Network
 aiohttp>=3.9.0
 requests>=2.31.0
 
@@ -12,7 +12,10 @@ google-genai>=0.3.0
 # Discord Bot
 discord.py>=2.3.2
 
-# --- 新增的 Web 與金庫存取依賴 ---
+# Web and Vault
 fastapi>=0.110.0
 uvicorn>=0.27.0
 aiofiles>=23.2.1
+
+# Image processing
+Pillow>=10.0.0
