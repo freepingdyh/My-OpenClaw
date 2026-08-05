@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.43_R2"
+LOBSTER_VERSION = "1.5.43_R3"
 
 
 def _normalize_generation_level(level):
@@ -15589,9 +15589,12 @@ def _photo_discord_file(context):
 
 
 def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
+    # Discord Embed title 上限為 256 字元。/寫真會把完整攝影要求帶入 scene_text，
+    # 因此必須在建立 embed 前截斷，避免圖片已生成卻因 Invalid Form Body 無法送出。
+    raw_title = f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}"
     embed = discord.Embed(
-        title=f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}",
-        description=context.get("message", "大俠按下 /photo 留住這一刻。"),
+        title=str(raw_title)[:256],
+        description=str(context.get("message", "大俠按下 /photo 留住這一刻。"))[:4096],
         color=0xffb6c1,
     )
     if attachment_filename:
@@ -16010,7 +16013,10 @@ async def handle_photobook_command(message, raw_content):
     photobook_generation_overrides[message.author.id] = override
     first_shot = int(session.get("shot_count") or 0) == 0
     photo_prompt = _photobook_shot_prompt(session, args)
-    delegated = "/photo " + (("衣櫃自由 " if first_shot else "") + photo_prompt)
+    # 若大俠在進入 /寫真 前已用 /衣櫃 穿 Wxxx 選定衣服，必須尊重該 pending wardrobe。
+    # 只有第一張且完全沒有預選衣服時，才啟動「衣櫃自由」，避免 W180 被隨機 W030 蓋掉。
+    use_wardrobe_free = bool(first_shot and not _get_pending_wardrobe_state())
+    delegated = "/photo " + (("衣櫃自由 " if use_wardrobe_free else "") + photo_prompt)
     try:
         image_url = await handle_unified_photo_command(message, delegated)
     finally:
@@ -16235,9 +16241,16 @@ async def handle_unified_photo_command(message, user_input):
         if pending_wardrobe:
             _clear_pending_wardrobe_state()
 
-        await status.delete()
+        # 先確認成品訊息成功送出，再刪除「生成中」狀態。
+        # 舊順序若 Discord embed 送出失敗，status 已刪除，except 再 edit 就會連鎖出現 404 Unknown Message。
         view = PhotoResultView(context)
         sent = await _send_photo_message(message.channel, context, view=view)
+        try:
+            await status.delete()
+        except discord.NotFound:
+            pass
+        except Exception as status_exc:
+            print(f"⚠️ [PHOTO_STATUS_DELETE_FAILED] {type(status_exc).__name__}: {status_exc}")
         context["message_id"] = sent.id
         photo_generation_contexts[sent.id] = context
         view.context = context
@@ -16268,7 +16281,13 @@ async def handle_unified_photo_command(message, user_input):
             )
             return None
 
-        await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{err_text[:1500]}`")
+        try:
+            await status.edit(content=f"⚠️ 大俠，這張照片生成失敗：`{err_text[:1500]}`")
+        except discord.NotFound:
+            # status 可能已被前一流程刪除；改送新訊息，避免錯誤處理本身再次拋出 404。
+            await message.channel.send(f"⚠️ 大俠，這張照片生成失敗：`{err_text[:1500]}`")
+        except Exception as status_exc:
+            print(f"⚠️ [PHOTO_STATUS_ERROR_REPORT_FAILED] {type(status_exc).__name__}: {status_exc}")
         return None
 
 
