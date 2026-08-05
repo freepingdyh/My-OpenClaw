@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.43_R3"
+LOBSTER_VERSION = "1.5.43_R3_WARDROBE_LOCK"
 
 
 def _normalize_generation_level(level):
@@ -15916,6 +15916,9 @@ def _new_photobook_session(user_id, request_text=""):
         "started_at": _photobook_now(),
         "last_photo_url": "",
         "last_instruction": _clean_text_compact(request_text or ""),
+        # 寫真 Session 需固定第一張實際使用的衣櫃服裝；後續每張重新掛回 Figure 10。
+        "wardrobe_id": "",
+        "wardrobe_name": "",
     }
     return _save_photobook_session(user_id, session)
 
@@ -16013,8 +16016,22 @@ async def handle_photobook_command(message, raw_content):
     photobook_generation_overrides[message.author.id] = override
     first_shot = int(session.get("shot_count") or 0) == 0
     photo_prompt = _photobook_shot_prompt(session, args)
+
+    # 📸 寫真服裝鎖：第一張實際使用哪件衣櫃服裝，後續每張都重新掛回同一件 Figure 10。
+    # /photo 成功後會清除 photo_pending_wardrobe；若只依「今日穿著」文字延續，Seedream 容易改掉衣服。
+    # 因此這裡不能只寫 keep same outfit，必須把 Session 的 wardrobe_id 對應原圖再次送入。
+    explicit_outfit_change = _photo_requests_outfit_change(args)
+    session_wardrobe_id = str(session.get("wardrobe_id") or "").strip().upper()
+    if (not first_shot) and session_wardrobe_id and not explicit_outfit_change:
+        locked_item = _find_wardrobe_item(session_wardrobe_id)
+        if isinstance(locked_item, dict) and _pending_wardrobe_has_usable_reference(locked_item):
+            _set_pending_wardrobe_state(locked_item)
+            print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_RESTORED] {session_wardrobe_id} {locked_item.get('name')}")
+        else:
+            print(f"⚠️ [PHOTOBOOK_WARDROBE_LOCK_MISSING] wardrobe_id={session_wardrobe_id}")
+
     # 若大俠在進入 /寫真 前已用 /衣櫃 穿 Wxxx 選定衣服，必須尊重該 pending wardrobe。
-    # 只有第一張且完全沒有預選衣服時，才啟動「衣櫃自由」，避免 W180 被隨機 W030 蓋掉。
+    # 只有第一張且完全沒有預選衣服時，才啟動「衣櫃自由」。
     use_wardrobe_free = bool(first_shot and not _get_pending_wardrobe_state())
     delegated = "/photo " + (("衣櫃自由 " if use_wardrobe_free else "") + photo_prompt)
     try:
@@ -16028,6 +16045,17 @@ async def handle_photobook_command(message, raw_content):
     session["shot_count"] = shot_no
     session["last_photo_url"] = image_url
     session["last_instruction"] = args or session.get("last_instruction") or ""
+
+    # 將本張生成後的實際衣櫃 ID 寫回 Session。第一張若是 W180，第二張起即固定 W180；
+    # 若大俠之後明確換成另一件衣櫃服裝，也會在成功生成後更新鎖定目標。
+    current_outfit = _get_current_outfit_state()
+    actual_wardrobe_id = str((current_outfit or {}).get("wardrobe_id") or "").strip().upper()
+    if actual_wardrobe_id:
+        actual_item = _find_wardrobe_item(actual_wardrobe_id)
+        session["wardrobe_id"] = actual_wardrobe_id
+        session["wardrobe_name"] = (actual_item or {}).get("name") or session.get("wardrobe_name") or ""
+        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_SAVED] {actual_wardrobe_id} {session.get('wardrobe_name')}")
+
     session["updated_at"] = _photobook_now()
     _save_photobook_session(message.author.id, session)
     return {
