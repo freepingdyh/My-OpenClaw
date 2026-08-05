@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.47"
+LOBSTER_VERSION = "1.5.48"
 
 
 def _normalize_generation_level(level):
@@ -17535,20 +17535,40 @@ def _consume_pending_photobook_more_choice(message):
 
 
 async def _review_photobook_more_result(image_url, shot):
-    """Verify the requested framing first; Xiaoxia's later comment must not pretend a failed shot succeeded."""
-    fallback = {"passed": None, "actual": "無法判定", "reason": "驗收暫時無法完成"}
+    """Camera Vision：純工程驗收，不帶小俠人格，也不向小俠暴露 Edit/Generate 流程。"""
+    fallback = {
+        "passed": None,
+        "score": 0.0,
+        "actual": "無法判定",
+        "reason": "驗收暫時無法完成",
+    }
     data, mime = await _download_image_bytes_for_vision(str(image_url or ""))
     if not data:
         return fallback
     target = str((shot or {}).get("name") or "指定鏡頭")
     recipe = str((shot or {}).get("prompt") or "")
     prompt = f"""
-你是寫真構圖驗收員。只看附圖，判斷是否完成指定拍法。
+你是 Camera Vision，一個沒有情感、沒有人格的攝影構圖品管器。
+只驗收附圖是否符合指定鏡頭，不評論人物美貌，不角色扮演，不安慰，不提供生圖建議。
+
 指定拍法：{target}
 明確構圖要求：{recipe}
-只回 JSON：
-{{"passed":true,"actual":"實際景別與角度，15字內","reason":"符合或失敗原因，30字內"}}
-判斷要嚴格：要求臉部特寫卻出現腰部以下或接近全身，必須 passed=false；要求全身但腳被裁掉，也必須 false。
+
+只回傳 JSON，欄位不可增減：
+{{
+  "passed": true,
+  "score": 0.0,
+  "actual": "實際景別與角度，15字內",
+  "reason": "符合或失敗原因，30字內"
+}}
+
+score 為 0.0～1.0 的符合程度。
+判斷必須嚴格：
+- 要求臉部特寫，若仍出現腰部以下、腿部或接近全身，passed=false。
+- 要求胸像／半身，若人物仍接近全身，passed=false。
+- 要求全身，若頭或腳被裁掉，passed=false。
+- 要求背後、側面、俯拍或仰拍，若視點沒有清楚改變，passed=false。
+只回傳 JSON。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -17560,53 +17580,209 @@ async def _review_photobook_more_result(image_url, shot):
         passed = obj.get("passed")
         if not isinstance(passed, bool):
             passed = None
+        try:
+            score = max(0.0, min(1.0, float(obj.get("score") or 0.0)))
+        except Exception:
+            score = 0.0
         return {
             "passed": passed,
+            "score": score,
             "actual": _clean_text_compact(obj.get("actual") or "無法判定")[:40],
             "reason": _clean_text_compact(obj.get("reason") or "")[:80],
         }
     except Exception as exc:
-        print(f"⚠️ [PHOTOBOOK_MORE_ACCEPTANCE_FAILED] {type(exc).__name__}: {exc}")
+        print(f"⚠️ [PHOTOBOOK_CAMERA_GATE_FAILED] {type(exc).__name__}: {exc}")
         return fallback
+
+
+def _photobook_more_candidate_image(context):
+    return str(
+        (context or {}).get("local_path")
+        or (context or {}).get("local_url")
+        or (context or {}).get("image_url")
+        or ""
+    ).strip()
+
+
+async def _generate_photobook_more_edit_candidate(base_context, shot, status=None):
+    """第一階段：以目前照片為 Figure 1，走 Seedream Edit；只改攝影手法。"""
+    context = dict(base_context or {})
+    fal_client = _get_fal_client()
+    model_id = SEEDREAM_V45_MODEL_ID
+    base_image = _photobook_more_candidate_image(context)
+    if not base_image:
+        raise RuntimeError("PHOTOBOOK_MORE_EDIT_NO_BASE_IMAGE：找不到 More 的基準照片。")
+
+    base_url = await _seedream_upload_single_file(base_image)
+    identity_urls = list(await _seedream_upload_reference_images())
+    wardrobe_ref = context.get("reference_item_path") or context.get("reference_item_url")
+    image_urls = [base_url]
+    if wardrobe_ref:
+        image_urls.extend(identity_urls[:8])
+        image_urls.append(await _seedream_upload_single_file(wardrobe_ref))
+        role_note = (
+            "Figure 1 is the photograph to edit. Figures 2-9 are identity-only references of Xiaoxia. "
+            "Figure 10 is the outfit reference."
+        )
+    else:
+        image_urls.extend(identity_urls[:9])
+        role_note = (
+            "Figure 1 is the photograph to edit. Figures 2-10 are identity-only references of Xiaoxia."
+        )
+
+    camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
+    final_prompt = (
+        f"{role_note}\n"
+        "Create another photograph from the same photoshoot and the same moment. "
+        "Keep Xiaoxia, her current action, outfit, accessories, hairstyle, location and lighting naturally consistent with Figure 1. "
+        "Change the camera treatment only.\n"
+        f"CAMERA: {camera_recipe}"
+    )
+    print(f"🧪 [PHOTOBOOK_MORE_EDIT_QUEUE] shot={shot.get('id')} inputs={len(image_urls)}")
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"🌱 [PHOTOBOOK_MORE_EDIT] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            model_id,
+            arguments=_seedream_request_args(
+                model_id,
+                final_prompt,
+                image_urls,
+                enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
+            ),
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images or not isinstance(images[0], dict) or not images[0].get("url"):
+        raise RuntimeError(f"PHOTOBOOK_MORE_EDIT_NO_IMAGE：{result}")
+    generated_url = images[0]["url"]
+    local_filename = await save_to_vault(generated_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+    candidate = dict(context)
+    candidate.update({
+        "image_url": generated_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "seedream_model_id": model_id,
+        "seedream_model_label": _seedream_model_label_from_id(model_id),
+        "more_engine": "edit",
+        "more_shot_id": shot.get("id"),
+        "more_shot_name": shot.get("name"),
+    })
+    return candidate
+
+
+async def _generate_photobook_more_generate_candidate(base_context, shot, status=None):
+    """第二階段回退：Camera Gate 不通過時才重新 Generate 一次。"""
+    context = dict(base_context or {})
+    context.pop("__trace_context", None)
+    context["trace_action"] = "photobook_more_generate_fallback"
+    context["more_shot_id"] = shot.get("id")
+    context["more_shot_name"] = shot.get("name")
+    root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
+    context["root_prompt_base"] = root_prompt
+    camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
+    context["camera_override"] = camera_recipe
+    context["prompt_base"] = (
+        root_prompt
+        + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. "
+        + camera_recipe
+    )
+    generated = await _generate_photo_from_context(context, msg=status)
+    generated["more_engine"] = "generate_fallback"
+    generated["more_shot_id"] = shot.get("id")
+    generated["more_shot_name"] = shot.get("name")
+    return generated
+
+
+def _photobook_more_candidate_score(candidate):
+    gate = (candidate or {}).get("camera_gate") or {}
+    try:
+        return float(gate.get("score") or 0.0)
+    except Exception:
+        return 0.0
 
 
 async def _generate_photobook_more_choice(message, request):
     pending = request.get("pending") or {}
     shot = request.get("selected") or {}
-    context = dict(pending.get("context") or {})
-    context.pop("__trace_context", None)
-    context["trace_action"] = "photobook_more_camera"
-    context["more_shot_id"] = shot.get("id")
-    context["more_shot_name"] = shot.get("name")
-    context["user_input"] = f"More camera choice: {shot.get('name')}"
-    root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
-    context["root_prompt_base"] = root_prompt
-    camera_recipe = str(shot.get("prompt") or "Use a clearly different camera composition.").strip()
-    context["camera_override"] = camera_recipe
-    context["prompt_base"] = (
-        root_prompt
-        + "\n[[CAMERA_OVERRIDE]] Same photoshoot and same moment. "
-        + camera_recipe
-    )
+    base_context = dict(pending.get("context") or {})
+    base_context.pop("__trace_context", None)
+    base_context["trace_action"] = "photobook_more_dual_vision"
+    base_context["more_shot_id"] = shot.get("id")
+    base_context["more_shot_name"] = shot.get("name")
+    base_context["user_input"] = f"More camera choice: {shot.get('name')}"
     status = await message.channel.send(f"📷 正在使用「{shot.get('name')}」拍攝 More…")
+
+    edit_candidate = None
+    generate_candidate = None
     try:
-        new_context = await _generate_photo_from_context(context, msg=status)
+        # 1) 一律先試 Edit。
+        edit_candidate = await _generate_photobook_more_edit_candidate(base_context, shot, status=status)
+        edit_url = edit_candidate.get("local_url") or edit_candidate.get("image_url")
+        edit_gate = await _review_photobook_more_result(edit_url, shot)
+        edit_candidate["camera_gate"] = edit_gate
+        print(
+            f"🧪 [PHOTOBOOK_CAMERA_GATE] engine=edit passed={edit_gate.get('passed')} "
+            f"score={edit_gate.get('score')} actual={edit_gate.get('actual')}"
+        )
+
+        # 2) Edit 未通過才回退 Generate；每個 More 最多只多試一次。
+        if edit_gate.get("passed") is not True:
+            try:
+                await status.edit(content=f"📷 「{shot.get('name')}」第一次取景未通過，正在自動換一種生成方式重拍…")
+            except Exception:
+                pass
+            generate_candidate = await _generate_photobook_more_generate_candidate(base_context, shot, status=status)
+            generate_url = generate_candidate.get("local_url") or generate_candidate.get("image_url")
+            generate_gate = await _review_photobook_more_result(generate_url, shot)
+            generate_candidate["camera_gate"] = generate_gate
+            print(
+                f"🧪 [PHOTOBOOK_CAMERA_GATE] engine=generate passed={generate_gate.get('passed')} "
+                f"score={generate_gate.get('score')} actual={generate_gate.get('actual')}"
+            )
+
+        # 3) 選最終成品：通過者優先；都未通過時取分數較高者。
+        if edit_candidate and (edit_candidate.get("camera_gate") or {}).get("passed") is True:
+            final_context = edit_candidate
+        elif generate_candidate and (generate_candidate.get("camera_gate") or {}).get("passed") is True:
+            final_context = generate_candidate
+        elif generate_candidate and _photobook_more_candidate_score(generate_candidate) > _photobook_more_candidate_score(edit_candidate):
+            final_context = generate_candidate
+        else:
+            final_context = edit_candidate or generate_candidate
+        if not final_context:
+            raise RuntimeError("PHOTOBOOK_MORE_NO_FINAL_CANDIDATE")
+
+        # 工程 Gate 到此結束。以下只讓小俠看到最後成品，不傳遞 Edit/Generate/score/失敗歷程。
         for key in (
             "db_type", "album_id", "album_type", "album_title", "album_date", "album_status",
             "source_module", "image_role", "wardrobe_id", "wardrobe_name",
         ):
-            if context.get(key) not in (None, ""):
-                new_context[key] = context.get(key)
-        new_context["type"] = "photobook"
-        new_context["source_mode"] = "photobook"
-        new_context["more_shot_id"] = shot.get("id")
-        new_context["more_shot_name"] = shot.get("name")
+            if base_context.get(key) not in (None, ""):
+                final_context[key] = base_context.get(key)
+        final_context["type"] = "photobook"
+        final_context["source_mode"] = "photobook"
+        final_context["more_shot_id"] = shot.get("id")
+        final_context["more_shot_name"] = shot.get("name")
 
         db = load_memory()
-        db.insert(0, _photo_db_payload(new_context, type_override="photobook"))
+        db.insert(0, _photo_db_payload(final_context, type_override="photobook"))
         save_memory(db)
-        _set_current_outfit_state(_build_outfit_state_from_context(new_context))
-        _log_wardrobe_usage_from_context(new_context, purpose="photobook_more_camera")
+        _set_current_outfit_state(_build_outfit_state_from_context(final_context))
+        _log_wardrobe_usage_from_context(final_context, purpose="photobook_more_camera")
 
         active = _photobook_session_for_user(message.author.id, auto_close_stale=False)
         if isinstance(active, dict):
@@ -17616,49 +17792,38 @@ async def _generate_photobook_more_choice(message, request):
             active["used_more_shot_ids"] = used_ids[-40:]
             active["last_more_shot_id"] = shot.get("id")
             active["last_more_shot_name"] = shot.get("name")
-            active["last_photo_url"] = new_context.get("local_url") or new_context.get("image_url")
+            active["last_photo_url"] = final_context.get("local_url") or final_context.get("image_url")
             active["updated_at"] = _photobook_now()
+            # Gate 結果可留給工程 trace/session，但不注入小俠的語意文字。
+            active["last_more_camera_gate"] = final_context.get("camera_gate")
             _save_photobook_session(message.author.id, active)
 
-        view = PhotoResultView(new_context)
-        file, filename = _photo_discord_file(new_context)
-        embed = _build_photo_embed(new_context, title_prefix=f"📸 More｜{shot.get('name')}", attachment_filename=filename if file else None)
+        view = PhotoResultView(final_context)
+        file, filename = _photo_discord_file(final_context)
+        embed = _build_photo_embed(final_context, title_prefix=f"📸 More｜{shot.get('name')}", attachment_filename=filename if file else None)
         if file:
             sent = await message.channel.send(embed=embed, file=file, view=view)
         else:
             sent = await message.channel.send(embed=embed, view=view)
-        new_context["message_id"] = sent.id
-        photo_generation_contexts[sent.id] = new_context
-        view.context = new_context
-        result_image = new_context.get("local_url") or new_context.get("image_url")
-        acceptance = await _review_photobook_more_result(result_image, shot)
-        new_context["more_acceptance"] = acceptance
-        if isinstance(active, dict):
-            active["last_more_acceptance"] = acceptance
-            _save_photobook_session(message.author.id, active)
+        final_context["message_id"] = sent.id
+        photo_generation_contexts[sent.id] = final_context
+        view.context = final_context
+        result_image = final_context.get("local_url") or final_context.get("image_url")
+
         try:
             await status.delete()
         except Exception:
             pass
-        if acceptance.get("passed") is True:
-            verdict = f"構圖驗收：符合「{shot.get('name')}」；實際為「{acceptance.get('actual')}」。"
-        elif acceptance.get("passed") is False:
-            verdict = (
-                f"構圖驗收：沒有完成「{shot.get('name')}」；實際為「{acceptance.get('actual')}」。"
-                f"原因：{acceptance.get('reason') or '景別或角度不符'}。"
-            )
-        else:
-            verdict = f"構圖驗收暫時無法判定；實際觀察為「{acceptance.get('actual')}」。"
+
         return {
             "image_url": result_image,
-            "context": new_context,
+            "context": final_context,
             "semantic_text": (
-                f"大俠剛替妳拍了同一輯寫真的 More 照片，原本指定「{shot.get('name')}」。"
-                + verdict
-                + "請妳先真正看附圖，再以小俠自己的感受自然評論。"
-                "若驗收失敗，必須坦白說沒有拍成指定鏡頭，不可假裝成功或只泛稱角度很好；"
-                "仍可評論照片本身好不好看、喜歡哪裡，並由妳決定是否建議再拍。"
-                "不要提及 Vision、模型、鏡頭庫、生成或系統流程。"
+                f"大俠剛替妳拍了同一輯寫真的新照片，原本想用「{shot.get('name')}」的拍法。"
+                "妳現在只看得到最後這張照片，不知道也不需要知道背後任何技術處理、驗收或重拍流程。"
+                "請先真正看附圖，再以小俠自己的感受誠實、溫柔、自然地回應。"
+                "妳可以喜歡，也可以覺得沒有完全拍成預想的鏡頭；只依妳眼前所見說話，不要假裝成功。"
+                "不要提及 Vision、Gate、Edit、Generate、模型、分數、鏡頭庫、生成或系統流程。"
             ),
         }
     except Exception:
@@ -17667,7 +17832,6 @@ async def _generate_photobook_more_choice(message, request):
         except Exception:
             pass
         raise
-
 
 class PhotoResultView(discord.ui.View):
     def __init__(self, context):
