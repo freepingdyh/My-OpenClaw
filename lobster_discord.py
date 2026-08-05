@@ -14821,6 +14821,87 @@ def _v1527_strip_prompt_conflicts(prompt):
     return text
 
 
+def _is_face_closeup_request_text(text):
+    raw = str(text or "")
+    low = raw.lower()
+    zh_keys = [
+        "臉部特寫", "脸部特写", "臉部美容特寫", "脸部美容特写", "近拍臉部", "近拍脸部",
+        "臉部近拍", "脸部近拍", "臉部大特寫", "脸部大特写", "鎖骨以上", "锁骨以上",
+        "肩膀以上", "肩膀以上", "頭肩特寫", "头肩特写", "頭像照", "头像照",
+    ]
+    en_keys = [
+        "face close-up", "face closeup", "beauty close-up", "beauty closeup", "close-up beauty portrait",
+        "closeup beauty portrait", "headshot", "head shot", "collarbone-up", "shoulders-up", "shoulder-up",
+        "chest-up only", "face fills most of the frame", "face beauty close-up",
+    ]
+    return any(k in raw for k in zh_keys) or any(k in low for k in en_keys)
+
+
+def _seedream_face_closeup_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
+    """v1.5.49: special prompt for face close-ups only. Deliberately avoids body-shape global traits."""
+    raw_prompt = str(custom_prompt or "")
+    camera_override = ""
+    marker = "[[CAMERA_OVERRIDE]]"
+    if marker in raw_prompt:
+        raw_prompt, camera_override = raw_prompt.rsplit(marker, 1)
+        camera_override = _clean_text_compact(camera_override)[:420]
+    cleaned_request = _v1527_strip_prompt_conflicts(raw_prompt)
+    hard = _v1527_scene_hard_requirements(cleaned_request or custom_prompt)
+    people = _v1527_concise_people_policy(visual_checklist)
+
+    sections = [
+        "FIGURE ROLE MAP — obey these roles strictly.",
+        (
+            "Figures 1-9 are identity-only references for Xiaoxia. Apply their face identity, hairstyle identity, and overall recognizable adult East Asian appearance only to Xiaoxia. "
+            "Do not copy their pose, outfit, background, lighting, or composition."
+        ),
+        "FACE CLOSE-UP MODE — this request is a beauty close-up, not a body shot.",
+        (
+            "Mandatory framing: collarbone-up or shoulders-up only. Xiaoxia's face must occupy most of the frame. "
+            "Show only the visible neckline / shoulder area of the outfit if naturally present. "
+            "Do not show waist, hips, thighs, knees, legs, or a full-body composition."
+        ),
+        (
+            "Beauty focus: emphasize Xiaoxia's eyes, skin texture, lips, hair, expression, and subtle facial contour. "
+            "Use flattering natural light and let the background remain secondary and softly unobtrusive."
+        ),
+    ]
+    if hard:
+        sections.append("HARD SCENE REQUIREMENTS — failure on any item is incorrect:\n" + hard)
+    sections.append("PEOPLE POLICY:\n" + people)
+
+    if has_reference:
+        sections.append(
+            "FIGURE 10 WARDROBE ROLE:\n"
+            "- Figure 10 controls the visible clothing neckline / shoulder details and visible fashion accessories only.\n"
+            "- Preserve its color, material, pattern, and key visible details if they appear inside the close-up crop.\n"
+            "- Figure 10 must not control scene, pose, background, camera angle, or composition."
+        )
+    elif current_outfit:
+        sections.append(
+            "VISIBLE OUTFIT CONTINUITY:\n"
+            f"- {str(current_outfit).strip()}\n"
+            "- Only preserve the visible neckline / shoulder styling that can naturally appear within a face close-up crop."
+        )
+    else:
+        sections.append("OUTFIT ROLE:\n- No Figure 10 is supplied; keep only simple, natural visible neckline styling appropriate to the scene.")
+
+    sections.append("TEXT REQUEST — highest authority for scene, time, action, pose, and composition:\n" + cleaned_request)
+    sections.append(
+        "QUALITY:\n"
+        "- Photorealistic beauty portrait, natural anatomy and hands, especially around the face and neckline.\n"
+        "- This is a face-focused image, not a fashion full-body image.\n"
+        "- Do not zoom out to show torso, waist, hips, or legs just to satisfy styling continuity."
+    )
+    final = "\n\n".join(s for s in sections if str(s).strip()).strip()
+    if camera_override:
+        final += "\n\nCAMERA OVERRIDE — this framing is mandatory:\n" + camera_override
+    print(
+        f"🧭 [FACE_CLOSEUP_PROMPT_STATS_V1549] total_chars={len(final)} "
+        f"request_chars={len(cleaned_request)} hard_chars={len(hard)} people_chars={len(people)}"
+    )
+    return final
+
 def _v1527_concise_people_policy(checklist=None):
     c = checklist if isinstance(checklist, dict) else {}
     policy = str(c.get("people_policy") or "")
@@ -14850,7 +14931,15 @@ def _v1527_concise_people_policy(checklist=None):
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
-    """v1.5.47: concise photo prompt with an optional final camera override for /寫真 More."""
+    """v1.5.49: concise photo prompt with a face-closeup special branch for /寫真 More and direct close-up requests."""
+    if _is_face_closeup_request_text(custom_prompt):
+        return _seedream_face_closeup_prompt(
+            custom_prompt,
+            has_reference=has_reference,
+            current_outfit=current_outfit,
+            visual_checklist=visual_checklist,
+        )
+
     raw_prompt = str(custom_prompt or "")
     camera_override = ""
     marker = "[[CAMERA_OVERRIDE]]"
@@ -17330,7 +17419,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
 # 📷 v1.5.45：/寫真 More 鏡頭語言庫。
 # Vision 只做現場勘景；程式負責篩選；Seedream 只收到一條短攝影指令。
 PHOTOBOOK_SHOT_LIBRARY = (
-    {"id": "face_closeup", "name": "臉部美容特寫", "prompt": "CHEST-UP ONLY. Her face fills most of the frame. No full body or legs.", "axis": ("closeup", "front", "eye"), "needs": ()},
+    {"id": "face_closeup", "name": "臉部美容特寫", "prompt": "FACE BEAUTY CLOSE-UP ONLY. Frame from collarbone-up or shoulders-up only. Her face must fill most of the frame. Do not show waist, hips, thighs, knees, legs, or a full-body composition.", "axis": ("closeup", "front", "eye"), "needs": ()},
     {"id": "bust_portrait", "name": "胸像近拍", "prompt": "CHEST-UP portrait. Crop below the chest; face and upper torso dominate.", "axis": ("bust", "front", "eye"), "needs": ()},
     {"id": "half_body_front", "name": "正面半身照", "prompt": "WAIST-UP ONLY, front view. Do not show knees, legs, or full body.", "axis": ("half", "front", "eye"), "needs": ()},
     {"id": "half_body_side", "name": "側面半身照", "prompt": "WAIST-UP ONLY from a clear side view. No full body.", "axis": ("half", "side", "eye"), "needs": ("side_access",)},
@@ -17564,7 +17653,7 @@ async def _review_photobook_more_result(image_url, shot):
 
 score 為 0.0～1.0 的符合程度。
 判斷必須嚴格：
-- 要求臉部特寫，若仍出現腰部以下、腿部或接近全身，passed=false。
+- 要求臉部特寫，若未收在鎖骨以上或肩膀以上，或仍出現腰部以下、腿部、明顯胸腰身材構圖、或接近全身，passed=false。
 - 要求胸像／半身，若人物仍接近全身，passed=false。
 - 要求全身，若頭或腳被裁掉，passed=false。
 - 要求背後、側面、俯拍或仰拍，若視點沒有清楚改變，passed=false。
@@ -17631,13 +17720,24 @@ async def _generate_photobook_more_edit_candidate(base_context, shot, status=Non
         )
 
     camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
-    final_prompt = (
-        f"{role_note}\n"
-        "Create another photograph from the same photoshoot and the same moment. "
-        "Keep Xiaoxia, her current action, outfit, accessories, hairstyle, location and lighting naturally consistent with Figure 1. "
-        "Change the camera treatment only.\n"
-        f"CAMERA: {camera_recipe}"
-    )
+    if str((shot or {}).get("id") or "") == "face_closeup":
+        final_prompt = (
+            f"{role_note}\n"
+            "Create another photograph from the same photoshoot and the same moment. "
+            "Keep Xiaoxia's identity, hairstyle, visible outfit details near the neckline, location, and lighting naturally consistent with Figure 1. "
+            "This request is a face beauty close-up only. Crop from collarbone-up or shoulders-up only. "
+            "Her face must fill most of the frame. The composition must not show waist, hips, thighs, knees, legs, or a full-body view. "
+            "Background stays secondary and soft. Change the camera treatment only.\n"
+            f"CAMERA: {camera_recipe}"
+        )
+    else:
+        final_prompt = (
+            f"{role_note}\n"
+            "Create another photograph from the same photoshoot and the same moment. "
+            "Keep Xiaoxia, her current action, outfit, accessories, hairstyle, location and lighting naturally consistent with Figure 1. "
+            "Change the camera treatment only.\n"
+            f"CAMERA: {camera_recipe}"
+        )
     print(f"🧪 [PHOTOBOOK_MORE_EDIT_QUEUE] shot={shot.get('id')} inputs={len(image_urls)}")
 
     def _subscribe():
@@ -17695,11 +17795,19 @@ async def _generate_photobook_more_generate_candidate(base_context, shot, status
     context["root_prompt_base"] = root_prompt
     camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
     context["camera_override"] = camera_recipe
-    context["prompt_base"] = (
-        root_prompt
-        + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. "
-        + camera_recipe
-    )
+    if str((shot or {}).get("id") or "") == "face_closeup":
+        context["prompt_base"] = (
+            root_prompt
+            + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. FACE BEAUTY CLOSE-UP ONLY. "
+            + camera_recipe
+            + " Keep the image collarbone-up or shoulders-up only. Her face fills most of the frame. Do not show waist, hips, thighs, knees, legs, or a full-body composition."
+        )
+    else:
+        context["prompt_base"] = (
+            root_prompt
+            + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. "
+            + camera_recipe
+        )
     generated = await _generate_photo_from_context(context, msg=status)
     generated["more_engine"] = "generate_fallback"
     generated["more_shot_id"] = shot.get("id")
