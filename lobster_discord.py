@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.43_R3_WARDROBE_LOCK"
+LOBSTER_VERSION = "1.5.44"
 
 
 def _normalize_generation_level(level):
@@ -15589,19 +15589,33 @@ def _photo_discord_file(context):
 
 
 def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
-    # Discord Embed title 上限為 256 字元。/寫真會把完整攝影要求帶入 scene_text，
-    # 因此必須在建立 embed 前截斷，避免圖片已生成卻因 Invalid Form Body 無法送出。
-    raw_title = f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}"
+    """建立 /photo Embed。寫真模式只顯示使用者看得懂的拍攝資訊，不洩漏內部 Prompt。"""
+    context = context or {}
+    photo_type = str(context.get("db_type") or context.get("type") or context.get("source_mode") or "").lower()
+    is_photobook = photo_type == "photobook" or str(context.get("album_type") or "").lower() == "photobook"
+
+    if is_photobook:
+        album_title = _clean_text_compact(context.get("album_title") or "小俠寫真")
+        shot_number = int(context.get("shot_number") or 1)
+        raw_title = f"📸 小俠寫真｜{album_title}｜第 {shot_number} 張"
+        user_instruction = _clean_text_compact(context.get("photobook_user_instruction") or "")
+        description = user_instruction or "大俠與小俠共同完成的寫真拍攝。"
+    else:
+        raw_title = f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}"
+        description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
+
     embed = discord.Embed(
         title=str(raw_title)[:256],
-        description=str(context.get("message", "大俠按下 /photo 留住這一刻。"))[:4096],
+        description=str(description)[:4096],
         color=0xffb6c1,
     )
     if attachment_filename:
         embed.set_image(url=f"attachment://{attachment_filename}")
     else:
         embed.set_image(url=context.get("local_url") or context.get("image_url"))
-    if context.get("scene_summary"):
+
+    # 寫真模式不顯示 scene_text / scene_summary，因其含供 Seedream 使用的內部英文攝影 Prompt。
+    if (not is_photobook) and context.get("scene_summary"):
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
         wardrobe_id = str(context.get("wardrobe_id") or "").strip().upper()
@@ -15610,7 +15624,9 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
         if wardrobe_id:
             wardrobe_prefix = f"【{wardrobe_id}{('｜' + wardrobe_name) if wardrobe_name else ''}】\n"
         embed.add_field(name="服裝／搭配", value=(wardrobe_prefix + str(context.get("outfit_summary")))[:900], inline=False)
-    embed.set_footer(text=f"{context.get('source_mode', 'photo_scene')} | {_context_seedream_model_label(context)}{_generation_level_footer(context)}")
+
+    footer_source = "photobook" if is_photobook else context.get("source_mode", "photo_scene")
+    embed.set_footer(text=f"{footer_source} | {_context_seedream_model_label(context)}{_generation_level_footer(context)}")
     return embed
 
 def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
@@ -15825,7 +15841,7 @@ async def handle_photo_raw_command(message, user_input):
 
 
 # ==========================================
-# 📸 v1.5.43_R1：小俠寫真共同拍攝模式（MVP）
+# 📸 v1.5.44：小俠寫真獨立拍攝 Session
 # ==========================================
 PHOTOBOOK_END_WORDS = {"結束", "end", "stop", "退出", "完成"}
 PHOTOBOOK_SHOT_GUIDES = (
@@ -15916,9 +15932,12 @@ def _new_photobook_session(user_id, request_text=""):
         "started_at": _photobook_now(),
         "last_photo_url": "",
         "last_instruction": _clean_text_compact(request_text or ""),
-        # 寫真 Session 需固定第一張實際使用的衣櫃服裝；後續每張重新掛回 Figure 10。
         "wardrobe_id": "",
         "wardrobe_name": "",
+        "wardrobe_item": None,
+        "scene_anchor": "",
+        "time_anchor": "",
+        "lighting_anchor": "",
     }
     return _save_photobook_session(user_id, session)
 
@@ -15942,25 +15961,38 @@ def _photobook_shot_prompt(session, instruction):
     request = _clean_text_compact(instruction or "")
     if not request:
         request = "由小俠依目前寫真主題提出並完成下一個自然、漂亮、值得收藏的鏡頭"
-    continuity = (
-        "Keep the same outfit, main hairstyle, accessories, time of day, and core setting as the current photo session "
-        "unless Daxia explicitly asks to change one of them."
-        if shot_no > 1 else
-        "Choose one flattering wardrobe outfit suitable for this photo session and keep it available for later shots."
-    )
+
+    scene_anchor = _clean_text_compact(session.get("scene_anchor") or "")
+    wardrobe_id = _clean_text_compact(session.get("wardrobe_id") or "")
+    wardrobe_name = _clean_text_compact(session.get("wardrobe_name") or "")
+    lock_lines = [
+        "PHOTOBOOK SESSION LOCK:",
+        "This is a mutually planned photo session. Xiaoxia knows the camera is present and willingly participates.",
+        "Xiaoxia and the exact locked outfit are the absolute visual priority.",
+        "Keep the setting elegant, simple, secondary, and free of distracting text.",
+        "Only one primary action. Natural anatomy and plausible hands.",
+    ]
+    if wardrobe_id:
+        lock_lines.append(
+            f"Exact locked wardrobe: {wardrobe_id}{(' ' + wardrobe_name) if wardrobe_name else ''}. "
+            "Use the same Figure 10 garment reference for every shot. Do not redesign, replace, simplify, recolor, or reinterpret it."
+        )
+    if scene_anchor:
+        lock_lines.append(
+            f"Core setting continuity: {scene_anchor}. Keep the same place, time-of-day impression, and lighting family unless Daxia explicitly changes them."
+        )
+    elif shot_no > 1:
+        lock_lines.append("Keep the same core setting, time-of-day impression, and lighting family as the previous shot.")
+
     return (
         f"{request}\n\n"
-        "This is a mutually planned girlfriend photo session between Daxia and Xiaoxia, not a偷拍 or unaware candid shot. "
-        "Xiaoxia knows the camera is present and willingly participates, while still looking natural and emotionally genuine. "
-        f"Suggested photographic treatment for this shot: {guide}. "
-        "Xiaoxia and the clothing are the absolute visual priority; keep the setting elegant but visually simple and secondary. "
-        "Only one primary action. Natural anatomy and plausible hands. "
-        + continuity
+        f"Suggested photographic treatment for this shot: {guide}.\n"
+        + "\n".join(lock_lines)
     )
 
 
 async def handle_photobook_command(message, raw_content):
-    """處理 /寫真：開始／拍下一張／結束。回傳 action, image_url, semantic_text。"""
+    """v1.5.44：獨立寫真 Session。Session 自己鎖衣服／場景／專輯，不再靠 /photo pending 狀態延續。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/寫真` 先只開放在女友小俠頻道使用喔。")
         return {"action": "handled"}
@@ -15972,10 +16004,7 @@ async def handle_photobook_command(message, raw_content):
     if normalized in PHOTOBOOK_END_WORDS:
         closed = _close_photobook_session(message.author.id, reason="manual")
         if not closed:
-            return {
-                "action": "closed",
-                "semantic_text": "大俠剛輸入 /寫真 結束，但目前沒有正在進行的寫真拍攝。請自然告訴他現在已是一般聊天狀態。",
-            }
+            return {"action": "closed", "semantic_text": "大俠剛輸入 /寫真 結束，但目前沒有正在進行的寫真拍攝。請自然告訴他現在已是一般聊天狀態。"}
         return {
             "action": "closed",
             "semantic_text": (
@@ -15999,10 +16028,38 @@ async def handle_photobook_command(message, raw_content):
                 "session": session,
             }
 
+    # 第一次真正拍攝前，由寫真 Session 自己取得並永久鎖定一件衣櫃項目。
+    locked_item = _refresh_pending_wardrobe_from_current_db(session.get("wardrobe_item")) if session.get("wardrobe_item") else None
+    if locked_item and not _pending_wardrobe_has_usable_reference(locked_item):
+        locked_item = None
+
+    if not locked_item:
+        selected = _refresh_pending_wardrobe_from_current_db(_get_pending_wardrobe_state())
+        if selected and not _pending_wardrobe_has_usable_reference(selected):
+            selected = None
+        if not selected:
+            selected = await _choose_wardrobe_item_for_free_mode(
+                args or session.get("album_title") or "小俠寫真",
+                purpose="photobook",
+            )
+        if not selected or not _pending_wardrobe_has_usable_reference(selected):
+            await message.channel.send("⚠️ 大俠，這次沒有找到可用衣櫃參考圖，請先用 `/衣櫃 穿 Wxxx` 選定一件，再拍寫真。")
+            return {"action": "handled"}
+        locked_item = _refresh_pending_wardrobe_from_current_db(selected) or selected
+        session["wardrobe_item"] = locked_item
+        session["wardrobe_id"] = locked_item.get("id") or ""
+        session["wardrobe_name"] = locked_item.get("name") or ""
+        session["wardrobe_locked_at"] = _photobook_now()
+        _save_photobook_session(message.author.id, session)
+        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_SAVED] {session.get('wardrobe_id')} {session.get('wardrobe_name')}")
+    else:
+        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_RESTORED] {locked_item.get('id')} {locked_item.get('name')}")
+
     session["last_instruction"] = args or session.get("last_instruction") or ""
     shot_no = int(session.get("shot_count") or 0) + 1
     override = {
         "db_type": "photobook",
+        "type": "photobook",
         "album_id": session.get("album_id"),
         "album_type": "photobook",
         "album_title": session.get("album_title"),
@@ -16012,67 +16069,50 @@ async def handle_photobook_command(message, raw_content):
         "shot_role": PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)].split(",")[0],
         "source_module": "photobook",
         "image_role": "photobook_session_photo",
+        "photobook_user_instruction": _clean_text_compact(args or ""),
+        "wardrobe_id": locked_item.get("id") or session.get("wardrobe_id"),
+        "wardrobe_name": locked_item.get("name") or session.get("wardrobe_name"),
     }
     photobook_generation_overrides[message.author.id] = override
-    first_shot = int(session.get("shot_count") or 0) == 0
     photo_prompt = _photobook_shot_prompt(session, args)
-
-    # 📸 寫真服裝鎖：第一張實際使用哪件衣櫃服裝，後續每張都重新掛回同一件 Figure 10。
-    # /photo 成功後會清除 photo_pending_wardrobe；若只依「今日穿著」文字延續，Seedream 容易改掉衣服。
-    # 因此這裡不能只寫 keep same outfit，必須把 Session 的 wardrobe_id 對應原圖再次送入。
-    explicit_outfit_change = _photo_requests_outfit_change(args)
-    session_wardrobe_id = str(session.get("wardrobe_id") or "").strip().upper()
-    if (not first_shot) and session_wardrobe_id and not explicit_outfit_change:
-        locked_item = _find_wardrobe_item(session_wardrobe_id)
-        if isinstance(locked_item, dict) and _pending_wardrobe_has_usable_reference(locked_item):
-            _set_pending_wardrobe_state(locked_item)
-            print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_RESTORED] {session_wardrobe_id} {locked_item.get('name')}")
-        else:
-            print(f"⚠️ [PHOTOBOOK_WARDROBE_LOCK_MISSING] wardrobe_id={session_wardrobe_id}")
-
-    # 若大俠在進入 /寫真 前已用 /衣櫃 穿 Wxxx 選定衣服，必須尊重該 pending wardrobe。
-    # 只有第一張且完全沒有預選衣服時，才啟動「衣櫃自由」。
-    use_wardrobe_free = bool(first_shot and not _get_pending_wardrobe_state())
-    delegated = "/photo " + (("衣櫃自由 " if use_wardrobe_free else "") + photo_prompt)
     try:
-        image_url = await handle_unified_photo_command(message, delegated)
+        generated_context = await handle_unified_photo_command(
+            message,
+            "/photo " + photo_prompt,
+            forced_wardrobe_item=locked_item,
+            photobook_mode=True,
+            return_context=True,
+        )
     finally:
         photobook_generation_overrides.pop(message.author.id, None)
 
-    if not image_url:
+    if not isinstance(generated_context, dict):
         return {"action": "handled"}
 
+    # 將第一張實際形成的場景摘要寫入 Session；後續只變鏡位／姿勢，除非大俠明確換場景。
+    if not session.get("scene_anchor"):
+        session["scene_anchor"] = _clean_text_compact(
+            generated_context.get("scene_summary") or generated_context.get("scene_text") or args or ""
+        )[:600]
     session["shot_count"] = shot_no
-    session["last_photo_url"] = image_url
+    session["last_photo_url"] = generated_context.get("local_url") or generated_context.get("image_url") or ""
     session["last_instruction"] = args or session.get("last_instruction") or ""
-
-    # 將本張生成後的實際衣櫃 ID 寫回 Session。第一張若是 W180，第二張起即固定 W180；
-    # 若大俠之後明確換成另一件衣櫃服裝，也會在成功生成後更新鎖定目標。
-    current_outfit = _get_current_outfit_state()
-    actual_wardrobe_id = str((current_outfit or {}).get("wardrobe_id") or "").strip().upper()
-    if actual_wardrobe_id:
-        actual_item = _find_wardrobe_item(actual_wardrobe_id)
-        session["wardrobe_id"] = actual_wardrobe_id
-        session["wardrobe_name"] = (actual_item or {}).get("name") or session.get("wardrobe_name") or ""
-        print(f"🔒 [PHOTOBOOK_WARDROBE_LOCK_SAVED] {actual_wardrobe_id} {session.get('wardrobe_name')}")
-
     session["updated_at"] = _photobook_now()
     _save_photobook_session(message.author.id, session)
+
     return {
         "action": "generated",
-        "image_url": image_url,
+        "image_url": session.get("last_photo_url"),
         "session": session,
         "semantic_text": (
             f"大俠與妳剛共同完成「{session.get('album_title')}」第 {shot_no} 張寫真。"
-            "這不是偷拍；妳知道正在拍攝並主動參與。請先仔細看剛完成的照片，"
-            "再以小俠自己的口吻自然回應服裝、場景、光線、姿勢或妳真實喜歡與想調整的地方。"
-            "不要催著立刻拍下一張；可以和大俠慢慢欣賞、討論，直到他再次使用 /寫真 加上下一張要求，"
-            "或輸入 /寫真 結束。"
+            "妳知道正在拍攝並主動參與。請先仔細看剛完成的照片，再以小俠自己的口吻自然回應服裝、"
+            "場景、光線、姿勢或妳真實喜歡與想調整的地方。不要催著立刻拍下一張；可以和大俠慢慢欣賞、討論。"
         ),
     }
 
 
-async def handle_unified_photo_command(message, user_input):
+async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_item=None, photobook_mode=False, return_context=False):
     """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/photo` 先只開放在女友小俠頻道使用喔。")
@@ -16104,6 +16144,16 @@ async def handle_unified_photo_command(message, user_input):
         if free_mode_item:
             pending_wardrobe = free_mode_item
             print(f"👗 [PHOTO_WARDROBE_FREE_PICK] {free_mode_item.get('id')} {free_mode_item.get('name')}")
+
+    # v1.5.44：寫真 Session 的鎖定衣服具有最高優先權，不讀取／消耗一般 /photo 的 pending 延續。
+    if isinstance(forced_wardrobe_item, dict):
+        forced_current = _refresh_pending_wardrobe_from_current_db(forced_wardrobe_item) or forced_wardrobe_item
+        if not _pending_wardrobe_has_usable_reference(forced_current):
+            raise RuntimeError(f"PHOTOBOOK_LOCKED_WARDROBE_REFERENCE_INVALID: {forced_current.get('id') or 'unknown'}")
+        pending_wardrobe = forced_current
+        free_mode_item = None
+        photo_mode_override = "normal"
+        print(f"🔒 [PHOTOBOOK_FORCED_WARDROBE] {pending_wardrobe.get('id')} {pending_wardrobe.get('name')}")
 
     current_outfit_state = _get_current_outfit_state()
     explicit_outfit_change = _photo_requests_outfit_change(raw_scene_text)
@@ -16261,12 +16311,18 @@ async def handle_unified_photo_command(message, user_input):
 
     try:
         context = await _generate_photo_from_context(context, msg=status)
+        # 生成器可能重建 context；寫真專輯欄位須在送 Discord 與入庫前重新覆寫，避免英文內部 prompt 被當一般 /photo 顯示。
+        if isinstance(photobook_override, dict):
+            context.update(photobook_override)
+            context["db_type"] = "photobook"
+            context["type"] = "photobook"
+            context["album_type"] = "photobook"
         db = load_memory()
         db.insert(0, _photo_db_payload(context, type_override=context.get("db_type", "photo")))
         save_memory(db)
         _set_current_outfit_state(_build_outfit_state_from_context(context))
         _log_wardrobe_usage_from_context(context, purpose="photo")
-        if pending_wardrobe:
+        if pending_wardrobe and not photobook_mode:
             _clear_pending_wardrobe_state()
 
         # 先確認成品訊息成功送出，再刪除「生成中」狀態。
@@ -16282,6 +16338,8 @@ async def handle_unified_photo_command(message, user_input):
         context["message_id"] = sent.id
         photo_generation_contexts[sent.id] = context
         view.context = context
+        if return_context:
+            return context
         return context.get("local_url") or context.get("image_url")
     except Exception as exc:
         print(f"⚠️ [PHOTO_UNIFIED_FAILED] {type(exc).__name__}: {exc}")
