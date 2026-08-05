@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.46"
+LOBSTER_VERSION = "1.5.47"
 
 
 def _normalize_generation_level(level):
@@ -14850,8 +14850,14 @@ def _v1527_concise_people_policy(checklist=None):
 
 
 def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
-    """v1.5.27: one concise, conflict-free Figure Role Map for every /photo request."""
-    cleaned_request = _v1527_strip_prompt_conflicts(custom_prompt)
+    """v1.5.47: concise photo prompt with an optional final camera override for /寫真 More."""
+    raw_prompt = str(custom_prompt or "")
+    camera_override = ""
+    marker = "[[CAMERA_OVERRIDE]]"
+    if marker in raw_prompt:
+        raw_prompt, camera_override = raw_prompt.rsplit(marker, 1)
+        camera_override = _clean_text_compact(camera_override)[:420]
+    cleaned_request = _v1527_strip_prompt_conflicts(raw_prompt)
     hard = _v1527_scene_hard_requirements(cleaned_request or custom_prompt)
     people = _v1527_concise_people_policy(visual_checklist)
 
@@ -14886,6 +14892,9 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
         "- Do not substitute a generic park, reading, walking, or solo portrait when a specific location or social action is requested."
     )
     final = "\n\n".join(s for s in sections if str(s).strip()).strip()
+    if camera_override:
+        # Keep this at the absolute end. Seedream v4.5 tends to ignore camera intent buried in long prompts.
+        final += "\n\nCAMERA OVERRIDE — this framing is mandatory:\n" + camera_override
     print(
         f"🧭 [PROMPT_STATS_V1527] total_chars={len(final)} "
         f"request_chars={len(cleaned_request)} hard_chars={len(hard)} people_chars={len(people)}"
@@ -16147,9 +16156,16 @@ async def _show_photobook_wardrobe_page(message, session, page_no):
 
 
 async def _start_photobook_wardrobe_selection(message, session, scene_text):
+    scene_label = _clean_text_compact(scene_text or "今日寫真")[:180]
+    status = await message.channel.send(
+        f"👗 收到，正在依「{scene_label}」篩選適合的衣服、製作第 1 頁六宮格，讓小俠看過後給意見…"
+    )
     candidates = _photobook_rank_wardrobe_candidates(scene_text, PHOTOBOOK_WARDROBE_MAX_CANDIDATES)
     if not candidates:
-        await message.channel.send("⚠️ 大俠，衣櫃裡目前沒有找到可用參考圖的外出服裝。")
+        try:
+            await status.edit(content="⚠️ 大俠，衣櫃裡目前沒有找到可用參考圖的外出服裝。")
+        except Exception:
+            await message.channel.send("⚠️ 大俠，衣櫃裡目前沒有找到可用參考圖的外出服裝。")
         return False
     session["scene_request"] = _clean_text_compact(scene_text or "")
     session["album_title"] = _photobook_title_from_request(scene_text)
@@ -16158,7 +16174,15 @@ async def _start_photobook_wardrobe_selection(message, session, scene_text):
     session["wardrobe_current_page"] = 1
     session["status"] = "wardrobe_selecting"
     _save_photobook_session(message.author.id, session)
+    try:
+        await status.edit(content=f"👗 已篩出 {len(candidates)} 件候選，正在完成第 1 頁並讓小俠看圖…")
+    except Exception:
+        pass
     await _show_photobook_wardrobe_page(message, session, 1)
+    try:
+        await status.delete()
+    except Exception:
+        pass
     return True
 
 
@@ -17306,26 +17330,26 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
 # 📷 v1.5.45：/寫真 More 鏡頭語言庫。
 # Vision 只做現場勘景；程式負責篩選；Seedream 只收到一條短攝影指令。
 PHOTOBOOK_SHOT_LIBRARY = (
-    {"id": "face_closeup", "name": "臉部美容特寫", "prompt": "Use a tight beauty close-up focused on her face and expression.", "axis": ("closeup", "front", "eye"), "needs": ()},
-    {"id": "bust_portrait", "name": "胸像近拍", "prompt": "Use a chest-up portrait with a clean, intimate framing.", "axis": ("bust", "front", "eye"), "needs": ()},
-    {"id": "half_body_front", "name": "正面半身照", "prompt": "Use a waist-up front-facing composition.", "axis": ("half", "front", "eye"), "needs": ()},
-    {"id": "half_body_side", "name": "側面半身照", "prompt": "Use a waist-up side-view composition.", "axis": ("half", "side", "eye"), "needs": ("side_access",)},
-    {"id": "three_quarter_left", "name": "左側 45° 取景", "prompt": "Photograph her from a clear left three-quarter camera position.", "axis": ("three_quarter", "left45", "eye"), "needs": ("left_access",)},
-    {"id": "three_quarter_right", "name": "右側 45° 取景", "prompt": "Photograph her from a clear right three-quarter camera position.", "axis": ("three_quarter", "right45", "eye"), "needs": ("right_access",)},
-    {"id": "profile", "name": "正側面取景", "prompt": "Use a strong true-profile camera viewpoint.", "axis": ("half", "profile", "eye"), "needs": ("side_access",)},
-    {"id": "full_body_eye", "name": "平視全身照", "prompt": "Use an eye-level head-to-toe full-body composition.", "axis": ("full", "front", "eye"), "needs": ("full_body_possible",)},
-    {"id": "full_body_low", "name": "略低機位全身照", "prompt": "Use a subtle low-angle head-to-toe full-body composition.", "axis": ("full", "front", "low"), "needs": ("full_body_possible", "low_angle_access")},
-    {"id": "high_angle_half", "name": "略高機位俯拍半身", "prompt": "Use a clearly higher camera position with a waist-up composition.", "axis": ("half", "front", "high"), "needs": ("high_angle_access",)},
-    {"id": "low_angle_half", "name": "略低機位仰拍半身", "prompt": "Use a clearly lower camera position with a waist-up composition.", "axis": ("half", "front", "low"), "needs": ("low_angle_access",)},
-    {"id": "rear_view", "name": "背後取景", "prompt": "Photograph the same moment from behind her, as a distinct rear-view composition.", "axis": ("three_quarter", "rear", "eye"), "needs": ("rear_access",)},
-    {"id": "over_shoulder", "name": "肩後回望構圖", "prompt": "Use an over-the-shoulder viewpoint with her looking back toward the camera.", "axis": ("bust", "rear45", "eye"), "needs": ("rear_access",)},
-    {"id": "wide_environment", "name": "廣角環境全景", "prompt": "Use a wider environmental composition that clearly shows her and the surrounding location.", "axis": ("wide", "front", "eye"), "needs": ("background_depth",)},
-    {"id": "telephoto", "name": "長焦壓縮背景", "prompt": "Use a telephoto portrait look with compressed softly blurred background.", "axis": ("half", "front", "tele"), "needs": ("background_depth",)},
-    {"id": "foreground_frame", "name": "前景框景構圖", "prompt": "Use a nearby foreground element to create a clear natural frame around her.", "axis": ("three_quarter", "front", "foreground"), "needs": ("foreground_available",)},
-    {"id": "window_frame", "name": "窗框取景", "prompt": "Use the window frame as a strong compositional frame while keeping her as the subject.", "axis": ("three_quarter", "front", "window"), "needs": ("window_present",)},
-    {"id": "reflection", "name": "玻璃／鏡面倒影構圖", "prompt": "Use a clear glass or mirror reflection as the main photographic composition.", "axis": ("half", "reflection", "eye"), "needs": ("reflection_surface",)},
-    {"id": "negative_space", "name": "留白構圖", "prompt": "Use strong negative space with her placed clearly off-center.", "axis": ("three_quarter", "offcenter", "eye"), "needs": ("background_depth",)},
-    {"id": "detail_hands_face", "name": "手與臉的細節近拍", "prompt": "Use a close detail composition of her face and the hand involved in the current action.", "axis": ("detail", "front", "eye"), "needs": ("hand_near_face",)},
+    {"id": "face_closeup", "name": "臉部美容特寫", "prompt": "CHEST-UP ONLY. Her face fills most of the frame. No full body or legs.", "axis": ("closeup", "front", "eye"), "needs": ()},
+    {"id": "bust_portrait", "name": "胸像近拍", "prompt": "CHEST-UP portrait. Crop below the chest; face and upper torso dominate.", "axis": ("bust", "front", "eye"), "needs": ()},
+    {"id": "half_body_front", "name": "正面半身照", "prompt": "WAIST-UP ONLY, front view. Do not show knees, legs, or full body.", "axis": ("half", "front", "eye"), "needs": ()},
+    {"id": "half_body_side", "name": "側面半身照", "prompt": "WAIST-UP ONLY from a clear side view. No full body.", "axis": ("half", "side", "eye"), "needs": ("side_access",)},
+    {"id": "three_quarter_left", "name": "左側 45° 取景", "prompt": "Move camera clearly to her LEFT 45-degree side; keep the same moment.", "axis": ("three_quarter", "left45", "eye"), "needs": ("left_access",)},
+    {"id": "three_quarter_right", "name": "右側 45° 取景", "prompt": "Move camera clearly to her RIGHT 45-degree side; keep the same moment.", "axis": ("three_quarter", "right45", "eye"), "needs": ("right_access",)},
+    {"id": "profile", "name": "正側面取景", "prompt": "TRUE PROFILE view, camera directly beside her; face in side silhouette.", "axis": ("half", "profile", "eye"), "needs": ("side_access",)},
+    {"id": "full_body_eye", "name": "平視全身照", "prompt": "HEAD-TO-TOE full body, both head and feet visible, eye-level.", "axis": ("full", "front", "eye"), "needs": ("full_body_possible",)},
+    {"id": "full_body_low", "name": "略低機位全身照", "prompt": "LOW-ANGLE head-to-toe full body; both head and feet visible.", "axis": ("full", "front", "low"), "needs": ("full_body_possible", "low_angle_access")},
+    {"id": "high_angle_half", "name": "略高機位俯拍半身", "prompt": "HIGH-ANGLE WAIST-UP view, camera visibly above her; no legs.", "axis": ("half", "front", "high"), "needs": ("high_angle_access",)},
+    {"id": "low_angle_half", "name": "略低機位仰拍半身", "prompt": "LOW-ANGLE WAIST-UP view, camera visibly below eye level; no full body.", "axis": ("half", "front", "low"), "needs": ("low_angle_access",)},
+    {"id": "rear_view", "name": "背後取景", "prompt": "REAR VIEW. Camera is clearly behind her; her back is the main view.", "axis": ("three_quarter", "rear", "eye"), "needs": ("rear_access",)},
+    {"id": "over_shoulder", "name": "肩後回望構圖", "prompt": "OVER-SHOULDER rear 45-degree view; she looks back toward camera.", "axis": ("bust", "rear45", "eye"), "needs": ("rear_access",)},
+    {"id": "wide_environment", "name": "廣角環境全景", "prompt": "WIDE environmental shot; she occupies less than half the frame and location is prominent.", "axis": ("wide", "front", "eye"), "needs": ("background_depth",)},
+    {"id": "telephoto", "name": "長焦壓縮背景", "prompt": "TELEPHOTO portrait compression; clearly tighter background and shallow depth.", "axis": ("half", "front", "tele"), "needs": ("background_depth",)},
+    {"id": "foreground_frame", "name": "前景框景構圖", "prompt": "FOREGROUND FRAME is visibly present around her; same pose and scene.", "axis": ("three_quarter", "front", "foreground"), "needs": ("foreground_available",)},
+    {"id": "window_frame", "name": "窗框取景", "prompt": "WINDOW FRAME visibly encloses or divides the composition around her.", "axis": ("three_quarter", "front", "window"), "needs": ("window_present",)},
+    {"id": "reflection", "name": "玻璃／鏡面倒影構圖", "prompt": "REFLECTION is the main composition; photograph her through mirror or glass reflection.", "axis": ("half", "reflection", "eye"), "needs": ("reflection_surface",)},
+    {"id": "negative_space", "name": "留白構圖", "prompt": "STRONG NEGATIVE SPACE; place her clearly off-center with large empty area.", "axis": ("three_quarter", "offcenter", "eye"), "needs": ("background_depth",)},
+    {"id": "detail_hands_face", "name": "手與臉的細節近拍", "prompt": "CLOSE DETAIL of face plus current hand gesture only; no full body.", "axis": ("detail", "front", "eye"), "needs": ("hand_near_face",)},
 )
 
 
@@ -17510,6 +17534,42 @@ def _consume_pending_photobook_more_choice(message):
     return {"pending": pending, "selected": selected, "choice": choice}
 
 
+async def _review_photobook_more_result(image_url, shot):
+    """Verify the requested framing first; Xiaoxia's later comment must not pretend a failed shot succeeded."""
+    fallback = {"passed": None, "actual": "無法判定", "reason": "驗收暫時無法完成"}
+    data, mime = await _download_image_bytes_for_vision(str(image_url or ""))
+    if not data:
+        return fallback
+    target = str((shot or {}).get("name") or "指定鏡頭")
+    recipe = str((shot or {}).get("prompt") or "")
+    prompt = f"""
+你是寫真構圖驗收員。只看附圖，判斷是否完成指定拍法。
+指定拍法：{target}
+明確構圖要求：{recipe}
+只回 JSON：
+{{"passed":true,"actual":"實際景別與角度，15字內","reason":"符合或失敗原因，30字內"}}
+判斷要嚴格：要求臉部特寫卻出現腰部以下或接近全身，必須 passed=false；要求全身但腳被裁掉，也必須 false。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Part.from_bytes(data=data, mime_type=mime), types.Part.from_text(text=prompt)],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+        )
+        obj = _extract_json_object(getattr(resp, "text", "") or "") or {}
+        passed = obj.get("passed")
+        if not isinstance(passed, bool):
+            passed = None
+        return {
+            "passed": passed,
+            "actual": _clean_text_compact(obj.get("actual") or "無法判定")[:40],
+            "reason": _clean_text_compact(obj.get("reason") or "")[:80],
+        }
+    except Exception as exc:
+        print(f"⚠️ [PHOTOBOOK_MORE_ACCEPTANCE_FAILED] {type(exc).__name__}: {exc}")
+        return fallback
+
+
 async def _generate_photobook_more_choice(message, request):
     pending = request.get("pending") or {}
     shot = request.get("selected") or {}
@@ -17521,10 +17581,12 @@ async def _generate_photobook_more_choice(message, request):
     context["user_input"] = f"More camera choice: {shot.get('name')}"
     root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
     context["root_prompt_base"] = root_prompt
+    camera_recipe = str(shot.get("prompt") or "Use a clearly different camera composition.").strip()
+    context["camera_override"] = camera_recipe
     context["prompt_base"] = (
         root_prompt
-        + "\nMORE CAMERA: Same photo session, same moment, same overall situation and current action. "
-        + str(shot.get("prompt") or "Use a clearly different camera composition.")
+        + "\n[[CAMERA_OVERRIDE]] Same photoshoot and same moment. "
+        + camera_recipe
     )
     status = await message.channel.send(f"📷 正在使用「{shot.get('name')}」拍攝 More…")
     try:
@@ -17568,18 +17630,35 @@ async def _generate_photobook_more_choice(message, request):
         new_context["message_id"] = sent.id
         photo_generation_contexts[sent.id] = new_context
         view.context = new_context
+        result_image = new_context.get("local_url") or new_context.get("image_url")
+        acceptance = await _review_photobook_more_result(result_image, shot)
+        new_context["more_acceptance"] = acceptance
+        if isinstance(active, dict):
+            active["last_more_acceptance"] = acceptance
+            _save_photobook_session(message.author.id, active)
         try:
             await status.delete()
         except Exception:
             pass
+        if acceptance.get("passed") is True:
+            verdict = f"構圖驗收：符合「{shot.get('name')}」；實際為「{acceptance.get('actual')}」。"
+        elif acceptance.get("passed") is False:
+            verdict = (
+                f"構圖驗收：沒有完成「{shot.get('name')}」；實際為「{acceptance.get('actual')}」。"
+                f"原因：{acceptance.get('reason') or '景別或角度不符'}。"
+            )
+        else:
+            verdict = f"構圖驗收暫時無法判定；實際觀察為「{acceptance.get('actual')}」。"
         return {
-            "image_url": new_context.get("local_url") or new_context.get("image_url"),
+            "image_url": result_image,
             "context": new_context,
             "semantic_text": (
-                f"大俠剛用「{shot.get('name')}」替妳拍了同一輯寫真的 More 照片。"
-                "照片已經完成，請妳先真正看附圖，再以小俠自己的感受自然評論；"
-                "可以喜歡，也可以覺得上一張較好，或指出妳看見的構圖、表情、服裝與氛圍。"
-                "不要假裝事前知道攝影師採用哪個鏡頭，也不要提及 Vision、鏡頭庫、生成或系統流程。"
+                f"大俠剛替妳拍了同一輯寫真的 More 照片，原本指定「{shot.get('name')}」。"
+                + verdict
+                + "請妳先真正看附圖，再以小俠自己的感受自然評論。"
+                "若驗收失敗，必須坦白說沒有拍成指定鏡頭，不可假裝成功或只泛稱角度很好；"
+                "仍可評論照片本身好不好看、喜歡哪裡，並由妳決定是否建議再拍。"
+                "不要提及 Vision、模型、鏡頭庫、生成或系統流程。"
             ),
         }
     except Exception:
