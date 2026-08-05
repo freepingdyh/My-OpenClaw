@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.43_R1"
+LOBSTER_VERSION = "1.5.43_R2"
 
 
 def _normalize_generation_level(level):
@@ -19472,8 +19472,12 @@ async def on_message(message):
         if await _handle_diary_wardrobe_message_direct(message):
             return
 
-        # 🌟 特例：/photo 是留給世界頻道拍照用的，不要被指令處理器攔截！
-        if not message.content.startswith('/photo'):
+        # 🌟 特例：/photo 與 /寫真 會在下方共用女友聊天／生圖流程，
+        # 不可先交給 discord.py command parser 後直接 return。
+        if not (
+            message.content.startswith('/photo')
+            or message.content.startswith('/寫真')
+        ):
             await girlfriend_bot.process_commands(message)
             return
 
