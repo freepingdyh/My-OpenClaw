@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.44"
+LOBSTER_VERSION = "1.5.45"
 
 
 def _normalize_generation_level(level):
@@ -4139,6 +4139,7 @@ pending_anniversary_board_inputs = {}  # 🎂 v1.5.01：/紀念日 的編號修�
 pending_memory_review_inputs = {}  # 📚 v1.5.01：/回憶 的刪除/保留/升級紀念日流程
 photo_generation_contexts = {}
 photobook_generation_overrides = {}  # user_id -> current album metadata injected into /photo
+pending_photobook_more_choices = {}  # user_id -> numbered Shot Library selection state
 
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
@@ -17044,6 +17045,294 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "visual_checklist": trace_context.get("visual_checklist"),
     }
 
+
+# 📷 v1.5.45：/寫真 More 鏡頭語言庫。
+# Vision 只做現場勘景；程式負責篩選；Seedream 只收到一條短攝影指令。
+PHOTOBOOK_SHOT_LIBRARY = (
+    {"id": "face_closeup", "name": "臉部美容特寫", "prompt": "Use a tight beauty close-up focused on her face and expression.", "axis": ("closeup", "front", "eye"), "needs": ()},
+    {"id": "bust_portrait", "name": "胸像近拍", "prompt": "Use a chest-up portrait with a clean, intimate framing.", "axis": ("bust", "front", "eye"), "needs": ()},
+    {"id": "half_body_front", "name": "正面半身照", "prompt": "Use a waist-up front-facing composition.", "axis": ("half", "front", "eye"), "needs": ()},
+    {"id": "half_body_side", "name": "側面半身照", "prompt": "Use a waist-up side-view composition.", "axis": ("half", "side", "eye"), "needs": ("side_access",)},
+    {"id": "three_quarter_left", "name": "左側 45° 取景", "prompt": "Photograph her from a clear left three-quarter camera position.", "axis": ("three_quarter", "left45", "eye"), "needs": ("left_access",)},
+    {"id": "three_quarter_right", "name": "右側 45° 取景", "prompt": "Photograph her from a clear right three-quarter camera position.", "axis": ("three_quarter", "right45", "eye"), "needs": ("right_access",)},
+    {"id": "profile", "name": "正側面取景", "prompt": "Use a strong true-profile camera viewpoint.", "axis": ("half", "profile", "eye"), "needs": ("side_access",)},
+    {"id": "full_body_eye", "name": "平視全身照", "prompt": "Use an eye-level head-to-toe full-body composition.", "axis": ("full", "front", "eye"), "needs": ("full_body_possible",)},
+    {"id": "full_body_low", "name": "略低機位全身照", "prompt": "Use a subtle low-angle head-to-toe full-body composition.", "axis": ("full", "front", "low"), "needs": ("full_body_possible", "low_angle_access")},
+    {"id": "high_angle_half", "name": "略高機位俯拍半身", "prompt": "Use a clearly higher camera position with a waist-up composition.", "axis": ("half", "front", "high"), "needs": ("high_angle_access",)},
+    {"id": "low_angle_half", "name": "略低機位仰拍半身", "prompt": "Use a clearly lower camera position with a waist-up composition.", "axis": ("half", "front", "low"), "needs": ("low_angle_access",)},
+    {"id": "rear_view", "name": "背後取景", "prompt": "Photograph the same moment from behind her, as a distinct rear-view composition.", "axis": ("three_quarter", "rear", "eye"), "needs": ("rear_access",)},
+    {"id": "over_shoulder", "name": "肩後回望構圖", "prompt": "Use an over-the-shoulder viewpoint with her looking back toward the camera.", "axis": ("bust", "rear45", "eye"), "needs": ("rear_access",)},
+    {"id": "wide_environment", "name": "廣角環境全景", "prompt": "Use a wider environmental composition that clearly shows her and the surrounding location.", "axis": ("wide", "front", "eye"), "needs": ("background_depth",)},
+    {"id": "telephoto", "name": "長焦壓縮背景", "prompt": "Use a telephoto portrait look with compressed softly blurred background.", "axis": ("half", "front", "tele"), "needs": ("background_depth",)},
+    {"id": "foreground_frame", "name": "前景框景構圖", "prompt": "Use a nearby foreground element to create a clear natural frame around her.", "axis": ("three_quarter", "front", "foreground"), "needs": ("foreground_available",)},
+    {"id": "window_frame", "name": "窗框取景", "prompt": "Use the window frame as a strong compositional frame while keeping her as the subject.", "axis": ("three_quarter", "front", "window"), "needs": ("window_present",)},
+    {"id": "reflection", "name": "玻璃／鏡面倒影構圖", "prompt": "Use a clear glass or mirror reflection as the main photographic composition.", "axis": ("half", "reflection", "eye"), "needs": ("reflection_surface",)},
+    {"id": "negative_space", "name": "留白構圖", "prompt": "Use strong negative space with her placed clearly off-center.", "axis": ("three_quarter", "offcenter", "eye"), "needs": ("background_depth",)},
+    {"id": "detail_hands_face", "name": "手與臉的細節近拍", "prompt": "Use a close detail composition of her face and the hand involved in the current action.", "axis": ("detail", "front", "eye"), "needs": ("hand_near_face",)},
+)
+
+
+def _photobook_more_image_url(context):
+    return str((context or {}).get("local_url") or (context or {}).get("image_url") or "").strip()
+
+
+async def _analyze_photobook_more_scene(image_url):
+    """Vision 只輸出可供程式篩選的現場條件，不寫 prompt、不替大俠選鏡頭。"""
+    fallback = {
+        "current_framing": "unknown", "current_viewpoint": "unknown", "current_angle": "unknown",
+        "left_access": True, "right_access": True, "side_access": True,
+        "rear_access": False, "full_body_possible": True,
+        "low_angle_access": True, "high_angle_access": True,
+        "background_depth": True, "foreground_available": False,
+        "window_present": False, "reflection_surface": False,
+        "hand_near_face": False, "confidence": 0.0,
+    }
+    data, mime = await _download_image_bytes_for_vision(image_url)
+    if not data:
+        return fallback
+    prompt = """
+你是寫真攝影的現場勘景器。只根據附圖判斷「攝影師還能從哪些方向與景別拍攝」，不要提出美感建議、不要寫生圖提示詞。
+請回傳 JSON，欄位不可增減：
+{
+  "current_framing": "closeup|bust|half|three_quarter|full|wide|unknown",
+  "current_viewpoint": "front|left45|right45|side|rear|rear45|reflection|unknown",
+  "current_angle": "high|eye|low|unknown",
+  "left_access": true,
+  "right_access": true,
+  "side_access": true,
+  "rear_access": true,
+  "full_body_possible": true,
+  "low_angle_access": true,
+  "high_angle_access": true,
+  "background_depth": true,
+  "foreground_available": true,
+  "window_present": true,
+  "reflection_surface": true,
+  "hand_near_face": true,
+  "confidence": 0.0
+}
+判斷原則：
+- 若人物背部貼牆、貼窗、緊靠大型家具或後方明顯無攝影空間，rear_access=false。
+- full_body_possible 表示依現場與姿勢，退遠後合理拍到完整全身，不是指目前照片是否已拍全身。
+- reflection_surface 只在可用的鏡子、玻璃反射面清楚存在時為 true。
+- 不確定時採保守判斷，尤其 rear_access 與 reflection_surface。
+只回傳 JSON。
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+        )
+        raw = _safe_json_from_text(response.text, {})
+        if not isinstance(raw, dict):
+            return fallback
+        result = dict(fallback)
+        for key in result:
+            if key in raw:
+                result[key] = raw[key]
+        for key in (
+            "left_access", "right_access", "side_access", "rear_access", "full_body_possible",
+            "low_angle_access", "high_angle_access", "background_depth", "foreground_available",
+            "window_present", "reflection_surface", "hand_near_face",
+        ):
+            result[key] = bool(result.get(key))
+        try:
+            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence") or 0.0)))
+        except Exception:
+            result["confidence"] = 0.0
+        return result
+    except Exception as exc:
+        print(f"⚠️ [PHOTOBOOK_MORE_VISION_FAILED] {type(exc).__name__}: {exc}")
+        return fallback
+
+
+def _photobook_more_requirement_ok(scene, requirement):
+    return bool(scene.get(requirement))
+
+
+def _select_photobook_more_options(scene, context):
+    """硬排除不可拍鏡頭，再排除與目前主構圖幾乎相同的項目。"""
+    scene = scene if isinstance(scene, dict) else {}
+    current_axis = (
+        str(scene.get("current_framing") or "unknown"),
+        str(scene.get("current_viewpoint") or "unknown"),
+        str(scene.get("current_angle") or "unknown"),
+    )
+    used = set()
+    user_id = (context or {}).get("request_user_id")
+    session = _photobook_session_for_user(user_id, auto_close_stale=False) if user_id else None
+    if isinstance(session, dict):
+        used = {str(x) for x in (session.get("used_more_shot_ids") or [])}
+
+    eligible = []
+    for shot in PHOTOBOOK_SHOT_LIBRARY:
+        if any(not _photobook_more_requirement_ok(scene, req) for req in shot.get("needs", ())):
+            continue
+        axis = tuple(shot.get("axis") or ())
+        if len(axis) >= 3 and axis[:3] == current_axis:
+            continue
+        item = dict(shot)
+        item["used"] = item.get("id") in used
+        item["difference"] = sum(1 for a, b in zip(axis[:3], current_axis) if a != b and b != "unknown")
+        eligible.append(item)
+
+    if len(eligible) < 5:
+        safe_ids = {"face_closeup", "bust_portrait", "half_body_side", "high_angle_half", "low_angle_half", "telephoto", "negative_space"}
+        for shot in PHOTOBOOK_SHOT_LIBRARY:
+            if shot["id"] in safe_ids and not any(x["id"] == shot["id"] for x in eligible):
+                item = dict(shot)
+                item["used"] = item.get("id") in used
+                item["difference"] = 1
+                eligible.append(item)
+
+    eligible.sort(key=lambda x: (bool(x.get("used")), -int(x.get("difference") or 0), x.get("name", "")))
+    return eligible[:20]
+
+
+def _format_photobook_more_options(options):
+    rows = ["📷 **目前可用的 More 拍攝手法**", ""]
+    for idx, item in enumerate(options, start=1):
+        rows.append(f"**{idx}.** {item.get('name')}")
+    rows.extend(["", f"請直接輸入 **1～{len(options)}**。", "輸入 **0**，由系統從本次可用鏡頭中挑選。"])
+    return "\n".join(rows)
+
+
+async def _prepare_photobook_more_choices(interaction, context):
+    image_url = _photobook_more_image_url(context)
+    if not image_url:
+        await interaction.followup.send("⚠️ 找不到這張照片，無法分析可用鏡頭。", ephemeral=True)
+        return
+    scene = await _analyze_photobook_more_scene(image_url)
+    context = dict(context or {})
+    context["request_user_id"] = interaction.user.id
+    options = _select_photobook_more_options(scene, context)
+    if not options:
+        await interaction.followup.send("⚠️ 目前沒有找到適合且差異足夠的 More 鏡頭。", ephemeral=True)
+        return
+    pending_photobook_more_choices[interaction.user.id] = {
+        "channel_id": interaction.channel_id,
+        "base_message_id": getattr(interaction.message, "id", None),
+        "context": context,
+        "scene": scene,
+        "options": options,
+        "created_at": _photobook_now(),
+        "created_ts": datetime.now(TZ_TPE).timestamp(),
+    }
+    await interaction.followup.send(_format_photobook_more_options(options))
+
+
+def _consume_pending_photobook_more_choice(message):
+    pending = pending_photobook_more_choices.get(message.author.id)
+    if not isinstance(pending, dict):
+        return None
+    if int(pending.get("channel_id") or 0) != int(getattr(message.channel, "id", 0) or 0):
+        return None
+    raw = str(message.content or "").strip()
+    if not re.fullmatch(r"\d+", raw):
+        return None
+    try:
+        if datetime.now(TZ_TPE).timestamp() - float(pending.get("created_ts") or 0) > 900:
+            pending_photobook_more_choices.pop(message.author.id, None)
+            return {"error": "⏳ More 鏡頭清單已超過 15 分鐘，請回到照片重新按 More。"}
+    except Exception:
+        pass
+    options = list(pending.get("options") or [])
+    choice = int(raw)
+    if choice == 0:
+        unused = [x for x in options if not x.get("used")]
+        pool = unused or options
+        selected = random.choice(pool) if pool else None
+    elif 1 <= choice <= len(options):
+        selected = options[choice - 1]
+    else:
+        return {"error": f"⚠️ 請輸入 0～{len(options)}。"}
+    if not selected:
+        return {"error": "⚠️ 目前沒有可用的 More 鏡頭。"}
+    pending_photobook_more_choices.pop(message.author.id, None)
+    return {"pending": pending, "selected": selected, "choice": choice}
+
+
+async def _generate_photobook_more_choice(message, request):
+    pending = request.get("pending") or {}
+    shot = request.get("selected") or {}
+    context = dict(pending.get("context") or {})
+    context.pop("__trace_context", None)
+    context["trace_action"] = "photobook_more_camera"
+    context["more_shot_id"] = shot.get("id")
+    context["more_shot_name"] = shot.get("name")
+    context["user_input"] = f"More camera choice: {shot.get('name')}"
+    root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
+    context["root_prompt_base"] = root_prompt
+    context["prompt_base"] = (
+        root_prompt
+        + "\nMORE CAMERA: Same photo session, same moment, same overall situation and current action. "
+        + str(shot.get("prompt") or "Use a clearly different camera composition.")
+    )
+    status = await message.channel.send(f"📷 正在使用「{shot.get('name')}」拍攝 More…")
+    try:
+        new_context = await _generate_photo_from_context(context, msg=status)
+        for key in (
+            "db_type", "album_id", "album_type", "album_title", "album_date", "album_status",
+            "source_module", "image_role", "wardrobe_id", "wardrobe_name",
+        ):
+            if context.get(key) not in (None, ""):
+                new_context[key] = context.get(key)
+        new_context["type"] = "photobook"
+        new_context["source_mode"] = "photobook"
+        new_context["more_shot_id"] = shot.get("id")
+        new_context["more_shot_name"] = shot.get("name")
+
+        db = load_memory()
+        db.insert(0, _photo_db_payload(new_context, type_override="photobook"))
+        save_memory(db)
+        _set_current_outfit_state(_build_outfit_state_from_context(new_context))
+        _log_wardrobe_usage_from_context(new_context, purpose="photobook_more_camera")
+
+        active = _photobook_session_for_user(message.author.id, auto_close_stale=False)
+        if isinstance(active, dict):
+            used_ids = list(active.get("used_more_shot_ids") or [])
+            if shot.get("id") and shot.get("id") not in used_ids:
+                used_ids.append(shot.get("id"))
+            active["used_more_shot_ids"] = used_ids[-40:]
+            active["last_more_shot_id"] = shot.get("id")
+            active["last_more_shot_name"] = shot.get("name")
+            active["last_photo_url"] = new_context.get("local_url") or new_context.get("image_url")
+            active["updated_at"] = _photobook_now()
+            _save_photobook_session(message.author.id, active)
+
+        view = PhotoResultView(new_context)
+        file, filename = _photo_discord_file(new_context)
+        embed = _build_photo_embed(new_context, title_prefix=f"📸 More｜{shot.get('name')}", attachment_filename=filename if file else None)
+        if file:
+            sent = await message.channel.send(embed=embed, file=file, view=view)
+        else:
+            sent = await message.channel.send(embed=embed, view=view)
+        new_context["message_id"] = sent.id
+        photo_generation_contexts[sent.id] = new_context
+        view.context = new_context
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        return {
+            "image_url": new_context.get("local_url") or new_context.get("image_url"),
+            "context": new_context,
+            "semantic_text": (
+                f"大俠剛用「{shot.get('name')}」替妳拍了同一輯寫真的 More 照片。"
+                "照片已經完成，請妳先真正看附圖，再以小俠自己的感受自然評論；"
+                "可以喜歡，也可以覺得上一張較好，或指出妳看見的構圖、表情、服裝與氛圍。"
+                "不要假裝事前知道攝影師採用哪個鏡頭，也不要提及 Vision、鏡頭庫、生成或系統流程。"
+            ),
+        }
+    except Exception:
+        try:
+            await status.edit(content="⚠️ More 拍攝失敗，請稍後再試。")
+        except Exception:
+            pass
+        raise
+
+
 class PhotoResultView(discord.ui.View):
     def __init__(self, context):
         super().__init__(timeout=86400)
@@ -17053,6 +17342,15 @@ class PhotoResultView(discord.ui.View):
     async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
+        if str(context.get("type") or context.get("db_type") or context.get("source_mode") or "").lower() == "photobook":
+            try:
+                await _prepare_photobook_more_choices(interaction, context)
+            except Exception as exc:
+                print(f"⚠️ [PHOTOBOOK_MORE_PREPARE_FAILED] {type(exc).__name__}: {exc}")
+                traceback.print_exc()
+                await interaction.followup.send(f"⚠️ More 鏡頭分析失敗：`{str(exc)[:1200]}`", ephemeral=True)
+            return
+
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_more"
         context["user_input"] = "More button from previous photo"
@@ -19492,6 +19790,12 @@ async def on_message(message):
     if await _handle_pending_memory_review_input(message): return
     if message.author.id in pending_inputs: return
 
+    # 📷 v1.5.45：只有等待 More 鏡頭選擇時，純數字才代表 0～N 的鏡頭選項。
+    photobook_more_request = _consume_pending_photobook_more_choice(message)
+    if isinstance(photobook_more_request, dict) and photobook_more_request.get("error"):
+        await message.channel.send(photobook_more_request.get("error"))
+        return
+
     # 🎴 今晚命運牌：
     # 遊戲服務只決定隱藏答案與狀態，絕不自行扮演小俠。
     # 所有說話都會繼續走下方同一條「完整小俠人格」對話流程。
@@ -19649,8 +19953,14 @@ async def on_message(message):
                 local_url = None
                 scene_prompt = ""
                 
+                # 📷 /寫真 More：大俠選定編號後才生圖；成品仍交給完整小俠人格看見並回應。
+                if isinstance(photobook_more_request, dict) and photobook_more_request.get("selected"):
+                    more_result = await _generate_photobook_more_choice(message, photobook_more_request)
+                    generated_image_url = more_result.get("image_url")
+                    user_input = more_result.get("semantic_text") or user_input
+
                 # 📸 /寫真：共同拍攝狀態。每次只拍一張，拍後由完整小俠人格看圖與大俠慢慢討論。
-                if message.content.startswith('/寫真'):
+                elif message.content.startswith('/寫真'):
                     photobook_result = await handle_photobook_command(message, message.content)
                     action = str((photobook_result or {}).get("action") or "")
                     if action == "generated":
