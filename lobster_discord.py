@@ -9,7 +9,7 @@ import re
 import math
 import traceback
 
-LOBSTER_VERSION = "1.5.42_R2"
+LOBSTER_VERSION = "1.5.43_R1"
 
 
 def _normalize_generation_level(level):
@@ -631,7 +631,7 @@ SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SA
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.42_R2")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.43_R1")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -654,6 +654,7 @@ WARDROBE_GEMINI_MODEL = (os.environ.get("WARDROBE_GEMINI_MODEL", "gemini-2.5-fla
 WARDROBE_ANALYSIS_TRACE_PATH = os.path.join(MEMORY_DIR, "wardrobe_analysis_trace.jsonl")
 # 👗 v1.5.32：不修改衣櫃 JSON schema，另建語意快取供選衣器使用。
 WARDROBE_SEMANTIC_CACHE_PATH = os.path.join(MEMORY_DIR, "wardrobe_semantic_cache.json")
+PHOTOBOOK_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_photobook_state.json") # 📸 v1.5.43：/寫真 當日共同拍攝狀態
 GENERATION_TRACE_DIR = os.path.join(MEMORY_DIR, "generation_trace")  # 🧭 v1.4.82：生圖決策鏈追溯
 GENERATION_TRACE_LATEST_PATH = os.path.join(GENERATION_TRACE_DIR, "latest.json")
 GENERATION_TRACE_ALL_PATH = os.path.join(GENERATION_TRACE_DIR, "all_trace.jsonl")
@@ -4137,6 +4138,8 @@ pending_event_board_inputs = {}  # 📍 v1.5.01：/事件 的編號修改/刪除
 pending_anniversary_board_inputs = {}  # 🎂 v1.5.01：/紀念日 的編號修改/刪除流程
 pending_memory_review_inputs = {}  # 📚 v1.5.01：/回憶 的刪除/保留/升級紀念日流程
 photo_generation_contexts = {}
+photobook_generation_overrides = {}  # user_id -> current album metadata injected into /photo
+
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
 PHOTO_USER_REF_DIR = None  # initialized after Zeabur paths are ready
@@ -15527,6 +15530,17 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "visual_checklist": context.get("visual_checklist"),
         "reference_item_path": context.get("reference_item_path"),
         "reference_item_url": context.get("reference_item_url"),
+        "album_id": context.get("album_id"),
+        "album_type": context.get("album_type"),
+        "album_title": context.get("album_title"),
+        "album_date": context.get("album_date"),
+        "album_status": context.get("album_status"),
+        "shot_number": context.get("shot_number"),
+        "shot_role": context.get("shot_role"),
+        "is_album_cover": bool(context.get("is_album_cover", False)),
+        "is_xiaoxia_favorite": bool(context.get("is_xiaoxia_favorite", False)),
+        "is_daxia_favorite": bool(context.get("is_daxia_favorite", False)),
+        "wardrobe_id": context.get("wardrobe_id"),
     }
 
 
@@ -15806,6 +15820,224 @@ async def handle_photo_raw_command(message, user_input):
         return None
 
 
+
+# ==========================================
+# 📸 v1.5.43_R1：小俠寫真共同拍攝模式（MVP）
+# ==========================================
+PHOTOBOOK_END_WORDS = {"結束", "end", "stop", "退出", "完成"}
+PHOTOBOOK_SHOT_GUIDES = (
+    "environmental full-body fashion portrait, complete outfit visible, simple recognizable setting, one clear pose",
+    "three-quarter body main portrait, mid-thigh framing, flattering three-quarter angle, clear waistline and leg line",
+    "waist-up emotional portrait, warm direct eye contact, refined face and upper-body silhouette, softly blurred background",
+    "natural candid action portrait, only one simple hand action, relaxed movement, lifestyle photography",
+    "intimate beauty or fashion detail close-up, refined facial expression or one garment detail, minimal background distraction",
+    "hero finale portrait, strongest flattering angle, elegant feminine allure, Xiaoxia and her outfit dominate the frame",
+)
+
+
+def load_photobook_state():
+    data = _load_json_file_or_default(PHOTOBOOK_STATE_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_photobook_state(data):
+    payload = data if isinstance(data, dict) else {}
+    with open(PHOTOBOOK_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _photobook_today():
+    return datetime.now(TZ_TPE).strftime("%Y-%m-%d")
+
+
+def _photobook_now():
+    return datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _photobook_session_for_user(user_id, *, auto_close_stale=True):
+    data = load_photobook_state()
+    key = str(user_id)
+    session = data.get(key)
+    if not isinstance(session, dict):
+        return None
+    if auto_close_stale and str(session.get("session_date") or "") != _photobook_today():
+        session["status"] = "auto_closed"
+        session["closed_at"] = _photobook_now()
+        data[key] = session
+        save_photobook_state(data)
+        return None
+    if session.get("status") != "shooting":
+        return None
+    return session
+
+
+def _save_photobook_session(user_id, session):
+    data = load_photobook_state()
+    data[str(user_id)] = dict(session or {})
+    save_photobook_state(data)
+    return data[str(user_id)]
+
+
+def _close_photobook_session(user_id, reason="manual"):
+    data = load_photobook_state()
+    key = str(user_id)
+    session = data.get(key)
+    if not isinstance(session, dict) or session.get("status") != "shooting":
+        return None
+    session["status"] = "completed" if reason == "manual" else "auto_closed"
+    session["closed_at"] = _photobook_now()
+    session["close_reason"] = reason
+    data[key] = session
+    save_photobook_state(data)
+    return session
+
+
+def _photobook_title_from_request(request_text):
+    cleaned = _clean_text_compact(request_text or "")
+    cleaned = re.sub(r"^(?:拍|來拍|想拍|幫我拍)\s*", "", cleaned).strip(" ，。")
+    if not cleaned:
+        return f"{_photobook_today()} 小俠寫真"
+    return cleaned[:36]
+
+
+def _new_photobook_session(user_id, request_text=""):
+    session_date = _photobook_today()
+    album_id = f"PB_{session_date.replace('-', '')}_{uuid.uuid4().hex[:6].upper()}"
+    session = {
+        "album_id": album_id,
+        "album_type": "photobook",
+        "album_title": _photobook_title_from_request(request_text),
+        "session_date": session_date,
+        "status": "shooting",
+        "shot_count": 0,
+        "started_at": _photobook_now(),
+        "last_photo_url": "",
+        "last_instruction": _clean_text_compact(request_text or ""),
+    }
+    return _save_photobook_session(user_id, session)
+
+
+def _photobook_chat_context(session):
+    if not isinstance(session, dict):
+        return ""
+    return (
+        "【寫真拍攝當下狀態｜只作共同情境背景】\n"
+        f"大俠與小俠正在共同拍攝「{session.get('album_title') or '今日寫真'}」。"
+        f"今天已完成 {int(session.get('shot_count') or 0)} 張。\n"
+        "這不是偷拍；小俠知道鏡頭存在、主動參與拍攝，也能自然談自己的感受、喜歡的角度與下一張想法。\n"
+        "寫真服務只管理拍攝狀態；妳仍是同一個完整的小俠，不要變成主持人、攝影助理或系統介面。\n"
+        "大俠可以自由聊天、稱讚、評論、指定場景、姿勢、景別、鏡位、光線或下一張方向。"
+    )
+
+
+def _photobook_shot_prompt(session, instruction):
+    shot_no = int(session.get("shot_count") or 0) + 1
+    guide = PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)]
+    request = _clean_text_compact(instruction or "")
+    if not request:
+        request = "由小俠依目前寫真主題提出並完成下一個自然、漂亮、值得收藏的鏡頭"
+    continuity = (
+        "Keep the same outfit, main hairstyle, accessories, time of day, and core setting as the current photo session "
+        "unless Daxia explicitly asks to change one of them."
+        if shot_no > 1 else
+        "Choose one flattering wardrobe outfit suitable for this photo session and keep it available for later shots."
+    )
+    return (
+        f"{request}\n\n"
+        "This is a mutually planned girlfriend photo session between Daxia and Xiaoxia, not a偷拍 or unaware candid shot. "
+        "Xiaoxia knows the camera is present and willingly participates, while still looking natural and emotionally genuine. "
+        f"Suggested photographic treatment for this shot: {guide}. "
+        "Xiaoxia and the clothing are the absolute visual priority; keep the setting elegant but visually simple and secondary. "
+        "Only one primary action. Natural anatomy and plausible hands. "
+        + continuity
+    )
+
+
+async def handle_photobook_command(message, raw_content):
+    """處理 /寫真：開始／拍下一張／結束。回傳 action, image_url, semantic_text。"""
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/寫真` 先只開放在女友小俠頻道使用喔。")
+        return {"action": "handled"}
+
+    raw = str(raw_content or "").strip()
+    args = re.sub(r"^/寫真(?:\s+|$)", "", raw, count=1, flags=re.IGNORECASE).strip()
+    normalized = args.lower().strip()
+
+    if normalized in PHOTOBOOK_END_WORDS:
+        closed = _close_photobook_session(message.author.id, reason="manual")
+        if not closed:
+            return {
+                "action": "closed",
+                "semantic_text": "大俠剛輸入 /寫真 結束，但目前沒有正在進行的寫真拍攝。請自然告訴他現在已是一般聊天狀態。",
+            }
+        return {
+            "action": "closed",
+            "semantic_text": (
+                f"大俠剛結束今天的寫真拍攝。這一輯是「{closed.get('album_title')}」，"
+                f"共拍了 {int(closed.get('shot_count') or 0)} 張；照片都已保存到雲端別墅。"
+                "請以小俠自然女友口吻收尾，回到一般聊天，不要像系統通知。"
+            ),
+        }
+
+    session = _photobook_session_for_user(message.author.id)
+    if session is None:
+        session = _new_photobook_session(message.author.id, args)
+        if not args:
+            return {
+                "action": "started",
+                "semantic_text": (
+                    "大俠剛使用 /寫真，妳和他進入共同拍攝寫真的當下。"
+                    "目前尚未決定第一張。請以小俠自然女友口吻提出一個簡短而具體的拍攝想法，"
+                    "可以提到場景、穿搭氣質或鏡位，也要讓大俠知道他可直接指定任何想法；不要立刻生成圖片。"
+                ),
+                "session": session,
+            }
+
+    session["last_instruction"] = args or session.get("last_instruction") or ""
+    shot_no = int(session.get("shot_count") or 0) + 1
+    override = {
+        "db_type": "photobook",
+        "album_id": session.get("album_id"),
+        "album_type": "photobook",
+        "album_title": session.get("album_title"),
+        "album_date": session.get("session_date"),
+        "album_status": "shooting",
+        "shot_number": shot_no,
+        "shot_role": PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)].split(",")[0],
+        "source_module": "photobook",
+        "image_role": "photobook_session_photo",
+    }
+    photobook_generation_overrides[message.author.id] = override
+    first_shot = int(session.get("shot_count") or 0) == 0
+    photo_prompt = _photobook_shot_prompt(session, args)
+    delegated = "/photo " + (("衣櫃自由 " if first_shot else "") + photo_prompt)
+    try:
+        image_url = await handle_unified_photo_command(message, delegated)
+    finally:
+        photobook_generation_overrides.pop(message.author.id, None)
+
+    if not image_url:
+        return {"action": "handled"}
+
+    session["shot_count"] = shot_no
+    session["last_photo_url"] = image_url
+    session["last_instruction"] = args or session.get("last_instruction") or ""
+    session["updated_at"] = _photobook_now()
+    _save_photobook_session(message.author.id, session)
+    return {
+        "action": "generated",
+        "image_url": image_url,
+        "session": session,
+        "semantic_text": (
+            f"大俠與妳剛共同完成「{session.get('album_title')}」第 {shot_no} 張寫真。"
+            "這不是偷拍；妳知道正在拍攝並主動參與。請先仔細看剛完成的照片，"
+            "再以小俠自己的口吻自然回應服裝、場景、光線、姿勢或妳真實喜歡與想調整的地方。"
+            "不要催著立刻拍下一張；可以和大俠慢慢欣賞、討論，直到他再次使用 /寫真 加上下一張要求，"
+            "或輸入 /寫真 結束。"
+        ),
+    }
+
+
 async def handle_unified_photo_command(message, user_input):
     """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
@@ -15987,10 +16219,16 @@ async def handle_unified_photo_command(message, user_input):
         "__trace_context": trace_context,
     }
 
+    photobook_override = photobook_generation_overrides.get(getattr(message.author, "id", None))
+    if isinstance(photobook_override, dict):
+        context.update(photobook_override)
+        trace_context["photobook"] = _trace_sanitize(photobook_override)
+        _trace_stage(trace_context, "photobook_context_injected", data=photobook_override)
+
     try:
         context = await _generate_photo_from_context(context, msg=status)
         db = load_memory()
-        db.insert(0, _photo_db_payload(context))
+        db.insert(0, _photo_db_payload(context, type_override=context.get("db_type", "photo")))
         save_memory(db)
         _set_current_outfit_state(_build_outfit_state_from_context(context))
         _log_wardrobe_usage_from_context(context, purpose="photo")
@@ -19302,11 +19540,23 @@ async def on_message(message):
                 local_url = None
                 scene_prompt = ""
                 
+                # 📸 /寫真：共同拍攝狀態。每次只拍一張，拍後由完整小俠人格看圖與大俠慢慢討論。
+                if message.content.startswith('/寫真'):
+                    photobook_result = await handle_photobook_command(message, message.content)
+                    action = str((photobook_result or {}).get("action") or "")
+                    if action == "generated":
+                        generated_image_url = photobook_result.get("image_url")
+                        user_input = photobook_result.get("semantic_text") or user_input
+                    elif action in {"started", "closed"}:
+                        user_input = photobook_result.get("semantic_text") or user_input
+                    else:
+                        return
+
                 # 📸 /photo 統一照片工作台：女友小俠頻道皆可用；說故事小俠姊姊頻道已在上方排除。
-                if message.content.startswith('/photo_raw'):
+                elif message.content.startswith('/photo_raw'):
                     generated_image_url = await handle_photo_raw_command(message, user_input)
                     return
-                if message.content.startswith('/photo'):
+                elif message.content.startswith('/photo'):
                     generated_image_url = await handle_unified_photo_command(message, user_input)
                     if generated_image_url:
                         # 讓後續小俠聊天大腦真的「看見」剛剛生成的照片，才能自然延伸互動。
@@ -19317,6 +19567,14 @@ async def on_message(message):
                         )
                     else:
                         return
+
+                active_photobook = _photobook_session_for_user(message.author.id)
+                if active_photobook:
+                    user_input = (
+                        str(user_input or "").strip()
+                        + "\n\n"
+                        + _photobook_chat_context(active_photobook)
+                    ).strip()
 
                 # ------------------------------------------------------------
                 # 🧠 聊天大腦區塊：感性與記憶融合
