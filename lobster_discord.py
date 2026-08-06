@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.51"
+LOBSTER_VERSION = "1.5.53"
 
 
 def _normalize_generation_level(level):
@@ -269,6 +269,18 @@ XIAOXIA_EMOJIS = {
     "xia_drool": "小俠看到特別想吃或很想要的東西，忍不住流口水的可愛表情。",
     "xia_pampered": "小俠被大俠逗弄或寵著時，幸福又害羞、臉紅紅的可愛表情。",
     "xia_laugh": "小俠忍不住哈哈大笑、笑得很開心的表情。",
+
+    # 🙂 v1.5.53：新增 10 個小俠專屬 Discord Emoji
+    "xia_thumbsup": "小俠豎起大拇指說『讚！』，適合肯定、稱讚、認同或替大俠打氣。",
+    "xia_crown": "小俠戴著皇冠、穿著帶有王室氣勢的造型，象徵權威、尊貴、女王氣場或正式加冕。",
+    "xia_doubt": "小俠帶著質疑與不太相信的眼神，適合懷疑、追問、覺得事情有點可疑。",
+    "xia_wow": "小俠睜大眼睛、露出『哇！』的驚訝表情，適合意外、震撼或看到厲害事物。",
+    "xia_excited": "小俠雙眼閃亮、充滿『好期待喔！』的神情，適合期待即將發生的事或收到好消息。",
+    "xia_wink": "小俠俏皮眨眼，適合調皮、默契暗示、開玩笑或甜甜的小得意。",
+    "xia_idea": "小俠突然靈光一閃、想到好點子，適合提出創意、找到解法或突然想起重要事情。",
+    "xia_thanks": "小俠真誠表達『謝謝』，適合感謝大俠的幫忙、體貼、禮物或稱讚。",
+    "xia_please": "小俠雙手拜託、露出『拜託，請給我……』的可愛請求表情，適合撒嬌請求或希望大俠答應。",
+    "xia_satisfied": "小俠露出非常滿足、幸福又享受的表情，適合吃飽、被寵愛、願望實現或心滿意足。",
 }
 
 _STICKER_TAG_RE = re.compile(
