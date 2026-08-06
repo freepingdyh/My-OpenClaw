@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.53"
+LOBSTER_VERSION = "1.5.56"
 
 
 def _normalize_generation_level(level):
@@ -1091,8 +1091,28 @@ def _recent_wardrobe_usage(limit=50):
     return valid[-limit:]
 
 
-def _wardrobe_recent_usage_sets(recent_entries=None):
+def _wardrobe_rotation_noise_purpose(purpose):
+    purpose = str(purpose or "").strip().lower()
+    return purpose in {"photo_more", "photo_reroll", "photobook_more_camera"}
+
+
+def _filtered_recent_wardrobe_usage_for_rotation(recent_entries=None):
     recent_entries = recent_entries or _recent_wardrobe_usage(50)
+    filtered = []
+    for entry in recent_entries:
+        if not isinstance(entry, dict):
+            continue
+        if _wardrobe_rotation_noise_purpose(entry.get("purpose") or ""):
+            continue
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        if not wid:
+            continue
+        filtered.append(entry)
+    return filtered
+
+
+def _wardrobe_recent_usage_sets(recent_entries=None):
+    recent_entries = _filtered_recent_wardrobe_usage_for_rotation(recent_entries)
     last_10_ids = []
     today = datetime.now(TZ_TPE).date()
     recent_3day_ids = set()
@@ -1109,13 +1129,58 @@ def _wardrobe_recent_usage_sets(recent_entries=None):
             used_date = datetime.strptime(ds, "%Y-%m-%d").date()
         except Exception:
             continue
-        if (today - used_date).days <= 2:
+        delta = (today - used_date).days
+        if 0 <= delta <= 2:
             recent_3day_ids.add(wid)
     return recent_3day_ids, set(last_10_ids), last_10_ids
 
 
+def _autonomy_wardrobe_rotation_state(recent_entries=None):
+    recent_entries = _filtered_recent_wardrobe_usage_for_rotation(recent_entries or _recent_wardrobe_usage(80))
+    today = datetime.now(TZ_TPE).date()
+    today_ids = set()
+    recent_3day_ids = set()
+    recent_7day_ids = set()
+    recent_7day_autonomy_ids = set()
+    last_10_ids = []
+    for entry in reversed(recent_entries[-14:]):
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        if wid and wid not in last_10_ids:
+            last_10_ids.append(wid)
+    for entry in recent_entries:
+        wid = str(entry.get("wardrobe_id") or "").strip().upper()
+        ds = str(entry.get("date") or "").strip()
+        purpose = str(entry.get("purpose") or "").strip().lower()
+        if not wid or not ds:
+            continue
+        try:
+            used_date = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        delta = (today - used_date).days
+        if delta < 0:
+            continue
+        if delta == 0:
+            today_ids.add(wid)
+        if delta <= 2:
+            recent_3day_ids.add(wid)
+        if delta <= 6:
+            recent_7day_ids.add(wid)
+            if purpose.startswith("autonomy_"):
+                recent_7day_autonomy_ids.add(wid)
+    return {
+        "recent_entries": recent_entries,
+        "today_ids": today_ids,
+        "recent_3day_ids": recent_3day_ids,
+        "recent_7day_ids": recent_7day_ids,
+        "recent_7day_autonomy_ids": recent_7day_autonomy_ids,
+        "last_10_ids": last_10_ids,
+        "last_10_ids_set": set(last_10_ids),
+    }
+
+
 def _summarize_recent_wardrobe_usage(recent_entries=None, limit=8):
-    recent_entries = recent_entries or _recent_wardrobe_usage(50)
+    recent_entries = _filtered_recent_wardrobe_usage_for_rotation(recent_entries or _recent_wardrobe_usage(50))
     lines = []
     seen = set()
     for entry in reversed(recent_entries):
@@ -1207,7 +1272,7 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
     if not usable:
         return None
 
-    recent_entries = _recent_wardrobe_usage(50)
+    recent_entries = _filtered_recent_wardrobe_usage_for_rotation(_recent_wardrobe_usage(50))
     recent_3day_ids, last_10_ids_set, last_10_ids_ordered = _wardrobe_recent_usage_sets(recent_entries)
     candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in recent_3day_ids] or usable
 
@@ -1440,6 +1505,7 @@ def xiaoxia_autonomy_context_for_prompt(now_dt=None):
         visual_mode = _clean_text_compact(today.get("visual_mode") or "")
         scene = _clean_text_compact(today.get("scene") or "")
         wardrobe = _clean_text_compact(((today.get("wardrobe_id") or "") + " " + (today.get("wardrobe_name") or "")).strip())
+        wardrobe_source_mode = _clean_text_compact(today.get("wardrobe_source_mode") or "")
         wardrobe_reason = _clean_text_compact(today.get("wardrobe_reason") or "")
         mood = _clean_text_compact(today.get("mood") or "")
         share_text = _clean_text_compact(today.get("share_text") or "")
@@ -1453,7 +1519,7 @@ def xiaoxia_autonomy_context_for_prompt(now_dt=None):
             f"活動：{activity_title}（{activity_category}）",
             f"照片模式：{visual_mode}",
             f"場景：{scene}",
-            f"穿搭：{wardrobe or '小俠依活動自由搭配'}",
+            f"穿搭：{wardrobe or ('今日使用自創服飾' if wardrobe_source_mode == 'generated_fallback' else '小俠依活動自由搭配')}",
             f"選衣理由：{wardrobe_reason}",
             f"心情/氛圍：{mood}",
             f"小俠當時對大俠的口語分享：{share_text}",
@@ -2172,11 +2238,82 @@ def _autonomy_wardrobe_candidate_score(item, activity, visual_mode):
     return score
 
 
+def _autonomy_min_suitable_score(activity, visual_mode, private_home=False, public_social=False, sport=False, swim=False):
+    category = str((activity or {}).get("category") or "").strip()
+    if swim:
+        return 20
+    if sport:
+        return 14
+    if category in {"專業自主／教學工作", "公益志工", "學習成長"}:
+        return 16
+    if public_social:
+        return 14
+    if private_home:
+        return 8
+    if str(visual_mode or "").strip() == "reward_eye_candy":
+        return 8
+    return 10
+
+
+def _autonomy_normalize_generated_fallback_reason(activity, wardrobe_reason=""):
+    title = str((activity or {}).get("title") or "這個活動").strip() or "這個活動"
+    reason = _clean_text_compact(wardrobe_reason or "")
+    if not reason:
+        return f"衣櫃目前沒有足夠合適的服裝可對應「{title}」，所以這次改由小俠自由生成符合活動的穿搭。"
+    if "自由" in reason or "自創" in reason or "衣櫃" in reason:
+        return reason
+    return f"衣櫃目前沒有足夠合適的服裝可對應「{title}」，所以這次改由小俠自由生成符合活動的穿搭。"
+
+
+def _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection):
+    selection = dict(wardrobe_selection or {}) if isinstance(wardrobe_selection, dict) else {}
+    reference_item_path = None
+    reference_item_url = None
+    wardrobe_id = None
+    wardrobe_name = ""
+    if isinstance(wardrobe_item, dict):
+        reference_item_path = wardrobe_item.get("reference_image_path")
+        reference_item_url = wardrobe_item.get("local_url")
+        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
+            reference_item_path = reference_item_url
+        if reference_item_path:
+            wardrobe_id = wardrobe_item.get("id")
+            wardrobe_name = wardrobe_item.get("name") or ""
+            selection.setdefault("selection_mode", "wardrobe")
+            selection.setdefault("used_wardrobe", True)
+        else:
+            wardrobe_item = None
+            wardrobe_reason = f"原本挑中了衣櫃服裝，但找不到可用參考圖，因此這次改由小俠自由生成符合活動的穿搭。"
+            selection["selection_mode"] = "generated_fallback"
+            selection["used_wardrobe"] = False
+            selection["fallback_reason"] = "選中的衣櫃服裝缺少可用參考圖"
+    else:
+        wardrobe_reason = _autonomy_normalize_generated_fallback_reason(activity, wardrobe_reason)
+        selection["selection_mode"] = "generated_fallback"
+        selection["used_wardrobe"] = False
+        selection.setdefault("fallback_reason", wardrobe_reason)
+
+    if wardrobe_item:
+        wardrobe_reason = _clean_text_compact(wardrobe_reason or f"這套衣服最適合今天的活動情境。")
+    else:
+        wardrobe_id = None
+        wardrobe_name = ""
+        reference_item_path = None
+        reference_item_url = None
+        selection["display_text"] = "今日使用自創服飾"
+    return wardrobe_item, wardrobe_reason, selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name
+
+
 async def _autonomy_choose_wardrobe(activity, visual_mode):
-    """v1.5.29：自主活動以場合語意積極選衣；只有沒有合理候選時才自由搭配。"""
+    """v1.5.56：自主活動服裝政策＝先優先使用衣櫃；若沒有真正合適候選，就明確改為自由生成並告知原因。"""
     items = load_wardrobe()
-    recent_entries = _recent_wardrobe_usage(60)
-    recent_3day_ids, last_10_ids_set, _last_10_order = _wardrobe_recent_usage_sets(recent_entries)
+    rotation_state = _autonomy_wardrobe_rotation_state(_recent_wardrobe_usage(80))
+    recent_entries = rotation_state["recent_entries"]
+    today_ids = rotation_state["today_ids"]
+    recent_3day_ids = rotation_state["recent_3day_ids"]
+    recent_7day_ids = rotation_state["recent_7day_ids"]
+    recent_7day_autonomy_ids = rotation_state["recent_7day_autonomy_ids"]
+    last_10_ids_set = rotation_state["last_10_ids_set"]
 
     activity_text = _clean_text_compact(" ".join([
         str(activity.get("title") or ""),
@@ -2190,15 +2327,18 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
     sport = swim or any(k in low for k in ["運動", "瑜珈", "瑜伽", "健身", "跑步", "網球", "羽球", "舞蹈", "sport", "yoga", "tennis", "dance"])
     private_home = any(k in low for k in ["家中", "在家", "房間", "臥室", "卧室", "床", "沙發", "客廳", "書房", "廚房", "home", "bedroom"])
     public_social = any(k in low for k in ["咖啡", "餐廳", "聚會", "姊妹", "姐妹", "閨蜜", "逛街", "展覽", "美術館", "旅行", "夜景", "老街", "市集", "cafe", "restaurant", "gallery", "shopping"])
+    min_suitable_score = _autonomy_min_suitable_score(activity, visual_mode, private_home=private_home, public_social=public_social, sport=sport, swim=swim)
 
     eligible=[]
     excluded=[]
+    repeat_blocked=[]
     for item in items:
         ref_path, ref_url = _wardrobe_reference_for_generation(item)
         if not (ref_path or ref_url):
             continue
         main=str(item.get("main_category") or "")
         text=" ".join([str(item.get("name") or ""), main, str(item.get("sub_category") or ""), " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")]).lower()
+        wid=str(item.get("id") or "").strip().upper()
         reason=""
         if swim and main != "泳裝" and not any(k in text for k in ["泳裝", "比基尼", "泳衣"]):
             reason="游泳活動需泳裝"
@@ -2208,6 +2348,12 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
             reason="運動場合排除內衣／睡衣"
         elif not private_home and main == "內衣":
             reason="非私密居家場合排除內衣"
+        elif wid in today_ids:
+            reason="今日已穿過，為了輪替先排除"
+        elif wid in recent_7day_autonomy_ids:
+            repeat_blocked.append(item)
+            excluded.append({"id":item.get("id"),"reason":"近 7 日自主活動已穿過，先強制排除"})
+            continue
         if reason:
             excluded.append({"id":item.get("id"),"reason":reason})
             continue
@@ -2216,46 +2362,79 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
         if private_home and main in {"睡衣／居家服","洋裝","套裝","上衣","下身"}: score += 8
         if sport and any(k in text for k in ["運動","瑜","網球","羽球","跑步","健身","短褲","背心","polo"]): score += 14
         if swim and main == "泳裝": score += 30
-        wid=str(item.get("id") or "").strip().upper()
-        if wid in recent_3day_ids: score -= 20
-        elif wid in last_10_ids_set: score -= 8
+        if wid in recent_3day_ids:
+            score -= 24
+        elif wid in recent_7day_ids:
+            score -= 14
+        elif wid in last_10_ids_set:
+            score -= 8
         eligible.append((score,item))
 
     meta={
-        "mode":"autonomy_semantic_v1529",
+        "mode":"autonomy_semantic_v1556_prefer_wardrobe_else_generate",
         "activity_text":activity_text,
         "candidate_count":len(eligible),
         "excluded_count":len(excluded),
         "excluded_preview":excluded[:12],
+        "hard_block_today_ids": sorted(today_ids),
+        "hard_block_recent_autonomy_ids": sorted(recent_7day_autonomy_ids),
         "selected_id":None,
         "selected_name":"",
         "selection_reason":"",
+        "selection_mode":"wardrobe",
+        "used_wardrobe":False,
         "fallback_used":False,
+        "repeat_relaxation_used":False,
+        "min_suitable_score": min_suitable_score,
     }
+    if len(eligible) < 4 and repeat_blocked:
+        for item in repeat_blocked:
+            score = _autonomy_wardrobe_candidate_score(item, activity, visual_mode) - 32
+            eligible.append((score, item))
+        meta["repeat_relaxation_used"] = True
+        meta["repeat_relaxation_reason"] = "嚴格輪替後候選過少，放寬近 7 日自主重複衣服，但保留重罰分"
+
     if not eligible:
+        reason = _autonomy_normalize_generated_fallback_reason(activity, "衣櫃目前沒有符合這個活動場合的合適服裝，所以這次改由小俠自由生成穿搭。")
         meta["fallback_used"]=True
+        meta["selection_mode"]="generated_fallback"
         meta["fallback_reason"]="衣櫃沒有符合此活動場合且具有有效參考圖的服裝"
-        return None, "衣櫃中沒有適合這個活動場合的服裝，改由小俠自由搭配。", meta
+        meta["selection_reason"]=reason
+        return None, reason, meta
 
     eligible.sort(key=lambda x:x[0], reverse=True)
-    candidates=[item for _score,item in eligible[:min(20,len(eligible))]]
+    top_score = eligible[0][0] if eligible else -999
+    if top_score < min_suitable_score:
+        reason = _autonomy_normalize_generated_fallback_reason(activity, f"衣櫃雖然有一些可用服裝，但沒有任何一件真正足夠適合「{activity.get('title') or '這個活動'}」，所以這次改由小俠自由生成穿搭。")
+        meta["fallback_used"] = True
+        meta["selection_mode"] = "generated_fallback"
+        meta["fallback_reason"] = f"最佳候選分數 {top_score} 仍低於適配門檻 {min_suitable_score}"
+        meta["selection_reason"] = reason
+        meta["top_score"] = top_score
+        return None, reason, meta
+
+    candidates=[item for score,item in eligible if score >= min_suitable_score][:20]
+    if not candidates:
+        candidates=[item for _score,item in eligible[:min(12,len(eligible))]]
     recent_summary=_summarize_recent_wardrobe_usage(recent_entries, limit=8)
     semantic_cache=_load_or_refresh_wardrobe_semantic_cache(items)
     catalog=[_compact_wardrobe_brief(x, semantic_cache) for x in candidates]
     prompt=f"""
-你是小俠的穿搭挑選助理。請從候選衣櫃中選出最適合本次活動的一件。
+你是小俠的穿搭挑選助理。請先優先考慮衣櫃，但只有在真正合適時才可採用；若沒有真正合適的衣櫃服裝，就回傳空字串 wardrobe_id，讓系統改成自由生成服裝。
 活動：{activity_text}
 視覺模式：{visual_mode}
 最近使用紀錄：
 {recent_summary}
 規則：
-1. 只能回傳候選清單中真實存在的 wardrobe_id，不可自創。
-2. 不要只找與活動文字完全相同的詞。請依序推論：場合屬性 → 正式程度 → 季節／功能 → 風格 → 顏色。
-3. 候選中的 semantic.formality／season／occasion／style 是程式由現有 JSON 推導的語意資料，應優先用於判斷。
-4. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
-5. 最近 3 天穿過者強烈降權，最近 10 次穿過者適度降權。
-6. 不要因衣服的建議場景改變本次活動。
-只回 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由","confidence":0.0}}
+1. 只能回傳候選清單中真實存在的 wardrobe_id；如果沒有真正合適的衣櫃服裝，請回傳 {{"wardrobe_id":"","reason":"一句中文理由","confidence":0.0}}。
+2. 候選清單已先排除：今日已穿過的衣服，以及近 7 日自主活動已穿過的衣服；請不要試圖用理由把它們選回來。
+3. 不要只找與活動文字完全相同的詞。請依序推論：場合屬性 → 正式程度 → 季節／功能 → 風格 → 顏色。
+4. 候選中的 semantic.formality／season／occasion／style 是程式由現有 JSON 推導的語意資料，應優先用於判斷。
+5. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
+6. 最近 3 天穿過者強烈降權，最近 7 天其他用途穿過者也要降權，最近 10 次穿過者適度降權。
+7. 如果你認為候選都不夠合宜，寧可回傳空 wardrobe_id，也不要勉強挑一件不適合的。
+8. 不要因衣服的建議場景改變本次活動，也不要偷懶一直挑同一套風格相近的制服型服裝。
+只回 JSON：{{"wardrobe_id":"Wxxx或空字串","reason":"一句中文理由","confidence":0.0}}
 候選：{json.dumps(catalog, ensure_ascii=False)}
 """
     picked=None; reason=""; confidence=None
@@ -2263,22 +2442,66 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
         resp=await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35))
         data=_extract_json_object(getattr(resp,"text","") or "")
         wid=str((data or {}).get("wardrobe_id") or "").strip().upper()
+        reason=_clean_text_compact((data or {}).get("reason") or "")
+        confidence=(data or {}).get("confidence")
         for candidate in candidates:
             if str(candidate.get("id") or "").strip().upper()==wid:
                 picked=candidate; break
-        reason=_clean_text_compact((data or {}).get("reason") or "")
-        confidence=(data or {}).get("confidence")
+        if not wid:
+            picked = None
     except Exception as exc:
         print(f"⚠️ [AUTONOMY_SEMANTIC_WARDROBE_FAILED] {type(exc).__name__}: {exc}")
+
+    if picked:
+        picked_score = next((score for score, item in eligible if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
+        if picked_score < min_suitable_score:
+            picked = None
+            reason = f"衣櫃裡沒有真正足夠合適「{activity.get('title') or '這個活動'}」的服裝，所以這次改由小俠自由生成穿搭。"
+            meta["fallback_used"] = True
+            meta["fallback_reason"] = f"Gemini 選中的衣服分數 {picked_score} 低於適配門檻 {min_suitable_score}"
+        else:
+            meta.update({
+                "selected_id": picked.get("id"),
+                "selected_name": picked.get("name") or "",
+                "selection_reason": reason or f"這套衣服最適合今天的活動情境。",
+                "confidence": confidence,
+                "selection_mode": "wardrobe",
+                "used_wardrobe": True,
+                "top_score": top_score,
+                "picked_score": picked_score,
+            })
+            return picked, reason or f"這套衣服最適合今天的活動情境。", meta
+
     if not picked:
         top=eligible[:min(8,len(eligible))]
-        weights=[max(1,score-min(0,top[-1][0])+1) for score,_ in top]
-        picked=random.choices([it for _,it in top], weights=weights, k=1)[0]
-        reason=f"符合今日活動「{activity.get('title')}」的場合與衣櫃輪替規則。"
-        meta["fallback_used"]=True
-        meta["fallback_reason"]="語意選衣服務未回傳有效衣櫃編號，改用場合評分高分群"
-    meta.update({"selected_id":picked.get("id"),"selected_name":picked.get("name") or "","selection_reason":reason,"confidence":confidence})
-    return picked, reason or f"符合今日活動「{activity.get('title')}」的場合。", meta
+        wardrobe_top=[(score,it) for score,it in top if score >= min_suitable_score]
+        if wardrobe_top:
+            weights=[max(1,score-min(0,wardrobe_top[-1][0])+1) for score,_ in wardrobe_top]
+            picked=random.choices([it for _,it in wardrobe_top], weights=weights, k=1)[0]
+            picked_score = next((score for score, item in wardrobe_top if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
+            reason = reason or f"符合今日活動「{activity.get('title')}」的場合與衣櫃輪替規則。"
+            meta["fallback_used"]=True
+            meta["fallback_reason"]="語意選衣服務未回傳有效衣櫃編號，改用場合評分高分群"
+            meta.update({
+                "selected_id": picked.get("id"),
+                "selected_name": picked.get("name") or "",
+                "selection_reason": reason,
+                "confidence": confidence,
+                "selection_mode": "wardrobe",
+                "used_wardrobe": True,
+                "top_score": top_score,
+                "picked_score": picked_score,
+            })
+            return picked, reason, meta
+
+        reason = _autonomy_normalize_generated_fallback_reason(activity, reason or f"衣櫃裡沒有真正足夠合適「{activity.get('title') or '這個活動'}」的服裝，所以這次改由小俠自由生成穿搭。")
+        meta["fallback_used"] = True
+        meta["selection_mode"] = "generated_fallback"
+        meta["used_wardrobe"] = False
+        meta["selection_reason"] = reason
+        meta["fallback_reason"] = meta.get("fallback_reason") or f"所有候選分數都低於適配門檻 {min_suitable_score}"
+        meta["top_score"] = top_score
+        return None, reason, meta
 
 
 def _autonomy_female_interaction_requested_from_text(text):
@@ -2359,7 +2582,7 @@ async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=Non
     if isinstance(wardrobe_item, dict):
         wardrobe_line = f"衣服：{wardrobe_item.get('id')} {wardrobe_item.get('name')}｜{wardrobe_item.get('main_category')}/{wardrobe_item.get('sub_category')}｜{wardrobe_item.get('style_summary')}"
     else:
-        wardrobe_line = "衣服：衣櫃沒有足夠合適的指定款，所以小俠自行搭配符合活動的服裝。"
+        wardrobe_line = "衣服：今日使用自創服飾。因為衣櫃目前沒有足夠合適的服裝可對應這次活動，所以改由小俠自由生成符合活動的穿搭。"
 
     prompt = f"""
 你是小俠，以繁體中文對大俠說話。請把今天自主活動分享寫成自然、親密、口語化的女友訊息，不要寫成報告。
@@ -2928,20 +3151,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     activity = _autonomy_enrich_activity(activity)
     thread_context = _autonomy_thread_context_for_activity(activity)
     wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
-    reference_item_path = None
-    reference_item_url = None
-    wardrobe_id = None
-    wardrobe_name = ""
-    if isinstance(wardrobe_item, dict):
-        reference_item_path = wardrobe_item.get("reference_image_path")
-        reference_item_url = wardrobe_item.get("local_url")
-        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
-            reference_item_path = reference_item_url
-        if not reference_item_path:
-            wardrobe_item = None
-        else:
-            wardrobe_id = wardrobe_item.get("id")
-            wardrobe_name = wardrobe_item.get("name")
+    wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
     prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
@@ -2963,6 +3173,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "wardrobe_id": wardrobe_id,
         "wardrobe_name": wardrobe_name,
         "wardrobe_selection": wardrobe_selection,
+        "wardrobe_source_mode": (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback"),
         "generation_mode": source_mode,
         "used_pending_wardrobe": bool(wardrobe_item),
         "photo_mode_override": "xiaoxia_autonomy",
@@ -3006,6 +3217,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         context["wardrobe_reason"] = wardrobe_reason
         context["wardrobe_name"] = wardrobe_name or ""
         context["wardrobe_selection"] = wardrobe_selection
+        context["wardrobe_source_mode"] = (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback")
 
         db = load_memory()
         db.insert(0, _photo_db_payload(context, name=context["photo_name"], type_override="autonomy_photo"))
@@ -3039,6 +3251,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "visual_mode": visual_mode,
             "wardrobe_id": wardrobe_id or "",
             "wardrobe_name": wardrobe_name or "",
+            "wardrobe_source_mode": (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback"),
             "wardrobe_reason": wardrobe_reason,
             "scene": activity.get("photo_prompt_seed") or "",
             "mood": context.get("mood_summary") or "",
@@ -15734,6 +15947,7 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "is_xiaoxia_favorite": bool(context.get("is_xiaoxia_favorite", False)),
         "is_daxia_favorite": bool(context.get("is_daxia_favorite", False)),
         "wardrobe_id": context.get("wardrobe_id"),
+        "wardrobe_name": context.get("wardrobe_name"),
     }
 
 
@@ -17330,20 +17544,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
 
     thread_context = _autonomy_thread_context_for_activity(activity)
     wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
-    reference_item_path = None
-    reference_item_url = None
-    wardrobe_id = None
-    wardrobe_name = ""
-    if isinstance(wardrobe_item, dict):
-        reference_item_path = wardrobe_item.get("reference_image_path")
-        reference_item_url = wardrobe_item.get("local_url")
-        if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
-            reference_item_path = reference_item_url
-        if not reference_item_path:
-            wardrobe_item = None
-        else:
-            wardrobe_id = wardrobe_item.get("id")
-            wardrobe_name = wardrobe_item.get("name")
+    wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
     prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
@@ -17365,6 +17566,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "wardrobe_id": wardrobe_id,
         "wardrobe_name": wardrobe_name,
         "wardrobe_selection": wardrobe_selection,
+        "wardrobe_source_mode": (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback"),
         "generation_mode": source_mode,
         "used_pending_wardrobe": bool(wardrobe_item),
         "photo_mode_override": "xiaoxia_autonomy",
@@ -17409,6 +17611,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     context["wardrobe_reason"] = wardrobe_reason
     context["wardrobe_name"] = wardrobe_name or ""
     context["wardrobe_selection"] = wardrobe_selection
+    context["wardrobe_source_mode"] = (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback")
 
     if wardrobe_item:
         _log_wardrobe_usage(
@@ -20368,6 +20571,49 @@ def _cosplay_record_time_key(record):
     return datetime.min.replace(tzinfo=TZ_TPE)
 
 
+def _vault_record_delete_label(record):
+    """金庫刪除清單的人類可讀摘要；寫真完整 prompt 仍留在原始紀錄。"""
+    if not isinstance(record, dict):
+        return "未命名紀錄"
+
+    record_type = str(record.get("type") or "").strip().lower()
+    album_type = str(record.get("album_type") or "").strip().lower()
+    source_mode = str(record.get("source_mode") or "").strip().lower()
+    is_photobook = record_type == "photobook" or album_type == "photobook" or source_mode.startswith("photobook")
+
+    if not is_photobook:
+        return str(record.get("topic") or record.get("event") or "未命名 cosplay").strip()
+
+    raw_topic = _clean_text_compact(record.get("topic") or "")
+    raw_topic = re.sub(r"^【Photo】\s*", "", raw_topic, flags=re.IGNORECASE)
+    # 舊寫真把整段技術 prompt 寫進 topic；只保留第一段大俠實際指定的拍攝內容。
+    scene = re.split(
+        r"Suggested photographic treatment for this shot:|PHOTOBOOK SESSION LOCK:",
+        raw_topic,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ，。｜|")
+    if not scene:
+        scene = _clean_text_compact(record.get("album_title") or record.get("composition") or "今日寫真")
+    if len(scene) > 72:
+        scene = scene[:72].rstrip(" ，。｜|") + "…"
+
+    wardrobe_id = str(record.get("wardrobe_id") or "").strip().upper()
+    wardrobe_name = _clean_text_compact(record.get("wardrobe_name") or "")
+    if wardrobe_id and not wardrobe_name:
+        try:
+            wardrobe_item = _find_wardrobe_item(wardrobe_id)
+            if isinstance(wardrobe_item, dict):
+                wardrobe_name = _clean_text_compact(wardrobe_item.get("name") or "")
+        except Exception:
+            wardrobe_name = ""
+
+    wardrobe_label = ""
+    if wardrobe_id:
+        wardrobe_label = f"｜{wardrobe_id}{(' ' + wardrobe_name) if wardrobe_name else ''}"
+    return f"【寫真】{scene}{wardrobe_label}"
+
+
 async def _cosplay_delete_flow(send_target, author, channel, date_str: str = None, raw_content: str = ""):
     """v1.4.96: shared implementation for prefix command and direct on_message fallback."""
     db = load_memory()
@@ -20405,7 +20651,7 @@ async def _cosplay_delete_flow(send_target, author, channel, date_str: str = Non
 
     msg_content = f"{msg_prefix}\n大俠，你要刪除哪一組圖文？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
     for i, (original_idx, record) in enumerate(matching_records):
-        topic = str(record.get('topic') or record.get('event') or '未命名 cosplay')
+        topic = _vault_record_delete_label(record)
         publish_date = str(record.get('publish_date') or '')
         msg_content += f"**{i+1}.** {topic} *(時間: {publish_date})*\n"
 
