@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R2"
+LOBSTER_VERSION = "1.5.57_R3"
 
 
 def _normalize_generation_level(level):
@@ -610,6 +610,7 @@ SEEDREAM_V45_REMOTE_CACHE_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "remote_cache
 os.makedirs(SEEDREAM_V45_REMOTE_CACHE_DIR, exist_ok=True)
 SEEDREAM_V45_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_V5_PRO_MODEL_ID = os.environ.get("SEEDREAM_V5_PRO_MODEL_ID", "bytedance/seedream/v5/pro/edit")
+SEEDREAM_V5_PRO_TTI_MODEL_ID = os.environ.get("SEEDREAM_V5_PRO_TTI_MODEL_ID", "bytedance/seedream/v5/pro/text-to-image")
 SEEDREAM_V45_IMAGE_SIZE = os.environ.get("SEEDREAM_V45_IMAGE_SIZE", "auto_2K")
 
 def _env_bool(name, default=False):
@@ -18294,98 +18295,203 @@ async def _generate_photobook_more_choice(message, request):
 
 
 async def _generate_seedream_v5_refine_from_v45(source_context):
-    """v1.5.57_R2：Seedream v5.0 Pro 只做 v4.5 成圖後段精修（人物強鎖、場景大幅放寬版）。
+    """v1.5.57_R3：Seedream v5.0 Pro 改成兩階段背景升級試跑。
 
-    關鍵原則：只送目前成圖 1 張，不送 1~9 小俠底圖、不送 Figure 10、不重送原生圖 prompt，
-    避免 v5 把任務理解成重新建立人物。人物與服裝仍是完整保護區；但非人物場景不再只做保守微調，
-    而是允許明顯升級、重構與豐富化，好先驗證 v5 對背景與環境是否真的能做出看得見的差異。
+    流程：
+    1. 以目前的 v4.5 成圖作為 Figure 1（人物權威圖）。
+    2. 用 Seedream v5.0 Pro text-to-image 依原場景概念先生成一張「無人物背景圖」作為 Figure 2。
+    3. 再用 Seedream v5.0 Pro edit 把 Figure 1 的小俠與 Figure 2 的背景結合。
+
+    目的不是精修衣服，而是驗證 v5 是否能在維持小俠不變的前提下，
+    真正把場景升級成更完整、更高級、更商用感的背景。
     """
     source_context = dict(source_context or {})
     source_path = str(source_context.get("local_path") or "").strip()
     source_url = str(source_context.get("local_url") or source_context.get("image_url") or "").strip()
     source_image = source_path if source_path and os.path.exists(source_path) else source_url
     if not source_image:
-        raise RuntimeError("V5_REFINE_SOURCE_NONE：找不到可供 v5.0 精修的 v4.5 成圖。")
+        raise RuntimeError("V5_BG_UPGRADE_SOURCE_NONE：找不到可供 v5.0 場景升級的 v4.5 成圖。")
 
-    fal_client = _get_fal_client()
-    image_url = await _seedream_upload_single_file(source_image)
-    final_prompt = """
-Figure 1 is the authoritative source image. This is an environment-focused enhancement and re-interpretation pass, NOT a task to redesign the human subject.
+    def _clip(value, n=700):
+        return _clean_text_compact(value or "")[:n]
+
+    def _scene_phrase():
+        candidates = [
+            source_context.get("scene_summary"),
+            source_context.get("scene_text"),
+            source_context.get("composition"),
+            source_context.get("action_summary"),
+            source_context.get("user_mode_request"),
+            source_context.get("user_input"),
+        ]
+        for item in candidates:
+            cleaned = _clip(item, 500)
+            if cleaned:
+                return cleaned
+        return "a visually appealing lifestyle or cosplay scene suitable for Xiaoxia"
+
+    scene_phrase = _scene_phrase()
+    mood_phrase = _clip(source_context.get("mood_summary"), 220)
+    framing = _clip(source_context.get("camera_framing"), 80) or "full_body"
+    source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
+    is_cosplay = "cosplay" in source_mode.lower() or "cosplay" in _clip(source_context.get("user_mode_request"), 120).lower()
+
+    background_prompt_lines = [
+        "Create a photorealistic environment-only background plate for later compositing with one woman.",
+        "No people, no human figure, no hands, no mannequin, no visible reflection of a person, and no silhouette.",
+        f"Scene concept: {scene_phrase}",
+        "Use a vertical portrait-friendly composition suitable for a single-woman photo.",
+        "Leave a clear open area for one woman in the central foreground or midground so later compositing feels natural.",
+        "Make the scene visibly richer, more polished, more cinematic, and more detailed than a simple first-pass background.",
+        "Emphasize architecture, landscaping, room structure, set design, surface materials, atmosphere, lighting depth, reflections, and environmental storytelling.",
+        "The background should look like a premium commercial-grade scene rather than a minimal draft.",
+        "Do not include text or typography.",
+    ]
+    if mood_phrase:
+        background_prompt_lines.append(f"Mood and atmosphere: {mood_phrase}")
+    if framing:
+        background_prompt_lines.append(f"The intended photo framing is approximately: {framing}.")
+    if is_cosplay:
+        background_prompt_lines.append("Because this is for cosplay/fantasy portrait use, the environment may be more stylized, magical, theatrical, or world-building-rich, as long as it still looks coherent and photorealistic.")
+    else:
+        background_prompt_lines.append("Because this is for a Xiaoxia portrait, keep the scene elegant, attractive, and believable, with strong depth and visual richness.")
+    background_prompt = "\n".join(background_prompt_lines).strip()
+
+    combine_prompt = """
+Figure 1 is the authoritative source image of Xiaoxia.
+Figure 2 is the target background / environment plate.
 
 ABSOLUTE HUMAN-SUBJECT LOCK:
 - Preserve the woman in Figure 1 exactly as she is.
-- Do not change, reinterpret, beautify, restyle, redraw, or replace her identity or face.
-- Keep exactly the same facial structure, eyes, nose, lips, jawline, expression, hairstyle, hair shape, skin tone, body shape, body proportions, hands, fingers, feet, pose, gaze, and silhouette.
-- Keep her clothing, accessories, garment design, neckline, fabric shape, colors, fit, folds on the body, and visible styling unchanged.
-- Keep the woman as the clear visual anchor of the image, with the same recognizable pose and overall presence.
-- Treat the entire human subject, including her clothing and accessories, as a protected region that must remain visually unchanged.
+- Do not change, replace, redraw, reinterpret, beautify into a different person, or drift her identity.
+- Keep the same face identity, facial structure, eyes, nose, lips, jawline, expression, hairstyle, hair shape, skin tone, body shape, body proportions, pose, gaze, silhouette, and overall recognizable Xiaoxia appearance.
+- Keep her outfit, accessories, garment design, colors, fit, and visible styling unchanged.
+- Keep anything she is directly wearing, holding, or physically interacting with as part of her portrayal unchanged.
+- Do not add any additional people.
 
-BACKGROUND / ENVIRONMENT CAN CHANGE MUCH MORE FREELY:
-- You are allowed to substantially enhance, enrich, and partially redesign the non-human environment to create a clearly visible before-and-after difference.
-- You may improve or reinterpret background architecture, landscaping, room structure, decor density, material richness, lighting interactions, atmosphere, reflections, water detail, vegetation density, depth layering, and scene complexity.
-- You may adjust non-human scene composition and restructure environmental elements if that helps create a more visually impressive, polished, high-end result.
-- You may add or refine plausible secondary details, textures, ornaments, structural features, props, natural irregularity, and environmental storytelling, as long as the overall setting remains thematically compatible with the original image.
-- Increase realism, richness, material fidelity, and cinematic polish in all non-human areas.
-- Do not merely sharpen the original image; produce a visibly upgraded environment.
-- The difference between before and after should be easy to notice, especially in the background and non-human scene elements.
-
-The output should feel like the same woman placed in a noticeably more refined, richer, more atmospheric version of the scene. The woman must remain recognizably identical to Figure 1 at first glance and under close comparison.
+BACKGROUND COMBINE / REPLACEMENT:
+- Use Figure 2 as the primary environmental design target.
+- Rebuild, replace, or strongly reinterpret the non-human background of Figure 1 so the final image clearly reflects the richer scene quality of Figure 2.
+- You may replace most or all of the original Figure 1 background if needed.
+- Integrate Xiaoxia naturally into the upgraded scene with believable perspective, scale, contact, grounding, lighting compatibility, reflections, and atmosphere.
+- Prioritize a seamless high-end final image that feels like one coherent photograph.
+- The final result should show an obvious environmental upgrade compared with Figure 1, while Xiaoxia herself remains recognizably identical.
+- Do not merely sharpen Figure 1. Produce a visibly more premium, more complete, more cinematic environment.
 """.strip()
+
+    fal_client = _get_fal_client()
+    image_url = await _seedream_upload_single_file(source_image)
 
     trace_context = {
         "kind": "photo",
-        "action": "seedream_v5_refine_from_v45",
+        "action": "seedream_v5_background_upgrade_from_v45",
         "trace_id": _new_generation_trace_id("photo"),
         "source_mode": source_context.get("source_mode") or source_context.get("type") or "photo_scene",
-        "user_input": "Seedream v5.0 Pro finishing pass on existing v4.5 image; human subject locked",
+        "user_input": "Seedream v5.0 Pro background-upgrade test from existing v4.5 image",
         "scene_seed_text": source_context.get("scene_summary") or source_context.get("scene_text") or "",
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
-        "v5_refine_mode": "human_locked_scene_freer_reinterpret",
+        "v5_refine_mode": "v45_subject_plus_v5_background_combine",
         "v5_refine_source_url": source_url or source_image,
         "seedream_input_images": [image_url],
         "seedream_input_image_roles": [{"figure": 1, "role": "authoritative_finished_v45_image", "url": image_url}],
     }
+
     _trace_stage(
         trace_context,
-        "seedream_v5_refine_request",
-        prompt=final_prompt,
+        "seedream_v5_background_t2i_request",
+        prompt=background_prompt,
         data={
-            "model": SEEDREAM_V5_PRO_MODEL_ID,
+            "model": SEEDREAM_V5_PRO_TTI_MODEL_ID,
             "image_size": SEEDREAM_V45_IMAGE_SIZE,
-            "input_count": 1,
-            "human_subject_locked": True,
-            "wardrobe_locked": True,
-            "camera_locked": False,
-            "human_locked_scene_freer_reinterpret": True,
+            "human_subject_locked": False,
+            "background_only": True,
             "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
         },
     )
 
-    def _subscribe():
+    def _subscribe_background():
         def on_queue_update(update):
             try:
                 if isinstance(update, fal_client.InProgress):
                     for log in update.logs:
-                        print(f"✨ [SEEDREAM_V5_REFINE_QUEUE] {log.get('message', '')}")
+                        print(f"🖼️ [SEEDREAM_V5_BG_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V5_PRO_TTI_MODEL_ID,
+            arguments={
+                "prompt": background_prompt,
+                "image_size": SEEDREAM_V45_IMAGE_SIZE,
+                "num_images": 1,
+                "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
+            },
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    bg_result = await asyncio.to_thread(_subscribe_background)
+    bg_images = bg_result.get("images") if isinstance(bg_result, dict) else None
+    if not bg_images or not isinstance(bg_images[0], dict) or not bg_images[0].get("url"):
+        raise RuntimeError(f"V5_BG_UPGRADE_BG_NONE：Seedream v5.0 Pro 背景圖沒有回傳圖片：{bg_result}")
+    background_generated_url = bg_images[0]["url"]
+    background_local_filename = await save_to_vault(background_generated_url)
+    background_local_url = f"https://xiaoxia0320.zeabur.app/gallery/{background_local_filename}" if background_local_filename else background_generated_url
+    background_local_path = os.path.join(OUTPUT_DIR, background_local_filename) if background_local_filename else None
+    _trace_stage(
+        trace_context,
+        "seedream_v5_background_t2i_result",
+        data={
+            "background_generated_url": background_generated_url,
+            "background_local_url": background_local_url,
+        },
+    )
+
+    trace_context["seedream_input_images"] = [image_url, background_generated_url]
+    trace_context["seedream_input_image_roles"] = [
+        {"figure": 1, "role": "authoritative_finished_v45_image", "url": image_url},
+        {"figure": 2, "role": "v5_generated_background_plate", "url": background_generated_url},
+    ]
+    _trace_stage(
+        trace_context,
+        "seedream_v5_background_combine_request",
+        prompt=combine_prompt,
+        data={
+            "model": SEEDREAM_V5_PRO_MODEL_ID,
+            "image_size": SEEDREAM_V45_IMAGE_SIZE,
+            "input_count": 2,
+            "human_subject_locked": True,
+            "background_replace_target": True,
+            "source_image_url": image_url,
+            "background_image_url": background_generated_url,
+            "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
+        },
+    )
+
+    def _subscribe_combine():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"✨ [SEEDREAM_V5_COMBINE_QUEUE] {log.get('message', '')}")
             except Exception:
                 pass
         return fal_client.subscribe(
             SEEDREAM_V5_PRO_MODEL_ID,
             arguments=_seedream_request_args(
                 SEEDREAM_V5_PRO_MODEL_ID,
-                final_prompt,
-                [image_url],
+                combine_prompt,
+                [image_url, background_generated_url],
                 enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
             ),
             with_logs=True,
             on_queue_update=on_queue_update,
         )
 
-    result = await asyncio.to_thread(_subscribe)
+    result = await asyncio.to_thread(_subscribe_combine)
     images = result.get("images") if isinstance(result, dict) else None
     if not images or not isinstance(images[0], dict) or not images[0].get("url"):
-        raise RuntimeError(f"V5_REFINE_NO_IMAGE：Seedream v5.0 Pro 精修沒有回傳圖片：{result}")
+        raise RuntimeError(f"V5_BG_UPGRADE_NO_IMAGE：Seedream v5.0 Pro 背景合成沒有回傳圖片：{result}")
 
     generated_url = images[0]["url"]
     local_filename = await save_to_vault(generated_url)
@@ -18403,16 +18509,22 @@ The output should feel like the same woman placed in a noticeably more refined, 
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
         "seedream_model_id_override": SEEDREAM_V5_PRO_MODEL_ID,
-        "v5_refine_mode": "human_locked_scene_freer_reinterpret",
+        "v5_refine_mode": "v45_subject_plus_v5_background_combine",
         "v5_refine_source_url": source_url or source_image,
-        "v5_refine_prompt": final_prompt,
-        "v5_refine_input_count": 1,
+        "v5_background_prompt": background_prompt,
+        "v5_refine_prompt": combine_prompt,
+        "v5_refine_input_count": 2,
         "v5_refine_human_locked": True,
         "v5_refine_wardrobe_locked": True,
         "v5_refine_camera_locked": False,
+        "v5_background_generated_url": background_generated_url,
+        "v5_background_local_url": background_local_url,
+        "v5_background_local_filename": background_local_filename,
+        "v5_background_local_path": background_local_path,
+        "v5_background_upgrade_mode": "v45_subject_plus_v5_background_combine",
     })
     trace_context["result_url"] = local_url or generated_url
-    _trace_stage(trace_context, "seedream_v5_refine_result", data={"result_url": trace_context["result_url"]})
+    _trace_stage(trace_context, "seedream_v5_background_combine_result", data={"result_url": trace_context["result_url"]})
     _write_generation_trace("photo", trace_context)
     return refined
 
@@ -18538,17 +18650,17 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✨ v5.0 精修", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary)
     async def try_seedream_v5(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
         source_model = str(context.get("seedream_model_id") or context.get("seedream_model_id_override") or "")
         if "v5" in source_model.lower() and context.get("v5_refine_mode"):
-            await interaction.followup.send("✨ 這張已經是 v5.0 精修結果；請從原本的 v4.5 成圖再按『v5.0 精修』，避免連續重算讓小俠漂掉。", ephemeral=True)
+            await interaction.followup.send("✨ 這張已經是 v5.0 場景升級結果；請從原本的 v4.5 成圖再按『v5.0 場景升級』，避免連續重算讓小俠漂掉。", ephemeral=True)
             return
         target_url = context.get("local_url") or context.get("image_url")
         if not target_url and not context.get("local_path"):
-            await interaction.followup.send("⚠️ 找不到這張 v4.5 成圖，無法交給 v5.0 精修。", ephemeral=True)
+            await interaction.followup.send("⚠️ 找不到這張 v4.5 成圖，無法交給 v5.0 場景升級。", ephemeral=True)
             return
         try:
             new_context = await _generate_seedream_v5_refine_from_v45(context)
@@ -18560,7 +18672,7 @@ class PhotoResultView(discord.ui.View):
             save_memory(db)
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
-            embed = _build_result_embed(new_context, title_prefix="✨ v5.0 精修", attachment_filename=filename if file else None)
+            embed = _build_result_embed(new_context, title_prefix="✨ v5.0 場景升級", attachment_filename=filename if file else None)
             if file:
                 sent = await interaction.followup.send(embed=embed, file=file, view=view)
             else:
@@ -18569,16 +18681,16 @@ class PhotoResultView(discord.ui.View):
             photo_generation_contexts[sent.id] = new_context
             view.context = new_context
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ v5.0 精修失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ v5.0 場景升級失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✅ 採用精修版", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 採用升級版", style=discord.ButtonStyle.success)
     async def adopt_v5_source(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = dict(self.context)
         target_url = context.get("v5_replace_target_url")
         target_mid = context.get("v5_replace_target_message_id")
         if not target_url:
-            await interaction.response.send_message("這張不是 v5.0 精修結果，沒有可取代的 v4.5 原圖。", ephemeral=True)
+            await interaction.response.send_message("這張不是 v5.0 場景升級結果，沒有可取代的 v4.5 原圖。", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         try:
@@ -18591,12 +18703,12 @@ class PhotoResultView(discord.ui.View):
                     adopted_context = dict(context)
                     adopted_context["message_id"] = target_message.id
                     photo_generation_contexts[target_message.id] = adopted_context
-                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0 精修")
+                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0 場景升級")
                 except Exception as edit_exc:
                     print(f"⚠️ [V5_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
-            await interaction.followup.send("✅ 已採用這張 v5.0 精修版並取代 v4.5 來源紀錄。", ephemeral=True)
+            await interaction.followup.send("✅ 已採用這張 v5.0 場景升級版並取代 v4.5 來源紀錄。", ephemeral=True)
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ 採用 v5.0 精修版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ 採用 v5.0 場景升級版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
     @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
