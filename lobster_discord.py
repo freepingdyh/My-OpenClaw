@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R1"
+LOBSTER_VERSION = "1.5.57_R2"
 
 
 def _normalize_generation_level(level):
@@ -18294,11 +18294,11 @@ async def _generate_photobook_more_choice(message, request):
 
 
 async def _generate_seedream_v5_refine_from_v45(source_context):
-    """v1.5.57_R1：Seedream v5.0 Pro 只做 v4.5 成圖後段精修（泛用場景版）。
+    """v1.5.57_R2：Seedream v5.0 Pro 只做 v4.5 成圖後段精修（人物強鎖、場景大幅放寬版）。
 
     關鍵原則：只送目前成圖 1 張，不送 1~9 小俠底圖、不送 Figure 10、不重送原生圖 prompt，
-    避免 v5 把任務理解成重新建立人物。人物與服裝視為完整保護區；其餘非人物內容則依場景內容自適應精修，
-    可泛用於室內、街景、建築、風景、夜景與一般生活照，而非只侷限床單或臥室軟裝。
+    避免 v5 把任務理解成重新建立人物。人物與服裝仍是完整保護區；但非人物場景不再只做保守微調，
+    而是允許明顯升級、重構與豐富化，好先驗證 v5 對背景與環境是否真的能做出看得見的差異。
     """
     source_context = dict(source_context or {})
     source_path = str(source_context.get("local_path") or "").strip()
@@ -18310,28 +18310,26 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     fal_client = _get_fal_client()
     image_url = await _seedream_upload_single_file(source_image)
     final_prompt = """
-Figure 1 is the authoritative finished photograph. This is a precision finishing pass, NOT a regeneration task.
+Figure 1 is the authoritative source image. This is an environment-focused enhancement and re-interpretation pass, NOT a task to redesign the human subject.
 
 ABSOLUTE HUMAN-SUBJECT LOCK:
 - Preserve the woman in Figure 1 exactly as she is.
 - Do not change, reinterpret, beautify, restyle, redraw, or replace her identity or face.
 - Keep exactly the same facial structure, eyes, nose, lips, jawline, expression, hairstyle, hair shape, skin tone, body shape, body proportions, hands, fingers, feet, pose, gaze, and silhouette.
 - Keep her clothing, accessories, garment design, neckline, fabric shape, colors, fit, folds on the body, and visible styling unchanged.
-- Do not change her position, scale, crop, camera angle, lens perspective, framing, depth of field, or composition.
+- Keep the woman as the clear visual anchor of the image, with the same recognizable pose and overall presence.
 - Treat the entire human subject, including her clothing and accessories, as a protected region that must remain visually unchanged.
 
-SCENE-ADAPTIVE NON-HUMAN REFINEMENT ONLY:
-- Refine and enhance only the non-human elements already present in Figure 1, according to the actual scene content.
-- Increase realistic fine detail, texture richness, material fidelity, depth, and photographic realism in the environment while leaving the woman unchanged.
-- Improve surfaces, micro-texture, natural imperfections, contact shadows, ambient occlusion, reflections, and lighting nuance where appropriate.
-- If the scene is indoors, refine relevant room details such as furniture, fabrics, bedding, upholstery, walls, floors, curtains, decor, and props.
-- If the scene includes architecture or urban elements, refine building facades, windows, stone, concrete, wood, metal, glass, signage, pavement, and environmental detail.
-- If the scene is an outdoor or natural setting, refine vegetation, terrain, sky, clouds, water, distant layers, atmosphere, and natural textures.
-- If the scene contains everyday objects, food, drink, books, accessories, or products, improve their material realism and fine detail without redesigning them.
-- Preserve the exact scene layout and every existing object; do not add, remove, relocate, or redesign major objects.
-- Keep the same overall color grading, mood, exposure, and photographic style.
+BACKGROUND / ENVIRONMENT CAN CHANGE MUCH MORE FREELY:
+- You are allowed to substantially enhance, enrich, and partially redesign the non-human environment to create a clearly visible before-and-after difference.
+- You may improve or reinterpret background architecture, landscaping, room structure, decor density, material richness, lighting interactions, atmosphere, reflections, water detail, vegetation density, depth layering, and scene complexity.
+- You may adjust non-human scene composition and restructure environmental elements if that helps create a more visually impressive, polished, high-end result.
+- You may add or refine plausible secondary details, textures, ornaments, structural features, props, natural irregularity, and environmental storytelling, as long as the overall setting remains thematically compatible with the original image.
+- Increase realism, richness, material fidelity, and cinematic polish in all non-human areas.
+- Do not merely sharpen the original image; produce a visibly upgraded environment.
+- The difference between before and after should be easy to notice, especially in the background and non-human scene elements.
 
-The output must look like the SAME photograph after professional high-end finishing. The woman must remain recognizably identical to Figure 1 at first glance and under close comparison.
+The output should feel like the same woman placed in a noticeably more refined, richer, more atmospheric version of the scene. The woman must remain recognizably identical to Figure 1 at first glance and under close comparison.
 """.strip()
 
     trace_context = {
@@ -18343,7 +18341,7 @@ The output must look like the SAME photograph after professional high-end finish
         "scene_seed_text": source_context.get("scene_summary") or source_context.get("scene_text") or "",
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
-        "v5_refine_mode": "scene_adaptive_nonhuman_refine_human_locked",
+        "v5_refine_mode": "human_locked_scene_freer_reinterpret",
         "v5_refine_source_url": source_url or source_image,
         "seedream_input_images": [image_url],
         "seedream_input_image_roles": [{"figure": 1, "role": "authoritative_finished_v45_image", "url": image_url}],
@@ -18358,8 +18356,8 @@ The output must look like the SAME photograph after professional high-end finish
             "input_count": 1,
             "human_subject_locked": True,
             "wardrobe_locked": True,
-            "camera_locked": True,
-            "scene_adaptive_nonhuman_refine": True,
+            "camera_locked": False,
+            "human_locked_scene_freer_reinterpret": True,
             "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
         },
     )
@@ -18405,13 +18403,13 @@ The output must look like the SAME photograph after professional high-end finish
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
         "seedream_model_id_override": SEEDREAM_V5_PRO_MODEL_ID,
-        "v5_refine_mode": "scene_adaptive_nonhuman_refine_human_locked",
+        "v5_refine_mode": "human_locked_scene_freer_reinterpret",
         "v5_refine_source_url": source_url or source_image,
         "v5_refine_prompt": final_prompt,
         "v5_refine_input_count": 1,
         "v5_refine_human_locked": True,
         "v5_refine_wardrobe_locked": True,
-        "v5_refine_camera_locked": True,
+        "v5_refine_camera_locked": False,
     })
     trace_context["result_url"] = local_url or generated_url
     _trace_stage(trace_context, "seedream_v5_refine_result", data={"result_url": trace_context["result_url"]})
