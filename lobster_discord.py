@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.56"
+LOBSTER_VERSION = "1.5.57_R1"
 
 
 def _normalize_generation_level(level):
@@ -18291,6 +18291,134 @@ async def _generate_photobook_more_choice(message, request):
             pass
         raise
 
+
+
+async def _generate_seedream_v5_refine_from_v45(source_context):
+    """v1.5.57_R1：Seedream v5.0 Pro 只做 v4.5 成圖後段精修（泛用場景版）。
+
+    關鍵原則：只送目前成圖 1 張，不送 1~9 小俠底圖、不送 Figure 10、不重送原生圖 prompt，
+    避免 v5 把任務理解成重新建立人物。人物與服裝視為完整保護區；其餘非人物內容則依場景內容自適應精修，
+    可泛用於室內、街景、建築、風景、夜景與一般生活照，而非只侷限床單或臥室軟裝。
+    """
+    source_context = dict(source_context or {})
+    source_path = str(source_context.get("local_path") or "").strip()
+    source_url = str(source_context.get("local_url") or source_context.get("image_url") or "").strip()
+    source_image = source_path if source_path and os.path.exists(source_path) else source_url
+    if not source_image:
+        raise RuntimeError("V5_REFINE_SOURCE_NONE：找不到可供 v5.0 精修的 v4.5 成圖。")
+
+    fal_client = _get_fal_client()
+    image_url = await _seedream_upload_single_file(source_image)
+    final_prompt = """
+Figure 1 is the authoritative finished photograph. This is a precision finishing pass, NOT a regeneration task.
+
+ABSOLUTE HUMAN-SUBJECT LOCK:
+- Preserve the woman in Figure 1 exactly as she is.
+- Do not change, reinterpret, beautify, restyle, redraw, or replace her identity or face.
+- Keep exactly the same facial structure, eyes, nose, lips, jawline, expression, hairstyle, hair shape, skin tone, body shape, body proportions, hands, fingers, feet, pose, gaze, and silhouette.
+- Keep her clothing, accessories, garment design, neckline, fabric shape, colors, fit, folds on the body, and visible styling unchanged.
+- Do not change her position, scale, crop, camera angle, lens perspective, framing, depth of field, or composition.
+- Treat the entire human subject, including her clothing and accessories, as a protected region that must remain visually unchanged.
+
+SCENE-ADAPTIVE NON-HUMAN REFINEMENT ONLY:
+- Refine and enhance only the non-human elements already present in Figure 1, according to the actual scene content.
+- Increase realistic fine detail, texture richness, material fidelity, depth, and photographic realism in the environment while leaving the woman unchanged.
+- Improve surfaces, micro-texture, natural imperfections, contact shadows, ambient occlusion, reflections, and lighting nuance where appropriate.
+- If the scene is indoors, refine relevant room details such as furniture, fabrics, bedding, upholstery, walls, floors, curtains, decor, and props.
+- If the scene includes architecture or urban elements, refine building facades, windows, stone, concrete, wood, metal, glass, signage, pavement, and environmental detail.
+- If the scene is an outdoor or natural setting, refine vegetation, terrain, sky, clouds, water, distant layers, atmosphere, and natural textures.
+- If the scene contains everyday objects, food, drink, books, accessories, or products, improve their material realism and fine detail without redesigning them.
+- Preserve the exact scene layout and every existing object; do not add, remove, relocate, or redesign major objects.
+- Keep the same overall color grading, mood, exposure, and photographic style.
+
+The output must look like the SAME photograph after professional high-end finishing. The woman must remain recognizably identical to Figure 1 at first glance and under close comparison.
+""".strip()
+
+    trace_context = {
+        "kind": "photo",
+        "action": "seedream_v5_refine_from_v45",
+        "trace_id": _new_generation_trace_id("photo"),
+        "source_mode": source_context.get("source_mode") or source_context.get("type") or "photo_scene",
+        "user_input": "Seedream v5.0 Pro finishing pass on existing v4.5 image; human subject locked",
+        "scene_seed_text": source_context.get("scene_summary") or source_context.get("scene_text") or "",
+        "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
+        "seedream_model_label": "Seedream v5.0 Pro",
+        "v5_refine_mode": "scene_adaptive_nonhuman_refine_human_locked",
+        "v5_refine_source_url": source_url or source_image,
+        "seedream_input_images": [image_url],
+        "seedream_input_image_roles": [{"figure": 1, "role": "authoritative_finished_v45_image", "url": image_url}],
+    }
+    _trace_stage(
+        trace_context,
+        "seedream_v5_refine_request",
+        prompt=final_prompt,
+        data={
+            "model": SEEDREAM_V5_PRO_MODEL_ID,
+            "image_size": SEEDREAM_V45_IMAGE_SIZE,
+            "input_count": 1,
+            "human_subject_locked": True,
+            "wardrobe_locked": True,
+            "camera_locked": True,
+            "scene_adaptive_nonhuman_refine": True,
+            "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
+        },
+    )
+
+    def _subscribe():
+        def on_queue_update(update):
+            try:
+                if isinstance(update, fal_client.InProgress):
+                    for log in update.logs:
+                        print(f"✨ [SEEDREAM_V5_REFINE_QUEUE] {log.get('message', '')}")
+            except Exception:
+                pass
+        return fal_client.subscribe(
+            SEEDREAM_V5_PRO_MODEL_ID,
+            arguments=_seedream_request_args(
+                SEEDREAM_V5_PRO_MODEL_ID,
+                final_prompt,
+                [image_url],
+                enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
+            ),
+            with_logs=True,
+            on_queue_update=on_queue_update,
+        )
+
+    result = await asyncio.to_thread(_subscribe)
+    images = result.get("images") if isinstance(result, dict) else None
+    if not images or not isinstance(images[0], dict) or not images[0].get("url"):
+        raise RuntimeError(f"V5_REFINE_NO_IMAGE：Seedream v5.0 Pro 精修沒有回傳圖片：{result}")
+
+    generated_url = images[0]["url"]
+    local_filename = await save_to_vault(generated_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+
+    refined = dict(source_context)
+    refined.pop("__trace_context", None)
+    refined.update({
+        "image_url": generated_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
+        "seedream_model_label": "Seedream v5.0 Pro",
+        "seedream_model_id_override": SEEDREAM_V5_PRO_MODEL_ID,
+        "v5_refine_mode": "scene_adaptive_nonhuman_refine_human_locked",
+        "v5_refine_source_url": source_url or source_image,
+        "v5_refine_prompt": final_prompt,
+        "v5_refine_input_count": 1,
+        "v5_refine_human_locked": True,
+        "v5_refine_wardrobe_locked": True,
+        "v5_refine_camera_locked": True,
+    })
+    trace_context["result_url"] = local_url or generated_url
+    _trace_stage(trace_context, "seedream_v5_refine_result", data={"result_url": trace_context["result_url"]})
+    _write_generation_trace("photo", trace_context)
+    return refined
+
+
 class PhotoResultView(discord.ui.View):
     def __init__(self, context):
         super().__init__(timeout=86400)
@@ -18412,30 +18540,29 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="🧪 v5.0 試跑", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="✨ v5.0 精修", style=discord.ButtonStyle.secondary)
     async def try_seedream_v5(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
-        context.pop("__trace_context", None)
-        context["trace_action"] = "seedream_v5_tryout"
-        context["user_input"] = "Seedream v5.0 Pro tryout from previous image"
-        context["seedream_model_id_override"] = SEEDREAM_V5_PRO_MODEL_ID
-        context["seedream_model_label"] = "Seedream v5.0 Pro"
-        context["v5_replace_target_url"] = context.get("local_url") or context.get("image_url")
-        context["v5_replace_target_message_id"] = getattr(interaction.message, "id", None)
-        context["prompt_base"] = (
-            context.get("prompt_base", "")
-            + "\nRegenerate this same requested image using Seedream v5.0 Pro. Keep the same scene, pose/action, outfit/reference, role anchors, and visual checklist; only the model changes."
-        )
+        source_model = str(context.get("seedream_model_id") or context.get("seedream_model_id_override") or "")
+        if "v5" in source_model.lower() and context.get("v5_refine_mode"):
+            await interaction.followup.send("✨ 這張已經是 v5.0 精修結果；請從原本的 v4.5 成圖再按『v5.0 精修』，避免連續重算讓小俠漂掉。", ephemeral=True)
+            return
+        target_url = context.get("local_url") or context.get("image_url")
+        if not target_url and not context.get("local_path"):
+            await interaction.followup.send("⚠️ 找不到這張 v4.5 成圖，無法交給 v5.0 精修。", ephemeral=True)
+            return
         try:
-            new_context = await _generate_photo_from_context(context)
+            new_context = await _generate_seedream_v5_refine_from_v45(context)
+            new_context["v5_replace_target_url"] = target_url
+            new_context["v5_replace_target_message_id"] = getattr(interaction.message, "id", None)
             db = load_memory()
             db_type = _context_db_type(new_context)
             db.insert(0, _photo_db_payload(new_context, type_override=db_type))
             save_memory(db)
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
-            embed = _build_result_embed(new_context, title_prefix="🧪 v5.0 試跑", attachment_filename=filename if file else None)
+            embed = _build_result_embed(new_context, title_prefix="✨ v5.0 精修", attachment_filename=filename if file else None)
             if file:
                 sent = await interaction.followup.send(embed=embed, file=file, view=view)
             else:
@@ -18444,16 +18571,16 @@ class PhotoResultView(discord.ui.View):
             photo_generation_contexts[sent.id] = new_context
             view.context = new_context
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ v5.0 試跑失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ v5.0 精修失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✅ 採用取代來源", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 採用精修版", style=discord.ButtonStyle.success)
     async def adopt_v5_source(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = dict(self.context)
         target_url = context.get("v5_replace_target_url")
         target_mid = context.get("v5_replace_target_message_id")
         if not target_url:
-            await interaction.response.send_message("這張不是 v5.0 試跑來源圖，沒有可取代的原圖。", ephemeral=True)
+            await interaction.response.send_message("這張不是 v5.0 精修結果，沒有可取代的 v4.5 原圖。", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         try:
@@ -18466,12 +18593,12 @@ class PhotoResultView(discord.ui.View):
                     adopted_context = dict(context)
                     adopted_context["message_id"] = target_message.id
                     photo_generation_contexts[target_message.id] = adopted_context
-                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0")
+                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0 精修")
                 except Exception as edit_exc:
                     print(f"⚠️ [V5_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
-            await interaction.followup.send("✅ 已採用這張 v5.0 結果並取代來源紀錄。", ephemeral=True)
+            await interaction.followup.send("✅ 已採用這張 v5.0 精修版並取代 v4.5 來源紀錄。", ephemeral=True)
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ 採用 v5.0 取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ 採用 v5.0 精修版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
     @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
