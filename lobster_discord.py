@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R3"
+LOBSTER_VERSION = "1.5.57_R4"
 
 
 def _normalize_generation_level(level):
@@ -18315,46 +18315,69 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     def _clip(value, n=700):
         return _clean_text_compact(value or "")[:n]
 
-    def _scene_phrase():
-        candidates = [
-            source_context.get("scene_summary"),
-            source_context.get("scene_text"),
-            source_context.get("composition"),
-            source_context.get("action_summary"),
-            source_context.get("user_mode_request"),
-            source_context.get("user_input"),
-        ]
-        for item in candidates:
-            cleaned = _clip(item, 500)
-            if cleaned:
-                return cleaned
-        return "a visually appealing lifestyle or cosplay scene suitable for Xiaoxia"
+    def _scene_semantic_brief():
+        """R4：把原圖真正的故事/活動語意交給 v5 TTI，而不是只取第一個 scene_summary。"""
+        rows = []
 
-    scene_phrase = _scene_phrase()
-    mood_phrase = _clip(source_context.get("mood_summary"), 220)
-    framing = _clip(source_context.get("camera_framing"), 80) or "full_body"
+        def add(label, value, limit=700):
+            cleaned = _clip(value, limit)
+            if cleaned:
+                rows.append(f"{label}: {cleaned}")
+
+        # Cosplay 最重要：作品、角色、事件與原導演 prompt 都要讓背景生成器知道。
+        add("Topic", source_context.get("topic"), 360)
+        add("Work / source title", source_context.get("cosplay_work_title") or source_context.get("source"), 260)
+        add("Character / role", source_context.get("cosplay_character_name") or source_context.get("role_name"), 220)
+        add("Cosplay family", source_context.get("cosplay_family_label") or source_context.get("cosplay_family"), 160)
+        add("Story / event", source_context.get("event"), 900)
+        add("Requested scene", source_context.get("scene_summary") or source_context.get("scene_text"), 700)
+        add("Composition", source_context.get("composition"), 700)
+        add("Action", source_context.get("action_summary"), 400)
+        add("Mood", source_context.get("mood_summary") or source_context.get("mood"), 320)
+        add("User request", source_context.get("user_mode_request") or source_context.get("user_input"), 500)
+
+        post_text = source_context.get("post_text")
+        if isinstance(post_text, dict):
+            add("Character context", post_text.get("character_intro"), 600)
+            add("Xiaoxia interpretation", post_text.get("xiaoxia_interpretation"), 600)
+            add("Intended scene caption", post_text.get("scene_caption"), 700)
+
+        # prompt_base 往往含最完整的導演層場景線索；只作世界觀/環境理解，不要求 TTI 畫人物。
+        add("Original generation scene prompt", source_context.get("prompt_base"), 1800)
+
+        if not rows:
+            rows.append("Scene: a visually appealing lifestyle scene suitable for Xiaoxia")
+        return "\n".join(rows)
+
+    semantic_brief = _scene_semantic_brief()
+    framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
     source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
     is_cosplay = "cosplay" in source_mode.lower() or "cosplay" in _clip(source_context.get("user_mode_request"), 120).lower()
 
     background_prompt_lines = [
-        "Create a photorealistic environment-only background plate for later compositing with one woman.",
-        "No people, no human figure, no hands, no mannequin, no visible reflection of a person, and no silhouette.",
-        f"Scene concept: {scene_phrase}",
-        "Use a vertical portrait-friendly composition suitable for a single-woman photo.",
-        "Leave a clear open area for one woman in the central foreground or midground so later compositing feels natural.",
-        "Make the scene visibly richer, more polished, more cinematic, and more detailed than a simple first-pass background.",
-        "Emphasize architecture, landscaping, room structure, set design, surface materials, atmosphere, lighting depth, reflections, and environmental storytelling.",
-        "The background should look like a premium commercial-grade scene rather than a minimal draft.",
+        "Create a photorealistic ENVIRONMENT-ONLY background plate for later compositing with one woman from another image.",
+        "No people, no human figure, no hands, no mannequin, no visible reflection of a person, and no human silhouette.",
+        "The SOURCE BRIEF below is authoritative for world, era, location, story context, genre, time of day, atmosphere, and environmental meaning.",
+        "Extract the environment from the brief; do NOT copy or generate the woman/character described there.",
+        "Do not change the story into a different genre just to make it prettier. Historical stays historical; realistic stays realistic; fantasy or magic appears only when the source brief actually calls for it.",
+        "Preserve explicit era, place, weather, time-of-day, damage/condition, and world-building cues from the source brief.",
+        "",
+        "SOURCE BRIEF:",
+        semantic_brief,
+        "",
+        "BACKGROUND PLATE REQUIREMENTS:",
+        "Use a vertical portrait-friendly composition suitable for later integration of one woman.",
+        "Leave a plausible open area in the foreground or midground for the existing woman from Figure 1; do not put a person there.",
+        "Make the environment materially richer, spatially deeper, more coherent, more polished, and more cinematic than a minimal first-pass background.",
+        "Freely improve architecture, landscape, set dressing, surfaces, vegetation, weathering, reflections, lighting depth, atmosphere, and environmental storytelling, but remain faithful to the source world and story.",
+        "The result should look like a premium commercial-grade location/set plate with believable physical space, perspective, materials, and lighting.",
         "Do not include text or typography.",
+        f"Intended portrait framing context: {framing}.",
     ]
-    if mood_phrase:
-        background_prompt_lines.append(f"Mood and atmosphere: {mood_phrase}")
-    if framing:
-        background_prompt_lines.append(f"The intended photo framing is approximately: {framing}.")
     if is_cosplay:
-        background_prompt_lines.append("Because this is for cosplay/fantasy portrait use, the environment may be more stylized, magical, theatrical, or world-building-rich, as long as it still looks coherent and photorealistic.")
+        background_prompt_lines.append("This is a cosplay/world-building scene: prioritize fidelity to the named work, role context, historical/fantasy setting, and story atmosphere over generic glamour or unrelated spectacle.")
     else:
-        background_prompt_lines.append("Because this is for a Xiaoxia portrait, keep the scene elegant, attractive, and believable, with strong depth and visual richness.")
+        background_prompt_lines.append("This is a lifestyle/activity scene: prioritize the requested real-world activity, place, time, and atmosphere over generic glamour scenery.")
     background_prompt = "\n".join(background_prompt_lines).strip()
 
     combine_prompt = """
@@ -18384,14 +18407,14 @@ BACKGROUND COMBINE / REPLACEMENT:
 
     trace_context = {
         "kind": "photo",
-        "action": "seedream_v5_background_upgrade_from_v45",
+        "action": "seedream_v5_background_upgrade_semantic_handoff_from_v45",
         "trace_id": _new_generation_trace_id("photo"),
         "source_mode": source_context.get("source_mode") or source_context.get("type") or "photo_scene",
         "user_input": "Seedream v5.0 Pro background-upgrade test from existing v4.5 image",
         "scene_seed_text": source_context.get("scene_summary") or source_context.get("scene_text") or "",
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
-        "v5_refine_mode": "v45_subject_plus_v5_background_combine",
+        "v5_refine_mode": "v45_subject_plus_v5_semantic_background_combine",
         "v5_refine_source_url": source_url or source_image,
         "seedream_input_images": [image_url],
         "seedream_input_image_roles": [{"figure": 1, "role": "authoritative_finished_v45_image", "url": image_url}],
@@ -18406,6 +18429,8 @@ BACKGROUND COMBINE / REPLACEMENT:
             "image_size": SEEDREAM_V45_IMAGE_SIZE,
             "human_subject_locked": False,
             "background_only": True,
+            "semantic_handoff": True,
+            "semantic_brief": semantic_brief,
             "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
         },
     )
@@ -18509,9 +18534,10 @@ BACKGROUND COMBINE / REPLACEMENT:
         "seedream_model_id": SEEDREAM_V5_PRO_MODEL_ID,
         "seedream_model_label": "Seedream v5.0 Pro",
         "seedream_model_id_override": SEEDREAM_V5_PRO_MODEL_ID,
-        "v5_refine_mode": "v45_subject_plus_v5_background_combine",
+        "v5_refine_mode": "v45_subject_plus_v5_semantic_background_combine",
         "v5_refine_source_url": source_url or source_image,
         "v5_background_prompt": background_prompt,
+        "v5_background_semantic_brief": semantic_brief,
         "v5_refine_prompt": combine_prompt,
         "v5_refine_input_count": 2,
         "v5_refine_human_locked": True,
@@ -18521,7 +18547,7 @@ BACKGROUND COMBINE / REPLACEMENT:
         "v5_background_local_url": background_local_url,
         "v5_background_local_filename": background_local_filename,
         "v5_background_local_path": background_local_path,
-        "v5_background_upgrade_mode": "v45_subject_plus_v5_background_combine",
+        "v5_background_upgrade_mode": "v45_subject_plus_v5_semantic_background_combine",
     })
     trace_context["result_url"] = local_url or generated_url
     _trace_stage(trace_context, "seedream_v5_background_combine_result", data={"result_url": trace_context["result_url"]})
