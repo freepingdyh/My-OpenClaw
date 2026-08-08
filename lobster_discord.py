@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R5"
+LOBSTER_VERSION = "1.5.57_R6"
 
 
 def _normalize_generation_level(level):
@@ -2305,6 +2305,33 @@ def _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason,
     return wardrobe_item, wardrobe_reason, selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name
 
 
+def _autonomy_use_specified_wardrobe(activity, wardrobe_item):
+    """大俠明確指定 Wxxx 時，直接使用該衣櫃服裝。"""
+    if not isinstance(wardrobe_item, dict):
+        reason = _autonomy_normalize_generated_fallback_reason(activity, "大俠原本有指定衣櫃衣服，但資料遺失，因此這次改由小俠自由生成穿搭。")
+        return None, reason, {
+            "mode": "autonomy_daxia_forced_wardrobe",
+            "selection_mode": "generated_fallback",
+            "used_wardrobe": False,
+            "fallback_used": True,
+            "fallback_reason": "specified_wardrobe_missing",
+            "selection_reason": reason,
+        }
+    wid = str(wardrobe_item.get("id") or "").strip().upper()
+    name = str(wardrobe_item.get("name") or "").strip()
+    reason = f"大俠指定今天穿 {wid}{(' ' + name) if name else ''}。"
+    return wardrobe_item, reason, {
+        "mode": "autonomy_daxia_forced_wardrobe",
+        "selection_mode": "wardrobe_forced_by_daxia",
+        "used_wardrobe": True,
+        "fallback_used": False,
+        "selected_id": wid,
+        "selected_name": name,
+        "selection_reason": reason,
+        "forced_by_daxia": True,
+    }
+
+
 async def _autonomy_choose_wardrobe(activity, visual_mode):
     """v1.5.56：自主活動服裝政策＝先優先使用衣櫃；若沒有真正合適候選，就明確改為自由生成並告知原因。"""
     items = load_wardrobe()
@@ -3068,6 +3095,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
 
     specified_category = None
     specified_activity = None
+    specified_wardrobe_item = None
     specified_label = ""
 
     if arg_key.startswith("指定類別") or arg_key.startswith("指定分類"):
@@ -3093,27 +3121,46 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             message=message,
             catalog=load_xiaoxia_activity_catalog(),
         )
+        specified_wardrobe_id = str(parsed_activity.get("wardrobe_id") or "").strip().upper()
+        if specified_wardrobe_id:
+            specified_wardrobe_item = _find_wardrobe_item(specified_wardrobe_id)
+            if not specified_wardrobe_item:
+                await message.channel.send(
+                    f"🌱 大俠，我找不到衣櫃編號 **{specified_wardrobe_id}**。\n"
+                    "你可以先用 `/衣櫃 看 Wxxx` 或 `/衣櫃` 查一下。"
+                )
+                return True
         specified_label = f"指定活動：{specified_activity.get('title')}"
+        if specified_wardrobe_item:
+            specified_label += f"｜指定衣服：{specified_wardrobe_item.get('id')} {specified_wardrobe_item.get('name') or ''}"
 
-        # v1.5.24：now 才立即出圖；有 HH:MM 則建立單次 slot；沒給時間則由小俠今天自行安排。
+        # v1.5.24+R6：now 才立即出圖；有 HH:MM 則建立單次 slot；沒給時間則由小俠今天自行安排。
         if parsed_activity.get("timing_mode") == "time":
             slot, err = _autonomy_add_specified_activity_slot(
                 specified_activity,
                 time_text=parsed_activity.get("time"),
                 now_dt=datetime.now(TZ_TPE),
                 auto_pick=False,
+                wardrobe_item=specified_wardrobe_item,
             )
             if err == "time_passed":
+                retry_cmd = f"/小俠自主 指定活動 {specified_activity.get('title')}"
+                if specified_wardrobe_item:
+                    retry_cmd += f" {specified_wardrobe_item.get('id')}"
+                retry_cmd += " now"
                 await message.channel.send(
                     f"🌱 大俠，**{parsed_activity.get('time')}** 今天已經過了，不補發。\n"
-                    f"你可以改用：`/小俠自主 指定活動 {specified_activity.get('title')} now`，或指定今天接下來的時間。"
+                    f"你可以改用：`{retry_cmd}`，或指定今天接下來的時間。"
                 )
                 return True
             if not slot:
                 await message.channel.send("🌱 大俠，這個時間格式好像不對，請用 `HH:MM`，例如 `15:30`。")
                 return True
+            wardrobe_note = ""
+            if specified_wardrobe_item:
+                wardrobe_note = f"\n指定衣服：**{specified_wardrobe_item.get('id')} {specified_wardrobe_item.get('name') or ''}**"
             await message.channel.send(
-                f"🌱 已安排 **{slot.get('time')}** 做：**{specified_activity.get('title')}**。\n"
+                f"🌱 已安排 **{slot.get('time')}** 做：**{specified_activity.get('title')}**。{wardrobe_note}\n"
                 "這是大俠指定活動，不受 daily_limit 限制；到時間會在這裡出圖與分享心得。"
             )
             return True
@@ -3123,20 +3170,28 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
                 specified_activity,
                 now_dt=datetime.now(TZ_TPE),
                 auto_pick=True,
+                wardrobe_item=specified_wardrobe_item,
             )
             if not slot:
+                retry_cmd = f"/小俠自主 指定活動 {specified_activity.get('title')}"
+                if specified_wardrobe_item:
+                    retry_cmd += f" {specified_wardrobe_item.get('id')}"
+                retry_cmd += " now"
                 await message.channel.send(
                     f"🌱 大俠，今天剩下的可用時間不夠安排 **{specified_activity.get('title')}**。\n"
-                    f"你可以改用：`/小俠自主 指定活動 {specified_activity.get('title')} now`，或指定明確時間。"
+                    f"你可以改用：`{retry_cmd}`，或指定明確時間。"
                 )
                 return True
+            wardrobe_note = ""
+            if specified_wardrobe_item:
+                wardrobe_note = f"\n指定衣服：**{specified_wardrobe_item.get('id')} {specified_wardrobe_item.get('name') or ''}**"
             await message.channel.send(
-                f"🌱 已把 **{specified_activity.get('title')}** 加入今天的小俠自主指定活動。\n"
+                f"🌱 已把 **{specified_activity.get('title')}** 加入今天的小俠自主指定活動。{wardrobe_note}\n"
                 f"小俠自行安排在 **{slot.get('time')}**，並會和其他 pending 活動至少間隔 1 小時。"
             )
             return True
     elif arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
-        await message.channel.send("大俠，目前 v1.5.24 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ... [now 或 HH:MM]`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
+        await message.channel.send("大俠，目前 v1.5.24 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ... [可夾帶 Wxxx 與 now 或 HH:MM，順序不限]`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
         return True
 
     force_reroll = arg_key in {"重抽", "再抽", "重拍"} or bool(specified_category or specified_activity)
@@ -3151,7 +3206,10 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     activity, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=specified_category, activity_filter=specified_activity)
     activity = _autonomy_enrich_activity(activity)
     thread_context = _autonomy_thread_context_for_activity(activity)
-    wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
+    if specified_wardrobe_item:
+        wardrobe_item, wardrobe_reason, wardrobe_selection = _autonomy_use_specified_wardrobe(activity, specified_wardrobe_item)
+    else:
+        wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
@@ -22336,29 +22394,51 @@ def _autonomy_resolve_or_create_activity(query, message=None, catalog=None):
 
 
 def _parse_autonomy_specified_activity_request(query):
-    """解析：指定活動 自由文字 [now|現在|立即|馬上|HH:MM]。"""
-    raw = _autonomy_normalize_ad_hoc_title(query)
+    """解析：指定活動 自由文字 [Wxxx] [now|現在|立即|馬上|HH:MM]。
+    - Wxxx 可出現在任意位置，不必寫「指定衣櫃」。
+    - HH:MM 與 Wxxx 的順序可對調。
+    """
+    raw = str(query or "").strip()
     if not raw:
-        return {"activity_text": "", "timing_mode": "", "time": "", "error": "missing_activity"}
-    m = re.search(r"\s+(now|現在|立即|馬上)\s*$", raw, flags=re.IGNORECASE)
-    if m:
-        return {
-            "activity_text": _autonomy_normalize_ad_hoc_title(raw[:m.start()]),
-            "timing_mode": "now",
-            "time": "",
-            "error": "",
-        }
-    m = re.search(r"\s+([01]?\d|2[0-3]):([0-5]\d)\s*$", raw)
-    if m:
-        hh = int(m.group(1))
-        mm = int(m.group(2))
-        return {
-            "activity_text": _autonomy_normalize_ad_hoc_title(raw[:m.start()]),
-            "timing_mode": "time",
-            "time": f"{hh:02d}:{mm:02d}",
-            "error": "",
-        }
-    return {"activity_text": raw, "timing_mode": "auto", "time": "", "error": ""}
+        return {"activity_text": "", "timing_mode": "", "time": "", "wardrobe_id": "", "error": "missing_activity"}
+
+    working = raw
+
+    wardrobe_ids = _extract_wardrobe_ids_from_text(working)
+    wardrobe_id = wardrobe_ids[0] if wardrobe_ids else ""
+    if wardrobe_id:
+        working = re.sub(r"\b" + re.escape(wardrobe_id) + r"\b", " ", working, count=1, flags=re.IGNORECASE)
+
+    now_match = re.search(r"(?<!\S)(now|現在|立即|馬上)(?!\S)", working, flags=re.IGNORECASE)
+    has_now = bool(now_match)
+    if has_now:
+        working = re.sub(r"(?<!\S)(now|現在|立即|馬上)(?!\S)", " ", working, count=1, flags=re.IGNORECASE)
+
+    time_match = re.search(r"(?<!\S)([01]?\d|2[0-3]):([0-5]\d)(?!\S)", working)
+    time_text = ""
+    if time_match:
+        hh = int(time_match.group(1))
+        mm = int(time_match.group(2))
+        time_text = f"{hh:02d}:{mm:02d}"
+        working = re.sub(r"(?<!\S)([01]?\d|2[0-3]):([0-5]\d)(?!\S)", " ", working, count=1)
+
+    activity_text = _autonomy_normalize_ad_hoc_title(working)
+    if not activity_text:
+        return {"activity_text": "", "timing_mode": "", "time": time_text, "wardrobe_id": wardrobe_id, "error": "missing_activity"}
+
+    timing_mode = "auto"
+    if has_now:
+        timing_mode = "now"
+    elif time_text:
+        timing_mode = "time"
+
+    return {
+        "activity_text": activity_text,
+        "timing_mode": timing_mode,
+        "time": time_text,
+        "wardrobe_id": wardrobe_id,
+        "error": "",
+    }
 
 
 def _autonomy_slot_dt_today(time_text, now_dt=None):
@@ -22377,10 +22457,15 @@ def _autonomy_sort_slots(slots):
     return sorted([s for s in (slots or []) if isinstance(s, dict)], key=key)
 
 
-def _autonomy_make_specified_activity_slot(activity, time_text, now_dt=None, scheduled_by="daxia"):
+def _autonomy_make_specified_activity_slot(activity, time_text, now_dt=None, scheduled_by="daxia", wardrobe_item=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     activity = _autonomy_enrich_activity(activity)
     mode = str(activity.get("activity_mode") or ("catalog" if not str(activity.get("id") or "").startswith("ADHOC_") else "ad_hoc"))
+    wardrobe_id = ""
+    wardrobe_name = ""
+    if isinstance(wardrobe_item, dict):
+        wardrobe_id = str(wardrobe_item.get("id") or "").strip().upper()
+        wardrobe_name = str(wardrobe_item.get("name") or "").strip()
     return {
         "id": f"MANUAL_ACTIVITY_{now_dt.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}",
         "time": str(time_text),
@@ -22395,6 +22480,8 @@ def _autonomy_make_specified_activity_slot(activity, time_text, now_dt=None, sch
         "source": "daxia_specified_activity",
         "scheduled_by": scheduled_by,
         "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "specified_wardrobe_id": wardrobe_id,
+        "specified_wardrobe_name": wardrobe_name,
     }
 
 
@@ -22436,7 +22523,7 @@ def _autonomy_find_auto_time_for_manual_activity(slots, now_dt=None, min_gap_min
     return chosen.strftime("%H:%M")
 
 
-def _autonomy_add_specified_activity_slot(activity, time_text=None, now_dt=None, auto_pick=False):
+def _autonomy_add_specified_activity_slot(activity, time_text=None, now_dt=None, auto_pick=False, wardrobe_item=None):
     """新增一個大俠指定活動 slot；不覆蓋既有 auto slots，也不受 daily_limit 限制。"""
     now_dt = now_dt or datetime.now(TZ_TPE)
     state = load_xiaoxia_autonomy_state()
@@ -22457,7 +22544,7 @@ def _autonomy_add_specified_activity_slot(activity, time_text=None, now_dt=None,
         if slot_dt <= now_dt:
             return None, "time_passed"
 
-    slot = _autonomy_make_specified_activity_slot(activity, time_text, now_dt=now_dt)
+    slot = _autonomy_make_specified_activity_slot(activity, time_text, now_dt=now_dt, wardrobe_item=wardrobe_item)
     slots.append(slot)
     scheduler["slots"] = _autonomy_sort_slots(slots)
     scheduler["date"] = now_dt.strftime("%Y-%m-%d")
@@ -22651,8 +22738,14 @@ async def xiaoxia_autonomy_auto_task():
         is_manual_activity = item.get("manual_kind") == "specified_activity"
         if is_manual_activity:
             title = str(item.get("activity_title") or item.get("activity_id") or "大俠指定活動").strip()
-            await channel.send(f"🌱 小俠到了大俠指定的生活時段（{item.get('time')}），準備去做：**{title}**。")
-            command_text = f"/小俠自主 指定活動 {title} now"
+            wid = str(item.get("specified_wardrobe_id") or "").strip().upper()
+            wname = str(item.get("specified_wardrobe_name") or "").strip()
+            wardrobe_note = f"｜指定衣服：{wid} {wname}" if wid else ""
+            await channel.send(f"🌱 小俠到了大俠指定的生活時段（{item.get('time')}），準備去做：**{title}**{wardrobe_note}。")
+            command_text = f"/小俠自主 指定活動 {title}"
+            if wid:
+                command_text += f" {wid}"
+            command_text += " now"
         else:
             await channel.send(f"🌱 小俠到了今天自己安排的生活時段（{item.get('time')}），準備去做一件事、拍一張照給大俠。")
             command_text = "/小俠自主 重抽"
