@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R6"
+LOBSTER_VERSION = "1.5.57_R7"
 
 
 def _normalize_generation_level(level):
@@ -15204,23 +15204,55 @@ async def _seedream_upload_single_file(path):
     return await asyncio.to_thread(fal_client.upload_file, upload_path)
 
 
+def _v1527_extract_explicit_time_bucket(text):
+    """從 prompt 中抽取明確時間上下文；若有明示時間，優先服從，不再被其他關鍵字誤導。"""
+    raw = str(text or "")
+    patterns = [
+        r"Current time context:\s*[^\n]*?(\d{1,2}):(\d{2})",
+        r"Current Taiwan local time is\s*(\d{1,2}):(\d{2})",
+        r"Taiwan time[,，]\s*(\d{1,2}):(\d{2})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, raw, flags=re.I)
+        if not m:
+            continue
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        probe_dt = datetime.now(TZ_TPE).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        bucket, label = _autonomy_time_bucket(probe_dt)
+        return bucket, label, f"{hh:02d}:{mm:02d}"
+    return None, "", ""
+
+
 def _v1527_scene_hard_requirements(text):
     """Extract only decisive scene/time locks and place them at the top of the Seedream prompt."""
     raw = str(text or "")
     low = raw.lower()
     rules = []
 
-    night_terms = ("晚間", "晚上", "夜裡", "夜晚", "深夜", "night", "evening", "22:", "21:", "20:", "19:")
-    day_terms = ("白天", "上午", "早上", "午後", "下午", "daytime", "morning", "afternoon")
-    if any(x in low for x in night_terms):
+    # v1.5.57_R7: if prompt already contains an explicit time context, obey it first.
+    explicit_bucket, _explicit_label, _explicit_time = _v1527_extract_explicit_time_bucket(raw)
+    if explicit_bucket in {"evening", "night"}:
         rules += [
             "The scene MUST visibly take place at night/evening.",
             "Daylight, sunshine, bright daytime windows, morning light, and afternoon light are incorrect.",
             "If windows or outdoor areas are visible, show darkness, night reflections, or night city lights.",
             "Use believable indoor evening illumination such as warm cafe lamps or ceiling lights."
         ]
-    elif any(x in low for x in day_terms):
+    elif explicit_bucket in {"morning", "noon", "afternoon"}:
         rules.append("The scene MUST visibly match the requested daytime period; do not turn it into a night scene.")
+    else:
+        night_terms = ("晚間", "晚上", "夜裡", "夜晚", "深夜", "night", "evening", "22:", "21:", "20:", "19:")
+        day_terms = ("白天", "上午", "早上", "午後", "下午", "daytime", "morning", "afternoon")
+        if any(x in low for x in night_terms):
+            rules += [
+                "The scene MUST visibly take place at night/evening.",
+                "Daylight, sunshine, bright daytime windows, morning light, and afternoon light are incorrect.",
+                "If windows or outdoor areas are visible, show darkness, night reflections, or night city lights.",
+                "Use believable indoor evening illumination such as warm cafe lamps or ceiling lights."
+            ]
+        elif any(x in low for x in day_terms):
+            rules.append("The scene MUST visibly match the requested daytime period; do not turn it into a night scene.")
 
     if any(x in low for x in ("咖啡廳", "咖啡店", "cafe", "coffee shop")):
         rules.append("The location MUST clearly read as a cafe/coffee shop, with recognizable tables, drinks, seating, and cafe interior details.")
