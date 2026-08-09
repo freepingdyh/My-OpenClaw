@@ -56,7 +56,7 @@
                 <div class="flex space-x-6 overflow-x-auto">
                     <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap">小俠寫真館</button>
                     <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">相片總覽</button>
-                    <button onclick="switchTab('projects')" id="tab-projects" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">其他企劃</button>
+                    <button onclick="switchTab('projects')" id="tab-projects" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">特別企劃</button>
                     <button onclick="switchTab('music')" id="tab-music" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">唱片珍藏房</button>
                     <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">交換日記</button>
                 </div>
@@ -113,8 +113,10 @@
                     <h2 class="text-xl font-bold text-gray-800">所有相片總覽</h2>
                     <div class="flex space-x-2 bg-white/50 p-1 rounded-lg shadow-sm border border-pink-100 overflow-x-auto w-full md:w-auto">
                         <button onclick="renderOverview('all')" id="btn-filter-all" class="px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap">全部</button>
-                        <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
+                        <button onclick="renderOverview('cosplay')" id="btn-filter-cosplay" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">角色扮演</button>
                         <button onclick="renderOverview('diary')" id="btn-filter-diary" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">日常陪伴</button>
+                        <button onclick="renderOverview('portrait')" id="btn-filter-portrait" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">小俠寫真</button>
+                        <button onclick="renderOverview('travel')" id="btn-filter-travel" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">旅遊紀錄</button>
                         <button onclick="renderOverview('important')" id="btn-filter-important" class="px-4 py-1 text-sm rounded-md text-gray-600 hover:bg-pink-100 transition whitespace-nowrap">心動時刻</button>
                     </div>
                 </div>
@@ -223,6 +225,7 @@
 
         const VAULT_SESSION_KEY = 'xiaoxia_vault_unlocked';
         const VAULT_ACTIVE_TAB_KEY = 'xiaoxia_vault_active_tab';
+        const VAULT_OVERVIEW_FILTER_KEY = 'xiaoxia_vault_overview_filter';
 
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
 
@@ -260,6 +263,7 @@
         function logoutVault() {
             sessionStorage.removeItem(VAULT_SESSION_KEY);
             sessionStorage.removeItem(VAULT_ACTIVE_TAB_KEY);
+            sessionStorage.removeItem(VAULT_OVERVIEW_FILTER_KEY);
             location.reload();
         }
 
@@ -297,7 +301,7 @@
                 if(allPhotos.length > 0) {
                     renderMainDisplay();
                     renderTimelineList();
-                    renderOverview('all'); 
+                    renderOverview(sessionStorage.getItem(VAULT_OVERVIEW_FILTER_KEY) || 'all'); 
                     renderHeatmap();
                 } else {
                     document.getElementById('main-display').innerHTML = '<p class="text-center text-gray-400 py-20">金庫目前空空的，快去 Discord 呼叫小俠吧！</p>';
@@ -409,9 +413,41 @@
             renderTimelineList();
         }
 
+        function getOverviewCategory(photo) {
+            if (!photo) return 'portrait';
+            const explicit = String(photo.gallery_category || '').toLowerCase();
+            if (['cosplay', 'diary', 'portrait', 'travel', 'project'].includes(explicit)) return explicit;
+
+            // 舊資料相容：新資料由後端入庫時直接寫 gallery_category。
+            const type = String(photo.type || '').toLowerCase();
+            const sourceMode = String(photo.source_mode || '').toLowerCase();
+            const albumType = String(photo.album_type || '').toLowerCase();
+            const worldMode = String(photo.world_mode || '').toLowerCase();
+            if (type === 'project') return 'project';
+            if (type === 'cosplay' || sourceMode === 'cosplay') return 'cosplay';
+            if (type === 'diary' || sourceMode === 'diary') return 'diary';
+            if (worldMode === 'travel' || sourceMode === 'travel_photo') return 'travel';
+            if (type === 'photobook' || albumType === 'photobook' || type === 'autonomy_photo' || type === 'photo') return 'portrait';
+            return 'portrait';
+        }
+
+        function overviewTagText(category) {
+            return {
+                cosplay: '🎭 角色扮演',
+                diary: '📖 日常陪伴',
+                portrait: '📸 小俠寫真',
+                travel: '✈️ 旅遊紀錄'
+            }[category] || '📸 小俠寫真';
+        }
+
         function renderOverview(filterType = 'all') {
-            ['all', 'cosplay', 'diary', 'important'].forEach(t => {
+            const validFilters = ['all', 'cosplay', 'diary', 'portrait', 'travel', 'important'];
+            if (!validFilters.includes(filterType)) filterType = 'all';
+            sessionStorage.setItem(VAULT_OVERVIEW_FILTER_KEY, filterType);
+
+            validFilters.forEach(t => {
                 const btn = document.getElementById('btn-filter-' + t);
+                if (!btn) return;
                 if(t === filterType) {
                     btn.className = "px-4 py-1 text-sm rounded-md bg-pink-500 text-white shadow transition whitespace-nowrap";
                 } else {
@@ -422,26 +458,27 @@
             const grid = document.getElementById('overview-grid');
             let htmlContent = '';
 
-            if (filterType === 'all' || filterType === 'cosplay' || filterType === 'diary') {
+            if (filterType !== 'important') {
                 const displayPhotos = allPhotos.filter(p => {
-                    const type = p.type || 'cosplay'; 
-                    return filterType === 'all' ? true : type === filterType;
+                    const category = getOverviewCategory(p);
+                    if (category === 'project') return false; // Project 永遠留在「特別企劃」房間
+                    return filterType === 'all' ? true : category === filterType;
                 });
-                
-                htmlContent += displayPhotos.map((p) => {
-                    const globalIndex = allPhotos.indexOf(p);
-                    const pType = p.type || 'cosplay';
-                    let tagText = pType === 'diary' ? '📖 日記' : '✨ 寫真';
 
+                htmlContent += displayPhotos.map((p) => {
+                    const photoId = String(p.id || '');
+                    const category = getOverviewCategory(p);
+                    const safeTopic = String(p.topic || '小俠照片').replace(/【.*?】/, '');
+                    const safeDate = String(p.publish_date || '').split(' ')[0];
                     return `
-                    <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="jumpToPhotoFromOverview(${globalIndex})">
+                    <div class="aspect-[3/4] relative rounded-lg overflow-hidden cursor-pointer group shadow-sm hover:shadow-xl transition" onclick="jumpToPhotoFromOverviewById('${photoId.replace(/'/g, "\'")}')">
                         <img src="${p.local_url || p.image_url}" class="w-full h-full object-cover group-hover:scale-110 transition duration-500">
                         <div class="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-2 pointer-events-none">
-                            <p class="text-white text-xs font-bold truncate">${p.topic.replace(/【.*?】/, '')}</p>
-                            <p class="text-pink-300 text-[10px]">${p.publish_date.split(' ')[0]}</p>
+                            <p class="text-white text-xs font-bold truncate">${safeTopic}</p>
+                            <p class="text-pink-300 text-[10px]">${safeDate}</p>
                         </div>
                         <div class="absolute top-2 right-2 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] text-white">
-                            ${tagText}
+                            ${overviewTagText(category)}
                         </div>
                     </div>
                     `;
@@ -480,10 +517,11 @@
             }
         }
 
-        function jumpToPhotoFromOverview(globalIndex) {
+        function jumpToPhotoFromOverviewById(photoId) {
             document.getElementById('gallery-search').value = '';
-            filteredPhotos = [...allPhotos]; 
-            currentIndex = globalIndex;
+            filteredPhotos = allPhotos.filter(p => getOverviewCategory(p) !== 'project');
+            const idx = filteredPhotos.findIndex(p => String(p.id || '') === String(photoId || ''));
+            currentIndex = idx >= 0 ? idx : 0;
             switchTab('gallery');
             renderMainDisplay();
             renderTimelineList();
