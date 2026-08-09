@@ -52,12 +52,15 @@
                 <h1 class="text-3xl font-bold text-gray-800 serif">小俠的雲端別墅</h1>
                 <p class="text-sm text-pink-500 mt-1">Xiaoxia's Secret Vault</p>
             </div>
-            <div class="flex space-x-6 overflow-x-auto">
-                <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap">小俠寫真館</button>
-                <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">相片總覽</button>
-                <button onclick="switchTab('projects')" id="tab-projects" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">其他企劃</button>
-                <button onclick="switchTab('music')" id="tab-music" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">唱片珍藏房</button>
-                <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">交換日記</button>
+            <div class="flex items-center gap-4">
+                <div class="flex space-x-6 overflow-x-auto">
+                    <button onclick="switchTab('gallery')" id="tab-gallery" class="text-pink-600 border-b-2 border-pink-500 font-bold pb-1 text-lg whitespace-nowrap">小俠寫真館</button>
+                    <button onclick="switchTab('overview')" id="tab-overview" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">相片總覽</button>
+                    <button onclick="switchTab('projects')" id="tab-projects" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">其他企劃</button>
+                    <button onclick="switchTab('music')" id="tab-music" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">唱片珍藏房</button>
+                    <button onclick="switchTab('diary')" id="tab-diary" class="text-gray-400 hover:text-pink-400 font-bold pb-1 text-lg transition whitespace-nowrap">交換日記</button>
+                </div>
+                <button onclick="logoutVault()" class="shrink-0 text-xs text-gray-400 hover:text-red-500 border border-gray-200 hover:border-red-200 bg-white/70 px-3 py-1.5 rounded-lg transition" title="登出後，下次重新進入需輸入密碼">登出</button>
             </div>
         </header>
 
@@ -218,20 +221,48 @@
             }
         }
 
+        const VAULT_SESSION_KEY = 'xiaoxia_vault_unlocked';
+
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
+
+        function openVaultSession() {
+            const lockScreen = document.getElementById('lock-screen');
+            lockScreen.classList.add('hidden-fade');
+            document.getElementById('main-body').classList.remove('hidden', 'overflow-hidden');
+            setTimeout(() => lockScreen.style.display = 'none', 120);
+
+            // 真正重新讀取資料；refresh 後仍會重新抓 API 最新內容。
+            loadGalleryData();
+            loadDiaryData();
+            loadProjectsAndMusic();
+        }
+
         function unlockVault() {
             const pass = document.getElementById('vault-pass').value;
-            if (pass === "xiaoxia520") { 
-                const lockScreen = document.getElementById('lock-screen');
-                lockScreen.classList.add('hidden-fade');
-                document.getElementById('main-body').classList.remove('hidden', 'overflow-hidden');
-                setTimeout(() => lockScreen.style.display = 'none', 500);
-                loadGalleryData(); 
-                loadDiaryData(); 
+            if (pass === "xiaoxia520") {
+                // 只記住「這個瀏覽器分頁／工作階段已登入」。
+                // 重新整理不必重輸密碼；關閉分頁/瀏覽器或按「登出」後失效。
+                sessionStorage.setItem(VAULT_SESSION_KEY, '1');
+                document.getElementById('lock-error').classList.add('hidden');
+                openVaultSession();
             } else {
                 document.getElementById('lock-error').classList.remove('hidden');
             }
         }
+
+        function logoutVault() {
+            sessionStorage.removeItem(VAULT_SESSION_KEY);
+            location.reload();
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            if (sessionStorage.getItem(VAULT_SESSION_KEY) === '1') {
+                openVaultSession();
+            } else {
+                const passInput = document.getElementById('vault-pass');
+                if (passInput) passInput.focus();
+            }
+        });
 
         function switchTab(tab) {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -567,12 +598,8 @@
             });
             timeline.innerHTML = htmlContent;
         }
-        // 🌟 初始化讀取擴充
-        const originalUnlock = unlockVault;
-        unlockVault = function() {
-            originalUnlock();
-            loadProjectsAndMusic();
-        };
+        // 🌟 登入後的初始化讀取已統一由 openVaultSession() 處理；
+        // refresh 若仍在同一 session，會直接重新抓取最新 API 資料，不再回到密碼頁。
 
         let musicData = [];
 
