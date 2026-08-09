@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R10"
+LOBSTER_VERSION = "1.5.57_R11"
 
 
 def _normalize_generation_level(level):
@@ -17144,6 +17144,14 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
 
     current_outfit_state = _get_current_outfit_state()
     explicit_outfit_change = _photo_requests_outfit_change(raw_scene_text)
+
+    # v1.5.57_R11：一般 /photo 在入庫前就固定記錄目前世界模式，供雲端別墅分類。
+    # 不可只在自主活動流程定義，否則一般 /photo 會在建立 context 時觸發 NameError。
+    world_state = active_world_events.get(getattr(message.author, "id", None), {})
+    if not isinstance(world_state, dict):
+        world_state = {}
+    world_mode = str(world_state.get("mode") or "").strip().lower()
+    travel_target = str(world_state.get("target") or "").strip() if world_mode == "travel" else ""
 
     source_mode = "photo_reference" if (attachment or pending_wardrobe) else "photo_scene"
     print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(attachment)} pending_wardrobe={bool(pending_wardrobe)} explicit_change={explicit_outfit_change}")
