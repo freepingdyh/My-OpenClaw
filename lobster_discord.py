@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R11"
+LOBSTER_VERSION = "1.5.57_R13"
 
 
 def _normalize_generation_level(level):
@@ -2333,7 +2333,12 @@ def _autonomy_use_specified_wardrobe(activity, wardrobe_item):
 
 
 async def _autonomy_choose_wardrobe(activity, visual_mode):
-    """v1.5.56：自主活動服裝政策＝先優先使用衣櫃；若沒有真正合適候選，就明確改為自由生成並告知原因。"""
+    """v1.5.57_R12：Wardrobe First。
+
+    先以硬規則排除明顯不合理服裝；只要仍有可穿且有有效參考圖的候選，就一定從衣櫃選一件。
+    Gemini 只負責在合理候選中挑「相對最適合」，不再擁有棄權改成自創服飾的權力。
+    只有硬規則後完全沒有候選時，才允許 generated_fallback。
+    """
     items = load_wardrobe()
     rotation_state = _autonomy_wardrobe_rotation_state(_recent_wardrobe_usage(80))
     recent_entries = rotation_state["recent_entries"]
@@ -2354,183 +2359,165 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
     swim = any(k in low for k in ["游泳", "泳池", "海灘", "海边", "海邊", "swim", "pool", "beach"])
     sport = swim or any(k in low for k in ["運動", "瑜珈", "瑜伽", "健身", "跑步", "網球", "羽球", "舞蹈", "sport", "yoga", "tennis", "dance"])
     private_home = any(k in low for k in ["家中", "在家", "房間", "臥室", "卧室", "床", "沙發", "客廳", "書房", "廚房", "home", "bedroom"])
-    public_social = any(k in low for k in ["咖啡", "餐廳", "聚會", "姊妹", "姐妹", "閨蜜", "逛街", "展覽", "美術館", "旅行", "夜景", "老街", "市集", "cafe", "restaurant", "gallery", "shopping"])
-    min_suitable_score = _autonomy_min_suitable_score(activity, visual_mode, private_home=private_home, public_social=public_social, sport=sport, swim=swim)
+    category = str(activity.get("category") or "").strip()
+    public_categories = {"城市探索", "藝文活動", "旅行微冒險", "專業自主／教學工作", "公益志工", "學習成長", "社交但安全", "藝文創作"}
+    public_social = category in public_categories or any(k in low for k in ["咖啡", "餐廳", "聚會", "姊妹", "姐妹", "閨蜜", "逛街", "展覽", "美術館", "博物館", "圖書館", "校園", "醫院", "教室", "工作", "旅行", "夜景", "老街", "市集", "cafe", "restaurant", "gallery", "museum", "library", "campus", "hospital", "shopping"])
+    legacy_min_score = _autonomy_min_suitable_score(activity, visual_mode, private_home=private_home, public_social=public_social, sport=sport, swim=swim)
 
-    eligible=[]
-    excluded=[]
-    repeat_blocked=[]
+    eligible = []
+    excluded = []
     for item in items:
         ref_path, ref_url = _wardrobe_reference_for_generation(item)
         if not (ref_path or ref_url):
+            excluded.append({"id": item.get("id"), "reason": "沒有可用參考圖"})
             continue
-        main=str(item.get("main_category") or "")
-        text=" ".join([str(item.get("name") or ""), main, str(item.get("sub_category") or ""), " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")]).lower()
-        wid=str(item.get("id") or "").strip().upper()
-        reason=""
-        if swim and main != "泳裝" and not any(k in text for k in ["泳裝", "比基尼", "泳衣"]):
-            reason="游泳活動需泳裝"
+
+        main = str(item.get("main_category") or "")
+        text_blob = " ".join([
+            str(item.get("name") or ""), main, str(item.get("sub_category") or ""),
+            " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")
+        ]).lower()
+        wid = str(item.get("id") or "").strip().upper()
+        hard_reason = ""
+
+        # 只保留真正的場合硬衝突；「不夠完美」不再是淘汰理由。
+        if swim and main != "泳裝" and not any(k in text_blob for k in ["泳裝", "比基尼", "泳衣"]):
+            hard_reason = "游泳活動需泳裝"
         elif public_social and main in {"內衣", "睡衣／居家服", "泳裝"}:
-            reason="公開社交場合排除內衣／睡衣／泳裝"
+            hard_reason = "公開社交場合排除內衣／睡衣／泳裝"
         elif sport and not swim and main in {"內衣", "睡衣／居家服"}:
-            reason="運動場合排除內衣／睡衣"
+            hard_reason = "運動場合排除內衣／睡衣"
+        elif sport and not swim and any(k in text_blob for k in ["禮服", "晚禮服", "高跟鞋"]):
+            hard_reason = "運動場合排除禮服／高跟鞋類穿搭"
         elif not private_home and main == "內衣":
-            reason="非私密居家場合排除內衣"
-        elif wid in today_ids:
-            reason="今日已穿過，為了輪替先排除"
-        elif wid in recent_7day_autonomy_ids:
-            repeat_blocked.append(item)
-            excluded.append({"id":item.get("id"),"reason":"近 7 日自主活動已穿過，先強制排除"})
+            hard_reason = "非私密居家場合排除內衣"
+
+        if hard_reason:
+            excluded.append({"id": item.get("id"), "reason": hard_reason})
             continue
-        if reason:
-            excluded.append({"id":item.get("id"),"reason":reason})
-            continue
-        score=_autonomy_wardrobe_candidate_score(item, activity, visual_mode)
-        if public_social and main in {"洋裝","套裝","上衣","下身","外套"}: score += 14
-        if private_home and main in {"睡衣／居家服","洋裝","套裝","上衣","下身"}: score += 8
-        if sport and any(k in text for k in ["運動","瑜","網球","羽球","跑步","健身","短褲","背心","polo"]): score += 14
-        if swim and main == "泳裝": score += 30
-        if wid in recent_3day_ids:
+
+        score = _autonomy_wardrobe_candidate_score(item, activity, visual_mode)
+        if public_social and main in {"洋裝", "套裝", "上衣", "下身", "外套"}:
+            score += 14
+        if private_home and main in {"睡衣／居家服", "洋裝", "套裝", "上衣", "下身"}:
+            score += 8
+        if sport and any(k in text_blob for k in ["運動", "瑜", "網球", "羽球", "跑步", "健身", "短褲", "背心", "polo"]):
+            score += 14
+        if swim and main == "泳裝":
+            score += 30
+
+        # R12：輪替只降權，不再把可穿衣服硬踢出候選池。
+        if wid in today_ids:
+            score -= 40
+        elif wid in recent_3day_ids:
             score -= 24
+        elif wid in recent_7day_autonomy_ids:
+            score -= 16
         elif wid in recent_7day_ids:
-            score -= 14
+            score -= 12
         elif wid in last_10_ids_set:
             score -= 8
-        eligible.append((score,item))
+        eligible.append((score, item))
 
-    meta={
-        "mode":"autonomy_semantic_v1556_prefer_wardrobe_else_generate",
-        "activity_text":activity_text,
-        "candidate_count":len(eligible),
-        "excluded_count":len(excluded),
-        "excluded_preview":excluded[:12],
-        "hard_block_today_ids": sorted(today_ids),
-        "hard_block_recent_autonomy_ids": sorted(recent_7day_autonomy_ids),
-        "selected_id":None,
-        "selected_name":"",
-        "selection_reason":"",
-        "selection_mode":"wardrobe",
-        "used_wardrobe":False,
-        "fallback_used":False,
-        "repeat_relaxation_used":False,
-        "min_suitable_score": min_suitable_score,
+    meta = {
+        "mode": "autonomy_semantic_v1557_r12_wardrobe_first",
+        "activity_text": activity_text,
+        "candidate_count": len(eligible),
+        "excluded_count": len(excluded),
+        "excluded_preview": excluded[:12],
+        "soft_avoid_today_ids": sorted(today_ids),
+        "soft_avoid_recent_autonomy_ids": sorted(recent_7day_autonomy_ids),
+        "selected_id": None,
+        "selected_name": "",
+        "selection_reason": "",
+        "selection_mode": "wardrobe",
+        "used_wardrobe": False,
+        "fallback_used": False,
+        "wardrobe_first": True,
+        "legacy_min_suitable_score": legacy_min_score,
     }
-    if len(eligible) < 4 and repeat_blocked:
-        for item in repeat_blocked:
-            score = _autonomy_wardrobe_candidate_score(item, activity, visual_mode) - 32
-            eligible.append((score, item))
-        meta["repeat_relaxation_used"] = True
-        meta["repeat_relaxation_reason"] = "嚴格輪替後候選過少，放寬近 7 日自主重複衣服，但保留重罰分"
 
+    # 只有硬條件後真的一件都不能穿，才允許自由生成。
     if not eligible:
-        reason = _autonomy_normalize_generated_fallback_reason(activity, "衣櫃目前沒有符合這個活動場合的合適服裝，所以這次改由小俠自由生成穿搭。")
-        meta["fallback_used"]=True
-        meta["selection_mode"]="generated_fallback"
-        meta["fallback_reason"]="衣櫃沒有符合此活動場合且具有有效參考圖的服裝"
-        meta["selection_reason"]=reason
-        return None, reason, meta
-
-    eligible.sort(key=lambda x:x[0], reverse=True)
-    top_score = eligible[0][0] if eligible else -999
-    if top_score < min_suitable_score:
-        reason = _autonomy_normalize_generated_fallback_reason(activity, f"衣櫃雖然有一些可用服裝，但沒有任何一件真正足夠適合「{activity.get('title') or '這個活動'}」，所以這次改由小俠自由生成穿搭。")
+        reason = _autonomy_normalize_generated_fallback_reason(
+            activity,
+            "衣櫃在排除場合硬衝突與失效參考圖後沒有任何可用服裝，所以這次才改由小俠自由生成穿搭。",
+        )
         meta["fallback_used"] = True
         meta["selection_mode"] = "generated_fallback"
-        meta["fallback_reason"] = f"最佳候選分數 {top_score} 仍低於適配門檻 {min_suitable_score}"
+        meta["fallback_reason"] = "硬規則後沒有任何具有有效參考圖的衣櫃候選"
         meta["selection_reason"] = reason
-        meta["top_score"] = top_score
         return None, reason, meta
 
-    candidates=[item for score,item in eligible if score >= min_suitable_score][:20]
-    if not candidates:
-        candidates=[item for _score,item in eligible[:min(12,len(eligible))]]
-    recent_summary=_summarize_recent_wardrobe_usage(recent_entries, limit=8)
-    semantic_cache=_load_or_refresh_wardrobe_semantic_cache(items)
-    catalog=[_compact_wardrobe_brief(x, semantic_cache) for x in candidates]
-    prompt=f"""
-你是小俠的穿搭挑選助理。請先優先考慮衣櫃，但只有在真正合適時才可採用；若沒有真正合適的衣櫃服裝，就回傳空字串 wardrobe_id，讓系統改成自由生成服裝。
+    eligible.sort(key=lambda x: x[0], reverse=True)
+    top_score = eligible[0][0]
+    # 不再使用 min_suitable_score 當成自創門檻；把最高分群交給 Gemini 做相對選擇。
+    candidates = [item for _score, item in eligible[:min(20, len(eligible))]]
+    recent_summary = _summarize_recent_wardrobe_usage(recent_entries, limit=8)
+    semantic_cache = _load_or_refresh_wardrobe_semantic_cache(items)
+    catalog = [_compact_wardrobe_brief(x, semantic_cache) for x in candidates]
+    prompt = f"""
+你是小俠的穿搭挑選助理。這是 Wardrobe First 模式：候選清單已由程式排除明顯不合理或沒有可用參考圖的服裝，所以你必須從候選中挑出相對最適合的一件，不能棄權、不能改成自創服飾。
 活動：{activity_text}
 視覺模式：{visual_mode}
 最近使用紀錄：
 {recent_summary}
 規則：
-1. 只能回傳候選清單中真實存在的 wardrobe_id；如果沒有真正合適的衣櫃服裝，請回傳 {{"wardrobe_id":"","reason":"一句中文理由","confidence":0.0}}。
-2. 候選清單已先排除：今日已穿過的衣服，以及近 7 日自主活動已穿過的衣服；請不要試圖用理由把它們選回來。
-3. 不要只找與活動文字完全相同的詞。請依序推論：場合屬性 → 正式程度 → 季節／功能 → 風格 → 顏色。
-4. 候選中的 semantic.formality／season／occasion／style 是程式由現有 JSON 推導的語意資料，應優先用於判斷。
-5. 公開社交場合不可選內衣、睡衣或泳裝；運動與游泳必須符合功能場合。
-6. 最近 3 天穿過者強烈降權，最近 7 天其他用途穿過者也要降權，最近 10 次穿過者適度降權。
-7. 如果你認為候選都不夠合宜，寧可回傳空 wardrobe_id，也不要勉強挑一件不適合的。
-8. 不要因衣服的建議場景改變本次活動，也不要偷懶一直挑同一套風格相近的制服型服裝。
-只回 JSON：{{"wardrobe_id":"Wxxx或空字串","reason":"一句中文理由","confidence":0.0}}
+1. 必須回傳候選清單中真實存在的一個 wardrobe_id，不可回傳空字串，不可自創 W 編號。
+2. 請比較「相對適合度」，不是要求完美匹配；只要候選中有可合理穿的，就選最好的一件。
+3. 不要只找與活動文字完全相同的詞。依序考慮：場合屬性 → 正式程度 → 季節／功能 → 風格 → 顏色。
+4. semantic.formality／season／occasion／style 可直接用於比較，但不得讓衣服反過來改變本次活動。
+5. 最近穿過只代表降低優先，不代表禁止；若近期穿過的衣服仍明顯最適合，可以選。
+6. 不要偷懶固定挑同一種白色短版上衣／白短褲或其他制服型組合，要利用衣櫃本身的多樣性。
+只回 JSON：{{"wardrobe_id":"Wxxx","reason":"一句中文理由","confidence":0.0}}
 候選：{json.dumps(catalog, ensure_ascii=False)}
 """
-    picked=None; reason=""; confidence=None
+
+    picked = None
+    reason = ""
+    confidence = None
     try:
-        resp=await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35))
-        data=_extract_json_object(getattr(resp,"text","") or "")
-        wid=str((data or {}).get("wardrobe_id") or "").strip().upper()
-        reason=_clean_text_compact((data or {}).get("reason") or "")
-        confidence=(data or {}).get("confidence")
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35),
+        )
+        data = _extract_json_object(getattr(resp, "text", "") or "")
+        wid = str((data or {}).get("wardrobe_id") or "").strip().upper()
+        reason = _clean_text_compact((data or {}).get("reason") or "")
+        confidence = (data or {}).get("confidence")
         for candidate in candidates:
-            if str(candidate.get("id") or "").strip().upper()==wid:
-                picked=candidate; break
-        if not wid:
-            picked = None
+            if str(candidate.get("id") or "").strip().upper() == wid:
+                picked = candidate
+                break
     except Exception as exc:
         print(f"⚠️ [AUTONOMY_SEMANTIC_WARDROBE_FAILED] {type(exc).__name__}: {exc}")
 
-    if picked:
-        picked_score = next((score for score, item in eligible if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
-        if picked_score < min_suitable_score:
-            picked = None
-            reason = f"衣櫃裡沒有真正足夠合適「{activity.get('title') or '這個活動'}」的服裝，所以這次改由小俠自由生成穿搭。"
-            meta["fallback_used"] = True
-            meta["fallback_reason"] = f"Gemini 選中的衣服分數 {picked_score} 低於適配門檻 {min_suitable_score}"
-        else:
-            meta.update({
-                "selected_id": picked.get("id"),
-                "selected_name": picked.get("name") or "",
-                "selection_reason": reason or f"這套衣服最適合今天的活動情境。",
-                "confidence": confidence,
-                "selection_mode": "wardrobe",
-                "used_wardrobe": True,
-                "top_score": top_score,
-                "picked_score": picked_score,
-            })
-            return picked, reason or f"這套衣服最適合今天的活動情境。", meta
-
+    # Gemini 空白、亂回、服務失敗都不再導向自創；直接由程式從高分群挑一件。
     if not picked:
-        top=eligible[:min(8,len(eligible))]
-        wardrobe_top=[(score,it) for score,it in top if score >= min_suitable_score]
-        if wardrobe_top:
-            weights=[max(1,score-min(0,wardrobe_top[-1][0])+1) for score,_ in wardrobe_top]
-            picked=random.choices([it for _,it in wardrobe_top], weights=weights, k=1)[0]
-            picked_score = next((score for score, item in wardrobe_top if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
-            reason = reason or f"符合今日活動「{activity.get('title')}」的場合與衣櫃輪替規則。"
-            meta["fallback_used"]=True
-            meta["fallback_reason"]="語意選衣服務未回傳有效衣櫃編號，改用場合評分高分群"
-            meta.update({
-                "selected_id": picked.get("id"),
-                "selected_name": picked.get("name") or "",
-                "selection_reason": reason,
-                "confidence": confidence,
-                "selection_mode": "wardrobe",
-                "used_wardrobe": True,
-                "top_score": top_score,
-                "picked_score": picked_score,
-            })
-            return picked, reason, meta
-
-        reason = _autonomy_normalize_generated_fallback_reason(activity, reason or f"衣櫃裡沒有真正足夠合適「{activity.get('title') or '這個活動'}」的服裝，所以這次改由小俠自由生成穿搭。")
+        top = eligible[:min(8, len(eligible))]
+        # 對分數做正值平移後加權，保留多樣性但仍偏向高分候選。
+        floor = min(score for score, _ in top)
+        weights = [max(1, score - floor + 1) for score, _ in top]
+        picked = random.choices([it for _, it in top], weights=weights, k=1)[0]
+        picked_score = next((score for score, item in top if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
+        reason = reason or f"Gemini 未回傳有效衣櫃編號，因此由場合評分高分群挑選；仍遵守 Wardrobe First。"
         meta["fallback_used"] = True
-        meta["selection_mode"] = "generated_fallback"
-        meta["used_wardrobe"] = False
-        meta["selection_reason"] = reason
-        meta["fallback_reason"] = meta.get("fallback_reason") or f"所有候選分數都低於適配門檻 {min_suitable_score}"
-        meta["top_score"] = top_score
-        return None, reason, meta
+        meta["fallback_reason"] = "Gemini 未回傳有效衣櫃編號，改由程式高分群選衣；未改成自創服飾"
+    else:
+        picked_score = next((score for score, item in eligible if str(item.get("id") or "").strip().upper() == str(picked.get("id") or "").strip().upper()), top_score)
 
+    meta.update({
+        "selected_id": picked.get("id"),
+        "selected_name": picked.get("name") or "",
+        "selection_reason": reason or "從可合理穿的衣櫃候選中選出相對最適合的一件。",
+        "confidence": confidence,
+        "selection_mode": "wardrobe",
+        "used_wardrobe": True,
+        "top_score": top_score,
+        "picked_score": picked_score,
+    })
+    return picked, meta["selection_reason"], meta
 
 def _autonomy_female_interaction_requested_from_text(text):
     """v1.5.25：辨識大俠指定的女性社交互動情境。"""
@@ -12855,12 +12842,27 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None,
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
     has_reference = bool((trace_context or {}).get("figure10_present") or (trace_context or {}).get("reference_item_path") or (trace_context or {}).get("reference_item_url")) if isinstance(trace_context, dict) else False
-    final_prompt = _seedream_diary_prompt(
+    diary_prompt_result = _seedream_diary_prompt(
         custom_prompt,
         has_reference=has_reference,
         current_outfit=(trace_context or {}).get("current_outfit_for_seedream") if isinstance(trace_context, dict) else None,
         visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
     )
+    # R13: v1.5.28+ diary prompt builder returns (prompt_string, stats_dict).
+    # The dedicated diary path previously forwarded that tuple directly to fal.ai,
+    # so the API received [prompt, stats] instead of a string and rejected every retry.
+    if isinstance(diary_prompt_result, tuple):
+        final_prompt, diary_prompt_stats = diary_prompt_result
+    else:
+        final_prompt, diary_prompt_stats = diary_prompt_result, None
+    final_prompt = str(final_prompt or "").strip()
+    if not final_prompt:
+        raise RuntimeError("SEEDREAM_DIARY_PROMPT_EMPTY")
+    if isinstance(trace_context, dict):
+        trace_context["seedream_prompt_exact"] = final_prompt
+        trace_context["diary_seedream_prompt_exact"] = final_prompt
+        if diary_prompt_stats is not None:
+            trace_context["diary_prompt_stats"] = diary_prompt_stats
     if isinstance(trace_context, dict) and trace_context.get("v5_background_role_handoff"):
         final_prompt = _apply_v5_background_role_handoff_prompt(final_prompt, has_reference=has_reference)
     if isinstance(trace_context, dict):
@@ -13312,56 +13314,44 @@ def _diary_promises_for_entry(profile, entry_date, max_items=4):
 
 
 async def _diary_auto_wardrobe_fit_check(item, photo_selection, diary_text=""):
-    """v1.5.51：只驗證自動挑選衣櫃是否真的符合本篇照片情境；不合適就改用自創服飾。"""
+    """v1.5.57_R12：交換日記只擋明顯場合硬衝突；不再讓 Gemini 因「不夠完美」否決衣櫃。"""
     if not isinstance(item, dict):
         return False, "沒有衣櫃候選"
+
     selection = photo_selection if isinstance(photo_selection, dict) else {}
-    item_desc = {
-        "id": item.get("id"),
-        "name": item.get("name"),
-        "main_category": item.get("main_category"),
-        "sub_category": item.get("sub_category"),
-        "tags": (item.get("tags") or [])[:18],
-        "style_summary": _clean_text_compact(item.get("style_summary"))[:600],
-    }
-    prompt = f"""
-你是交換日記衣櫃適配檢查員。只判斷這件既有衣櫃服飾是否真的適合本篇已選定的單張照片。
+    scene_blob = _clean_text_compact(" ".join([
+        str(selection.get("scene") or ""),
+        str(selection.get("action") or ""),
+        str(selection.get("mood") or ""),
+        str(selection.get("outfit") or ""),
+        str(diary_text or ""),
+    ])).lower()
+    main = str(item.get("main_category") or "")
+    item_blob = " ".join([
+        str(item.get("name") or ""), main, str(item.get("sub_category") or ""),
+        " ".join(str(x) for x in (item.get("tags") or [])), str(item.get("style_summary") or "")
+    ]).lower()
 
-【照片決策】
-scene：{selection.get('scene') or ''}
-action：{selection.get('action') or ''}
-mood：{selection.get('mood') or ''}
-outfit intent：{selection.get('outfit') or ''}
+    swim = any(k in scene_blob for k in ["游泳", "泳池", "海灘", "海边", "海邊", "swim", "pool", "beach"])
+    sport = swim or any(k in scene_blob for k in ["運動", "瑜珈", "瑜伽", "健身", "跑步", "網球", "羽球", "皮拉提斯", "舞蹈", "sport", "yoga", "tennis", "pilates", "dance"])
+    private_home = any(k in scene_blob for k in ["家中", "在家", "房間", "臥室", "卧室", "床", "沙發", "客廳", "書房", "廚房", "home", "bedroom", "private"])
+    public_scene = any(k in scene_blob for k in [
+        "咖啡", "餐廳", "聚會", "早午餐", "逛街", "百貨", "展覽", "美術館", "博物館", "書店", "圖書館", "校園", "醫院", "志工", "教室", "工作", "旅行", "夜景", "老街", "市集", "公園", "街道", "cafe", "restaurant", "gallery", "museum", "library", "campus", "hospital", "shopping"
+    ])
 
-【本篇日記摘要】
-{_clean_text_compact(diary_text)[-1200:]}
+    if swim and main != "泳裝" and not any(k in item_blob for k in ["泳裝", "比基尼", "泳衣"]):
+        return False, "游泳／泳池情境需要泳裝"
+    if public_scene and main in {"內衣", "睡衣／居家服", "泳裝"}:
+        return False, "公開場合不可穿內衣／睡衣／泳裝"
+    if sport and not swim and main in {"內衣", "睡衣／居家服"}:
+        return False, "運動情境不可穿內衣／睡衣"
+    if not private_home and main == "內衣":
+        return False, "非私密居家情境不可穿內衣"
 
-【衣櫃候選】
-{json.dumps(item_desc, ensure_ascii=False)}
-
-規則：
-1. 不要因為衣服漂亮就判合適；必須符合地點、時間、活動與情緒。
-2. 若照片決策明確要某種服裝，而候選的類型、顏色或氛圍明顯不同，判 unsuitable。
-3. 居家私密可接受內衣、睡袍、睡衣、居家服；公開場合需可合理外穿。
-4. 沒有真正合適的衣櫃服飾時，寧可判 unsuitable，後續會標示「今日使用自創服飾」。
-5. 只回 JSON：{{"suitable":true,"reason":"30字內"}}
-"""
-    try:
-        response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        data = _safe_json_from_text(response.text, {})
-        return bool(data.get("suitable")), _clean_text_compact(data.get("reason"))[:120]
-    except Exception as exc:
-        print(f"⚠️ [DIARY_WARDROBE_FIT_CHECK_FAILED] {type(exc).__name__}: {exc}")
-        # 檢查失敗時不冒險掛上錯誤衣櫃編號。
-        return False, "適配檢查失敗，改用自創服飾"
-
+    return True, "通過場合硬規則；Wardrobe First 保留此衣櫃候選"
 
 async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promises=None, result=None, target_date=None, autonomy_candidate=None, photo_selection=None):
-    """v1.5.51：交換日記只在真正合適時使用衣櫃；否則回傳 None，改標示自創服飾。"""
+    """v1.5.57_R12：交換日記採 Wardrobe First；除明顯硬衝突或使用者明確指定自由服裝外，優先使用衣櫃。"""
     selection = photo_selection if isinstance(photo_selection, dict) else {}
     sources=[entry_content, chat_context, selection.get("outfit", ""), selection.get("selected_memory", ""), selection.get("scene", "")]
     if isinstance(result,dict):
@@ -13388,7 +13378,8 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
                 selection_source="autonomy_rewash_continuity"
                 reason=f"今日自主活動加洗，延續原活動衣櫃 {awid}。"
 
-    if not item and _diary_outfit_has_custom_marker(selection) and pref_mode not in {"free", "specified"}:
+    # R12：Photo Selector 自己寫「自創服飾」不再有權直接跳過衣櫃；只有大俠明確用 scene_only 模式時保留自由服裝。
+    if not item and _diary_outfit_has_custom_marker(selection) and pref_mode == "scene_only":
         return None
 
     if not item:
@@ -13406,9 +13397,24 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
         if item:
             suitable, fit_reason = await _diary_auto_wardrobe_fit_check(item, selection, diary_text=blob)
             if not suitable:
-                print(f"👗 [DIARY_WARDROBE_REJECTED] id={item.get('id')} reason={fit_reason}")
-                return None
-            reason = f"{reason} 適配檢查：{fit_reason}".strip()
+                print(f"👗 [DIARY_WARDROBE_HARD_REJECTED] id={item.get('id')} reason={fit_reason}")
+                # 僅硬衝突才拒絕；再選一次時不允許沿用這個 item。
+                alternatives = [x for x in load_wardrobe() if str(x.get("id") or "").strip().upper() != str(item.get("id") or "").strip().upper() and _wardrobe_reference_for_generation(x)[0]]
+                item = None
+                fit_reason2 = ""
+                # 從其餘可用衣櫃中找第一件通過硬規則者；不再因主觀「不夠完美」退回自創。
+                random.shuffle(alternatives)
+                for retry_item in alternatives[:40]:
+                    suitable2, fit_reason2 = await _diary_auto_wardrobe_fit_check(retry_item, selection, diary_text=blob)
+                    if suitable2:
+                        item = retry_item
+                        fit_reason = fit_reason2
+                        break
+                if not item:
+                    print(f"👗 [DIARY_WARDROBE_NO_HARD_VALID_ALTERNATIVE] reason={fit_reason2 or fit_reason}")
+                if not item:
+                    return None
+            reason = f"{reason} 硬規則檢查：{fit_reason}".strip()
 
     if not item:
         return None
