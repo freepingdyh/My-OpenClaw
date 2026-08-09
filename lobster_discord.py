@@ -10,7 +10,7 @@ import math
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R7"
+LOBSTER_VERSION = "1.5.57_R10"
 
 
 def _normalize_generation_level(level):
@@ -3215,6 +3215,12 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     policy_info = _autonomy_people_policy_info(activity)
     prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
+    world_state = active_world_events.get(getattr(message.author, "id", None), {})
+    if not isinstance(world_state, dict):
+        world_state = {}
+    world_mode = str(world_state.get("mode") or "").strip().lower()
+    travel_target = str(world_state.get("target") or "").strip() if world_mode == "travel" else ""
+
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
@@ -12289,6 +12295,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "local_filename": local_filename,
             "local_path": os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,
             "type": "cosplay",
+            "gallery_category": "cosplay",
             "source_mode": "cosplay",
             "prompt_base": scene_prompt,
             "user_mode_request": mode,
@@ -13085,16 +13092,42 @@ def _pending_wardrobe_has_usable_reference(item):
 
 
 def _extract_current_outfit_reference(outfit_state):
-    """延續今日穿著時，盡量保留原本的 wardrobe_id 與 Figure 10 參考圖。"""
+    """延續今日穿著時，優先回到最新衣櫃資料；若舊 Figure 10 已失效，退回純文字延續，避免 /photo 因舊 URL 404 而失敗。"""
     if not isinstance(outfit_state, dict):
         return None
-    ref_path = str(outfit_state.get("reference_item_path") or "").strip()
-    ref_url = str(outfit_state.get("reference_item_url") or "").strip()
+
     wardrobe_id = str(outfit_state.get("wardrobe_id") or "").strip().upper() or None
-    if ref_path and not os.path.exists(ref_path):
-        ref_path = ""
-    if not ref_path and ref_url:
-        ref_path = ref_url
+    if wardrobe_id:
+        latest_item = _find_wardrobe_item(wardrobe_id)
+        latest_ref_path, latest_ref_url = _wardrobe_reference_for_generation(latest_item) if latest_item else (None, None)
+        if latest_ref_path or latest_ref_url:
+            return {
+                "reference_item_path": latest_ref_path or None,
+                "reference_item_url": latest_ref_url or None,
+                "wardrobe_id": wardrobe_id,
+            }
+
+    def _normalize_candidate(value):
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("http"):
+            if "/gallery/" in raw:
+                candidate_local = _gallery_url_to_local_path(raw)
+                return candidate_local if candidate_local and os.path.exists(candidate_local) else ""
+            return raw
+        return raw if os.path.exists(raw) else ""
+
+    ref_path = _normalize_candidate(outfit_state.get("reference_item_path"))
+    ref_url = str(outfit_state.get("reference_item_url") or "").strip()
+    if not ref_path:
+        fallback_candidate = _normalize_candidate(ref_url)
+        if fallback_candidate:
+            ref_path = fallback_candidate
+        elif ref_url.startswith("http") and "/gallery/" in ref_url:
+            # 舊 gallery URL 已經沒有對應本機檔案時，不再硬餵給 Seedream，避免 404。
+            ref_url = ""
+
     if not ref_path and not ref_url and not wardrobe_id:
         return None
     return {
@@ -13128,14 +13161,22 @@ def _photo_requests_outfit_change(raw_scene_text):
 def _build_outfit_state_from_context(context):
     if not context:
         return None
+    wardrobe_id = context.get("wardrobe_id")
+    if wardrobe_id:
+        stored_reference_path = context.get("reference_item_path") or context.get("local_path")
+        stored_reference_url = context.get("reference_item_url") or context.get("local_url") or context.get("image_url")
+    else:
+        # 非衣櫃／附件延續時，優先記住已存入 gallery 的穩定輸出，避免日後再抓 Discord/CDN 臨時網址。
+        stored_reference_path = context.get("local_path") or context.get("reference_item_path")
+        stored_reference_url = context.get("local_url") or context.get("reference_item_url") or context.get("image_url")
     return {
         "date": _today_str_tpe(),
         "description": _wardrobe_visual_summary_only(context.get("outfit_summary") or "自然日常穿搭") or _clean_text_compact(context.get("outfit_summary") or "自然日常穿搭"),
         "source": context.get("source_mode", "photo_scene"),
         "scene_summary": _clean_text_compact(context.get("scene_summary") or ""),
-        "reference_item_path": context.get("reference_item_path"),
-        "reference_item_url": context.get("reference_item_url") or context.get("local_url") or context.get("image_url"),
-        "wardrobe_id": context.get("wardrobe_id"),
+        "reference_item_path": stored_reference_path,
+        "reference_item_url": stored_reference_url,
+        "wardrobe_id": wardrobe_id,
         "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -16094,9 +16135,35 @@ def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, refere
     }
 
 
+def _gallery_category_for_photo(context, type_override="photo"):
+    """雲端別墅相片總覽分類。分類在入庫時決定，前端只負責顯示。"""
+    context = context if isinstance(context, dict) else {}
+    explicit = str(context.get("gallery_category") or "").strip().lower()
+    if explicit in {"cosplay", "diary", "portrait", "travel", "project"}:
+        return explicit
+
+    record_type = str(type_override or context.get("type") or context.get("db_type") or "photo").strip().lower()
+    source_mode = str(context.get("source_mode") or "").strip().lower()
+    album_type = str(context.get("album_type") or "").strip().lower()
+    world_mode = str(context.get("world_mode") or "").strip().lower()
+
+    if record_type == "project":
+        return "project"
+    if record_type == "cosplay" or source_mode == "cosplay":
+        return "cosplay"
+    if record_type == "diary" or source_mode == "diary":
+        return "diary"
+    if world_mode == "travel" or source_mode == "travel_photo":
+        return "travel"
+    if record_type in {"photobook", "autonomy_photo", "photo"} or album_type == "photobook":
+        return "portrait"
+    return "portrait"
+
+
 def _photo_db_payload(context, name=None, type_override="photo"):
     title = name or context.get("photo_name") or context.get("scene_text") or "小俠照片"
     activity = context.get("autonomy_activity") if isinstance(context.get("autonomy_activity"), dict) else {}
+    gallery_category = _gallery_category_for_photo(context, type_override=type_override)
     return {
         "id": str(uuid.uuid4()),
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
@@ -16108,6 +16175,9 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "image_url": context.get("image_url", ""),
         "local_url": context.get("local_url", context.get("image_url", "")),
         "type": type_override,
+        "gallery_category": gallery_category,
+        "world_mode": context.get("world_mode"),
+        "travel_target": context.get("travel_target"),
         "source_mode": context.get("source_mode", "photo_scene"),
         "source_module": context.get("source_module") or context.get("source_mode", "photo_scene"),
         "image_role": context.get("image_role"),
@@ -17200,6 +17270,9 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
+        "gallery_category": "travel" if world_mode == "travel" else "portrait",
+        "world_mode": world_mode,
+        "travel_target": travel_target,
         "scene_text": scene_seed_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
         "scene_summary": scene_data.get("scene_summary", ""),
         "outfit_summary": scene_data.get("outfit_summary", ""),
@@ -17234,6 +17307,7 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
             context["db_type"] = "photobook"
             context["type"] = "photobook"
             context["album_type"] = "photobook"
+            context["gallery_category"] = "portrait"
         db = load_memory()
         db.insert(0, _photo_db_payload(context, type_override=context.get("db_type", "photo")))
         save_memory(db)
@@ -23983,7 +24057,8 @@ async def upload_project(ctx, *, description: str = "未命名企劃"):
             "composition": "",
             "mood": "",
             "message": description,
-            "type": "project" # 關鍵標籤
+            "type": "project", # 關鍵標籤
+            "gallery_category": "project"
         }
         
         photos_db = load_memory()
