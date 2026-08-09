@@ -222,6 +222,7 @@
         }
 
         const VAULT_SESSION_KEY = 'xiaoxia_vault_unlocked';
+        const VAULT_ACTIVE_TAB_KEY = 'xiaoxia_vault_active_tab';
 
         function handleEnter(e) { if (e.key === 'Enter') unlockVault(); }
 
@@ -235,6 +236,12 @@
             loadGalleryData();
             loadDiaryData();
             loadProjectsAndMusic();
+
+            // Refresh 後回到使用者原本所在的分頁。
+            const savedTab = sessionStorage.getItem(VAULT_ACTIVE_TAB_KEY);
+            if (savedTab && ['gallery', 'overview', 'projects', 'music', 'diary'].includes(savedTab)) {
+                switchTab(savedTab);
+            }
         }
 
         function unlockVault() {
@@ -252,6 +259,7 @@
 
         function logoutVault() {
             sessionStorage.removeItem(VAULT_SESSION_KEY);
+            sessionStorage.removeItem(VAULT_ACTIVE_TAB_KEY);
             location.reload();
         }
 
@@ -265,6 +273,7 @@
         });
 
         function switchTab(tab) {
+            sessionStorage.setItem(VAULT_ACTIVE_TAB_KEY, tab);
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('content-' + tab).classList.add('active');
             ['gallery', 'overview', 'projects', 'music', 'diary'].forEach(t => {
