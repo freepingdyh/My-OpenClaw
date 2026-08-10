@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R15"
+LOBSTER_VERSION = "1.5.57_R16"
 
 
 def _normalize_generation_level(level):
@@ -1827,6 +1827,120 @@ def _autonomy_resolve_activity(query, message=None, catalog=None, category_filte
     return None
 
 
+def _autonomy_recent_theme_episodes(activity, limit=6):
+    """取同 theme 的最近幾集，供 Episode Angle 規劃；平常不注入聊天 prompt。"""
+    activity = _autonomy_enrich_activity(activity)
+    theme_key = _autonomy_theme_key_for_activity(activity)
+    rows = load_xiaoxia_autonomy_episode_log()
+    matched = [row for row in rows if isinstance(row, dict) and str(row.get("theme_key") or "").strip() == theme_key]
+    return matched[-max(1, int(limit or 6)):]
+
+
+def _autonomy_episode_history_brief(activity, limit=6, max_chars=2400):
+    rows = _autonomy_recent_theme_episodes(activity, limit=limit)
+    if not rows:
+        return "（無既有 episode；這次是這條生活線的起點。）"
+    lines = []
+    for idx, row in enumerate(rows, 1):
+        detail = row.get("episode_angle") or row.get("what_happened") or row.get("share_text") or row.get("scene") or row.get("activity_title") or ""
+        progress = row.get("new_progress") or row.get("progress_focus") or ""
+        scene_focus = row.get("scene_focus") or ""
+        lines.append(
+            f"{idx}. {row.get('date') or '?'}｜{row.get('activity_title') or ''}｜"
+            f"重點：{_clean_text_compact(detail)[:360]}｜"
+            f"進展：{_clean_text_compact(progress)[:220]}｜"
+            f"畫面：{_clean_text_compact(scene_focus)[:220]}"
+        )
+    return narrative_safe_text("\n".join(lines), max_len=max_chars)
+
+
+async def _autonomy_generate_episode_plan(activity, thread_context=""):
+    """R16：同主題再出現時，讓 Gemini 先決定『這一集的新枝葉』，再交給生圖與分享文共用。"""
+    activity = _autonomy_enrich_activity(activity)
+    recent_rows = _autonomy_recent_theme_episodes(activity, limit=6)
+    history_brief = _autonomy_episode_history_brief(activity, limit=6)
+    seed = _clean_text_compact(activity.get("photo_prompt_seed") or activity.get("title") or "")
+    title = _clean_text_compact(activity.get("title") or "小俠自主生活")
+    theme_key = _autonomy_theme_key_for_activity(activity)
+
+    if not recent_rows:
+        return {
+            "episode_angle": seed or title,
+            "what_is_new": "這是此主題線的起始 episode。",
+            "progress_focus": "建立這項活動的第一段生活經驗。",
+            "scene_focus": seed or title,
+            "future_hook": "保留自然延續空間，不預先承諾下一集。",
+            "planning_mode": "seed_start",
+            "theme_key": theme_key,
+            "history_count": 0,
+        }
+
+    prompt = f"""
+你現在不是寫分享文，而是小俠自主生活的「單集導演」。
+活動庫提供種子；過去 episode 是土壤與養分。你的任務是替今天這一集找一個新的生長方向，避免把上一集換句話重講。
+
+【今天活動｜不可改掉本質】
+{json.dumps(activity, ensure_ascii=False)}
+
+【同主題索引】
+{thread_context or '無'}
+
+【最近同主題 episode】
+{history_brief}
+
+規則：
+1. 必須留在今天這個活動的本質、地點類型與合理生活範圍內；不要突然換成另一個活動。
+2. 與最近 episode 相比，至少推進一項：新事件、新進展、新觀察、新角色位置、新行動階段、能力成長、或活動前後的小片段。
+3. 不得只是換句話重述上一集的主動作、核心事件、照片構圖與主要感想。
+4. 不要為了求新而戲劇化；以自然生活中的小變化為主。
+5. 若活動涉及社交，人物安排仍須遵守活動既有 people_policy；不要自行創造男性與小俠互動。必要時可用女性友人、女性同學、女性工作人員，或讓小俠獨自完成一個合理片段。
+6. scene_focus 要能直接拿去拍照，是一個具體可視的瞬間，不是抽象心得。
+7. future_hook 只是未來可延續的線索，不是承諾一定會發生。
+8. 不要提系統、資料庫、prompt、episode、模型或「避免重複」等幕後概念。
+
+只回傳 JSON：
+{{
+  "episode_angle": "今天這一集的具體新方向，1-2句",
+  "what_is_new": "相較過去真正不同之處",
+  "progress_focus": "這次累積出的能力/關係/認知/生活進展；若沒有明顯能力成長，就寫具體新發現",
+  "scene_focus": "最值得拍下的具體生活瞬間",
+  "future_hook": "之後若再延續，可自然接上的一個小線索"
+}}
+""".strip()
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.75),
+        )
+        data = _extract_json_object(getattr(resp, "text", "") or "") or {}
+        plan = {
+            "episode_angle": _clean_text_compact(data.get("episode_angle") or ""),
+            "what_is_new": _clean_text_compact(data.get("what_is_new") or ""),
+            "progress_focus": _clean_text_compact(data.get("progress_focus") or ""),
+            "scene_focus": _clean_text_compact(data.get("scene_focus") or ""),
+            "future_hook": _clean_text_compact(data.get("future_hook") or ""),
+            "planning_mode": "gemini_episode_angle",
+            "theme_key": theme_key,
+            "history_count": len(recent_rows),
+        }
+        if plan["episode_angle"] and plan["scene_focus"]:
+            return plan
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_EPISODE_PLAN_FAILED] {type(exc).__name__}: {exc}")
+
+    return {
+        "episode_angle": f"延續「{title}」，但改拍與上次不同的相鄰時刻或新發現。",
+        "what_is_new": "避免重演上一集主畫面，改從活動前奏、進行中的不同步驟、或結尾整理切入。",
+        "progress_focus": "在同一生活主題中累積新的具體經驗。",
+        "scene_focus": seed or title,
+        "future_hook": "保留下一次自然延續的生活線索。",
+        "planning_mode": "fallback_variation",
+        "theme_key": theme_key,
+        "history_count": len(recent_rows),
+    }
+
+
 def _autonomy_thread_context_for_activity(activity, max_chars=1300):
     activity = _autonomy_enrich_activity(activity)
     theme_key = _autonomy_theme_key_for_activity(activity)
@@ -1840,6 +1954,8 @@ def _autonomy_thread_context_for_activity(activity, max_chars=1300):
         f"上次相關活動：{th.get('last_episode_date') or '未知'}",
         f"摘要：{th.get('summary') or ''}",
         f"目前方向：{th.get('current_direction') or ''}",
+        f"最近一集新方向：{th.get('latest_episode_angle') or ''}",
+        f"最近進展：{th.get('latest_progress') or ''}",
         f"下次延續指引：{th.get('next_time_guidance') or ''}",
     ]
     return narrative_safe_text("\n".join([p for p in parts if p.strip()]), max_len=max_chars)
@@ -1905,7 +2021,10 @@ def _autonomy_update_thread_from_episode(episode):
         "episode_ids": episode_ids[-50:],
         "summary": summary,
         "current_direction": current_direction,
-        "next_time_guidance": th.get("next_time_guidance") or f"下次若再抽到或指定「{episode.get('activity_title') or title}」相關題材，不要從零開始，要延續這條主題線與上次的感受。",
+        "latest_episode_angle": episode.get("episode_angle") or th.get("latest_episode_angle") or "",
+        "latest_progress": episode.get("new_progress") or episode.get("progress_focus") or th.get("latest_progress") or "",
+        "latest_future_hook": episode.get("future_hook") or th.get("latest_future_hook") or "",
+        "next_time_guidance": f"下次若再抽到或指定「{episode.get('activity_title') or title}」相關題材，必須推進一個新的生活片段：延續既有事實與感受，但避免重複上一回的主動作、核心事件、主要感想與照片構圖。",
         "updated_at": _board_now(),
     }
     save_xiaoxia_autonomy_threads(threads)
@@ -1936,6 +2055,13 @@ def _autonomy_append_episode(today_payload, activity, context=None):
         "wardrobe_name": today_payload.get("wardrobe_name") or "",
         "wardrobe_reason": today_payload.get("wardrobe_reason") or "",
         "share_text": today_payload.get("share_text") or "",
+        # R16：輕量、可檢索的生活索引；未來按 theme/關鍵字查，不必常駐聊天 prompt。
+        "episode_angle": today_payload.get("episode_angle") or "",
+        "what_happened": today_payload.get("what_happened") or today_payload.get("episode_angle") or "",
+        "new_progress": today_payload.get("new_progress") or today_payload.get("progress_focus") or "",
+        "scene_focus": today_payload.get("scene_focus") or "",
+        "future_hook": today_payload.get("future_hook") or "",
+        "episode_planning_mode": today_payload.get("episode_planning_mode") or "",
         "photo_url": today_payload.get("photo_url") or "",
         "event_upgrade_potential": today_payload.get("event_upgrade_potential") or "",
         "followup_summaries": [],
@@ -2593,7 +2719,7 @@ def _autonomy_people_policy_info(activity):
         "zh": "公開場景可有背景路人，男性也可存在，但只能是非主體背景人物且不可互動。",
     }
 
-async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, thread_context=""):
+async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, thread_context="", episode_plan=None):
     wardrobe_line = ""
     if isinstance(wardrobe_item, dict):
         wardrobe_line = f"衣服：{wardrobe_item.get('id')} {wardrobe_item.get('name')}｜{wardrobe_item.get('main_category')}/{wardrobe_item.get('sub_category')}｜{wardrobe_item.get('style_summary')}"
@@ -2621,6 +2747,9 @@ composition={str((result_context or {}).get('composition') or '')}
 【同主題過去脈絡】
 {thread_context or '目前沒有同主題過去紀錄。'}
 
+【今天這一回的新方向｜文稿必須沿這裡生長】
+{json.dumps(episode_plan or {}, ensure_ascii=False)}
+
 必須做到：
 1. 像跟親密伴侶聊天，不要有「今日活動／我看到的／我聽到的／我的體會／這張照片」這種標題。
 2. 一到三段自然文字即可，通常 180～420 個中文字。
@@ -2631,6 +2760,8 @@ composition={str((result_context or {}).get('composition') or '')}
 7. 不要提 AI 生成、prompt、資料庫、JSON、系統、指令或模型。
 8. 不要把大俠寫進照片，不要說有男性陪她。
 9. 如果同主題過去脈絡有內容，這次分享要自然延續，不要說成第一次或從零開始；但不要像背資料庫。
+10. 若「今天這一回的新方向」有內容，事件、觀察、體會與收尾要圍繞它發展；不可只把過去內容換句話再說一次。至少讓大俠讀得出今天真的多發生了一件事、進步了一點、發現了一件新事，或看見同一活動的另一個階段。
+11. 不要在正文提到 episode、資料索引、避免重複等幕後概念；這些只用來讓生活自然往前走。
 
 只回傳小俠要說的正文。
 """
@@ -2678,7 +2809,7 @@ def _autonomy_people_policy_text(activity):
         "No foreground second person, no couple composition, no male partner vibe, no interacting male, no external hands, and no boyfriend visible. Daxia is never visible."
     )
 
-def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None):
+def _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=None, episode_plan=None):
     title = str(activity.get("title") or "小俠自主生活")
     seed = str(activity.get("photo_prompt_seed") or title)
     category = str(activity.get("category") or "")
@@ -2773,6 +2904,13 @@ Xiaoxia has her own life today. She is not passively waiting at home for Daxia's
 
 Same-theme continuity memory:
 {thread_context}
+
+TODAY STORY GROWTH DIRECTION:
+Episode angle: {_clean_text_compact((episode_plan or {}).get('episode_angle') or '')}
+What is new today: {_clean_text_compact((episode_plan or {}).get('what_is_new') or '')}
+Progress / discovery: {_clean_text_compact((episode_plan or {}).get('progress_focus') or '')}
+Scene focus: {_clean_text_compact((episode_plan or {}).get('scene_focus') or '')}
+This direction refines today's activity; it must not replace the activity itself. Prefer this concrete new moment over repeating the previous main action or composition.
 
 Visual mode: {visual_mode}
 {style_rule}
@@ -3194,6 +3332,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     activity, visual_mode, reward_gap = _autonomy_pick_activity(category_filter=specified_category, activity_filter=specified_activity)
     activity = _autonomy_enrich_activity(activity)
     thread_context = _autonomy_thread_context_for_activity(activity)
+    episode_plan = await _autonomy_generate_episode_plan(activity, thread_context=thread_context)
     if specified_wardrobe_item:
         wardrobe_item, wardrobe_reason, wardrobe_selection = _autonomy_use_specified_wardrobe(activity, specified_wardrobe_item)
     else:
@@ -3201,7 +3340,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     world_state = active_world_events.get(getattr(message.author, "id", None), {})
     if not isinstance(world_state, dict):
@@ -3221,6 +3360,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
         "camera_framing": "lifestyle portrait",
         "prompt_base": prompt_base,
+        "episode_angle": episode_plan.get("episode_angle") or "",
+        "episode_plan": episode_plan,
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
@@ -3246,6 +3387,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "theme_key": _autonomy_theme_key_for_activity(activity),
             "continuity_group": _autonomy_continuity_group_for_activity(activity),
             "thread_context": thread_context,
+            "episode_plan": episode_plan,
+            "episode_angle": episode_plan.get("episode_angle") or "",
             "specified_label": specified_label,
             "reward_gap_days": reward_gap,
             "custom_people_policy": policy_info.get("policy_key"),
@@ -3262,7 +3405,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     try:
         await status.edit(content=f"📸 小俠決定今天去做：**{activity.get('title')}**。正在拍下這一刻…")
         context = await _generate_photo_from_context(context, msg=status)
-        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context)
+        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
         context["message"] = share_text
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
         context["autonomy_activity"] = activity
@@ -3300,6 +3443,13 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "theme_key": _autonomy_theme_key_for_activity(activity),
             "continuity_group": _autonomy_continuity_group_for_activity(activity),
             "thread_context": thread_context,
+            "episode_plan": episode_plan,
+            "episode_angle": episode_plan.get("episode_angle") or "",
+            "what_happened": episode_plan.get("episode_angle") or "",
+            "new_progress": episode_plan.get("progress_focus") or "",
+            "scene_focus": episode_plan.get("scene_focus") or "",
+            "future_hook": episode_plan.get("future_hook") or "",
+            "episode_planning_mode": episode_plan.get("planning_mode") or "",
             "specified_label": specified_label,
             "visual_mode": visual_mode,
             "wardrobe_id": wardrobe_id or "",
@@ -17882,11 +18032,12 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         activity = _autonomy_enrich_activity(activity)
 
     thread_context = _autonomy_thread_context_for_activity(activity)
+    episode_plan = await _autonomy_generate_episode_plan(activity, thread_context=thread_context)
     wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item)
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     context = {
         "mode": source_mode,
@@ -17900,6 +18051,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
         "camera_framing": "lifestyle portrait",
         "prompt_base": prompt_base,
+        "episode_angle": episode_plan.get("episode_angle") or "",
+        "episode_plan": episode_plan,
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
         "wardrobe_id": wardrobe_id,
@@ -17925,6 +18078,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
             "theme_key": _autonomy_theme_key_for_activity(activity),
             "continuity_group": _autonomy_continuity_group_for_activity(activity),
             "thread_context": thread_context,
+            "episode_plan": episode_plan,
+            "episode_angle": episode_plan.get("episode_angle") or "",
             "specified_label": specified_label,
             "reward_gap_days": reward_gap,
             "custom_people_policy": policy_info.get("policy_key"),
@@ -17942,7 +18097,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         await msg.edit(content=f"📸 小俠把今天的自主活動改成：**{activity.get('title')}**。正在重新拍下這一刻…")
 
     context = await _generate_photo_from_context(context, msg=msg)
-    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context)
+    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
     context["message"] = share_text
     context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
     context["autonomy_activity"] = activity
@@ -17975,6 +18130,12 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "theme_key": _autonomy_theme_key_for_activity(activity),
         "continuity_group": _autonomy_continuity_group_for_activity(activity),
         "thread_context": thread_context,
+        "episode_angle": episode_plan.get("episode_angle") or "",
+        "what_happened": episode_plan.get("episode_angle") or "",
+        "new_progress": episode_plan.get("progress_focus") or "",
+        "scene_focus": episode_plan.get("scene_focus") or "",
+        "future_hook": episode_plan.get("future_hook") or "",
+        "episode_planning_mode": episode_plan.get("planning_mode") or "",
         "specified_label": specified_label,
         "visual_mode": visual_mode,
         "wardrobe_id": wardrobe_id or "",
