@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.58_R1"
+LOBSTER_VERSION = "1.5.58_R2"
 
 
 def _normalize_generation_level(level):
@@ -16885,11 +16885,12 @@ PHOTOBOOK_WARDROBE_ALWAYS_EXCLUDE_CATEGORIES = {"鞋子", "包包", "配件"}
 PHOTOBOOK_WARDROBE_USUALLY_PRIVATE_CATEGORIES = {"內衣", "泳裝", "睡衣／居家服"}
 PHOTOBOOK_WARDROBE_SCENE_PRIVATE_HINTS = [
     "在家", "家中", "家裡", "臥室", "房間", "客廳", "沙發", "床邊", "床上", "私密", "只能在家中穿",
-    "居家", "晚安", "睡前", "夜晚", "晚上", "夜裡", "晨起", "剛睡醒"
+    "居家", "晚安", "睡前", "晨起", "剛睡醒"
 ]
 PHOTOBOOK_WARDROBE_SCENE_PUBLIC_HINTS = [
-    "文創", "園區", "書店", "美術館", "公園", "戶外", "散步", "街", "白天", "午後", "華山", "松菸", "河濱",
-    "咖啡", "展覽", "校園", "巷弄", "百貨", "車站"
+    "文創", "園區", "書店", "美術館", "公園", "戶外", "散步", "街", "華山", "松菸", "河濱",
+    "咖啡", "展覽", "校園", "巷弄", "百貨", "車站", "市集", "夜市", "碼頭", "河岸",
+    "老街", "商圈", "景點", "廣場", "街區", "港邊", "港口"
 ]
 PHOTOBOOK_WARDROBE_SCENE_SOFT_SEXY_HINTS = [
     "溫柔", "性感", "害羞", "微性感", "柔軟", "慵懶", "曖昧", "撒嬌", "親密", "女友感"
@@ -16898,11 +16899,20 @@ PHOTOBOOK_WARDROBE_SCENE_SOFT_SEXY_HINTS = [
 
 def _photobook_scene_profile(scene_text):
     scene = str(scene_text or "").strip().lower()
+
+    # R2：場域與時間分離。夜晚/晚上/夜裡不再等同於「家中私密」。
     private_home = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_PRIVATE_HINTS)
     public_outdoor = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_PUBLIC_HINTS)
     soft_sexy = any(k in scene for k in PHOTOBOOK_WARDROBE_SCENE_SOFT_SEXY_HINTS)
     swim_related = any(k in scene for k in ["泳", "泳池", "海邊", "沙灘", "溫泉", "泡湯"])
     formal_event = any(k in scene for k in ["宴會", "晚宴", "婚禮", "典禮", "記者會"])
+    is_night = any(k in scene for k in ["夜晚", "晚上", "夜裡", "夜間", "晚間", "夜景", "黃昏", "傍晚"])
+    is_day = any(k in scene for k in ["白天", "上午", "中午", "午後", "下午", "晨間", "早上"])
+
+    # 若同時明確出現公共地點與居家詞，優先採用更具體的公共場域，不讓「晚上」或敘事修飾誤導。
+    if public_outdoor and not any(k in scene for k in ["在家", "家中", "家裡", "臥室", "床邊", "床上", "客廳"]):
+        private_home = False
+
     return {
         "scene": scene,
         "private_home": private_home,
@@ -16910,6 +16920,8 @@ def _photobook_scene_profile(scene_text):
         "soft_sexy": soft_sexy,
         "swim_related": swim_related,
         "formal_event": formal_event,
+        "is_night": is_night,
+        "is_day": is_day,
     }
 
 
@@ -16934,13 +16946,13 @@ def _photobook_wardrobe_scene_score(item, scene_text, recent_ids=None):
     scene_profile = _photobook_scene_profile(scene_text)
     score = 10.0
 
-    # 公開白天場景：偏外出、休閒、旅遊、社交；私密服裝大幅扣分。
+    # 公開場景：偏外出、休閒、旅遊、社交；私密服裝大幅扣分。
     if scene_profile["public_outdoor"] and not scene_profile["private_home"]:
         if main in {"洋裝", "套裝", "上衣", "下身", "外套"}: score += 8
         if any(x in (sem.get("occasion") or []) for x in ["休閒", "社交", "旅遊"]): score += 7
         if any(x in (sem.get("style") or []) for x in ["知性", "休閒", "甜美", "優雅", "俐落"]): score += 4
-        if main in PHOTOBOOK_WARDROBE_USUALLY_PRIVATE_CATEGORIES: score -= 42
-        if any(k in text for k in ["內衣", "胸罩", "lingerie", "睡衣", "睡袍", "比基尼"]): score -= 24
+        if main in PHOTOBOOK_WARDROBE_USUALLY_PRIVATE_CATEGORIES: score -= 60
+        if any(k in text for k in ["內衣", "胸罩", "lingerie", "睡衣", "睡袍", "睡裙", "晨袍", "比基尼"]): score -= 36
 
     # 居家私密場景：允許內衣／睡袍／睡衣／居家服進榜，反而優先這些衣服。
     if scene_profile["private_home"]:
@@ -17066,7 +17078,7 @@ async def _xiaoxia_review_photobook_wardrobe_page(grid_path, items, scene_text, 
     if scene_profile.get("private_home"):
         fit_rule = "請判斷實際外觀是否適合這個家中私密寫真場景，是否有溫柔、微性感、害羞或放鬆的女友感。內衣、睡袍、睡衣、居家服都可以，只要真的適合在家穿、畫面好看、能襯托她。若圖片其實太像正式外出、上班、晚宴或完全不符合『只能在家中穿』，要明確指出。"
     else:
-        fit_rule = "請判斷實際外觀是否適合這個場景、是否可公開外穿、是否能襯托妳且適合多種寫真取景。若名稱像洋裝但圖片其實像內衣、睡衣或不適合公開場合，要明確指出。"
+        fit_rule = "請判斷實際外觀是否適合這個公開／外出場景、是否可公開外穿、是否能襯托妳且適合多種寫真取景。夜晚本身不代表私密居家；只要場景是市集、碼頭、街區、商圈、景點、展覽、咖啡館等公共場所，內衣、睡衣、睡袍、睡裙、晨袍與明顯居家私密服裝都應列為 avoid。若名稱像洋裝但圖片其實像內衣、睡衣或不適合公開場合，要明確指出。"
     prompt = f"""
 妳是小俠，正在和男友大俠一起為寫真挑衣服。請真正看六宮格候選圖，而不是只相信名稱。
 寫真情境：{scene_text}
