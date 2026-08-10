@@ -7,10 +7,11 @@ import io
 import json
 import re
 import math
+import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R14"
+LOBSTER_VERSION = "1.5.57_R15"
 
 
 def _normalize_generation_level(level):
@@ -9818,7 +9819,49 @@ def append_cosplay_topic_history(entry):
 
 
 def _normalize_cosplay_key(value):
-    return re.sub(r"[\s，。！？、；;：:'\"「」『』（）()《》〈〉\[\]【】]+", "", str(value or "")).lower()
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+    return re.sub(r"[\s，。！？、；;：:'\"「」『』（）()《》〈〉\[\]【】·・._\-—–]+", "", text)
+
+
+def _cosplay_identity_aliases(value):
+    """把中/英/日混合題名與角色名拆成可比對 alias；完整歷史防重用。"""
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not raw:
+        return set()
+    parts = [raw]
+    parts.extend(re.findall(r"[\(（]([^\(\)（）]{2,120})[\)）]", raw))
+    parts.extend(re.split(r"\s*(?:/|／|\||｜|;|；)\s*", raw))
+    aliases = set()
+    for part in parts:
+        cleaned = _normalize_cosplay_key(part)
+        if cleaned:
+            aliases.add(cleaned)
+    return aliases
+
+
+def _cosplay_alias_overlap(a, b):
+    aa = _cosplay_identity_aliases(a)
+    bb = _cosplay_identity_aliases(b)
+    if not aa or not bb:
+        return False
+    if aa & bb:
+        return True
+    # 長 alias 容許「正式全名 vs 簡稱」的包含關係；短詞不做模糊包含以免誤殺。
+    for x in aa:
+        if len(x) < 7:
+            continue
+        for y in bb:
+            if len(y) < 7:
+                continue
+            if x in y or y in x:
+                return True
+    return False
+
+
+def _cosplay_history_match_label(item):
+    if not isinstance(item, dict):
+        return ""
+    return f"{item.get('date') or '?'}｜{item.get('work_title') or ''}｜{item.get('character_name') or ''}"
 
 
 def _cosplay_history_since_days(history, days=45):
@@ -9882,39 +9925,57 @@ def pick_daily_cosplay_family(history=None):
 
 
 def is_cosplay_topic_too_similar(candidate, history=None):
+    """R15：角色採完整歷史硬防重；作品採中期防重；原型/視覺仍採近期防撞。"""
     history = history if isinstance(history, list) else load_cosplay_topic_history()
     if not isinstance(candidate, dict):
         return True, "invalid_candidate"
-    work_key = _normalize_cosplay_key(candidate.get("work_title"))
-    char_key = _normalize_cosplay_key(candidate.get("character_name"))
+
+    work_title = str(candidate.get("work_title") or "").strip()
+    character_name = str(candidate.get("character_name") or "").strip()
     arch_key = _normalize_cosplay_key(candidate.get("role_archetype"))
-    if work_key:
-        for old in _cosplay_history_since_days(history, 45):
-            if work_key == _normalize_cosplay_key(old.get("work_title")):
-                return True, "recent_work_duplicate"
-    if char_key:
-        for old in _cosplay_history_since_days(history, 90):
-            if char_key == _normalize_cosplay_key(old.get("character_name")):
-                return True, "recent_character_duplicate"
+
+    # 1) 最重要：同一角色一旦在自動 Cosplay 歷史中出現過，就不再自動選。
+    #    alias 比對可抓「薇爾莉特·伊芙加登 (Violet Evergarden)」
+    #    vs「ヴァイオレット・エヴァーガーデン (Violet Evergarden)」這類跨語言寫法。
+    if character_name:
+        for old in reversed(history):
+            if not isinstance(old, dict):
+                continue
+            if _cosplay_alias_overlap(character_name, old.get("character_name")):
+                return True, "historical_character_duplicate:" + _cosplay_history_match_label(old)
+
+    # 2) 同作品不永久封鎖，保留未來換角色的可能；但 120 天內先避開。
+    if work_title:
+        for old in reversed(_cosplay_history_since_days(history, 120)):
+            if not isinstance(old, dict):
+                continue
+            if _cosplay_alias_overlap(work_title, old.get("work_title")):
+                return True, "recent_work_duplicate_120d:" + _cosplay_history_match_label(old)
+
+    # 3) 原型只看最近 14 次，避免題材雖換角色但一直是相同模板。
     if arch_key:
-        recent_arch = [_normalize_cosplay_key(x) for x in _recent_cosplay_values(history, "role_archetype", limit=10)]
+        recent_arch = [_normalize_cosplay_key(x) for x in _recent_cosplay_values(history, "role_archetype", limit=14)]
         if arch_key and arch_key in recent_arch:
             return True, "recent_archetype_duplicate"
+
+    # 4) 視覺元素撞 3 個以上，最近 8 次先退回重選。
     tags = {_normalize_cosplay_key(x) for x in (candidate.get("visual_tags") or []) if str(x).strip()}
     if tags:
-        for old in history[-5:]:
+        for old in history[-8:]:
             old_tags = {_normalize_cosplay_key(x) for x in (old.get("visual_tags") or []) if str(x).strip()} if isinstance(old, dict) else set()
             if len(tags & old_tags) >= 3:
                 return True, "visual_tags_too_similar"
+
     return False, "ok"
 
 
 async def request_cosplay_topic_candidate(family, recent_summary, reject_reason=""):
     family = family or pick_daily_cosplay_family([])
     history = load_cosplay_topic_history()
-    recent_works = _recent_cosplay_values(history, "work_title", days=45)[-20:]
-    recent_chars = _recent_cosplay_values(history, "character_name", days=90)[-30:]
-    recent_arch = _recent_cosplay_values(history, "role_archetype", limit=10)
+    recent_works = _recent_cosplay_values(history, "work_title", days=120)[-60:]
+    recent_chars = _recent_cosplay_values(history, "character_name", days=120)[-80:]
+    historical_chars = _recent_cosplay_values(history, "character_name")[-300:]
+    recent_arch = _recent_cosplay_values(history, "role_archetype", limit=14)
     recent_tags = _recent_cosplay_values(history, "visual_tags", limit=8)[-40:]
     prompt = f"""
 你是每日 cosplay 題材策展師。今天不要從固定角色池抽卡，而是依照 family 做開放式探索。
@@ -9929,14 +9990,17 @@ family 代號：{family.get('family')}
 3. 結果是「小俠 cosplay 該角色」，不是直接生成原作角色本人。
 3a. 必須列出 canonical_visual_anchors：原角色最該保留的 3 到 6 個視覺錨點，例如主色系、服裝剪影、徽記/圖案、道具、髮色/髮型、世界觀環境或角色任務。這些錨點不是照抄，而是避免小俠版性感化後與原型差異過大。
 4. 不要只選最熱門、最保守、最模板化的角色；也不要為了安全而把小俠魅力降成普通展示照。
-5. 請避開近期重複作品、角色、角色原型與視覺元素。
+5. 嚴格防重：只要「角色本身」曾出現在完整歷史角色黑名單，就不可再次選，即使作品名/角色名改用日文、英文、中文譯名、簡稱或別名也一樣；請主動換成真正不同角色。
+5a. 同一作品在 120 天內也先避開；角色原型與視覺元素則避免近期反覆。
+5b. 題材庫很廣，不要因為熟悉度而反覆回到少數熱門角色；優先探索尚未使用過、但視覺辨識度清楚的女性角色。
 6. 若上一輪被退回，請明確避開退回原因：{reject_reason or '無'}。
 
 近期題材摘要：
 {recent_summary}
 
-近期應避免作品：{json.dumps(recent_works, ensure_ascii=False)}
-近期應避免角色：{json.dumps(recent_chars, ensure_ascii=False)}
+120 天內應避免作品：{json.dumps(recent_works, ensure_ascii=False)}
+120 天內近期角色：{json.dumps(recent_chars, ensure_ascii=False)}
+完整歷史角色黑名單（任何語言/別名都視為同角色）：{json.dumps(historical_chars, ensure_ascii=False)}
 近期應避免角色原型：{json.dumps(recent_arch, ensure_ascii=False)}
 近期應避免視覺元素：{json.dumps(recent_tags, ensure_ascii=False)}
 
@@ -9991,13 +10055,13 @@ async def build_daily_cosplay_topic():
     history = load_cosplay_topic_history()
     reject_reason = ""
     tried_families = set()
-    for attempt in range(4):
+    for attempt in range(6):
         family = pick_daily_cosplay_family(history)
         if family.get("family") in tried_families and len(tried_families) < len(COSPLAY_TOPIC_FAMILIES):
             pool = [f for f in COSPLAY_TOPIC_FAMILIES if f.get("family") not in tried_families]
             family = random.choice(pool) if pool else family
         tried_families.add(family.get("family"))
-        for sub_attempt in range(2):
+        for sub_attempt in range(3):
             candidate = await request_cosplay_topic_candidate(
                 family,
                 summarize_recent_cosplay_topics(history, limit=15),
