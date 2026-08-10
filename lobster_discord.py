@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.57_R16"
+LOBSTER_VERSION = "1.5.58_R1"
 
 
 def _normalize_generation_level(level):
@@ -2972,7 +2972,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "`/小俠自主 指定活動 sport_tennis now`：直接指定活動並立刻出圖。\n"
             "`/小俠自主 指定活動 潛水 15:30`：今天指定時間做指定活動。\n"
             "`/小俠自主 指定活動 逛書展`：不給時間時，由小俠今天自行安排；多筆至少間隔 1 小時。\n"
-            "`/小俠自主 狀態`：查看今日活動、主題線與養眼照保底狀態。\n"
+            "`/小俠自主 狀態`：查看今日活動、主題線、養眼照保底與今天尚未執行的手動指定活動。\n"
+            "`/小俠自主 刪除 1`：取消今日第 1 筆尚未執行的手動指定活動；只取消排程，不抹除歷史。\n"
             "`/小俠自主 重抽`：重抽並重拍今日自主活動。\n"
             "`/小俠自主 變事件`：把今天這個題材升級成近期事件。\n"
             "`/小俠自主 關`：暫停自動排程，直到 `/小俠自主 開`。\n"
@@ -3139,10 +3140,52 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         )
         return True
 
+    if arg_key.startswith("刪除") or arg_key.startswith("取消") or arg_key.startswith("delete"):
+        raw_index = re.sub(r"^(刪除|取消|delete)\s*", "", arg_key, flags=re.IGNORECASE).strip()
+        pending_manual = _autonomy_pending_manual_activity_slots(state=state, now_dt=datetime.now(TZ_TPE))
+        if not raw_index:
+            if not pending_manual:
+                await message.channel.send("🌱 今天沒有尚未執行、可取消的手動指定活動。")
+                return True
+            rows = []
+            for i, s in enumerate(pending_manual, 1):
+                wid = str(s.get("specified_wardrobe_id") or "").strip().upper()
+                wardrobe_note = f"｜{wid} {s.get('specified_wardrobe_name') or ''}".rstrip() if wid else ""
+                rows.append(f"{i}. {s.get('time')}｜{s.get('activity_title') or s.get('activity_id') or '未命名活動'}{wardrobe_note}")
+            await message.channel.send(
+                "🌱 **今天可取消的手動指定活動**\n"
+                + "\n".join(rows)
+                + "\n\n輸入例如：`/小俠自主 刪除 1`"
+            )
+            return True
+
+        m_index = re.fullmatch(r"#?\s*(\d+)", raw_index)
+        if not m_index:
+            await message.channel.send(
+                "🌱 請用編號取消，例如：`/小俠自主 刪除 1`。\n"
+                "若忘了編號，輸入 `/小俠自主 刪除` 就會列出今天可取消的項目。"
+            )
+            return True
+
+        cancelled, err = _autonomy_cancel_manual_activity_slot(m_index.group(1), now_dt=datetime.now(TZ_TPE))
+        if not cancelled:
+            if err == "index_out_of_range":
+                await message.channel.send("🌱 找不到這個編號。輸入 `/小俠自主 刪除` 查看目前可取消的活動。")
+            else:
+                await message.channel.send("🌱 今天沒有這筆仍在等待中的手動指定活動，可能已執行、已取消，或排程日期已變更。")
+            return True
+
+        await message.channel.send(
+            f"✅ 已取消今日手動指定活動：**{cancelled.get('time')}｜{cancelled.get('activity_title') or cancelled.get('activity_id') or '未命名活動'}**\n"
+            "這筆只會從待執行排程中取消；取消紀錄仍保留在 scheduler trace 裡。"
+        )
+        return True
+
     if arg_key in {"狀態", "status"}:
         today = state.get("today") if isinstance(state.get("today"), dict) else {}
         gap = _days_since_date(state.get("last_reward_photo_date"))
         scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+        pending_manual = _autonomy_pending_manual_activity_slots(state=state, now_dt=datetime.now(TZ_TPE))
         slot_lines = []
         for s in (scheduler.get("slots") or [])[:8]:
             if isinstance(s, dict):
@@ -3155,9 +3198,15 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         schedule_kind = "指定排程" if scheduler.get("manual_schedule") else "不定時排程"
         pause_note = f"｜pause_until={control.get('pause_until')}" if control.get("pause_until") else ""
         effective_limit = scheduler.get("daily_limit") if scheduler.get("manual_schedule") else XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT
+        manual_lines = []
+        for i, s in enumerate(pending_manual, 1):
+            wid = str(s.get("specified_wardrobe_id") or "").strip().upper()
+            wardrobe_note = f"｜{wid} {s.get('specified_wardrobe_name') or ''}".rstrip() if wid else ""
+            manual_lines.append(f"{i}. {s.get('time')}｜{s.get('activity_title') or s.get('activity_id') or '未命名活動'}{wardrobe_note}")
         scheduler_text = (
             f"\n自動排程：{control_label}{pause_note}｜{schedule_kind}｜limit={effective_limit}｜window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR:02d}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR:02d}:00｜min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h｜TZ=UTC+8/Taipei"
             + (f"\n今日 slots：{', '.join(slot_lines)}" if slot_lines else "")
+            + (f"\n手動指定待執行：\n" + "\n".join(manual_lines) + "\n取消方式：`/小俠自主 刪除 編號`" if manual_lines else "")
         )
         if today.get("date") == today_key and today:
             msg = (
@@ -3317,7 +3366,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             )
             return True
     elif arg_key not in {"今日", "今天", "重抽", "再抽", "重拍"}:
-        await message.channel.send("大俠，目前 v1.5.24 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ... [可夾帶 Wxxx 與 now 或 HH:MM，順序不限]`、`/小俠自主 狀態`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
+        await message.channel.send("大俠，目前 v1.5.24 支援：`/小俠自主 今日`、`/小俠自主 類別`、`/小俠自主 活動 [類別]`、`/小俠自主 指定類別 ...`、`/小俠自主 指定活動 ... [可夾帶 Wxxx 與 now 或 HH:MM，順序不限]`、`/小俠自主 狀態`、`/小俠自主 刪除 [編號]`、`/小俠自主 重抽`、`/小俠自主 變事件`；而圖下按鈕也支援 More、骰子取代、修正這張、上傳成 Project / Diary。")
         return True
 
     force_reroll = arg_key in {"重抽", "再抽", "重拍"} or bool(specified_category or specified_activity)
@@ -22938,6 +22987,68 @@ def _autonomy_add_specified_activity_slot(activity, time_text=None, now_dt=None,
     state["auto_scheduler"] = scheduler
     save_xiaoxia_autonomy_state(state)
     return slot, ""
+
+
+
+def _autonomy_pending_manual_activity_slots(state=None, now_dt=None):
+    """回傳今日仍可取消的手動指定活動 slots，依時間排序。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    if not isinstance(state, dict):
+        state = load_xiaoxia_autonomy_state()
+    scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+    if scheduler.get("date") != now_dt.strftime("%Y-%m-%d"):
+        return []
+    rows = []
+    for slot in (scheduler.get("slots") or []):
+        if not isinstance(slot, dict):
+            continue
+        if slot.get("manual_kind") != "specified_activity":
+            continue
+        if str(slot.get("status") or "") != "pending":
+            continue
+        rows.append(slot)
+    return _autonomy_sort_slots(rows)
+
+
+def _autonomy_cancel_manual_activity_slot(index, now_dt=None):
+    """以今日 pending 手動指定活動的 1-based 編號取消單筆 slot；保留取消紀錄。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    state = load_xiaoxia_autonomy_state()
+    scheduler = state.get("auto_scheduler") if isinstance(state.get("auto_scheduler"), dict) else {}
+    if scheduler.get("date") != now_dt.strftime("%Y-%m-%d"):
+        return None, "no_pending_manual_activity"
+
+    pending = _autonomy_pending_manual_activity_slots(state=state, now_dt=now_dt)
+    try:
+        idx = int(index)
+    except Exception:
+        return None, "invalid_index"
+    if idx < 1 or idx > len(pending):
+        return None, "index_out_of_range"
+
+    target = pending[idx - 1]
+    target_id = str(target.get("id") or "")
+    found = None
+    for slot in (scheduler.get("slots") or []):
+        if isinstance(slot, dict) and str(slot.get("id") or "") == target_id:
+            slot["status"] = "cancelled_by_daxia"
+            slot["cancelled_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            slot["cancelled_by"] = "daxia_command"
+            found = slot
+            break
+    if not found:
+        return None, "slot_not_found"
+
+    scheduler["manual_activity_slots"] = any(
+        isinstance(s, dict)
+        and s.get("manual_kind") == "specified_activity"
+        and str(s.get("status") or "") in {"pending", "running"}
+        for s in (scheduler.get("slots") or [])
+    )
+    scheduler["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    state["auto_scheduler"] = scheduler
+    save_xiaoxia_autonomy_state(state)
+    return found, ""
 
 
 def _autonomy_generate_auto_slots(now_dt=None):
