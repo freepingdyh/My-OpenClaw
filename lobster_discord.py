@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R5"
+LOBSTER_VERSION = "1.6.01_R6"
 
 
 def _normalize_generation_level(level):
@@ -4912,6 +4912,50 @@ def _atomic_write_photo_db(db, create_backup=True):
 
     os.replace(temp_path, DATA_PATH)
 
+def _repair_truncated_reviewer_tail(path):
+    """Repair the exact R3/R4 failure shape:
+    xiaoxia_photos.json ends while writing director_review_result.corrected_director_json.
+
+    We intentionally discard the unfinished corrected_director_json payload, keep the already
+    written reviewer pass/issues metadata, and close the surrounding JSON objects/list.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    marker = '"corrected_director_json"'
+    pos = raw.rfind(marker)
+    if pos < 0:
+        return None
+
+    # Only use this targeted repair if the failure is at the tail of the file.
+    tail = raw[pos:]
+    if len(tail) > 800:
+        return None
+
+    # Remove the comma that precedes the unfinished corrected_director_json field.
+    prefix = raw[:pos].rstrip()
+    if prefix.endswith(","):
+        prefix = prefix[:-1].rstrip()
+
+    # At this point the file is inside:
+    # top-level list -> photo record -> director_json -> director_review_result.
+    repaired = prefix + "\n      }\n    }\n  }\n]\n"
+
+    try:
+        parsed = json.loads(repaired)
+        if not isinstance(parsed, list):
+            return None
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_TARGETED_REPAIR_VALIDATE_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+    return repaired
+
+
 def load_memory():
     if not os.path.exists(DATA_PATH):
         return []
@@ -4925,6 +4969,19 @@ def load_memory():
     except Exception as exc:
         print(f"⚠️ [PHOTO_DB_LOAD_FAILED] {type(exc).__name__}: {exc}")
         _preserve_corrupt_memory_file(type(exc).__name__)
+
+    # Recovery priority 0: exact R3/R4 reviewer-tail truncation.
+    repaired_text = _repair_truncated_reviewer_tail(DATA_PATH)
+    if repaired_text:
+        try:
+            repaired = json.loads(repaired_text)
+            repaired_copy = f"{DATA_PATH}.repaired_reviewer_tail"
+            Path(repaired_copy).write_text(repaired_text, encoding="utf-8")
+            _atomic_write_photo_db(repaired, create_backup=False)
+            print(f"🛟 [PHOTO_DB_REPAIRED_REVIEWER_TAIL] items={len(repaired)} repaired_copy={repaired_copy}")
+            return repaired
+        except Exception as exc:
+            print(f"⚠️ [PHOTO_DB_TARGETED_REPAIR_WRITE_FAILED] {type(exc).__name__}: {exc}")
 
     # Recovery priority 1: last known-good backup.
     backup = _load_valid_photo_db(_memory_backup_path())
@@ -4958,6 +5015,16 @@ def save_memory(db):
     if not isinstance(db, list):
         raise ValueError("save_memory expects a list")
     _atomic_write_photo_db(db, create_backup=True)
+
+
+# R6: validate/recover the persistent photo DB during process startup rather than waiting
+# for the first gallery/cosplay path to call load_memory().
+try:
+    _PHOTO_DB_STARTUP_VALIDATION = load_memory()
+    print(f"✅ [PHOTO_DB_STARTUP_VALIDATED] items={len(_PHOTO_DB_STARTUP_VALIDATION)}")
+except Exception as exc:
+    print(f"⚠️ [PHOTO_DB_STARTUP_VALIDATION_FAILED] {type(exc).__name__}: {exc}")
+    _PHOTO_DB_STARTUP_VALIDATION = []
 
 def _today_str_tpe():
     return datetime.now(TZ_TPE).strftime("%Y-%m-%d")
