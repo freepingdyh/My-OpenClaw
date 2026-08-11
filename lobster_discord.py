@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R1"
+LOBSTER_VERSION = "1.6.01_R2"
 
 
 def _normalize_generation_level(level):
@@ -64,6 +64,8 @@ PHOTO_CONTEXT_CARRY_KEYS = (
     "director_json", "director_schema_version", "director_time_context",
     "director_background_unit", "director_subject_unit", "director_fusion_unit",
     "director_v45_prompt", "director_v5_background_prompt",
+    "cosplay_work_title", "cosplay_character_name", "story", "cosplay_state", "vibe_mode",
+    "cosplay_anchor_lines", "cosplay_canon_json", "xiaoxia_interpretation",
 )
 
 
@@ -18991,7 +18993,7 @@ def _director_fallback_json(source_context, semantic_brief, prompt_base):
     must_not = [str(x).strip()[:180] for x in (visual_checklist.get("must_not_have") or []) if str(x).strip()][:10]
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "module": module_key,
         "time_context": time_context,
         "director_summary": {
@@ -19032,6 +19034,11 @@ def _director_fallback_json(source_context, semantic_brief, prompt_base):
             "must_have": must_have,
             "must_not_drift": must_not,
         },
+        "xiaoxia_interpretation": {
+            "allure_direction": "Preserve Xiaoxia's established refined adult-feminine allure without replacing role-defining canon elements." if module_key == "cosplay" else "",
+            "feminine_styling": "Xiaoxia-style polished cinematic reinterpretation inside the role's recognizable visual system." if module_key == "cosplay" else "",
+            "visual_impact": "cinematic, polished, attractive, story-driven" if module_key == "cosplay" else ""
+        },
         "fusion_unit": {
             "mood": mood,
             "composition": camera,
@@ -19055,13 +19062,163 @@ def _director_fallback_json(source_context, semantic_brief, prompt_base):
     }
 
 
+
+def _cosplay_role_identity(source_context):
+    ctx = source_context or {}
+    story = ctx.get("story") if isinstance(ctx.get("story"), dict) else {}
+    state = ctx.get("cosplay_state") if isinstance(ctx.get("cosplay_state"), dict) else {}
+    work = (
+        ctx.get("cosplay_work_title")
+        or story.get("work_title")
+        or state.get("work_title")
+        or state.get("source_title")
+        or ""
+    )
+    character = (
+        ctx.get("cosplay_character_name")
+        or story.get("character_name")
+        or state.get("character_name")
+        or state.get("role_name")
+        or ""
+    )
+    user_request = str(ctx.get("user_mode_request") or ctx.get("user_input") or "").strip()
+    # Some legacy contexts only retain the explicit /cosplay request. Keep it as a fallback label
+    # rather than losing role identity entirely.
+    if not character and user_request:
+        character = user_request
+    return str(work or "").strip(), str(character or "").strip()
+
+
+def _sanitize_cosplay_canon_json(data, source_context):
+    work, character = _cosplay_role_identity(source_context)
+    fallback = {
+        "schema_version": "1.0",
+        "source_work": work,
+        "character": character,
+        "variant": "unspecified",
+        "confidence": "limited",
+        "appearance": {"hair_color": "", "hair_style": "", "distinctive_features": []},
+        "costume": {
+            "signature_palette": [], "silhouette": "", "upper_body": "", "lower_body": "",
+            "footwear": "", "accessories": [], "motifs": []
+        },
+        "signature_props": [],
+        "recognition_anchors": [],
+        "uncertain_fields": [],
+    }
+    if not isinstance(data, dict):
+        return fallback
+    data["schema_version"] = "1.0"
+    data["source_work"] = str(data.get("source_work") or work or "").strip()[:180]
+    data["character"] = str(data.get("character") or character or "").strip()[:180]
+    data["variant"] = str(data.get("variant") or "unspecified").strip()[:120]
+    data["confidence"] = str(data.get("confidence") or "mixed").strip()[:60]
+    for key, default in (("appearance", fallback["appearance"]), ("costume", fallback["costume"])):
+        if not isinstance(data.get(key), dict):
+            data[key] = dict(default)
+    for key in ("signature_props", "recognition_anchors", "uncertain_fields"):
+        if not isinstance(data.get(key), list):
+            data[key] = []
+        data[key] = data[key][:12]
+
+    def compact(v, n=320):
+        if isinstance(v, str):
+            return _clean_text_compact(v)[:n]
+        if isinstance(v, list):
+            return [compact(x, 220) for x in v[:12] if x not in (None, "", [], {})]
+        if isinstance(v, dict):
+            return {str(k): compact(val, 260) for k, val in v.items() if val not in (None, "", [], {})}
+        return v
+    return compact(data, 420)
+
+
+async def _build_cosplay_canon_json(source_context):
+    """Build a compact, high-confidence role fact card for cosplay.
+
+    This is deliberately separate from the creative cosplay story/state. The goal is to stop a
+    beautifully written reinterpretation from silently becoming 'canon'. If the model is unsure,
+    it must omit or flag the field rather than inventing detail.
+    """
+    ctx = source_context or {}
+    existing = ctx.get("cosplay_canon_json")
+    if isinstance(existing, dict) and existing:
+        return _sanitize_cosplay_canon_json(copy.deepcopy(existing), ctx)
+
+    work, character = _cosplay_role_identity(ctx)
+    if not character:
+        return _sanitize_cosplay_canon_json({}, ctx)
+
+    explicit_anchors = ctx.get("cosplay_anchor_lines") if isinstance(ctx.get("cosplay_anchor_lines"), list) else []
+    prompt = f"""
+你是 Cosplay Character Canon Editor。請建立一份「角色原作視覺事實卡」，不是今天拍攝的故事，也不是性感改編提案。
+
+角色：{character}
+作品：{work or '未明確提供'}
+使用者原始指定：{ctx.get('user_mode_request') or ctx.get('user_input') or ''}
+既有明確 anchor（可能為空）：{json.dumps(explicit_anchors[:12], ensure_ascii=False)}
+
+規則：
+1. 只填你有高信心的「角色辨識事實」。不確定就留空或放進 uncertain_fields，禁止為了完整而腦補。
+2. 不要把本次 story / cosplay_state 裡的創作情節、煉金實驗室、重新設計服裝等當作 canon 來源。
+3. 若角色跨多代造型且使用者未指定版本，variant 填 unspecified，優先列跨版本最穩定、最具辨識度的特徵；不要假裝某一代細節是唯一正解。
+4. signature_props 只放真正具角色辨識力的武器/道具；若有，required=true。
+5. 這張卡稍後會交給 Director，Director 不可用自己的創作去覆蓋此卡。
+
+只輸出 JSON：
+{{
+  "schema_version": "1.0",
+  "source_work": "",
+  "character": "",
+  "variant": "unspecified",
+  "confidence": "high | mixed | limited",
+  "appearance": {{
+    "hair_color": "",
+    "hair_style": "",
+    "distinctive_features": []
+  }},
+  "costume": {{
+    "signature_palette": [],
+    "silhouette": "",
+    "upper_body": "",
+    "lower_body": "",
+    "footwear": "",
+    "accessories": [],
+    "motifs": []
+  }},
+  "signature_props": [
+    {{"name": "", "type": "", "visual_description": "", "required": true}}
+  ],
+  "recognition_anchors": [],
+  "uncertain_fields": []
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                ],
+            ),
+        )
+        raw = str(getattr(response, "text", "") or "").replace("```json", "").replace("```", "").strip()
+        return _sanitize_cosplay_canon_json(json.loads(raw, strict=False), ctx)
+    except Exception as exc:
+        print(f"⚠️ [COSPLAY_CANON_JSON_FAILED] {type(exc).__name__}: {exc}")
+        return _sanitize_cosplay_canon_json({}, ctx)
+
 def _sanitize_director_json(data, source_context, semantic_brief, prompt_base):
     fallback = _director_fallback_json(source_context, semantic_brief, prompt_base)
     if not isinstance(data, dict):
         return fallback
 
     module_key = _director_module_key(source_context)
-    data["schema_version"] = "1.0"
+    data["schema_version"] = "1.1"
     data["module"] = module_key
 
     # Preserve module-specific time authority outside Gemini so it cannot casually turn an afternoon run into a morning run.
@@ -19095,7 +19252,7 @@ def _sanitize_director_json(data, source_context, semantic_brief, prompt_base):
         time_context.setdefault("rule", authoritative_time["rule"])
     data["time_context"] = time_context
 
-    for key in ("director_summary", "background_unit", "subject_unit", "fusion_unit"):
+    for key in ("director_summary", "background_unit", "subject_unit", "xiaoxia_interpretation", "fusion_unit"):
         if not isinstance(data.get(key), dict):
             data[key] = fallback[key]
 
@@ -19130,6 +19287,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
     ctx = source_context or {}
     module_key = _director_module_key(ctx)
     time_context = _director_current_time_context(module_key, ctx)
+    cosplay_canon_json = await _build_cosplay_canon_json(ctx) if module_key == "cosplay" else {}
 
     # Give Gemini structured source facts where available, without dumping the full DB/history.
     source_facts = {
@@ -19147,6 +19305,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         "visual_checklist": ctx.get("visual_checklist"),
         "story": ctx.get("story") if module_key == "cosplay" else None,
         "cosplay_state": ctx.get("cosplay_state") if module_key == "cosplay" else None,
+        "cosplay_canon_json": cosplay_canon_json if module_key == "cosplay" else None,
     }
 
     prompt = f"""
@@ -19174,7 +19333,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 
 請輸出且只輸出以下 JSON 結構：
 {{
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "module": "{module_key}",
   "time_context": {{
     "source": "",
@@ -19221,6 +19380,11 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
     "must_have": [],
     "must_not_drift": []
   }},
+  "xiaoxia_interpretation": {{
+    "allure_direction": "",
+    "feminine_styling": "",
+    "visual_impact": ""
+  }},
   "fusion_unit": {{
     "mood": "",
     "composition": "",
@@ -19237,11 +19401,13 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 3. 文中明確提到且對故事或角色辨識重要的道具，要列入 props；不可只藏在散文裡。
 4. must_have 只列「缺了就不能算拍對」的視覺元素。
 5. must_not_drift 用來防止畫面變成另一件事，例如淨灘變海邊擺拍、Ivy 變 generic gothic woman。
-6. cosplay 要把原型髮型/髮色、服裝輪廓/主色、signature prop、角色辨識特徵逐欄填出；小俠的臉與核心身形仍由 identity refs 決定。
-7. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
-8. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
-9. subject_unit + fusion_unit 是給最終人物模型看的；必須讓小俠和世界有實際互動，而非把背景當壁紙。
-10. 不需要提出 A/B/C 候選，不需要解釋選擇過程。
+6. cosplay 時，cosplay_canon_json 是「角色事實層」最高權威。它決定角色髮色/髮型、代表性服裝系統、主色、signature prop、motif 與 recognition anchors；本次 story/cosplay_state 只能決定今天演什麼，不能改寫 canon。
+7. cosplay 的 subject_unit 必須把 canon 中 high-confidence 的辨識元素具體轉成 hair / outfit / props / must_have。若 canon signature_props 中 required=true，必須放入 props 與 must_have，不可省略成氣氛描述。
+8. xiaoxia_interpretation 是「小俠版美學層」：保留 canon-first sexy cosplay 的漂亮、成熟、電影寫真感，但性感與華麗只能在 canon costume system 內重新詮釋，不能拿 generic glamour outfit 取代角色。
+9. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
+10. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
+11. subject_unit + xiaoxia_interpretation + fusion_unit 是給最終人物模型看的；必須讓小俠和世界有實際互動，而非把背景當壁紙。
+12. 不需要提出 A/B/C 候選，不需要解釋選擇過程。
 """
     try:
         response = await gemini_client.aio.models.generate_content(
@@ -19259,17 +19425,23 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         )
         raw = str(getattr(response, "text", "") or "").replace("```json", "").replace("```", "").strip()
         data = json.loads(raw, strict=False)
-        return _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
+        sanitized = _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
+        if module_key == "cosplay":
+            sanitized["cosplay_canon_json"] = cosplay_canon_json
+        return sanitized
     except Exception as exc:
         print(f"⚠️ [DIRECTOR_JSON_FAILED] {type(exc).__name__}: {exc}")
-        return _director_fallback_json(ctx, semantic_brief, prompt_base)
+        fallback = _director_fallback_json(ctx, semantic_brief, prompt_base)
+        if module_key == "cosplay":
+            fallback["cosplay_canon_json"] = cosplay_canon_json
+        return fallback
 
 
 def _director_json_block(title, payload):
     return f"{title}\n{json.dumps(payload or {}, ensure_ascii=False, indent=2)}"
 
 
-def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, director_fusion_unit=None, director_time_context=None, source_mode="photo", has_reference=False):
+def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, director_fusion_unit=None, director_time_context=None, source_mode="photo", has_reference=False, cosplay_canon_json=None, xiaoxia_interpretation=None):
     prompt_base = str(prompt_base or "").strip()
     source_mode_norm = str(source_mode or "photo").strip().lower()
     is_cosplay = source_mode_norm == "cosplay"
@@ -19277,10 +19449,11 @@ def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, d
     if is_cosplay:
         preface_lines += [
             "- COSPLAY MODE: preserve Xiaoxia's recognizable face identity and core body identity from the identity figures.",
-            "- COSPLAY MODE: do NOT lock Xiaoxia's everyday brown-family hair or civilian styling. Hair color, hairstyle, costume silhouette, signature accessories, signature weapons/props, and character-defining motifs must follow the DIRECTOR SUBJECT UNIT.",
-            "- COSPLAY MODE: the DIRECTOR SUBJECT UNIT is the authoritative role brief for appearance, outfit, props, and action. The DIRECTOR FUSION UNIT is the authoritative integration brief for composition, world interaction, and story readability.",
-            "- If generic cosplay baseline wording conflicts with the DIRECTOR units, the DIRECTOR units win.",
-            "- Do not replace a role-defining prop, weapon, outfit silhouette, or hair requirement with a generic glamour alternative. If subject_unit.must_have or outfit.must_preserve requires it, it must stay visible unless physically impossible in the chosen framing.",
+            "- CHARACTER CANON JSON is the role fact authority. Creative story text may choose today's scene/action, but may NOT override canon hair, costume system, signature props, motifs, or recognition anchors.",
+            "- Do NOT lock Xiaoxia's everyday brown-family hair or civilian styling. Role hair, costume silhouette, signature accessories, signature weapons/props, and character-defining motifs must follow CHARACTER CANON JSON and DIRECTOR SUBJECT UNIT.",
+            "- XIAOXIA INTERPRETATION is the beauty/style layer: keep the established canon-first sexy cosplay look — polished, mature, cinematic, alluring, and distinctly Xiaoxia — while staying inside the recognizable canon costume system.",
+            "- If generic cosplay baseline wording or the earlier creative story conflicts with CHARACTER CANON JSON or DIRECTOR units, the canon/director data wins.",
+            "- Do not replace a role-defining prop, weapon, outfit silhouette, hair requirement, or motif with a generic glamour alternative. Required canon props and subject_unit.must_have items must remain visibly readable.",
             "- Keep the result clearly readable as Xiaoxia cosplaying this named role, not as a generic gothic / fantasy / glamorous woman.",
         ]
     else:
@@ -19293,18 +19466,23 @@ def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, d
     if has_reference:
         preface_lines.append("- When a Figure 10 / wardrobe reference is present, preserve its garment structure and visible design details exactly unless the DIRECTOR unit explicitly says otherwise.")
     preface_lines.append("- Render one coherent single-photo moment. Do not split the scene into multiple beats or collapse the action into a generic standing pose.")
-    preface = "\n".join(preface_lines).strip()
-    return (
-        preface
-        + "\n\nORIGINAL SCENE REQUEST\n"
-        + prompt_base
-        + "\n\nDIRECTOR SUBJECT UNIT — AUTHORITATIVE VISUAL TASK CARD\n"
-        + json.dumps(director_subject_unit or {}, ensure_ascii=False, indent=2)
-        + "\n\nDIRECTOR FUSION UNIT — AUTHORITATIVE INTEGRATION TASK CARD\n"
-        + json.dumps(director_fusion_unit or {}, ensure_ascii=False, indent=2)
-        + "\n\nDIRECTOR TIME CONTEXT\n"
-        + json.dumps(director_time_context or {}, ensure_ascii=False, indent=2)
-    ).strip()
+    blocks = ["\n".join(preface_lines).strip()]
+    if is_cosplay:
+        blocks += [
+            "CHARACTER CANON JSON — ROLE FACT AUTHORITY\n" + json.dumps(cosplay_canon_json or {}, ensure_ascii=False, indent=2),
+            "XIAOXIA INTERPRETATION — BEAUTY / STYLE LAYER\n" + json.dumps(xiaoxia_interpretation or {}, ensure_ascii=False, indent=2),
+        ]
+        # Director already distilled the story. Do not re-feed a conflicting creative costume paragraph
+        # into Seedream just because it existed upstream.
+    else:
+        blocks.append("ORIGINAL SCENE REQUEST\n" + prompt_base)
+    blocks += [
+        "DIRECTOR SUBJECT UNIT — AUTHORITATIVE VISUAL TASK CARD\n" + json.dumps(director_subject_unit or {}, ensure_ascii=False, indent=2),
+        "DIRECTOR FUSION UNIT — AUTHORITATIVE INTEGRATION TASK CARD\n" + json.dumps(director_fusion_unit or {}, ensure_ascii=False, indent=2),
+        "DIRECTOR TIME CONTEXT\n" + json.dumps(director_time_context or {}, ensure_ascii=False, indent=2),
+    ]
+    return "\n\n".join(blocks).strip()
+
 
 async def _generate_seedream_v5_refine_from_v45(source_context, background_policy="new", background_source_context=None):
     """v1.5.57_R5：改成「v5 背景圖 + v4.5 最終成圖」的場景升級路線。
@@ -19357,14 +19535,21 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
     if not str(prompt_base).strip():
         raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
 
+    # Resolve mode BEFORE Director prompt composition. R1 had this below the call, which caused
+    # source_mode_norm to be referenced before assignment and silently fell back to pure v4.5.
+    source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
+    source_mode_norm = source_mode.strip().lower()
+    is_cosplay = source_mode_norm == "cosplay" or "cosplay" in _clip(source_context.get("user_mode_request"), 120).lower()
+
     director_json = await _build_director_json(source_context, semantic_brief, prompt_base)
     director_background_unit = director_json.get("background_unit") if isinstance(director_json, dict) else {}
     director_subject_unit = director_json.get("subject_unit") if isinstance(director_json, dict) else {}
     director_fusion_unit = director_json.get("fusion_unit") if isinstance(director_json, dict) else {}
     director_time_context = director_json.get("time_context") if isinstance(director_json, dict) else {}
+    cosplay_canon_json = director_json.get("cosplay_canon_json") if isinstance(director_json, dict) else {}
+    xiaoxia_interpretation = director_json.get("xiaoxia_interpretation") if isinstance(director_json, dict) else {}
 
-    # v1.6.01_R1：Director-first。v4.5 直接讀 Subject + Fusion JSON，尤其在 cosplay
-    # 下由 Director task cards 接管髮型/髮色/服裝/道具/互動，而不是被舊長散文稀釋。
+    # v1.6.01_R2：Director-first + Canon fact layer + Xiaoxia style layer.
     director_v45_prompt = _compose_director_seedream_prompt(
         prompt_base,
         director_subject_unit=director_subject_unit,
@@ -19372,12 +19557,11 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         director_time_context=director_time_context,
         source_mode=source_mode_norm,
         has_reference=bool(source_context.get("reference_item_path") or source_context.get("reference_item_url")),
+        cosplay_canon_json=cosplay_canon_json,
+        xiaoxia_interpretation=xiaoxia_interpretation,
     )
 
     framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
-    source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
-    source_mode_norm = source_mode.strip().lower()
-    is_cosplay = source_mode_norm == "cosplay" or "cosplay" in _clip(source_context.get("user_mode_request"), 120).lower()
 
     background_prompt_lines = [
         "Create a photorealistic ENVIRONMENT-ONLY background plate for a later Xiaoxia image generation run.",
@@ -19424,12 +19608,14 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "reference_item_url": source_context.get("reference_item_url"),
         "current_outfit_for_seedream": source_context.get("current_outfit_for_seedream"),
         "visual_checklist": source_context.get("visual_checklist"),
-        "director_schema_version": "1.0",
+        "director_schema_version": "1.1",
         "director_json": director_json,
         "director_time_context": director_time_context,
         "director_background_unit": director_background_unit,
         "director_subject_unit": director_subject_unit,
         "director_fusion_unit": director_fusion_unit,
+        "cosplay_canon_json": cosplay_canon_json,
+        "xiaoxia_interpretation": xiaoxia_interpretation,
     }
     _trace_stage(
         trace_context,
@@ -19609,12 +19795,14 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "v5_background_selected_identity_figures": list(selected_figures),
         "v5_background_upgrade_mode": "v5_background_t2i_as_figure9_then_v45_regenerate",
         "v5_handoff_input_count": len(input_urls),
-        "director_schema_version": "1.0",
+        "director_schema_version": "1.1",
         "director_json": director_json,
         "director_time_context": director_time_context,
         "director_background_unit": director_background_unit,
         "director_subject_unit": director_subject_unit,
         "director_fusion_unit": director_fusion_unit,
+        "cosplay_canon_json": cosplay_canon_json,
+        "xiaoxia_interpretation": xiaoxia_interpretation,
         "director_v45_prompt": director_v45_prompt,
         "director_v5_background_prompt": director_v5_background_prompt,
     })
@@ -19660,6 +19848,8 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
             director_time_context=context.get("director_time_context") or {},
             source_mode=source_mode_norm,
             has_reference=bool(context.get("reference_item_path") or context.get("reference_item_url")),
+            cosplay_canon_json=context.get("cosplay_canon_json") or {},
+            xiaoxia_interpretation=context.get("xiaoxia_interpretation") or {},
         )
 
     visual = {
@@ -19681,6 +19871,8 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
         "director_json": copy.deepcopy(context.get("director_json")) if isinstance(context.get("director_json"), dict) else {},
         "director_subject_unit": copy.deepcopy(context.get("director_subject_unit")) if isinstance(context.get("director_subject_unit"), dict) else {},
         "director_fusion_unit": copy.deepcopy(context.get("director_fusion_unit")) if isinstance(context.get("director_fusion_unit"), dict) else {},
+        "cosplay_canon_json": copy.deepcopy(context.get("cosplay_canon_json")) if isinstance(context.get("cosplay_canon_json"), dict) else {},
+        "xiaoxia_interpretation": copy.deepcopy(context.get("xiaoxia_interpretation")) if isinstance(context.get("xiaoxia_interpretation"), dict) else {},
         "seedream_model_id": SEEDREAM_V45_MODEL_ID,
         "seedream_model_label": _seedream_model_label_from_id(SEEDREAM_V45_MODEL_ID),
         "figure10_present": bool(context.get("reference_item_path") or context.get("reference_item_url")),
