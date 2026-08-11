@@ -5,13 +5,14 @@
 import os
 import io
 import json
+import copy
 import re
 import math
 import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.59_R1"
+LOBSTER_VERSION = "1.5.59_R2"
 
 
 def _normalize_generation_level(level):
@@ -45,6 +46,36 @@ def _generation_level_footer(context, prefix="防護等級"):
     if not level:
         return ""
     return f" | {prefix}: {level}"
+
+
+PHOTO_CONTEXT_CARRY_KEYS = (
+    "message", "reply_to_daxia", "xiaoxia_daily_scene", "inner_monologue", "xiaoxia_diary",
+    "selected_memory", "why_this_photo", "photo_alignment", "photo_alignment_label",
+    "post_text", "scene_text", "scene_summary", "action_summary", "outfit_summary",
+    "camera_framing", "prompt_base", "root_prompt_base", "user_input", "autonomy_activity",
+    "current_outfit_for_seedream", "wardrobe_selection_source", "wardrobe_selection_reason",
+    "wardrobe_match", "diary_source_layer", "outfit_source", "outfit_display",
+    "repair_request", "repair_history", "primary_generation_strategy", "compare_source_url",
+    "compare_source_message_id", "v45_replace_target_url", "v45_replace_target_message_id",
+    "v5_refine_mode", "v5_background_prompt", "v5_background_semantic_brief",
+    "v5_background_generated_url", "v5_background_local_url", "v5_background_local_filename",
+    "v5_background_local_path", "v5_background_selected_identity_figures",
+    "v5_background_upgrade_mode", "v5_handoff_input_count", "story_scene_candidates",
+    "chosen_story_scene_candidate", "story_scene_candidate_summary",
+)
+
+
+def _carry_forward_photo_context_fields(source_context, target_context, force=False):
+    source = source_context or {}
+    target = dict(target_context or {})
+    for key in PHOTO_CONTEXT_CARRY_KEYS:
+        value = source.get(key)
+        if value in (None, "", [], {}):
+            continue
+        existing = target.get(key)
+        if force or existing in (None, "", [], {}):
+            target[key] = copy.deepcopy(value)
+    return target
 
 
 SOLO_XIAOXIA_VISUAL_RULES = """
@@ -16314,6 +16345,9 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "allow_background_bystanders": bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders")),
         "diary_allow_background_bystanders": bool(context.get("diary_allow_background_bystanders")),
     })
+    repaired = _carry_forward_photo_context_fields(context, repaired, force=True)
+    if context.get("v5_background_generated_url") or context.get("v5_background_local_url") or context.get("v5_background_local_path"):
+        repaired["primary_generation_strategy"] = context.get("primary_generation_strategy") or "v45_plus_v50_default"
     trace_context["result_url"] = local_url
     _write_generation_trace("repair", trace_context)
     return repaired
@@ -16447,7 +16481,7 @@ def _photo_db_payload(context, name=None, type_override="photo"):
     title = name or context.get("photo_name") or context.get("scene_text") or "小俠照片"
     activity = context.get("autonomy_activity") if isinstance(context.get("autonomy_activity"), dict) else {}
     gallery_category = _gallery_category_for_photo(context, type_override=type_override)
-    return {
+    payload = {
         "id": str(uuid.uuid4()),
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "topic": f"【Photo】{title}",
@@ -16487,6 +16521,10 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "wardrobe_id": context.get("wardrobe_id"),
         "wardrobe_name": context.get("wardrobe_name"),
     }
+    for key in PHOTO_CONTEXT_CARRY_KEYS:
+        if key in context:
+            payload[key] = copy.deepcopy(context.get(key))
+    return payload
 
 
 def _photo_local_path_from_context(context):
@@ -16653,6 +16691,7 @@ async def _generate_photo_from_context(context, msg=None):
         "figure10_present": bool(context.get("reference_item_path")),
         "seedream_model_id_override": context.get("seedream_model_id_override"),
         "seedream_model_label": context.get("seedream_model_label"),
+        "original_context": context if context.get("preserve_textual_fields_on_regenerate") else None,
     }
     if str(context.get("source_mode") or context.get("type") or "").lower() == "cosplay":
         trace_context["kind"] = "cosplay"
@@ -16722,6 +16761,8 @@ async def _generate_photo_from_context(context, msg=None):
         "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
         "visual_checklist": trace_context.get("visual_checklist"),
     })
+    if context.get("preserve_textual_fields_on_regenerate"):
+        context = _carry_forward_photo_context_fields(trace_context.get("original_context") or {}, context, force=True)
     trace_context.update({
         "source_mode": context.get("source_mode"),
         "generation_mode": generation_mode,
@@ -18868,7 +18909,94 @@ async def _generate_photobook_more_choice(message, request):
 
 
 
-async def _generate_seedream_v5_refine_from_v45(source_context):
+async def _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief, prompt_base):
+    prompt = f"""
+你是小俠照片的故事分鏡規劃器。請根據以下資料，先提出 2~3 個可直接拍成單張照片的「故事畫面候選」，
+每個候選都必須忠於原本的事件、場景與人物規則，不可亂改成另一個故事。
+然後請在候選中挑出最適合作為本次單張照片的那一個。
+
+【原始語意摘要】
+{semantic_brief}
+
+【原始 prompt_base】
+{prompt_base}
+
+輸出 JSON：
+{
+  "candidates": [
+    {
+      "id": "A",
+      "title": "候選標題",
+      "scene": "一句話描述具體場景",
+      "primary_action": "主要動作",
+      "secondary_action": "次要或輔助動作，沒有可留空",
+      "props": ["必要道具1", "必要道具2"],
+      "camera": "適合的鏡頭與構圖",
+      "mood": "情緒與氛圍",
+      "why_best": "這個候選為何適合做成單張照片"
+    }
+  ],
+  "chosen_id": "A",
+  "selection_reason": "為何選這個候選"
+}
+規則：
+1. 候選數量 2 或 3。
+2. 每個候選都要是「同一時間、同一地點、同一主要活動」的單張畫面。
+3. 必須保留原本人物邏輯與服裝邏輯；不得加入不在原需求中的人際互動。
+4. 請用繁體中文。
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                ],
+            ),
+        )
+        raw = str(getattr(response, 'text', '') or '').replace('```json', '').replace('```', '').strip()
+        data = json.loads(raw, strict=False)
+    except Exception as exc:
+        print(f"⚠️ [HYBRID_STORY_CANDIDATES_FAILED] {type(exc).__name__}: {exc}")
+        return {"candidates": [], "chosen": None, "selection_reason": ""}
+
+    candidates = data.get("candidates") if isinstance(data, dict) else []
+    if not isinstance(candidates, list):
+        candidates = []
+    cleaned = []
+    for idx, item in enumerate(candidates[:3], start=1):
+        if not isinstance(item, dict):
+            continue
+        cleaned.append({
+            "id": str(item.get("id") or chr(64 + idx)),
+            "title": _clean_text_compact(item.get("title") or f"候選{idx}")[:80],
+            "scene": _clean_text_compact(item.get("scene") or "")[:280],
+            "primary_action": _clean_text_compact(item.get("primary_action") or item.get("action") or "")[:220],
+            "secondary_action": _clean_text_compact(item.get("secondary_action") or "")[:220],
+            "props": [str(x).strip()[:80] for x in (item.get("props") or []) if str(x).strip()][:6],
+            "camera": _clean_text_compact(item.get("camera") or "")[:220],
+            "mood": _clean_text_compact(item.get("mood") or "")[:160],
+            "why_best": _clean_text_compact(item.get("why_best") or "")[:220],
+        })
+    chosen = None
+    chosen_id = str((data or {}).get("chosen_id") or "").strip()
+    if chosen_id:
+        chosen = next((x for x in cleaned if str(x.get("id")) == chosen_id), None)
+    if not chosen and cleaned:
+        chosen = cleaned[0]
+    return {
+        "candidates": cleaned,
+        "chosen": chosen,
+        "selection_reason": _clean_text_compact((data or {}).get("selection_reason") or "")[:220],
+    }
+
+
+async def _generate_seedream_v5_refine_from_v45(source_context, background_policy="new", background_source_context=None):
     """v1.5.57_R5：改成「v5 背景圖 + v4.5 最終成圖」的場景升級路線。
 
     流程：
@@ -18878,6 +19006,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     4. 最終仍由 Seedream v4.5 出圖，避免 v5 edit 直接改壞人物身份。
     """
     source_context = dict(source_context or {})
+    background_source_context = dict(background_source_context or source_context or {})
 
     def _clip(value, n=700):
         return _clean_text_compact(value or "")[:n]
@@ -18911,6 +19040,31 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         return "\n".join(rows)
 
     semantic_brief = _scene_semantic_brief()
+    story_scene_plan = await _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief, prompt_base)
+    chosen_story_scene = story_scene_plan.get("chosen") if isinstance(story_scene_plan, dict) else None
+    if isinstance(chosen_story_scene, dict):
+        chosen_summary_lines = [
+            "CHOSEN STORY MOMENT CANDIDATE:",
+            f"Title: {chosen_story_scene.get('title')}",
+            f"Scene: {chosen_story_scene.get('scene')}",
+            f"Primary action: {chosen_story_scene.get('primary_action')}",
+        ]
+        if chosen_story_scene.get("secondary_action"):
+            chosen_summary_lines.append(f"Secondary action: {chosen_story_scene.get('secondary_action')}")
+        if chosen_story_scene.get("props"):
+            chosen_summary_lines.append(f"Props: {', '.join(chosen_story_scene.get('props') or [])}")
+        if chosen_story_scene.get("camera"):
+            chosen_summary_lines.append(f"Camera: {chosen_story_scene.get('camera')}")
+        if chosen_story_scene.get("mood"):
+            chosen_summary_lines.append(f"Mood: {chosen_story_scene.get('mood')}")
+        if story_scene_plan.get("selection_reason"):
+            chosen_summary_lines.append(f"Why chosen: {story_scene_plan.get('selection_reason')}")
+        chosen_story_summary = "\n".join(chosen_summary_lines)
+        semantic_brief = chosen_story_summary + "\n\n" + semantic_brief
+        prompt_base = (prompt_base.rstrip() + "\n\nHYBRID STORY MOMENT CANDIDATE — SELECTED\n" + chosen_story_summary).strip()
+    else:
+        chosen_story_summary = ""
+
     framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
     source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
     source_mode_norm = source_mode.strip().lower()
@@ -18964,6 +19118,9 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         "reference_item_url": source_context.get("reference_item_url"),
         "current_outfit_for_seedream": source_context.get("current_outfit_for_seedream"),
         "visual_checklist": source_context.get("visual_checklist"),
+        "story_scene_candidates": (story_scene_plan.get("candidates") if isinstance(story_scene_plan, dict) else []),
+        "chosen_story_scene_candidate": chosen_story_scene,
+        "story_scene_candidate_summary": chosen_story_summary,
     }
     _trace_stage(
         trace_context,
@@ -18999,23 +19156,57 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
             on_queue_update=on_queue_update,
         )
 
-    bg_result = await asyncio.to_thread(_subscribe_background)
-    bg_images = bg_result.get("images") if isinstance(bg_result, dict) else None
-    if not bg_images or not isinstance(bg_images[0], dict) or not bg_images[0].get("url"):
-        raise RuntimeError(f"V5_BG_UPGRADE_BG_NONE：Seedream v5.0 Pro 背景圖沒有回傳圖片：{bg_result}")
-    background_generated_url = bg_images[0]["url"]
-    background_local_filename = await save_to_vault(background_generated_url)
-    background_local_url = f"https://xiaoxia0320.zeabur.app/gallery/{background_local_filename}" if background_local_filename else background_generated_url
-    background_local_path = os.path.join(OUTPUT_DIR, background_local_filename) if background_local_filename else None
-    _trace_stage(
-        trace_context,
-        "seedream_v5_background_t2i_result",
-        data={
-            "background_generated_url": background_generated_url,
-            "background_local_url": background_local_url,
-            "background_local_path": background_local_path,
-        },
-    )
+    background_generated_url = None
+    background_local_filename = None
+    background_local_url = None
+    background_local_path = None
+    reused_existing_background = False
+
+    if str(background_policy or "new").lower() == "reuse":
+        candidate_path = str(background_source_context.get("v5_background_local_path") or "").strip()
+        candidate_local_url = str(background_source_context.get("v5_background_local_url") or "").strip()
+        candidate_generated_url = str(background_source_context.get("v5_background_generated_url") or "").strip()
+        if (not candidate_path) and candidate_local_url:
+            candidate_path = _gallery_url_to_local_path(candidate_local_url) or ""
+        if candidate_generated_url.startswith("http"):
+            background_generated_url = candidate_generated_url
+            reused_existing_background = True
+        elif candidate_path and os.path.exists(candidate_path):
+            background_generated_url = await _seedream_upload_single_file(candidate_path)
+            reused_existing_background = bool(background_generated_url)
+        if reused_existing_background:
+            background_local_path = candidate_path or None
+            background_local_url = candidate_local_url or background_source_context.get("v5_background_generated_url")
+            background_local_filename = background_source_context.get("v5_background_local_filename") or (os.path.basename(candidate_path) if candidate_path else None)
+            _trace_stage(
+                trace_context,
+                "seedream_v5_background_reused",
+                data={
+                    "background_generated_url": background_generated_url,
+                    "background_local_url": background_local_url,
+                    "background_local_path": background_local_path,
+                },
+                note="Reuse existing v5 background asset; skip new v5 text-to-image generation.",
+            )
+
+    if not reused_existing_background:
+        bg_result = await asyncio.to_thread(_subscribe_background)
+        bg_images = bg_result.get("images") if isinstance(bg_result, dict) else None
+        if not bg_images or not isinstance(bg_images[0], dict) or not bg_images[0].get("url"):
+            raise RuntimeError(f"V5_BG_UPGRADE_BG_NONE：Seedream v5.0 Pro 背景圖沒有回傳圖片：{bg_result}")
+        background_generated_url = bg_images[0]["url"]
+        background_local_filename = await save_to_vault(background_generated_url)
+        background_local_url = f"https://xiaoxia0320.zeabur.app/gallery/{background_local_filename}" if background_local_filename else background_generated_url
+        background_local_path = os.path.join(OUTPUT_DIR, background_local_filename) if background_local_filename else None
+        _trace_stage(
+            trace_context,
+            "seedream_v5_background_t2i_result",
+            data={
+                "background_generated_url": background_generated_url,
+                "background_local_url": background_local_url,
+                "background_local_path": background_local_path,
+            },
+        )
 
     identity_urls = await _seedream_upload_reference_images(force_refresh=True, selected_figure_indexes=selected_figures)
     input_urls = list(identity_urls)
@@ -19113,6 +19304,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         "v5_background_upgrade_mode": "v5_background_t2i_as_figure9_then_v45_regenerate",
         "v5_handoff_input_count": len(input_urls),
     })
+    refined = _carry_forward_photo_context_fields(source_context, refined, force=bool(source_context.get("preserve_textual_fields_on_regenerate")))
     trace_context["result_url"] = local_url or generated_image_url
     _trace_stage(trace_context, "seedream_v45_final_result_after_v5_background_handoff", data={"result_url": trace_context["result_url"]})
     _write_generation_trace("photo", trace_context)
@@ -19197,12 +19389,17 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
         "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label") or _seedream_model_label_from_id(SEEDREAM_V45_MODEL_ID),
         "visual_checklist": trace_context.get("visual_checklist") or context.get("visual_checklist"),
     })
+    context = _carry_forward_photo_context_fields(source_context, context, force=bool(source_context.get("preserve_textual_fields_on_regenerate")))
     return context
 
 
-async def _promote_context_to_primary_hybrid(base_context):
+async def _promote_context_to_primary_hybrid(base_context, background_policy="new", background_source_context=None):
     try:
-        hybrid = await _generate_seedream_v5_refine_from_v45(base_context)
+        hybrid = await _generate_seedream_v5_refine_from_v45(
+            base_context,
+            background_policy=background_policy,
+            background_source_context=(background_source_context or base_context),
+        )
         hybrid["primary_generation_strategy"] = "v45_plus_v50_default"
         hybrid["compare_source_url"] = base_context.get("local_url") or base_context.get("image_url")
         return hybrid
@@ -19213,9 +19410,11 @@ async def _promote_context_to_primary_hybrid(base_context):
         return fallback
 
 
-async def _generate_primary_photo_from_context(context, msg=None):
-    pure_context = await _generate_photo_from_context(_prepare_context_for_pure_v45_rerender(context), msg=msg)
-    return await _promote_context_to_primary_hybrid(pure_context)
+async def _generate_primary_photo_from_context(context, msg=None, background_policy="new"):
+    source_context = dict(context or {})
+    pure_context = await _generate_photo_from_context(_prepare_context_for_pure_v45_rerender(source_context), msg=msg)
+    pure_context = _carry_forward_photo_context_fields(source_context, pure_context, force=bool(source_context.get("preserve_textual_fields_on_regenerate")))
+    return await _promote_context_to_primary_hybrid(pure_context, background_policy=background_policy, background_source_context=source_context)
 
 
 class PhotoResultView(discord.ui.View):
@@ -19239,6 +19438,7 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_more"
         context["user_input"] = "More button from previous photo"
+        context["preserve_textual_fields_on_regenerate"] = True
         root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
@@ -19274,6 +19474,7 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_reroll_replace"
         context["user_input"] = "骰子取代 from previous photo"
+        context["preserve_textual_fields_on_regenerate"] = True
         root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
@@ -19282,7 +19483,7 @@ class PhotoResultView(discord.ui.View):
         )
         try:
             old_url = context.get("local_url") or context.get("image_url")
-            new_context = await _generate_primary_photo_from_context(context)
+            new_context = await _generate_primary_photo_from_context(context, background_policy="reuse")
             _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
             _sync_autonomy_today_after_photo_replace(context, new_context)
             _safe_delete_vault_image(old_url)
@@ -19351,6 +19552,7 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send("⚠️ 找不到這張主要 hybrid 成圖，無法產生純 v4.5 對照版。", ephemeral=True)
             return
         try:
+            context["preserve_textual_fields_on_regenerate"] = True
             source_context = _prepare_context_for_pure_v45_rerender(context)
             new_context = await _generate_pure_v45_from_existing_context(source_context)
             new_context["v45_replace_target_url"] = target_url
