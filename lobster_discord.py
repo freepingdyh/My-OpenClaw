@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R2"
+LOBSTER_VERSION = "1.6.01_R5"
 
 
 def _normalize_generation_level(level):
@@ -4813,14 +4813,151 @@ state = {
     "current_topic_data": None
 }
 
+def _memory_backup_path():
+    return f"{DATA_PATH}.bak"
+
+def _preserve_corrupt_memory_file(reason="json_error"):
+    """Keep the broken original before any repair/overwrite attempt."""
+    if not os.path.exists(DATA_PATH):
+        return None
+    stamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S")
+    safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "_", str(reason or "json_error"))[:40]
+    target = f"{DATA_PATH}.corrupt_{stamp}_{safe_reason}"
+    try:
+        shutil.copy2(DATA_PATH, target)
+        print(f"🛟 [PHOTO_DB_CORRUPT_PRESERVED] {target}")
+        return target
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_CORRUPT_PRESERVE_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+def _load_valid_photo_db(path):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        return None
+    return None
+
+def _salvage_truncated_photo_db(path):
+    """Recover only complete top-level list items from a truncated JSON array."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    text = raw.lstrip()
+    if not text.startswith("["):
+        return []
+
+    decoder = json.JSONDecoder()
+    offset = len(raw) - len(text)
+    i = offset + 1
+    recovered = []
+    n = len(raw)
+
+    while i < n:
+        while i < n and raw[i] in " \t\r\n,":
+            i += 1
+        if i >= n or raw[i] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(raw, i)
+        except json.JSONDecodeError:
+            break
+        recovered.append(value)
+        i = end
+    return recovered
+
+def _atomic_write_photo_db(db, create_backup=True):
+    """Write xiaoxia_photos.json safely: temp -> validate -> optional backup -> replace."""
+    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
+    temp_path = f"{DATA_PATH}.tmp"
+
+    # Never touch the live file until the whole new JSON is serializable and valid.
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+
+    # Re-open temp file to guarantee we did not produce malformed JSON.
+    with open(temp_path, "r", encoding="utf-8") as f:
+        check = json.load(f)
+    if not isinstance(check, list):
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        raise ValueError("xiaoxia_photos.json must remain a JSON list")
+
+    if create_backup and os.path.exists(DATA_PATH):
+        current = _load_valid_photo_db(DATA_PATH)
+        if current is not None:
+            try:
+                shutil.copy2(DATA_PATH, _memory_backup_path())
+                print(f"💾 [PHOTO_DB_BACKUP_OK] {_memory_backup_path()}")
+            except Exception as exc:
+                print(f"⚠️ [PHOTO_DB_BACKUP_FAILED] {type(exc).__name__}: {exc}")
+        else:
+            # The live file is already damaged. Preserve it, but do not poison .bak.
+            _preserve_corrupt_memory_file("before_atomic_replace")
+
+    os.replace(temp_path, DATA_PATH)
+
 def load_memory():
-    if not os.path.exists(DATA_PATH): return []
-    with open(DATA_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if not os.path.exists(DATA_PATH):
+        return []
+
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError("xiaoxia_photos.json root is not a list")
+        return data
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_LOAD_FAILED] {type(exc).__name__}: {exc}")
+        _preserve_corrupt_memory_file(type(exc).__name__)
+
+    # Recovery priority 1: last known-good backup.
+    backup = _load_valid_photo_db(_memory_backup_path())
+    if backup is not None:
+        try:
+            _atomic_write_photo_db(backup, create_backup=False)
+            print(f"✅ [PHOTO_DB_RECOVERED_FROM_BACKUP] items={len(backup)}")
+        except Exception as exc:
+            print(f"⚠️ [PHOTO_DB_BACKUP_RESTORE_WRITE_FAILED] {type(exc).__name__}: {exc}")
+        return backup
+
+    # Recovery priority 2: salvage only complete leading records from the broken JSON array.
+    salvaged = _salvage_truncated_photo_db(DATA_PATH)
+    if salvaged:
+        recovered_path = f"{DATA_PATH}.recovered"
+        try:
+            with open(recovered_path, "w", encoding="utf-8") as f:
+                json.dump(salvaged, f, ensure_ascii=False, indent=2)
+            _atomic_write_photo_db(salvaged, create_backup=False)
+            print(f"🛟 [PHOTO_DB_SALVAGED] items={len(salvaged)} recovered_copy={recovered_path}")
+        except Exception as exc:
+            print(f"⚠️ [PHOTO_DB_SALVAGE_WRITE_FAILED] {type(exc).__name__}: {exc}")
+        return salvaged
+
+    # No safe records recovered. Keep the corrupt original; return an empty in-memory list
+    # so startup can continue. A later save still preserves the corrupt file before replace.
+    print("⚠️ [PHOTO_DB_RECOVERY_EMPTY] no complete records could be salvaged; corrupt original preserved.")
+    return []
 
 def save_memory(db):
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+    if not isinstance(db, list):
+        raise ValueError("save_memory expects a list")
+    _atomic_write_photo_db(db, create_backup=True)
 
 def _today_str_tpe():
     return datetime.now(TZ_TPE).strftime("%Y-%m-%d")
