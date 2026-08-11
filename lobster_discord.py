@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R10"
+LOBSTER_VERSION = "1.6.01_R11"
 
 
 def _normalize_generation_level(level):
@@ -19645,188 +19645,242 @@ def _director_extract_required_canon_props(cosplay_canon_json):
     return props
 
 
+def _canon_clean_string_list(items, limit=12, max_chars=180):
+    out, seen = [], set()
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        text = _clean_text_compact(item or "")[:max_chars]
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _canon_clean_prop_list(items, limit=12):
+    out, seen = [], set()
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_text_compact(item.get("name") or "")[:160]
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": name,
+            "type": _clean_text_compact(item.get("type") or "")[:80],
+            "visual_description": _clean_text_compact(item.get("visual_description") or "")[:260],
+            "required": bool(item.get("required")),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _build_cosplay_canon_preserve_list(cosplay_canon_json):
+    canon = cosplay_canon_json if isinstance(cosplay_canon_json, dict) else {}
+    costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
+    items = []
+    for key in ("silhouette", "upper_body", "lower_body", "footwear"):
+        value = _clean_text_compact(costume.get(key) or "")[:180]
+        if value:
+            items.append(value)
+    items.extend([f"palette: {x}" for x in _canon_clean_string_list(costume.get("signature_palette"), limit=6, max_chars=60)])
+    items.extend([f"accessory: {x}" for x in _canon_clean_string_list(costume.get("accessories"), limit=6, max_chars=80)])
+    items.extend([f"motif: {x}" for x in _canon_clean_string_list(costume.get("motifs"), limit=6, max_chars=80)])
+    items.extend(_canon_clean_string_list(canon.get("recognition_anchors"), limit=8, max_chars=160))
+    return _canon_clean_string_list(items, limit=12, max_chars=180)
+
+
+def _validate_cosplay_director_against_canon(director_json, cosplay_canon_json):
+    issues = []
+    data = director_json if isinstance(director_json, dict) else {}
+    canon = cosplay_canon_json if isinstance(cosplay_canon_json, dict) else {}
+    subject = data.get("subject_unit") if isinstance(data.get("subject_unit"), dict) else {}
+    outfit = subject.get("outfit") if isinstance(subject.get("outfit"), dict) else {}
+    props = subject.get("props") if isinstance(subject.get("props"), list) else []
+    must_have = subject.get("must_have") if isinstance(subject.get("must_have"), list) else []
+    action = subject.get("action") if isinstance(subject.get("action"), dict) else {}
+
+    prop_names = set()
+    for item in props:
+        if isinstance(item, dict):
+            name = _clean_text_compact(item.get("name") or "")[:160]
+        else:
+            name = _clean_text_compact(item or "")[:160]
+        if name:
+            prop_names.add(name.lower())
+    must_text = " | ".join(_clean_text_compact(x or "") for x in must_have)
+    primary = _clean_text_compact(action.get("primary_action") or "").lower()
+    interaction = _clean_text_compact(action.get("interaction_with_world") or "").lower()
+    outfit_desc = _clean_text_compact(outfit.get("description") or "")
+
+    required = _director_extract_required_canon_props(canon)
+    for req in required:
+        name = _clean_text_compact(req.get("name") or "")[:160]
+        if not name:
+            continue
+        low = name.lower()
+        if low not in prop_names:
+            issues.append(f"missing_required_prop:{name}")
+        if low not in must_text.lower():
+            issues.append(f"required_prop_not_in_must_have:{name}")
+        if low not in primary and low not in interaction:
+            issues.append(f"required_prop_not_in_action:{name}")
+
+    if _summarize_cosplay_canon_costume(canon) and "Canon-first costume requirement:" not in outfit_desc:
+        issues.append("outfit_not_hard_replaced_by_canon")
+
+    forbidden_tokens = (
+        "magic book", "spellbook", "grimoire", "魔法書", "魔典", "generic librarian",
+        "generic scholar", "evening gown", "lingerie"
+    )
+    for item in must_have:
+        low = _clean_text_compact(item or "").lower()
+        if any(tok in low for tok in forbidden_tokens):
+            issues.append(f"forbidden_must_have:{item}")
+    return {"pass": len(issues) == 0, "issues": issues[:20]}
+
+
 def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
-    """Post-review hard enforcement. Prevent required canon anchors from disappearing."""
+    """Canon Hard Replace: clear conflicting role fields, then rebuild them from canon."""
     data = copy.deepcopy(director_json or {}) if isinstance(director_json, dict) else {}
     canon = cosplay_canon_json or {}
     if not isinstance(canon, dict):
         return data
 
     subject = data.get("subject_unit") if isinstance(data.get("subject_unit"), dict) else {}
-    appearance = subject.get("appearance") if isinstance(subject.get("appearance"), dict) else {}
-    outfit = subject.get("outfit") if isinstance(subject.get("outfit"), dict) else {}
-    props = subject.get("props") if isinstance(subject.get("props"), list) else []
-    must_have = subject.get("must_have") if isinstance(subject.get("must_have"), list) else []
-    must_not_drift = subject.get("must_not_drift") if isinstance(subject.get("must_not_drift"), list) else []
     background = data.get("background_unit") if isinstance(data.get("background_unit"), dict) else {}
+    appearance = subject.get("appearance") if isinstance(subject.get("appearance"), dict) else {}
+    action = subject.get("action") if isinstance(subject.get("action"), dict) else {}
+    outfit = {}
     forbidden_elements = background.get("forbidden_elements") if isinstance(background.get("forbidden_elements"), list) else []
+    must_not_drift = subject.get("must_not_drift") if isinstance(subject.get("must_not_drift"), list) else []
 
     canon_appearance = canon.get("appearance") if isinstance(canon.get("appearance"), dict) else {}
     hair_color = _clean_text_compact(canon_appearance.get("hair_color") or "")[:80]
     hair_style = _clean_text_compact(canon_appearance.get("hair_style") or "")[:120]
-    canon_hair = ", ".join([x for x in [hair_color, hair_style] if x]).strip(", ")
-    if canon_hair:
-        current_hair = _clean_text_compact(appearance.get("hair") or "")
-        low = current_hair.lower()
-        if hair_color and hair_color.lower() not in low:
-            current_hair = (current_hair + "; " if current_hair else "") + f"Canon hair color: {hair_color}"
-        if hair_style and hair_style.lower() not in current_hair.lower():
-            current_hair = (current_hair + "; " if current_hair else "") + f"Canon hair style: {hair_style}"
-        appearance["hair"] = current_hair[:320]
+    distinct = _canon_clean_string_list(canon_appearance.get("distinctive_features"), limit=6, max_chars=160)
+    hair_bits = []
+    if hair_color:
+        hair_bits.append(f"canon hair color: {hair_color}")
+    if hair_style:
+        hair_bits.append(f"canon hair style: {hair_style}")
+    if distinct:
+        hair_bits.append("distinctive features: " + ", ".join(distinct))
+    if hair_bits:
+        appearance["hair"] = "; ".join(hair_bits)[:320]
 
-    canon_costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
     canon_costume_summary = _summarize_cosplay_canon_costume(canon)
-    if canon_costume_summary:
-        # R10: for cosplay, canon costume is not merely appended. It replaces contradictory free-form prose.
-        # This prevents cases like Ivy drifting into a generic velvet gown / magic-user redesign.
-        outfit["description"] = canon_costume_summary[:900]
-    mp = outfit.get("must_preserve") if isinstance(outfit.get("must_preserve"), list) else []
-    for anchor in (canon.get("recognition_anchors") or [])[:8]:
-        a = _clean_text_compact(anchor or "")[:180]
-        if a and a not in mp:
-            mp.append(a)
-    outfit["must_preserve"] = mp[:12]
+    canon_preserve = _build_cosplay_canon_preserve_list(canon)
+    outfit["source"] = "cosplay_canon"
+    outfit["description"] = canon_costume_summary[:900] if canon_costume_summary else _clean_text_compact(appearance.get("hair") or "")[:200]
+    outfit["must_preserve"] = canon_preserve[:12]
 
-    existing_names = set()
-    normalized_props = []
-    for item in props[:12]:
-        if isinstance(item, dict):
-            name = _clean_text_compact(item.get("name") or "")[:160]
-            if name:
-                existing_names.add(name.lower())
-                normalized_props.append({
-                    "name": name,
-                    "type": _clean_text_compact(item.get("type") or "")[:80],
-                    "visual_description": _clean_text_compact(item.get("visual_description") or "")[:260],
-                    "required": bool(item.get("required")),
-                })
-        elif isinstance(item, str):
-            name = _clean_text_compact(item)[:160]
-            if name:
-                existing_names.add(name.lower())
-                normalized_props.append({"name": name, "type": "", "visual_description": "", "required": False})
-    required_canon_props = _director_extract_required_canon_props(canon)
-    for req in required_canon_props:
-        if req["name"].lower() not in existing_names:
-            normalized_props.append(req)
-            existing_names.add(req["name"].lower())
-        label = req["name"]
-        if label not in must_have:
-            must_have.append(label)
+    canon_all_props = _canon_clean_prop_list((canon.get("signature_props") if isinstance(canon.get("signature_props"), list) else []), limit=8)
+    required_canon_props = [p for p in canon_all_props if p.get("required")]
+    props = required_canon_props or canon_all_props[:4]
+    must_have = []
+    for p in props:
+        if p.get("required"):
+            must_have.append(p.get("name"))
+    must_have.extend(_canon_clean_string_list(canon.get("recognition_anchors"), limit=8, max_chars=160))
+    must_have.extend(distinct)
+    must_have.extend(canon_preserve[:4])
+    must_have = _canon_clean_string_list(must_have, limit=12, max_chars=180)
 
-    # R7 COSPLAY CANON ACTION LOCK:
-    # A required signature prop is not merely metadata. It must own the visible hero action.
-    # This prevents an invented story prop (e.g. a magic book) from becoming the foreground
-    # action while the canonical weapon is hidden at the waist.
+    old_primary = _clean_text_compact(action.get("primary_action") or "")
+    old_secondary = _clean_text_compact(action.get("secondary_action") or "")
+    old_world = _clean_text_compact(action.get("interaction_with_world") or "")
     if required_canon_props:
         hero = required_canon_props[0]
-        hero_name = hero["name"]
+        hero_name = hero.get("name") or "the signature prop"
         hero_type = hero.get("type") or ""
         hero_desc = hero.get("visual_description") or ""
-        action = subject.get("action") if isinstance(subject.get("action"), dict) else {}
-        old_primary = _clean_text_compact(action.get("primary_action") or "")
-        old_secondary = _clean_text_compact(action.get("secondary_action") or "")
         action["primary_action"] = (
-            f"Clearly and visibly handle {hero_name}"
-            + (f" ({hero_type})" if hero_type else "")
-            + "; the signature prop must be unmistakable in the foreground and actively used, "
-              "not holstered, hidden, reduced to a generic short blade, or replaced by another prop."
-        )
-        if hero_desc:
-            action["interaction_with_world"] = (
-                f"Show the defining behavior of {hero_name}: {hero_desc}. "
-                "The character should visibly interact with this signature prop as the main story beat."
-            )[:700]
+            f"Clearly and visibly handle {hero_name}" + (f" ({hero_type})" if hero_type else "") +
+            "; this required signature prop must be unmistakable, foregrounded, and actively used. "
+            "Do not hide it, minimize it, collapse it into a generic short weapon, or replace it with a non-canon prop."
+        )[:520]
+        action["interaction_with_world"] = (
+            f"Build the story beat around {hero_name}. {hero_desc}"
+            if hero_desc else
+            f"Build the story beat around visibly interacting with {hero_name} as the role-defining prop."
+        )[:700]
         if old_primary and hero_name.lower() not in old_primary.lower():
-            action["secondary_action"] = (
-                f"Secondary story beat only after the signature prop is clear: {old_primary}"
-            )[:420]
+            action["secondary_action"] = (f"After the signature prop is clear, secondary story beat: {old_primary}")[:420]
         elif old_secondary:
             action["secondary_action"] = old_secondary[:420]
-        subject["action"] = action
+    else:
+        action["primary_action"] = old_primary[:420] if old_primary else action.get("primary_action", "")
+        action["secondary_action"] = old_secondary[:420] if old_secondary else action.get("secondary_action", "")
+        action["interaction_with_world"] = old_world[:700] if old_world else action.get("interaction_with_world", "")
 
-        # Remove non-canon story props from must_have. They may remain as background dressing,
-        # but cannot compete with the required signature prop for visual priority.
-        canon_names = {x["name"].lower() for x in required_canon_props}
-        filtered_must = []
-        story_prop_tokens = ("magic book", "spellbook", "grimoire", "魔法書", "魔典", "古老書", "pendant", "鍊墜", "項鍊")
-        for item in must_have:
-            text = _clean_text_compact(item or "")
-            low = text.lower()
-            if any(tok in low for tok in story_prop_tokens) and not any(cn in low for cn in canon_names):
-                continue
-            filtered_must.append(item)
-        must_have = filtered_must
-
-        # Required canon prop is first among props and must_have.
-        normalized_props = [hero] + [
-            p for p in normalized_props
-            if _clean_text_compact((p or {}).get("name") if isinstance(p, dict) else p).lower() != hero_name.lower()
-        ]
-        must_have = [hero_name] + [x for x in must_have if _clean_text_compact(x).lower() != hero_name.lower()]
-
-        if _is_weapon_like_required_prop(hero):
-            combat_lock = (
-                "Do not drift into a generic magician, scholar, librarian, or passive noblewoman. "
-                "This role must remain visibly weapon-forward and combat-capable."
-            )
-            if combat_lock not in must_not_drift:
-                must_not_drift.append(combat_lock)
-            for fb in [
-                "non-canon hero magic book or grimoire",
-                "non-canon spellcasting focus replacing the required signature weapon",
-                "generic scholar / librarian styling that hides the role weapon",
-            ]:
-                if fb not in forbidden_elements:
-                    forbidden_elements.append(fb)
-    # generic drift locks
     character = _clean_text_compact(canon.get("character") or "")[:120]
+    drift_lines = [
+        "Do not replace the canon costume system with a generic glamour outfit, generic gothic dress, lingerie, or unrelated fantasy gown.",
+        "Do not let invented story props outrank or replace canon props, motifs, or recognition anchors.",
+    ]
     if character:
-        drift = f"Do not drift into a generic glamour or generic gothic woman; she must still read clearly as {character}."
-        if drift not in must_not_drift:
-            must_not_drift.append(drift)
-    for anchor in (canon.get("recognition_anchors") or [])[:8]:
-        a = _clean_text_compact(anchor or "")[:180]
-        if a and a not in must_have:
-            must_have.append(a)
-    distinct = canon_appearance.get("distinctive_features") if isinstance(canon_appearance.get("distinctive_features"), list) else []
-    for feat in distinct[:6]:
-        f = _clean_text_compact(feat or "")[:180]
-        if f and f not in must_have:
-            must_have.append(f)
+        drift_lines.append(f"She must still read clearly as {character}, not as a generic glamorous woman.")
+    if required_canon_props and any(_is_weapon_like_required_prop(p) for p in required_canon_props):
+        drift_lines.append("This role is weapon-forward and must remain visibly weapon-forward, not recast as a magician, scholar, librarian, or passive noblewoman.")
+        forbidden_elements.extend([
+            "non-canon hero magic book or grimoire",
+            "non-canon spellcasting focus replacing the required signature weapon",
+            "generic scholar / librarian styling that hides the role weapon",
+            "generic evening gown or unrelated glamour dress replacing the canon costume",
+        ])
+    must_not_drift = _canon_clean_string_list(must_not_drift + drift_lines, limit=12, max_chars=220)
+    background["forbidden_elements"] = _canon_clean_string_list(forbidden_elements, limit=12, max_chars=180)
 
     subject["appearance"] = appearance
     subject["outfit"] = outfit
-    subject["props"] = normalized_props[:12]
+    subject["action"] = action
+    subject["props"] = props[:12]
     subject["must_have"] = must_have[:12]
     subject["must_not_drift"] = must_not_drift[:12]
-    background["forbidden_elements"] = forbidden_elements[:12]
     data["background_unit"] = background
     data["subject_unit"] = subject
     return data
 
 
-async def _review_director_json_with_openai_DISABLED_R8(source_context, semantic_brief, prompt_base, director_json, cosplay_canon_json):
-    """OpenAI reviewer: minimally fix cosplay director JSON when canon anchors drift or disappear."""
+async def _review_director_json_with_openai(source_context, semantic_brief, prompt_base, director_json, cosplay_canon_json):
+    """Use OpenAI to review the Gemini director JSON under canon-hard conditions."""
     ctx = source_context or {}
+    base_locked = _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json)
+    base_check = _validate_cosplay_director_against_canon(base_locked, cosplay_canon_json)
     if not isinstance(director_json, dict) or not isinstance(cosplay_canon_json, dict) or not cosplay_canon_json:
-        reviewed = _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json)
-        return {"pass": True, "issues": [], "corrected_director_json": reviewed, "review_model": "hardlock_only"}
+        return {
+            "pass": True,
+            "issues": base_check.get("issues") or [],
+            "corrected_director_json": base_locked,
+            "review_model": "hardlock_only",
+        }
 
     system_prompt = """You are the Director JSON Reviewer for Xiaoxia cosplay image generation.
-Your job is to audit a Gemini-produced DIRECTOR JSON against the CHARACTER CANON JSON.
-Priorities in order:
-1. Preserve role recognizability and canon anchors.
-2. Preserve Xiaoxia identity and the beautiful canon-first sexy cosplay style.
-3. Make only minimal corrections; do not rewrite everything unless necessary.
-4. Required canon props must remain explicit in subject_unit.props and subject_unit.must_have.
-5. Hair color/style, signature costume system, motifs, and recognition anchors should not be lost or replaced by generic glamour styling.
-6. Keep the result as a single-image task card, concise and production-ready.
-7. If CHARACTER CANON JSON has any signature_props with required=true, that prop must be the visible primary action/hero prop. Do not allow an invented book, pendant, cup, generic sword, or other story prop to become the main action or a must-have unless Daxia explicitly requested it.
-8. A required transforming/segmented weapon must remain visibly recognizable in that signature form; do not collapse it into a small generic dagger at the waist.
-Return JSON only."""
+You must enforce CHARACTER CANON JSON as hard constraints.
 
-    user_prompt = f"""Please review this cosplay director package.
+Critical rules:
+1. CHARACTER CANON JSON is the role fact authority.
+2. Replace conflicting hair, costume system, signature props, motifs, and recognition anchors with canon-compliant values.
+3. If a required canon prop exists, it must be visible in subject_unit.props, subject_unit.must_have, and the main visible action.
+4. Non-canon books, grimoires, pendants, generic daggers, generic white/black glamour gowns, lingerie slips, or unrelated fantasy dresses must not replace the canon role identity.
+5. Preserve compatible scene, mood, camera, and Xiaoxia-beauty styling when possible.
+6. Return one corrected full DIRECTOR JSON with the same schema keys. JSON only."""
+
+    user_prompt = f"""Review and correct this cosplay director package.
 
 SOURCE CONTEXT SUMMARY:
 {json.dumps({
@@ -19837,26 +19891,22 @@ SOURCE CONTEXT SUMMARY:
     'prompt_base': str(prompt_base or ''),
 }, ensure_ascii=False)}
 
-CHARACTER CANON JSON (authoritative role facts):
+CHARACTER CANON JSON (hard constraints):
 {json.dumps(cosplay_canon_json, ensure_ascii=False, indent=2)}
 
-CURRENT DIRECTOR JSON TO REVIEW:
+CURRENT DIRECTOR JSON:
 {json.dumps(director_json, ensure_ascii=False, indent=2)}
 
-Task:
-- Check whether required canon props, hair, costume system, motifs, recognition anchors, and role identity are preserved.
-- If the director JSON drifts into generic glamour / generic gothic / unrelated outfit, fix it.
-- Keep background and mood if they are already compatible.
-- Keep Xiaoxia beautiful, mature, cinematic, and alluring, but inside canon.
-- Ensure the corrected JSON still matches the same schema keys.
+BASE HARDLOCKED DIRECTOR JSON (already canon-cleaned; use this as the minimum acceptable baseline):
+{json.dumps(base_locked, ensure_ascii=False, indent=2)}
 
-Return ONLY this JSON object:
+Return only:
 {{
   "pass": true,
   "issues": ["..."],
   "corrected_director_json": {{...full corrected director json...}}
 }}"""
-    fallback = {"pass": True, "issues": [], "corrected_director_json": director_json}
+    fallback = {"pass": True, "issues": base_check.get("issues") or [], "corrected_director_json": base_locked}
     try:
         response = await openai_client.chat.completions.create(
             model="gpt-5-mini",
@@ -19870,14 +19920,22 @@ Return ONLY this JSON object:
     except Exception as exc:
         print(f"⚠️ [DIRECTOR_REVIEW_FAILED] {type(exc).__name__}: {exc}")
         parsed = dict(fallback)
-        parsed["issues"] = [f"review_failed:{type(exc).__name__}"]
-    reviewed = parsed.get("corrected_director_json") if isinstance(parsed, dict) else director_json
+        parsed["issues"] = (parsed.get("issues") or []) + [f"review_failed:{type(exc).__name__}"]
+    reviewed = parsed.get("corrected_director_json") if isinstance(parsed, dict) else base_locked
     reviewed = _sanitize_director_json(reviewed, ctx, semantic_brief, prompt_base)
     reviewed["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
     reviewed = _apply_cosplay_canon_hardlock(reviewed, cosplay_canon_json)
+    final_check = _validate_cosplay_director_against_canon(reviewed, cosplay_canon_json)
+    issues = [str(x)[:240] for x in ((parsed or {}).get("issues") or [])[:12]]
+    for issue in (final_check.get("issues") or []):
+        issue = str(issue)[:240]
+        if issue not in issues:
+            issues.append(issue)
+    if not final_check.get("pass"):
+        reviewed = base_locked
     result = {
-        "pass": bool((parsed or {}).get("pass", True)),
-        "issues": [str(x)[:240] for x in ((parsed or {}).get("issues") or [])[:12]],
+        "pass": bool(final_check.get("pass")),
+        "issues": issues[:16],
         "corrected_director_json": reviewed,
         "review_model": "gpt-5-mini",
     }
@@ -20106,14 +20164,24 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         data = json.loads(raw, strict=False)
         sanitized = _sanitize_director_json(data, ctx, semantic_brief, director_prompt_base)
         if module_key == "cosplay":
-            # R8: Canon JSON is authoritative. No per-image OpenAI reviewer.
             sanitized["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
-            locked = _apply_cosplay_canon_hardlock(sanitized, cosplay_canon_json)
+            review = await _review_director_json_with_openai(ctx, semantic_brief, director_prompt_base, sanitized, cosplay_canon_json)
+            locked = review.get("corrected_director_json") if isinstance(review, dict) else sanitized
+            locked = _apply_cosplay_canon_hardlock(locked, cosplay_canon_json)
+            check = _validate_cosplay_director_against_canon(locked, cosplay_canon_json)
             locked["director_review_result"] = {
-                "pass": True, "issues": [], "review_model": "disabled_r8_hard_canon"
+                "pass": bool(check.get("pass")),
+                "issues": [str(x)[:240] for x in ((review or {}).get("issues") or [])[:16]],
+                "review_model": (review or {}).get("review_model", "gpt-5-mini"),
             }
-            locked["director_review_pass"] = True
-            locked["director_review_issues"] = []
+            locked["director_review_pass"] = bool(check.get("pass"))
+            locked["director_review_issues"] = [str(x)[:240] for x in ((review or {}).get("issues") or [])[:16]]
+            if check.get("issues"):
+                for item in check.get("issues")[:16]:
+                    s = str(item)[:240]
+                    if s not in locked["director_review_issues"]:
+                        locked["director_review_issues"].append(s)
+                locked["director_review_result"]["issues"] = locked["director_review_issues"][:16]
             return locked
         return sanitized
     except Exception as exc:
