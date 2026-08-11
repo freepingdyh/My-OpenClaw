@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.58_R3"
+LOBSTER_VERSION = "1.5.59_R1"
 
 
 def _normalize_generation_level(level):
@@ -3453,7 +3453,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
 
     try:
         await status.edit(content=f"📸 小俠決定今天去做：**{activity.get('title')}**。正在拍下這一刻…")
-        context = await _generate_photo_from_context(context, msg=status)
+        context = await _generate_primary_photo_from_context(context, msg=status)
         share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
         context["message"] = share_text
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
@@ -12558,6 +12558,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
             "visual_checklist": trace_context.get("visual_checklist"),
         }
+        payload = await _promote_context_to_primary_hybrid(payload)
+        local_url = payload.get("local_url") or local_url
         db = load_memory()
         db.insert(0, payload)
         save_memory(db)
@@ -17601,7 +17603,7 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         _trace_stage(trace_context, "photobook_context_injected", data=photobook_override)
 
     try:
-        context = await _generate_photo_from_context(context, msg=status)
+        context = await _generate_primary_photo_from_context(context, msg=status)
         # 生成器可能重建 context；寫真專輯欄位須在送 Discord 與入庫前重新覆寫，避免英文內部 prompt 被當一般 /photo 顯示。
         if isinstance(photobook_override, dict):
             context.update(photobook_override)
@@ -18167,7 +18169,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     if msg:
         await msg.edit(content=f"📸 小俠把今天的自主活動改成：**{activity.get('title')}**。正在重新拍下這一刻…")
 
-    context = await _generate_photo_from_context(context, msg=msg)
+    context = await _generate_primary_photo_from_context(context, msg=msg)
     share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
     context["message"] = share_text
     context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
@@ -18303,7 +18305,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         state["daily_gen_count"] += 1
     except Exception:
         pass
-    return {
+    payload = {
         "id": str(uuid.uuid4()),
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "topic": story.get("topic"),
@@ -18335,6 +18337,8 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
         "visual_checklist": trace_context.get("visual_checklist"),
     }
+    payload = await _promote_context_to_primary_hybrid(payload)
+    return payload
 
 
 # 📷 v1.5.45：/寫真 More 鏡頭語言庫。
@@ -18729,7 +18733,7 @@ async def _generate_photobook_more_generate_candidate(base_context, shot, status
             + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. "
             + camera_recipe
         )
-    generated = await _generate_photo_from_context(context, msg=status)
+    generated = await _generate_primary_photo_from_context(context, msg=status)
     generated["more_engine"] = "generate_fallback"
     generated["more_shot_id"] = shot.get("id")
     generated["more_shot_name"] = shot.get("name")
@@ -19116,6 +19120,104 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
 
 
 
+def _prepare_context_for_pure_v45_rerender(source_context):
+    context = dict(source_context or {})
+    context.pop("__trace_context", None)
+    context.pop("v5_refine_mode", None)
+    context.pop("v5_replace_target_url", None)
+    context.pop("v5_replace_target_message_id", None)
+    context.pop("v45_replace_target_url", None)
+    context.pop("v45_replace_target_message_id", None)
+    context.pop("primary_generation_strategy", None)
+    context.pop("compare_source_url", None)
+    context.pop("compare_source_message_id", None)
+    for key in list(context.keys()):
+        if str(key).startswith("v5_background_"):
+            context.pop(key, None)
+    return context
+
+
+async def _generate_pure_v45_from_existing_context(source_context, msg=None):
+    context = _prepare_context_for_pure_v45_rerender(source_context)
+    source_mode_norm = str(context.get("source_mode") or context.get("type") or context.get("mode") or "photo_scene").strip().lower()
+    if source_mode_norm not in {"cosplay", "diary"}:
+        return await _generate_photo_from_context(context, msg=msg)
+
+    prompt_base = context.get("prompt_base") or context.get("scene_text") or context.get("user_input") or context.get("scene_summary") or ""
+    if not str(prompt_base).strip():
+        raise RuntimeError("PURE_V45_COMPARE_PROMPT_NONE：找不到可重建場景的 prompt_base。")
+
+    visual = {
+        "composition": context.get("composition") or context.get("scene_summary") or "",
+        "mood": context.get("mood_summary") or context.get("mood") or "",
+        "message": context.get("message") or "",
+        "image_prompt": prompt_base,
+    }
+    trace_context = {
+        "kind": "cosplay" if source_mode_norm == "cosplay" else "diary",
+        "action": "manual_pure_v45_compare",
+        "source_mode": source_mode_norm,
+        "user_input": f"manual pure v4.5 compare from {source_mode_norm}",
+        "scene_seed_text": prompt_base[:1200],
+        "seedream_model_id": SEEDREAM_V45_MODEL_ID,
+        "seedream_model_label": _seedream_model_label_from_id(SEEDREAM_V45_MODEL_ID),
+        "figure10_present": bool(context.get("reference_item_path") or context.get("reference_item_url")),
+        "reference_item_path": context.get("reference_item_path"),
+        "reference_item_url": context.get("reference_item_url"),
+        "current_outfit_for_seedream": context.get("current_outfit_for_seedream"),
+        "visual_checklist": context.get("visual_checklist"),
+        "force_minimal_prompt": bool(context.get("force_minimal_prompt")),
+    }
+    generated_image_url, visual = await execute_safe_generation(
+        discord_image_url=context.get("reference_item_path"),
+        base_filename="base_xiaoxia.jpg",
+        mode=source_mode_norm,
+        initial_prompt=prompt_base,
+        visual_dict=visual,
+        msg=msg,
+        current_outfit=context.get("current_outfit_for_seedream"),
+        trace_context=trace_context,
+    )
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    local_path = os.path.join(OUTPUT_DIR, local_filename) if local_filename else None
+    context.update({
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": local_path,
+        "composition": visual.get("composition", context.get("composition", context.get("scene_summary", ""))),
+        "mood_summary": visual.get("mood", context.get("mood_summary", context.get("mood", ""))),
+        "message": visual.get("message", context.get("message", "")),
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "trace_id": trace_context.get("trace_id"),
+        "final_level": trace_context.get("final_level") or visual.get("final_level"),
+        "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
+        "seedream_model_id": trace_context.get("seedream_model_id") or visual.get("seedream_model_id") or SEEDREAM_V45_MODEL_ID,
+        "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label") or _seedream_model_label_from_id(SEEDREAM_V45_MODEL_ID),
+        "visual_checklist": trace_context.get("visual_checklist") or context.get("visual_checklist"),
+    })
+    return context
+
+
+async def _promote_context_to_primary_hybrid(base_context):
+    try:
+        hybrid = await _generate_seedream_v5_refine_from_v45(base_context)
+        hybrid["primary_generation_strategy"] = "v45_plus_v50_default"
+        hybrid["compare_source_url"] = base_context.get("local_url") or base_context.get("image_url")
+        return hybrid
+    except Exception as exc:
+        print(f"⚠️ [PRIMARY_HYBRID_FALLBACK_TO_V45] {type(exc).__name__}: {exc}")
+        fallback = dict(base_context or {})
+        fallback["primary_generation_strategy"] = "pure_v45_fallback"
+        return fallback
+
+
+async def _generate_primary_photo_from_context(context, msg=None):
+    pure_context = await _generate_photo_from_context(_prepare_context_for_pure_v45_rerender(context), msg=msg)
+    return await _promote_context_to_primary_hybrid(pure_context)
+
+
 class PhotoResultView(discord.ui.View):
     def __init__(self, context):
         super().__init__(timeout=86400)
@@ -19144,7 +19246,7 @@ class PhotoResultView(discord.ui.View):
             + "\nCONTINUATION: Keep the same story, scene, activity, people boundary, and outfit. Create one fresh natural variation in pose, expression, camera angle, and composition only."
         )
         try:
-            new_context = await _generate_photo_from_context(context)
+            new_context = await _generate_primary_photo_from_context(context)
             db = load_memory()
             db.insert(0, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
             save_memory(db)
@@ -19180,7 +19282,7 @@ class PhotoResultView(discord.ui.View):
         )
         try:
             old_url = context.get("local_url") or context.get("image_url")
-            new_context = await _generate_photo_from_context(context)
+            new_context = await _generate_primary_photo_from_context(context)
             _replace_photo_db_record(old_url, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
             _sync_autonomy_today_after_photo_replace(context, new_context)
             _safe_delete_vault_image(old_url)
@@ -19237,28 +19339,30 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="✨ v4.5人物著重", style=discord.ButtonStyle.secondary)
     async def try_seedream_v5(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
-        if context.get("v5_refine_mode"):
-            await interaction.followup.send("✨ 這張已經是 v5.0 場景升級結果；請從原本的 v4.5 成圖再按『v5.0 場景升級』，避免連續重算讓小俠漂掉。", ephemeral=True)
+        if not context.get("v5_refine_mode"):
+            await interaction.followup.send("✨ 這張已經是純 v4.5 版本，沒有再另外生『v4.5人物著重』的必要。", ephemeral=True)
             return
         target_url = context.get("local_url") or context.get("image_url")
         if not target_url and not context.get("local_path"):
-            await interaction.followup.send("⚠️ 找不到這張 v4.5 成圖，無法交給 v5.0 場景升級。", ephemeral=True)
+            await interaction.followup.send("⚠️ 找不到這張主要 hybrid 成圖，無法產生純 v4.5 對照版。", ephemeral=True)
             return
         try:
-            new_context = await _generate_seedream_v5_refine_from_v45(context)
-            new_context["v5_replace_target_url"] = target_url
-            new_context["v5_replace_target_message_id"] = getattr(interaction.message, "id", None)
+            source_context = _prepare_context_for_pure_v45_rerender(context)
+            new_context = await _generate_pure_v45_from_existing_context(source_context)
+            new_context["v45_replace_target_url"] = target_url
+            new_context["v45_replace_target_message_id"] = getattr(interaction.message, "id", None)
+            new_context["compare_source_url"] = target_url
             db = load_memory()
             db_type = _context_db_type(new_context)
             db.insert(0, _photo_db_payload(new_context, type_override=db_type))
             save_memory(db)
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
-            embed = _build_result_embed(new_context, title_prefix="✨ v5.0 場景升級", attachment_filename=filename if file else None)
+            embed = _build_result_embed(new_context, title_prefix="✨ v4.5人物著重", attachment_filename=filename if file else None)
             if file:
                 sent = await interaction.followup.send(embed=embed, file=file, view=view)
             else:
@@ -19267,7 +19371,7 @@ class PhotoResultView(discord.ui.View):
             photo_generation_contexts[sent.id] = new_context
             view.context = new_context
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ v5.0 場景升級失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ v4.5人物著重失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
     @discord.ui.button(label="🪟 查看 v5 背景", style=discord.ButtonStyle.secondary)
@@ -19301,13 +19405,13 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 顯示 v5.0 背景圖失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✅ 採用升級版", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 採用純v4.5版", style=discord.ButtonStyle.success)
     async def adopt_v5_source(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = dict(self.context)
-        target_url = context.get("v5_replace_target_url")
-        target_mid = context.get("v5_replace_target_message_id")
+        target_url = context.get("v45_replace_target_url")
+        target_mid = context.get("v45_replace_target_message_id")
         if not target_url:
-            await interaction.response.send_message("這張不是 v5.0 場景升級結果，沒有可取代的 v4.5 原圖。", ephemeral=True)
+            await interaction.response.send_message("這張不是『v4.5人物著重』對照版，沒有可取代的主要 hybrid 原圖。", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         try:
@@ -19320,12 +19424,12 @@ class PhotoResultView(discord.ui.View):
                     adopted_context = dict(context)
                     adopted_context["message_id"] = target_message.id
                     photo_generation_contexts[target_message.id] = adopted_context
-                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0 場景升級")
+                    await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用純v4.5版")
                 except Exception as edit_exc:
-                    print(f"⚠️ [V5_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
-            await interaction.followup.send("✅ 已採用這張 v5.0 場景升級版並取代 v4.5 來源紀錄。", ephemeral=True)
+                    print(f"⚠️ [V45_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
+            await interaction.followup.send("✅ 已採用這張純 v4.5 版並取代主要 hybrid 紀錄。", ephemeral=True)
         except Exception as exc:
-            await interaction.followup.send(f"⚠️ 採用 v5.0 場景升級版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ 採用純 v4.5 版取代主要紀錄失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
     @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -20663,6 +20767,10 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "outfit_display": result.get("diary_outfit_display") if not custom_diary else "大俠指定照片",
                 "wardrobe_match": diary_wardrobe_match if not custom_diary else None,
             }
+            if not custom_diary:
+                diary_photo_payload = await _promote_context_to_primary_hybrid(diary_photo_payload)
+                up_img = diary_photo_payload.get("image_url") or up_img
+                local_url = diary_photo_payload.get("local_url") or local_url
             db = load_memory()
             db.insert(0, diary_photo_payload)
             save_memory(db)
