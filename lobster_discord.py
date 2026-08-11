@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.59_R4"
+LOBSTER_VERSION = "1.6.01"
 
 
 def _normalize_generation_level(level):
@@ -60,8 +60,10 @@ PHOTO_CONTEXT_CARRY_KEYS = (
     "v5_refine_mode", "v5_background_prompt", "v5_background_semantic_brief",
     "v5_background_generated_url", "v5_background_local_url", "v5_background_local_filename",
     "v5_background_local_path", "v5_background_selected_identity_figures",
-    "v5_background_upgrade_mode", "v5_handoff_input_count", "story_scene_candidates",
-    "chosen_story_scene_candidate", "story_scene_candidate_summary",
+    "v5_background_upgrade_mode", "v5_handoff_input_count",
+    "director_json", "director_schema_version", "director_time_context",
+    "director_background_unit", "director_subject_unit", "director_fusion_unit",
+    "director_v45_prompt", "director_v5_background_prompt",
 )
 
 
@@ -18909,45 +18911,325 @@ async def _generate_photobook_more_choice(message, request):
 
 
 
-async def _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief, prompt_base):
+
+def _director_module_key(source_context):
+    ctx = source_context or {}
+    source_mode = str(ctx.get("source_mode") or ctx.get("mode") or ctx.get("type") or "").strip().lower()
+    source_module = str(ctx.get("source_module") or "").strip().lower()
+    if source_mode == "cosplay" or source_module == "cosplay":
+        return "cosplay"
+    if source_mode == "diary" or source_module == "diary":
+        return "diary"
+    if source_module == "autonomy" or ctx.get("image_role") == "autonomy_today_image":
+        return "autonomy"
+    if source_module == "photobook" or source_mode == "photobook" or ctx.get("image_role") == "photobook_session_photo":
+        return "photobook"
+    return "photo"
+
+
+def _director_current_time_context(module_key, source_context=None):
+    """Director time policy:
+    - autonomy/photo/photobook: current Taiwan time is the default reality anchor; explicit user time wins.
+    - cosplay: current clock is irrelevant; story/world decides.
+    - diary: diary/article narrative decides; never force current clock.
+    """
+    ctx = source_context or {}
+    now_dt = datetime.now(TZ_TPE)
+    bucket, label = _autonomy_time_bucket(now_dt)
+    if module_key in {"autonomy", "photo", "photobook"}:
+        return {
+            "source": "current_time_unless_user_explicit",
+            "local_datetime": now_dt.strftime("%Y-%m-%d %H:%M"),
+            "time_of_day": bucket,
+            "time_label_zh": label,
+            "rule": "If the user's request explicitly names another time/daypart, that explicit request overrides current time. Otherwise the scene must match this real Taiwan local time."
+        }
+    if module_key == "diary":
+        return {
+            "source": "story_text",
+            "local_datetime": "",
+            "time_of_day": "",
+            "time_label_zh": "",
+            "rule": "Infer the pictured time only from the diary/article/story text. Do not force the current clock."
+        }
+    return {
+        "source": "director_free",
+        "local_datetime": "",
+        "time_of_day": "",
+        "time_label_zh": "",
+        "rule": "Cosplay is not tied to the current clock. Use explicit user instructions first, otherwise choose the time that best fits the source world and story."
+    }
+
+
+def _director_fallback_json(source_context, semantic_brief, prompt_base):
+    ctx = source_context or {}
+    module_key = _director_module_key(ctx)
+    time_context = _director_current_time_context(module_key, ctx)
+    scene = _clean_text_compact(ctx.get("scene_summary") or ctx.get("scene_text") or semantic_brief or "")[:700]
+    action = _clean_text_compact(ctx.get("action_summary") or "")[:300]
+    outfit = _clean_text_compact(ctx.get("outfit_summary") or ctx.get("current_outfit_for_seedream") or "")[:500]
+    mood = _clean_text_compact(ctx.get("mood_summary") or ctx.get("mood") or "")[:250]
+    camera = _clean_text_compact(ctx.get("camera_framing") or ctx.get("composition") or "")[:250]
+    visual_checklist = ctx.get("visual_checklist") if isinstance(ctx.get("visual_checklist"), dict) else {}
+    must_have = [str(x).strip()[:180] for x in (visual_checklist.get("must_have") or []) if str(x).strip()][:10]
+    must_not = [str(x).strip()[:180] for x in (visual_checklist.get("must_not_have") or []) if str(x).strip()][:10]
+
+    return {
+        "schema_version": "1.0",
+        "module": module_key,
+        "time_context": time_context,
+        "director_summary": {
+            "story_core": scene or _clean_text_compact(prompt_base)[:500],
+            "image_goal": "Create one coherent still image that clearly communicates the requested activity/story and preserves its defining visual elements.",
+            "must_not_lose": must_have[:6],
+        },
+        "background_unit": {
+            "scene_type": module_key,
+            "location": scene,
+            "time_of_day": time_context.get("time_of_day") or "",
+            "weather": "",
+            "environment": scene,
+            "background_elements": [],
+            "lighting": "",
+            "spatial_notes": "Leave physically plausible space for Xiaoxia and her requested action.",
+            "forbidden_elements": [],
+        },
+        "subject_unit": {
+            "subject": "Xiaoxia",
+            "identity_lock": "Preserve Xiaoxia's established facial identity and core body identity from the identity reference images.",
+            "appearance": {
+                "hair": "",
+                "expression": "",
+                "body": "Preserve Xiaoxia's established core body identity."
+            },
+            "outfit": {
+                "source": "wardrobe" if ctx.get("reference_item_path") or ctx.get("reference_item_url") else ("cosplay_canon" if module_key == "cosplay" else "generated"),
+                "description": outfit,
+                "must_preserve": []
+            },
+            "action": {
+                "primary_action": action or scene,
+                "secondary_action": "",
+                "interaction_with_world": scene
+            },
+            "props": [],
+            "must_have": must_have,
+            "must_not_drift": must_not,
+        },
+        "fusion_unit": {
+            "mood": mood,
+            "composition": camera,
+            "camera": camera,
+            "subject_environment_relationship": "Xiaoxia must visibly belong in and interact with the depicted environment rather than merely pose in front of it.",
+            "priority_order": [
+                "Xiaoxia identity",
+                "requested main activity or role",
+                "must-have visual elements and props",
+                "outfit fidelity",
+                "environment coherence",
+                "mood and decorative detail"
+            ],
+            "integration_rules": [
+                "Figure 9 is environment-only in the hybrid pipeline.",
+                "If Figure 10 is supplied, it is the authoritative wardrobe/styling reference.",
+                "Required props must support the action and remain visibly readable.",
+                "Prefer one coherent still-image moment over trying to depict multiple time-separated events."
+            ]
+        }
+    }
+
+
+def _sanitize_director_json(data, source_context, semantic_brief, prompt_base):
+    fallback = _director_fallback_json(source_context, semantic_brief, prompt_base)
+    if not isinstance(data, dict):
+        return fallback
+
+    module_key = _director_module_key(source_context)
+    data["schema_version"] = "1.0"
+    data["module"] = module_key
+
+    # Preserve module-specific time authority outside Gemini so it cannot casually turn an afternoon run into a morning run.
+    time_context = data.get("time_context") if isinstance(data.get("time_context"), dict) else {}
+    authoritative_time = _director_current_time_context(module_key, source_context)
+    if module_key in {"autonomy", "photo", "photobook"}:
+        explicit_text = " ".join([
+            str((source_context or {}).get("user_input") or ""),
+            str((source_context or {}).get("scene_text") or ""),
+            str((source_context or {}).get("scene_summary") or ""),
+            str(prompt_base or ""),
+        ])
+        explicit_bucket, explicit_label, explicit_clock = _v1527_extract_explicit_time_bucket(explicit_text)
+        # Existing explicit HH:MM context is already trustworthy; otherwise current real time is the anchor.
+        if explicit_bucket:
+            authoritative_time = {
+                "source": "user_specified",
+                "local_datetime": explicit_clock,
+                "time_of_day": explicit_bucket,
+                "time_label_zh": explicit_label,
+                "rule": "Explicit requested time overrides the current clock."
+            }
+        time_context.update(authoritative_time)
+    elif module_key == "diary":
+        time_context["source"] = "story_text"
+        time_context["local_datetime"] = ""
+        time_context.setdefault("rule", authoritative_time["rule"])
+    else:
+        time_context["source"] = "director_free"
+        time_context["local_datetime"] = ""
+        time_context.setdefault("rule", authoritative_time["rule"])
+    data["time_context"] = time_context
+
+    for key in ("director_summary", "background_unit", "subject_unit", "fusion_unit"):
+        if not isinstance(data.get(key), dict):
+            data[key] = fallback[key]
+
+    # Keep arrays and strings simple/compact so the JSON is a visual task card, not a database dump.
+    def compact(value, max_chars=800):
+        if isinstance(value, str):
+            return _clean_text_compact(value)[:max_chars]
+        if isinstance(value, list):
+            return [compact(x, 220) for x in value[:12] if x not in (None, "", [], {})]
+        if isinstance(value, dict):
+            return {str(k): compact(v, 700) for k, v in value.items() if v not in (None, [], {})}
+        return value
+
+    data = compact(data, 900)
+
+    # Enforce current-time daypart into background for real-time modules unless explicit user time already won.
+    if module_key in {"autonomy", "photo", "photobook"}:
+        bg = data.get("background_unit") or {}
+        bg["time_of_day"] = (data.get("time_context") or {}).get("time_of_day") or bg.get("time_of_day") or ""
+        data["background_unit"] = bg
+
+    return data
+
+
+async def _build_director_json(source_context, semantic_brief, prompt_base):
+    """v1.6.01 Gemini Director:
+    One Master Director JSON is filled once, then dispatched:
+      background_unit -> Seedream v5.0 background
+      subject_unit + fusion_unit -> Seedream v4.5 final
+    No 2-3 story-candidate stage.
+    """
+    ctx = source_context or {}
+    module_key = _director_module_key(ctx)
+    time_context = _director_current_time_context(module_key, ctx)
+
+    # Give Gemini structured source facts where available, without dumping the full DB/history.
+    source_facts = {
+        "source_module": ctx.get("source_module"),
+        "source_mode": ctx.get("source_mode") or ctx.get("mode") or ctx.get("type"),
+        "scene_text": ctx.get("scene_text"),
+        "scene_summary": ctx.get("scene_summary"),
+        "action_summary": ctx.get("action_summary"),
+        "outfit_summary": ctx.get("outfit_summary"),
+        "mood_summary": ctx.get("mood_summary") or ctx.get("mood"),
+        "camera_framing": ctx.get("camera_framing") or ctx.get("composition"),
+        "wardrobe_id": ctx.get("wardrobe_id"),
+        "wardrobe_name": ctx.get("wardrobe_name"),
+        "current_outfit_for_seedream": ctx.get("current_outfit_for_seedream"),
+        "visual_checklist": ctx.get("visual_checklist"),
+        "story": ctx.get("story") if module_key == "cosplay" else None,
+        "cosplay_state": ctx.get("cosplay_state") if module_key == "cosplay" else None,
+    }
+
     prompt = f"""
-你是小俠照片的故事分鏡規劃器。請根據以下資料，先提出 2~3 個可直接拍成單張照片的「故事畫面候選」，
-每個候選都必須忠於原本的事件、場景與人物規則，不可亂改成另一個故事。
-然後請在候選中挑出最適合作為本次單張照片的那一個。
+你是「小俠影像導演 Director」。你的任務不是寫散文，也不是提出多個候選故事。
+你只需要把這次「單張照片」的視覺需求填成一份 Master Director JSON。
+填空的目的，是逐欄檢查重要元素，避免漏掉服裝、髮型、表情、主要動作、必要道具、場景、時間與氛圍。
+
+【模組】
+{module_key}
+
+【時間政策｜必須服從】
+{json.dumps(time_context, ensure_ascii=False)}
+- autonomy / photo / photobook：使用者若明確指定時間則使用者優先；否則必須跟現在台灣真實時間一致。
+- cosplay：完全不需要跟現在時間；依原作世界、故事或使用者指定時間。
+- diary：依日記／文章敘述判斷照片發生時間，不套現在時間。
 
 【原始語意摘要】
 {semantic_brief}
 
-【原始 prompt_base】
+【原始生圖需求】
 {prompt_base}
 
-輸出 JSON：
+【已知結構化事實】
+{json.dumps(source_facts, ensure_ascii=False, default=str)[:10000]}
+
+請輸出且只輸出以下 JSON 結構：
 {{
-  "candidates": [
-    {{
-      "id": "A",
-      "title": "候選標題",
-      "scene": "一句話描述具體場景",
-      "primary_action": "主要動作",
-      "secondary_action": "次要或輔助動作，沒有可留空",
-      "props": ["必要道具1", "必要道具2"],
-      "camera": "適合的鏡頭與構圖",
-      "mood": "情緒與氛圍",
-      "why_best": "這個候選為何適合做成單張照片"
-    }}
-  ],
-  "chosen_id": "A",
-  "selection_reason": "為何選這個候選"
+  "schema_version": "1.0",
+  "module": "{module_key}",
+  "time_context": {{
+    "source": "",
+    "local_datetime": "",
+    "time_of_day": "",
+    "time_label_zh": "",
+    "rule": ""
+  }},
+  "director_summary": {{
+    "story_core": "這一張照片到底正在發生什麼",
+    "image_goal": "看圖時應立刻讀懂什麼",
+    "must_not_lose": ["最重要元素"]
+  }},
+  "background_unit": {{
+    "scene_type": "",
+    "location": "",
+    "time_of_day": "",
+    "weather": "",
+    "environment": "",
+    "background_elements": [],
+    "lighting": "",
+    "spatial_notes": "",
+    "forbidden_elements": []
+  }},
+  "subject_unit": {{
+    "subject": "Xiaoxia",
+    "identity_lock": "保留小俠既有臉部與核心身形身份",
+    "appearance": {{
+      "hair": "",
+      "expression": "",
+      "body": ""
+    }},
+    "outfit": {{
+      "source": "wardrobe | generated | cosplay_canon",
+      "description": "",
+      "must_preserve": []
+    }},
+    "action": {{
+      "primary_action": "",
+      "secondary_action": "",
+      "interaction_with_world": ""
+    }},
+    "props": [],
+    "must_have": [],
+    "must_not_drift": []
+  }},
+  "fusion_unit": {{
+    "mood": "",
+    "composition": "",
+    "camera": "",
+    "subject_environment_relationship": "",
+    "priority_order": [],
+    "integration_rules": []
+  }}
 }}
-規則：
-1. 候選數量 2 或 3。
-2. 每個候選都要是「同一時間、同一地點、同一主要活動」的單張畫面。
-3. 必須保留原本人物邏輯與服裝邏輯；不得加入不在原需求中的人際互動。
-4. 請用繁體中文。
+
+導演規則：
+1. 這是「單張照片」，不要企圖表現先後兩個時間點；選一個合理瞬間即可。
+2. primary_action 必須是最能代表文章／指令的可見動作，不可退化成泛用站姿或擺拍。
+3. 文中明確提到且對故事或角色辨識重要的道具，要列入 props；不可只藏在散文裡。
+4. must_have 只列「缺了就不能算拍對」的視覺元素。
+5. must_not_drift 用來防止畫面變成另一件事，例如淨灘變海邊擺拍、Ivy 變 generic gothic woman。
+6. cosplay 要把原型髮型/髮色、服裝輪廓/主色、signature prop、角色辨識特徵逐欄填出；小俠的臉與核心身形仍由 identity refs 決定。
+7. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
+8. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
+9. subject_unit + fusion_unit 是給最終人物模型看的；必須讓小俠和世界有實際互動，而非把背景當壁紙。
+10. 不需要提出 A/B/C 候選，不需要解釋選擇過程。
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -18959,41 +19241,16 @@ async def _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief
                 ],
             ),
         )
-        raw = str(getattr(response, 'text', '') or '').replace('```json', '').replace('```', '').strip()
+        raw = str(getattr(response, "text", "") or "").replace("```json", "").replace("```", "").strip()
         data = json.loads(raw, strict=False)
+        return _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
     except Exception as exc:
-        print(f"⚠️ [HYBRID_STORY_CANDIDATES_FAILED] {type(exc).__name__}: {exc}")
-        return {"candidates": [], "chosen": None, "selection_reason": ""}
+        print(f"⚠️ [DIRECTOR_JSON_FAILED] {type(exc).__name__}: {exc}")
+        return _director_fallback_json(ctx, semantic_brief, prompt_base)
 
-    candidates = data.get("candidates") if isinstance(data, dict) else []
-    if not isinstance(candidates, list):
-        candidates = []
-    cleaned = []
-    for idx, item in enumerate(candidates[:3], start=1):
-        if not isinstance(item, dict):
-            continue
-        cleaned.append({
-            "id": str(item.get("id") or chr(64 + idx)),
-            "title": _clean_text_compact(item.get("title") or f"候選{idx}")[:80],
-            "scene": _clean_text_compact(item.get("scene") or "")[:280],
-            "primary_action": _clean_text_compact(item.get("primary_action") or item.get("action") or "")[:220],
-            "secondary_action": _clean_text_compact(item.get("secondary_action") or "")[:220],
-            "props": [str(x).strip()[:80] for x in (item.get("props") or []) if str(x).strip()][:6],
-            "camera": _clean_text_compact(item.get("camera") or "")[:220],
-            "mood": _clean_text_compact(item.get("mood") or "")[:160],
-            "why_best": _clean_text_compact(item.get("why_best") or "")[:220],
-        })
-    chosen = None
-    chosen_id = str((data or {}).get("chosen_id") or "").strip()
-    if chosen_id:
-        chosen = next((x for x in cleaned if str(x.get("id")) == chosen_id), None)
-    if not chosen and cleaned:
-        chosen = cleaned[0]
-    return {
-        "candidates": cleaned,
-        "chosen": chosen,
-        "selection_reason": _clean_text_compact((data or {}).get("selection_reason") or "")[:220],
-    }
+
+def _director_json_block(title, payload):
+    return f"{title}\\n{json.dumps(payload or {}, ensure_ascii=False, indent=2)}"
 
 
 async def _generate_seedream_v5_refine_from_v45(source_context, background_policy="new", background_source_context=None):
@@ -19041,37 +19298,29 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
 
     semantic_brief = _scene_semantic_brief()
 
-    # v1.5.59_R3：先取得原始 prompt_base，再交給故事候選規劃器。
-    # R2 在這裡先使用 prompt_base、後面才定義，會觸發 NameError，
-    # 進而讓 hybrid 主生成整段 fallback 回純 v4.5。
+    # v1.6.01：Gemini Director 直接產生一份 Master Director JSON。
+    # 不再建立 2~3 個故事候選；JSON 本身就是單張照片的導演任務卡。
     prompt_base = source_context.get("prompt_base") or source_context.get("scene_text") or source_context.get("user_input") or source_context.get("scene_summary") or ""
     if not str(prompt_base).strip():
         raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
 
-    story_scene_plan = await _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief, prompt_base)
-    chosen_story_scene = story_scene_plan.get("chosen") if isinstance(story_scene_plan, dict) else None
-    if isinstance(chosen_story_scene, dict):
-        chosen_summary_lines = [
-            "CHOSEN STORY MOMENT CANDIDATE:",
-            f"Title: {chosen_story_scene.get('title')}",
-            f"Scene: {chosen_story_scene.get('scene')}",
-            f"Primary action: {chosen_story_scene.get('primary_action')}",
-        ]
-        if chosen_story_scene.get("secondary_action"):
-            chosen_summary_lines.append(f"Secondary action: {chosen_story_scene.get('secondary_action')}")
-        if chosen_story_scene.get("props"):
-            chosen_summary_lines.append(f"Props: {', '.join(chosen_story_scene.get('props') or [])}")
-        if chosen_story_scene.get("camera"):
-            chosen_summary_lines.append(f"Camera: {chosen_story_scene.get('camera')}")
-        if chosen_story_scene.get("mood"):
-            chosen_summary_lines.append(f"Mood: {chosen_story_scene.get('mood')}")
-        if story_scene_plan.get("selection_reason"):
-            chosen_summary_lines.append(f"Why chosen: {story_scene_plan.get('selection_reason')}")
-        chosen_story_summary = "\n".join(chosen_summary_lines)
-        semantic_brief = chosen_story_summary + "\n\n" + semantic_brief
-        prompt_base = (prompt_base.rstrip() + "\n\nHYBRID STORY MOMENT CANDIDATE — SELECTED\n" + chosen_story_summary).strip()
-    else:
-        chosen_story_summary = ""
+    director_json = await _build_director_json(source_context, semantic_brief, prompt_base)
+    director_background_unit = director_json.get("background_unit") if isinstance(director_json, dict) else {}
+    director_subject_unit = director_json.get("subject_unit") if isinstance(director_json, dict) else {}
+    director_fusion_unit = director_json.get("fusion_unit") if isinstance(director_json, dict) else {}
+    director_time_context = director_json.get("time_context") if isinstance(director_json, dict) else {}
+
+    # v4.5 直接讀 Subject + Fusion JSON。保留既有 Figure Role Map / identity / wardrobe 規則，
+    # 但不把 Director JSON 再翻回一篇長散文。
+    director_v45_prompt = (
+        prompt_base.rstrip()
+        + "\n\nDIRECTOR SUBJECT UNIT — AUTHORITATIVE VISUAL TASK CARD\n"
+        + json.dumps(director_subject_unit or {}, ensure_ascii=False, indent=2)
+        + "\n\nDIRECTOR FUSION UNIT — AUTHORITATIVE INTEGRATION TASK CARD\n"
+        + json.dumps(director_fusion_unit or {}, ensure_ascii=False, indent=2)
+        + "\n\nDIRECTOR TIME CONTEXT\n"
+        + json.dumps(director_time_context or {}, ensure_ascii=False, indent=2)
+    ).strip()
 
     framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
     source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
@@ -19081,28 +19330,25 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
     background_prompt_lines = [
         "Create a photorealistic ENVIRONMENT-ONLY background plate for a later Xiaoxia image generation run.",
         "No people, no human figure, no hands, no mannequin, no visible reflection of a person, and no human silhouette.",
-        "The SOURCE BRIEF below is authoritative for world, era, location, story context, genre, time of day, atmosphere, and environmental meaning.",
-        "Extract the environment from the brief; do NOT copy or generate the woman/character described there.",
-        "Do not change the story into a different genre just to make it prettier. Historical stays historical; realistic stays realistic; fantasy or magic appears only when the source brief actually calls for it.",
-        "Preserve explicit era, place, weather, time-of-day, damage/condition, and world-building cues from the source brief.",
+        "The DIRECTOR BACKGROUND UNIT below is authoritative. Follow it as structured production instructions.",
+        "Do not invent a different time of day, location, genre, weather, or world just to make the image prettier.",
         "",
-        "SOURCE BRIEF:",
-        semantic_brief,
+        "DIRECTOR BACKGROUND UNIT:",
+        json.dumps(director_background_unit or {}, ensure_ascii=False, indent=2),
         "",
         "BACKGROUND PLATE REQUIREMENTS:",
         "Use a vertical portrait-friendly composition suitable for later insertion of one woman.",
-        "Leave a plausible open area in the foreground or midground for Xiaoxia; do not put a person there.",
-        "Make the environment materially richer, spatially deeper, more coherent, more polished, and more cinematic than a minimal first-pass background.",
-        "Freely improve architecture, landscape, set dressing, surfaces, vegetation, weathering, reflections, lighting depth, atmosphere, and environmental storytelling, but remain faithful to the source world and story.",
-        "The result should look like a premium commercial-grade location/set plate with believable physical space, perspective, materials, and lighting.",
+        "Respect spatial_notes and leave plausible physical space for Xiaoxia's later action.",
+        "Make the environment materially rich, spatially deep, coherent, polished, and photorealistic.",
         "Do not include any text, typography, numbers, timestamps, clock readouts, subtitles, watermarks, labels, signage overlays, or UI overlays.",
         f"Intended portrait framing context: {framing}.",
     ]
     if is_cosplay:
-        background_prompt_lines.append("This is a cosplay/world-building scene: prioritize fidelity to the named work, role context, historical/fantasy setting, and story atmosphere over generic glamour or unrelated spectacle.")
+        background_prompt_lines.append("This is a cosplay/world-building background: source-world fidelity outranks generic glamour scenery.")
     else:
-        background_prompt_lines.append("This is a lifestyle/activity scene: prioritize the requested real-world activity, place, time, and atmosphere over generic glamour scenery.")
+        background_prompt_lines.append("This is a lifestyle/activity background: real activity/place/time coherence outranks generic glamour scenery.")
     background_prompt = "\n".join(background_prompt_lines).strip()
+    director_v5_background_prompt = background_prompt
 
     fal_client = _get_fal_client()
     selected_figures = _v5_background_upgrade_identity_figures()
@@ -19126,9 +19372,12 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "reference_item_url": source_context.get("reference_item_url"),
         "current_outfit_for_seedream": source_context.get("current_outfit_for_seedream"),
         "visual_checklist": source_context.get("visual_checklist"),
-        "story_scene_candidates": (story_scene_plan.get("candidates") if isinstance(story_scene_plan, dict) else []),
-        "chosen_story_scene_candidate": chosen_story_scene,
-        "story_scene_candidate_summary": chosen_story_summary,
+        "director_schema_version": "1.0",
+        "director_json": director_json,
+        "director_time_context": director_time_context,
+        "director_background_unit": director_background_unit,
+        "director_subject_unit": director_subject_unit,
+        "director_fusion_unit": director_fusion_unit,
     }
     _trace_stage(
         trace_context,
@@ -19138,7 +19387,8 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
             "model": SEEDREAM_V5_PRO_TTI_MODEL_ID,
             "image_size": SEEDREAM_V45_IMAGE_SIZE,
             "background_only": True,
-            "semantic_brief": semantic_brief,
+            "director_background_unit": director_background_unit,
+            "director_time_context": director_time_context,
             "selected_identity_figures": list(selected_figures),
             "enable_safety_checker": bool(SEEDREAM_ENABLE_SAFETY_CHECKER),
         },
@@ -19239,7 +19489,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "seedream_input_images": list(input_urls),
         "seedream_input_image_roles": list(input_roles),
         "seedream_identity_selected_figures": list(selected_figures),
-        "seedream_prompt_source": prompt_base,
+        "seedream_prompt_source": director_v45_prompt,
         "v5_background_generated_url": background_generated_url,
         "v5_background_local_url": background_local_url,
         "v5_background_local_path": background_local_path,
@@ -19257,21 +19507,21 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
 
     if source_mode_norm == "diary":
         generated_image_url = await generate_seedream_v45_diary(
-            prompt_base,
+            director_v45_prompt,
             enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
             trace_context=trace_context,
             input_image_urls_override=input_urls,
         )
     elif source_mode_norm == "cosplay":
         generated_image_url = await generate_seedream_v45_cosplay(
-            prompt_base,
+            director_v45_prompt,
             enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
             trace_context=trace_context,
             input_image_urls_override=input_urls,
         )
     else:
         generated_image_url = await generate_seedream_v45_photo(
-            prompt_base,
+            director_v45_prompt,
             reference_image_path=reference_candidate,
             enable_safety_checker=SEEDREAM_ENABLE_SAFETY_CHECKER,
             current_outfit=source_context.get("current_outfit_for_seedream"),
@@ -19307,6 +19557,14 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "v5_background_selected_identity_figures": list(selected_figures),
         "v5_background_upgrade_mode": "v5_background_t2i_as_figure9_then_v45_regenerate",
         "v5_handoff_input_count": len(input_urls),
+        "director_schema_version": "1.0",
+        "director_json": director_json,
+        "director_time_context": director_time_context,
+        "director_background_unit": director_background_unit,
+        "director_subject_unit": director_subject_unit,
+        "director_fusion_unit": director_fusion_unit,
+        "director_v45_prompt": director_v45_prompt,
+        "director_v5_background_prompt": director_v5_background_prompt,
     })
     refined = _carry_forward_photo_context_fields(source_context, refined, force=bool(source_context.get("preserve_textual_fields_on_regenerate")))
     trace_context["result_url"] = local_url or generated_image_url
@@ -19342,6 +19600,16 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
     prompt_base = context.get("prompt_base") or context.get("scene_text") or context.get("user_input") or context.get("scene_summary") or ""
     if not str(prompt_base).strip():
         raise RuntimeError("PURE_V45_COMPARE_PROMPT_NONE：找不到可重建場景的 prompt_base。")
+    if context.get("director_subject_unit") or context.get("director_fusion_unit"):
+        prompt_base = (
+            prompt_base.rstrip()
+            + "\n\nDIRECTOR SUBJECT UNIT — AUTHORITATIVE VISUAL TASK CARD\n"
+            + json.dumps(context.get("director_subject_unit") or {}, ensure_ascii=False, indent=2)
+            + "\n\nDIRECTOR FUSION UNIT — AUTHORITATIVE INTEGRATION TASK CARD\n"
+            + json.dumps(context.get("director_fusion_unit") or {}, ensure_ascii=False, indent=2)
+            + "\n\nDIRECTOR TIME CONTEXT\n"
+            + json.dumps(context.get("director_time_context") or {}, ensure_ascii=False, indent=2)
+        ).strip()
 
     visual = {
         "composition": context.get("composition") or context.get("scene_summary") or "",
@@ -19353,8 +19621,15 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
         "kind": "cosplay" if source_mode_norm == "cosplay" else "diary",
         "action": "manual_pure_v45_compare",
         "source_mode": source_mode_norm,
-        "user_input": f"manual pure v4.5 compare from {source_mode_norm}",
-        "scene_seed_text": prompt_base[:1200],
+        "user_input": context.get("user_input") or context.get("user_mode_request") or prompt_base[:800],
+        "scene_seed_text": prompt_base[:1600],
+        "story": copy.deepcopy(context.get("story")) if isinstance(context.get("story"), dict) else {},
+        "cosplay_state": copy.deepcopy(context.get("cosplay_state")) if isinstance(context.get("cosplay_state"), dict) else {},
+        "vibe_mode": copy.deepcopy(context.get("vibe_mode")) if isinstance(context.get("vibe_mode"), dict) else {},
+        "cosplay_anchor_lines": copy.deepcopy(context.get("cosplay_anchor_lines")) if isinstance(context.get("cosplay_anchor_lines"), list) else [],
+        "director_json": copy.deepcopy(context.get("director_json")) if isinstance(context.get("director_json"), dict) else {},
+        "director_subject_unit": copy.deepcopy(context.get("director_subject_unit")) if isinstance(context.get("director_subject_unit"), dict) else {},
+        "director_fusion_unit": copy.deepcopy(context.get("director_fusion_unit")) if isinstance(context.get("director_fusion_unit"), dict) else {},
         "seedream_model_id": SEEDREAM_V45_MODEL_ID,
         "seedream_model_label": _seedream_model_label_from_id(SEEDREAM_V45_MODEL_ID),
         "figure10_present": bool(context.get("reference_item_path") or context.get("reference_item_url")),
