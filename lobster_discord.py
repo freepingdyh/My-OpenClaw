@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.59_R2"
+LOBSTER_VERSION = "1.5.59_R3"
 
 
 def _normalize_generation_level(level):
@@ -19040,6 +19040,14 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         return "\n".join(rows)
 
     semantic_brief = _scene_semantic_brief()
+
+    # v1.5.59_R3：先取得原始 prompt_base，再交給故事候選規劃器。
+    # R2 在這裡先使用 prompt_base、後面才定義，會觸發 NameError，
+    # 進而讓 hybrid 主生成整段 fallback 回純 v4.5。
+    prompt_base = source_context.get("prompt_base") or source_context.get("scene_text") or source_context.get("user_input") or source_context.get("scene_summary") or ""
+    if not str(prompt_base).strip():
+        raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
+
     story_scene_plan = await _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief, prompt_base)
     chosen_story_scene = story_scene_plan.get("chosen") if isinstance(story_scene_plan, dict) else None
     if isinstance(chosen_story_scene, dict):
@@ -19224,10 +19232,6 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         input_roles.append({"figure": len(input_urls), "role": "wardrobe_reference", "url": wardrobe_url})
     else:
         wardrobe_url = None
-
-    prompt_base = source_context.get("prompt_base") or source_context.get("scene_text") or source_context.get("user_input") or source_context.get("scene_summary") or ""
-    if not str(prompt_base).strip():
-        raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
 
     trace_context.update({
         "seedream_input_images_override": list(input_urls),
