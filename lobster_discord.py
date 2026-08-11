@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R9"
+LOBSTER_VERSION = "1.6.01_R10"
 
 
 def _normalize_generation_level(level):
@@ -4813,142 +4813,6 @@ state = {
     "current_topic_data": None
 }
 
-
-def _photo_db_rebuild_scan_output():
-    """R9 emergency recovery: rebuild missing gallery index entries from surviving image files.
-
-    Safety rules:
-    - never delete image files
-    - never replace an existing DB item
-    - only add filenames that are not already indexed
-    - mark reconstructed rows as recovered so they can be reviewed later
-    """
-    import glob
-    import os
-    import time
-    recovered = []
-    try:
-        output_dir = "/data/output"
-        patterns = (
-            os.path.join(output_dir, "xiaoxia_*.jpg"),
-            os.path.join(output_dir, "xiaoxia_*.jpeg"),
-            os.path.join(output_dir, "xiaoxia_*.png"),
-            os.path.join(output_dir, "xiaoxia_*.webp"),
-        )
-        paths = []
-        for pat in patterns:
-            paths.extend(glob.glob(pat))
-        paths = sorted(set(paths))
-        for path in paths:
-            try:
-                st = os.stat(path)
-                fn = os.path.basename(path)
-                recovered.append({
-                    "id": f"recovered_{os.path.splitext(fn)[0]}",
-                    "publish_date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
-                    "topic": f"【Recovered】{fn}",
-                    "event": "由 R9 Photo DB Rebuilder 從仍存在的圖片檔重建索引；原始 metadata 待後續補回。",
-                    "composition": "",
-                    "mood": "",
-                    "mood_summary": "",
-                    "message": "",
-                    "post_text": {},
-                    "image_url": "",
-                    "local_url": f"/gallery/{fn}",
-                    "local_filename": fn,
-                    "local_path": path,
-                    "type": "recovered",
-                    "gallery_category": "uncategorized",
-                    "source_mode": "recovered",
-                    "recovered": True,
-                    "recovery_source": "r9_output_scan",
-                    "recovery_mtime": st.st_mtime,
-                })
-            except Exception as exc:
-                print(f"⚠️ [PHOTO_DB_REBUILD_FILE_SKIP] {path}: {type(exc).__name__}: {exc}")
-    except Exception as exc:
-        print(f"⚠️ [PHOTO_DB_REBUILD_SCAN_FAILED] {type(exc).__name__}: {exc}")
-    return recovered
-
-
-def _photo_db_merge_recovered(existing_db, recovered_rows):
-    """Merge by local_filename/local_path without overwriting existing metadata."""
-    existing_db = list(existing_db or [])
-    filenames = {
-        str((row or {}).get("local_filename") or "").strip()
-        for row in existing_db if isinstance(row, dict)
-    }
-    paths = {
-        str((row or {}).get("local_path") or "").strip()
-        for row in existing_db if isinstance(row, dict)
-    }
-    added = []
-    for row in recovered_rows or []:
-        if not isinstance(row, dict):
-            continue
-        fn = str(row.get("local_filename") or "").strip()
-        lp = str(row.get("local_path") or "").strip()
-        if (fn and fn in filenames) or (lp and lp in paths):
-            continue
-        existing_db.append(row)
-        if fn:
-            filenames.add(fn)
-        if lp:
-            paths.add(lp)
-        added.append(row)
-    return existing_db, added
-
-
-def _photo_db_rebuild_if_needed(db):
-    """Emergency R9 rebuild when the DB is suspiciously tiny relative to surviving output images."""
-    db = list(db or [])
-    recovered_rows = _photo_db_rebuild_scan_output()
-    if not recovered_rows:
-        print(f"ℹ️ [PHOTO_DB_REBUILD_SCAN] surviving_images=0 db_items={len(db)}")
-        return db
-
-    indexed = {
-        str((row or {}).get("local_filename") or "").strip()
-        for row in db if isinstance(row, dict)
-    }
-    missing_count = sum(
-        1 for row in recovered_rows
-        if str(row.get("local_filename") or "").strip() not in indexed
-    )
-
-    print(
-        f"ℹ️ [PHOTO_DB_REBUILD_SCAN] surviving_images={len(recovered_rows)} "
-        f"db_items={len(db)} missing_index={missing_count}"
-    )
-
-    if missing_count <= 0:
-        return db
-
-    merged, added = _photo_db_merge_recovered(db, recovered_rows)
-    if not added:
-        return db
-
-    # Preserve a human-readable recovery snapshot before replacing the live DB.
-    try:
-        snap = DATA_PATH + ".rebuild_r9"
-        with open(snap, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
-        print(f"🛟 [PHOTO_DB_REBUILD_SNAPSHOT] {snap}")
-    except Exception as exc:
-        print(f"⚠️ [PHOTO_DB_REBUILD_SNAPSHOT_FAILED] {type(exc).__name__}: {exc}")
-
-    try:
-        _atomic_write_photo_db(merged)
-        print(
-            f"🛟 [PHOTO_DB_REBUILT_FROM_OUTPUT] "
-            f"added={len(added)} total={len(merged)}"
-        )
-        return merged
-    except Exception as exc:
-        print(f"⚠️ [PHOTO_DB_REBUILD_WRITE_FAILED] {type(exc).__name__}: {exc}")
-        return db
-
-
 def _memory_backup_path():
     return f"{DATA_PATH}.bak"
 
@@ -5010,6 +4874,72 @@ def _salvage_truncated_photo_db(path):
         i = end
     return recovered
 
+PHOTO_DB_SNAPSHOT_DIR = os.path.join(MEMORY_DIR, "xiaoxia_photos_snapshots")
+PHOTO_DB_SNAPSHOT_KEEP = 30
+
+def _photo_db_snapshot_current():
+    """Keep rotating full snapshots of the last known-good photo DB.
+    This protects story records from a logically-valid but destructive future write,
+    which a single .bak cannot protect against for long.
+    """
+    if not os.path.exists(DATA_PATH):
+        return None
+    current = _load_valid_photo_db(DATA_PATH)
+    if current is None:
+        return None
+
+    try:
+        os.makedirs(PHOTO_DB_SNAPSHOT_DIR, exist_ok=True)
+        stamp = datetime.now(TZ_TPE).strftime("%Y%m%d_%H%M%S_%f")
+        snapshot_path = os.path.join(
+            PHOTO_DB_SNAPSHOT_DIR,
+            f"xiaoxia_photos_{stamp}_{len(current)}items.json",
+        )
+        shutil.copy2(DATA_PATH, snapshot_path)
+
+        files = sorted(
+            (
+                os.path.join(PHOTO_DB_SNAPSHOT_DIR, name)
+                for name in os.listdir(PHOTO_DB_SNAPSHOT_DIR)
+                if name.startswith("xiaoxia_photos_") and name.endswith(".json")
+            ),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        for old in files[PHOTO_DB_SNAPSHOT_KEEP:]:
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+
+        print(f"📚 [PHOTO_DB_SNAPSHOT_OK] items={len(current)} file={os.path.basename(snapshot_path)}")
+        return snapshot_path
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_SNAPSHOT_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+def _photo_db_newest_valid_snapshot():
+    """Return newest valid rolling snapshot, if any."""
+    if not os.path.isdir(PHOTO_DB_SNAPSHOT_DIR):
+        return None, None
+    try:
+        files = sorted(
+            (
+                os.path.join(PHOTO_DB_SNAPSHOT_DIR, name)
+                for name in os.listdir(PHOTO_DB_SNAPSHOT_DIR)
+                if name.startswith("xiaoxia_photos_") and name.endswith(".json")
+            ),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        for path in files:
+            data = _load_valid_photo_db(path)
+            if data is not None:
+                return data, path
+    except Exception:
+        pass
+    return None, None
+
 def _atomic_write_photo_db(db, create_backup=True):
     """Write xiaoxia_photos.json safely: temp -> validate -> optional backup -> replace."""
     os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
@@ -5037,6 +4967,8 @@ def _atomic_write_photo_db(db, create_backup=True):
     if create_backup and os.path.exists(DATA_PATH):
         current = _load_valid_photo_db(DATA_PATH)
         if current is not None:
+            # R9: preserve a rotating historical snapshot BEFORE every valid replacement.
+            _photo_db_snapshot_current()
             try:
                 shutil.copy2(DATA_PATH, _memory_backup_path())
                 print(f"💾 [PHOTO_DB_BACKUP_OK] {_memory_backup_path()}")
@@ -5094,8 +5026,7 @@ def _repair_truncated_reviewer_tail(path):
 
 def load_memory():
     if not os.path.exists(DATA_PATH):
-        rebuilt = _photo_db_rebuild_if_needed([])
-        return rebuilt
+        return []
 
     try:
         with open(DATA_PATH, "r", encoding="utf-8") as f:
@@ -5116,11 +5047,21 @@ def load_memory():
             Path(repaired_copy).write_text(repaired_text, encoding="utf-8")
             _atomic_write_photo_db(repaired, create_backup=False)
             print(f"🛟 [PHOTO_DB_REPAIRED_REVIEWER_TAIL] items={len(repaired)} repaired_copy={repaired_copy}")
-            return _photo_db_rebuild_if_needed(repaired)
+            return repaired
         except Exception as exc:
             print(f"⚠️ [PHOTO_DB_TARGETED_REPAIR_WRITE_FAILED] {type(exc).__name__}: {exc}")
 
-    # Recovery priority 1: last known-good backup.
+    # Recovery priority 1: newest rotating full snapshot.
+    snapshot, snapshot_path = _photo_db_newest_valid_snapshot()
+    if snapshot is not None:
+        try:
+            _atomic_write_photo_db(snapshot, create_backup=False)
+            print(f"✅ [PHOTO_DB_RECOVERED_FROM_SNAPSHOT] items={len(snapshot)} file={os.path.basename(snapshot_path)}")
+        except Exception as exc:
+            print(f"⚠️ [PHOTO_DB_SNAPSHOT_RESTORE_WRITE_FAILED] {type(exc).__name__}: {exc}")
+        return snapshot
+
+    # Recovery priority 2: last known-good single backup.
     backup = _load_valid_photo_db(_memory_backup_path())
     if backup is not None:
         try:
@@ -5130,7 +5071,7 @@ def load_memory():
             print(f"⚠️ [PHOTO_DB_BACKUP_RESTORE_WRITE_FAILED] {type(exc).__name__}: {exc}")
         return backup
 
-    # Recovery priority 2: salvage only complete leading records from the broken JSON array.
+    # Recovery priority 3: salvage only complete leading records from the broken JSON array.
     salvaged = _salvage_truncated_photo_db(DATA_PATH)
     if salvaged:
         recovered_path = f"{DATA_PATH}.recovered"
@@ -5158,7 +5099,16 @@ def save_memory(db):
 # for the first gallery/cosplay path to call load_memory().
 try:
     _PHOTO_DB_STARTUP_VALIDATION = load_memory()
-    print(f"✅ [PHOTO_DB_STARTUP_VALIDATED] items={len(_PHOTO_DB_STARTUP_VALIDATION)}")
+    latest_topic = ""
+    latest_date = ""
+    if _PHOTO_DB_STARTUP_VALIDATION:
+        latest = _PHOTO_DB_STARTUP_VALIDATION[0] if isinstance(_PHOTO_DB_STARTUP_VALIDATION[0], dict) else {}
+        latest_topic = str(latest.get("topic") or "")[:80]
+        latest_date = str(latest.get("publish_date") or latest.get("created_at") or "")
+    print(
+        f"✅ [PHOTO_DB_STARTUP_VALIDATED] items={len(_PHOTO_DB_STARTUP_VALIDATION)} "
+        f"latest_date={latest_date!r} latest_topic={latest_topic!r}"
+    )
 except Exception as exc:
     print(f"⚠️ [PHOTO_DB_STARTUP_VALIDATION_FAILED] {type(exc).__name__}: {exc}")
     _PHOTO_DB_STARTUP_VALIDATION = []
@@ -19554,6 +19504,125 @@ async def _build_cosplay_canon_json(source_context):
         print(f"⚠️ [COSPLAY_CANON_JSON_FAILED] {type(exc).__name__}: {exc}")
         return _sanitize_cosplay_canon_json({}, ctx)
 
+
+def _summarize_cosplay_canon_costume(cosplay_canon_json):
+    """Build a compact canon-first costume sentence from the canon card.
+
+    Important: this is not a creative rewrite. It is a visual lock string used to
+    replace contradictory free-form costume prose when cosplay generation drifts.
+    """
+    canon = cosplay_canon_json or {}
+    if not isinstance(canon, dict):
+        return ""
+
+    costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
+    bits = []
+    for key in ("silhouette", "upper_body", "lower_body", "footwear"):
+        value = _clean_text_compact(costume.get(key) or "")[:200]
+        if value:
+            bits.append(value)
+
+    accessories = costume.get("accessories") if isinstance(costume.get("accessories"), list) else []
+    accessories = [_clean_text_compact(x)[:80] for x in accessories[:6] if _clean_text_compact(x)]
+    if accessories:
+        bits.append("accessories: " + ", ".join(accessories))
+
+    palette = costume.get("signature_palette") if isinstance(costume.get("signature_palette"), list) else []
+    palette = [_clean_text_compact(x)[:40] for x in palette[:6] if _clean_text_compact(x)]
+    if palette:
+        bits.append("palette: " + ", ".join(palette))
+
+    motifs = costume.get("motifs") if isinstance(costume.get("motifs"), list) else []
+    motifs = [_clean_text_compact(x)[:50] for x in motifs[:6] if _clean_text_compact(x)]
+    if motifs:
+        bits.append("motifs: " + ", ".join(motifs))
+
+    if not bits:
+        return ""
+    return ("Canon-first costume requirement: " + " | ".join(bits))[:900]
+
+
+def _is_weapon_like_required_prop(prop):
+    if not isinstance(prop, dict):
+        return False
+    text = " ".join([
+        _clean_text_compact(prop.get("name") or ""),
+        _clean_text_compact(prop.get("type") or ""),
+        _clean_text_compact(prop.get("visual_description") or ""),
+    ]).lower()
+    keywords = (
+        "weapon", "blade", "sword", "whip", "chain", "spear", "gun", "rifle",
+        "dagger", "staff", "bow", "scythe", "katana", "刀", "劍", "鞭", "鎖鏈", "槍"
+    )
+    return any(k in text for k in keywords)
+
+
+def _build_cosplay_director_focus_prompt_base(source_context, cosplay_canon_json, raw_prompt_base):
+    """For cosplay, reduce contamination from free-form invented story prose.
+
+    We still keep the scene request as a soft hint, but we reframe it under canon-first rules,
+    so Gemini Director is less likely to turn weapon characters into unrelated magician/library
+    variants just because an upstream story paragraph became too imaginative.
+    """
+    ctx = source_context or {}
+    work, character = _cosplay_role_identity(ctx)
+    story = ctx.get("story") if isinstance(ctx.get("story"), dict) else {}
+    vibe = ctx.get("vibe_mode") if isinstance(ctx.get("vibe_mode"), dict) else {}
+    canon = cosplay_canon_json if isinstance(cosplay_canon_json, dict) else {}
+    appearance = canon.get("appearance") if isinstance(canon.get("appearance"), dict) else {}
+    costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
+    required_props = _director_extract_required_canon_props(canon)
+
+    lines = [
+        f"Cosplay role request: Xiaoxia cosplaying {character or 'the requested role'} from {work or 'the requested work'}.",
+        "Character canon is the hard truth layer. Free-form story prose may suggest today's scene, but may not redefine the role.",
+    ]
+
+    topic = _clean_text_compact(story.get("topic") or ctx.get("topic") or ctx.get("user_mode_request") or "")[:300]
+    if topic:
+        lines.append(f"Requested topic / title: {topic}")
+
+    event_hint = _clean_text_compact(story.get("event") or ctx.get("event") or "")[:700]
+    if event_hint:
+        lines.append(
+            "Soft scene hint only (use only if compatible with canon, and never as a replacement for canon identity): "
+            + event_hint
+        )
+
+    raw_hint = _clean_text_compact(raw_prompt_base or "")[:800]
+    if raw_hint:
+        lines.append("Original prompt hint (soft, not authoritative if conflicting with canon): " + raw_hint)
+
+    hair_bits = []
+    hc = _clean_text_compact(appearance.get("hair_color") or "")[:80]
+    hs = _clean_text_compact(appearance.get("hair_style") or "")[:120]
+    if hc:
+        hair_bits.append(hc)
+    if hs:
+        hair_bits.append(hs)
+    if hair_bits:
+        lines.append("Canon hair anchors: " + ", ".join(hair_bits))
+
+    costume_summary = _summarize_cosplay_canon_costume(canon)
+    if costume_summary:
+        lines.append(costume_summary)
+
+    if required_props:
+        prop_names = ", ".join(_clean_text_compact(p.get("name") or "")[:120] for p in required_props if _clean_text_compact(p.get("name") or ""))
+        if prop_names:
+            lines.append(f"Required signature props that must stay visible: {prop_names}.")
+        if any(_is_weapon_like_required_prop(p) for p in required_props):
+            lines.append(
+                "This role is weapon-forward. Do NOT redesign the role into a magician, scholar, librarian, or generic noblewoman whose main action is reading, holding a book, or using a non-canon prop."
+            )
+
+    vibe_zh = _clean_text_compact(vibe.get("zh") or "")[:60]
+    if vibe_zh:
+        lines.append(f"Requested vibe: {vibe_zh}. Keep it canon-first and recognizably this role.")
+
+    return "\n".join(lines).strip()
+
+
 def _director_extract_required_canon_props(cosplay_canon_json):
     props = []
     items = (cosplay_canon_json or {}).get("signature_props") if isinstance(cosplay_canon_json, dict) else []
@@ -19589,6 +19658,8 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
     props = subject.get("props") if isinstance(subject.get("props"), list) else []
     must_have = subject.get("must_have") if isinstance(subject.get("must_have"), list) else []
     must_not_drift = subject.get("must_not_drift") if isinstance(subject.get("must_not_drift"), list) else []
+    background = data.get("background_unit") if isinstance(data.get("background_unit"), dict) else {}
+    forbidden_elements = background.get("forbidden_elements") if isinstance(background.get("forbidden_elements"), list) else []
 
     canon_appearance = canon.get("appearance") if isinstance(canon.get("appearance"), dict) else {}
     hair_color = _clean_text_compact(canon_appearance.get("hair_color") or "")[:80]
@@ -19604,25 +19675,11 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
         appearance["hair"] = current_hair[:320]
 
     canon_costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
-    costume_bits = []
-    for bit in [canon_costume.get("silhouette"), canon_costume.get("upper_body"), canon_costume.get("lower_body"), canon_costume.get("footwear")]:
-        bit = _clean_text_compact(bit or "")[:160]
-        if bit:
-            costume_bits.append(bit)
-    if isinstance(canon_costume.get("signature_palette"), list) and canon_costume.get("signature_palette"):
-        palette = ", ".join([_clean_text_compact(x)[:40] for x in canon_costume.get("signature_palette")[:6] if x])
-        if palette:
-            costume_bits.append(f"palette: {palette}")
-    if isinstance(canon_costume.get("motifs"), list) and canon_costume.get("motifs"):
-        motifs = ", ".join([_clean_text_compact(x)[:50] for x in canon_costume.get("motifs")[:6] if x])
-        if motifs:
-            costume_bits.append(f"motifs: {motifs}")
-    if costume_bits:
-        desc = _clean_text_compact(outfit.get("description") or "")
-        supplement = "Canon costume anchors: " + " | ".join(costume_bits)
-        if supplement.lower() not in desc.lower():
-            desc = (desc + "; " if desc else "") + supplement
-        outfit["description"] = desc[:700]
+    canon_costume_summary = _summarize_cosplay_canon_costume(canon)
+    if canon_costume_summary:
+        # R10: for cosplay, canon costume is not merely appended. It replaces contradictory free-form prose.
+        # This prevents cases like Ivy drifting into a generic velvet gown / magic-user redesign.
+        outfit["description"] = canon_costume_summary[:900]
     mp = outfit.get("must_preserve") if isinstance(outfit.get("must_preserve"), list) else []
     for anchor in (canon.get("recognition_anchors") or [])[:8]:
         a = _clean_text_compact(anchor or "")[:180]
@@ -19707,6 +19764,21 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
             if _clean_text_compact((p or {}).get("name") if isinstance(p, dict) else p).lower() != hero_name.lower()
         ]
         must_have = [hero_name] + [x for x in must_have if _clean_text_compact(x).lower() != hero_name.lower()]
+
+        if _is_weapon_like_required_prop(hero):
+            combat_lock = (
+                "Do not drift into a generic magician, scholar, librarian, or passive noblewoman. "
+                "This role must remain visibly weapon-forward and combat-capable."
+            )
+            if combat_lock not in must_not_drift:
+                must_not_drift.append(combat_lock)
+            for fb in [
+                "non-canon hero magic book or grimoire",
+                "non-canon spellcasting focus replacing the required signature weapon",
+                "generic scholar / librarian styling that hides the role weapon",
+            ]:
+                if fb not in forbidden_elements:
+                    forbidden_elements.append(fb)
     # generic drift locks
     character = _clean_text_compact(canon.get("character") or "")[:120]
     if character:
@@ -19728,6 +19800,8 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
     subject["props"] = normalized_props[:12]
     subject["must_have"] = must_have[:12]
     subject["must_not_drift"] = must_not_drift[:12]
+    background["forbidden_elements"] = forbidden_elements[:12]
+    data["background_unit"] = background
     data["subject_unit"] = subject
     return data
 
@@ -19906,6 +19980,10 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         "cosplay_canon_json": cosplay_canon_json if module_key == "cosplay" else None,
     }
 
+    director_prompt_base = prompt_base
+    if module_key == "cosplay":
+        director_prompt_base = _build_cosplay_director_focus_prompt_base(ctx, cosplay_canon_json, prompt_base)
+
     prompt = f"""
 你是「小俠影像導演 Director」。你的任務不是寫散文，也不是提出多個候選故事。
 你只需要把這次「單張照片」的視覺需求填成一份 Master Director JSON。
@@ -19924,7 +20002,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 {semantic_brief}
 
 【原始生圖需求】
-{prompt_base}
+{director_prompt_base}
 
 【已知結構化事實】
 {json.dumps(source_facts, ensure_ascii=False, default=str)[:10000]}
@@ -20003,6 +20081,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 7. COSPLAY HARD CANON：CHARACTER CANON JSON 是不可修改的角色事實，不是參考建議。Director 不得改寫或替換 canon 的 hair、costume system、signature palette、recognition anchors、signature_props。Director 只負責 scene / pose / expression / camera / lighting / mood，以及不與 canon 衝突的 secondary story details。
 7a. canon signature_props 中 required=true 時，必須放入 props 與 must_have，並成為 primary_action 的可見主角；不得收在腰間、藏在背景、縮成一般短劍，或被其他故事道具取代。
 7b. 除非大俠明確指定，story 中自行發明的魔法書、魔典、鍊墜等非 canon 道具，只能當背景小物或 secondary detail，不可列入 must_have，也不可成為 primary_action。
+7c. 若原始文字把角色寫成與 canon 明顯衝突的身份（例如武器系角色被寫成魔法師、圖書管理員、單純看窗景的 generic 貴族女性），Director 必須主動修正，讓畫面回到 canon-first 的角色辨識。
 8. xiaoxia_interpretation 是「小俠版美學層」：保留 canon-first sexy cosplay 的漂亮、成熟、電影寫真感，但性感與華麗只能在 canon costume system 內重新詮釋，不能拿 generic glamour outfit 取代角色。
 9. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
 10. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
@@ -20025,7 +20104,7 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         )
         raw = str(getattr(response, "text", "") or "").replace("```json", "").replace("```", "").strip()
         data = json.loads(raw, strict=False)
-        sanitized = _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
+        sanitized = _sanitize_director_json(data, ctx, semantic_brief, director_prompt_base)
         if module_key == "cosplay":
             # R8: Canon JSON is authoritative. No per-image OpenAI reviewer.
             sanitized["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
