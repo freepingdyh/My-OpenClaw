@@ -19634,9 +19634,17 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
             review_result = await _review_director_json_with_openai(ctx, semantic_brief, prompt_base, sanitized, cosplay_canon_json)
             reviewed = review_result.get("corrected_director_json") if isinstance(review_result, dict) else sanitized
             if isinstance(review_result, dict):
-                reviewed["director_review_result"] = review_result
-                reviewed["director_review_pass"] = bool(review_result.get("pass", True))
-                reviewed["director_review_issues"] = review_result.get("issues") or []
+                # Store only reviewer metadata here. Do NOT embed corrected_director_json
+                # inside the corrected director object itself, otherwise JSON serialization
+                # creates a circular reference.
+                review_meta = {
+                    "pass": bool(review_result.get("pass", True)),
+                    "issues": copy.deepcopy(review_result.get("issues") or []),
+                    "review_model": str(review_result.get("review_model") or ""),
+                }
+                reviewed["director_review_result"] = review_meta
+                reviewed["director_review_pass"] = review_meta["pass"]
+                reviewed["director_review_issues"] = copy.deepcopy(review_meta["issues"])
             return reviewed
         return sanitized
     except Exception as exc:
