@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R6"
+LOBSTER_VERSION = "1.6.01_R7"
 
 
 def _normalize_generation_level(level):
@@ -19511,13 +19511,65 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
             if name:
                 existing_names.add(name.lower())
                 normalized_props.append({"name": name, "type": "", "visual_description": "", "required": False})
-    for req in _director_extract_required_canon_props(canon):
+    required_canon_props = _director_extract_required_canon_props(canon)
+    for req in required_canon_props:
         if req["name"].lower() not in existing_names:
             normalized_props.append(req)
             existing_names.add(req["name"].lower())
         label = req["name"]
         if label not in must_have:
             must_have.append(label)
+
+    # R7 COSPLAY CANON ACTION LOCK:
+    # A required signature prop is not merely metadata. It must own the visible hero action.
+    # This prevents an invented story prop (e.g. a magic book) from becoming the foreground
+    # action while the canonical weapon is hidden at the waist.
+    if required_canon_props:
+        hero = required_canon_props[0]
+        hero_name = hero["name"]
+        hero_type = hero.get("type") or ""
+        hero_desc = hero.get("visual_description") or ""
+        action = subject.get("action") if isinstance(subject.get("action"), dict) else {}
+        old_primary = _clean_text_compact(action.get("primary_action") or "")
+        old_secondary = _clean_text_compact(action.get("secondary_action") or "")
+        action["primary_action"] = (
+            f"Clearly and visibly handle {hero_name}"
+            + (f" ({hero_type})" if hero_type else "")
+            + "; the signature prop must be unmistakable in the foreground and actively used, "
+              "not holstered, hidden, reduced to a generic short blade, or replaced by another prop."
+        )
+        if hero_desc:
+            action["interaction_with_world"] = (
+                f"Show the defining behavior of {hero_name}: {hero_desc}. "
+                "The character should visibly interact with this signature prop as the main story beat."
+            )[:700]
+        if old_primary and hero_name.lower() not in old_primary.lower():
+            action["secondary_action"] = (
+                f"Secondary story beat only after the signature prop is clear: {old_primary}"
+            )[:420]
+        elif old_secondary:
+            action["secondary_action"] = old_secondary[:420]
+        subject["action"] = action
+
+        # Remove non-canon story props from must_have. They may remain as background dressing,
+        # but cannot compete with the required signature prop for visual priority.
+        canon_names = {x["name"].lower() for x in required_canon_props}
+        filtered_must = []
+        story_prop_tokens = ("magic book", "spellbook", "grimoire", "魔法書", "魔典", "古老書", "pendant", "鍊墜", "項鍊")
+        for item in must_have:
+            text = _clean_text_compact(item or "")
+            low = text.lower()
+            if any(tok in low for tok in story_prop_tokens) and not any(cn in low for cn in canon_names):
+                continue
+            filtered_must.append(item)
+        must_have = filtered_must
+
+        # Required canon prop is first among props and must_have.
+        normalized_props = [hero] + [
+            p for p in normalized_props
+            if _clean_text_compact((p or {}).get("name") if isinstance(p, dict) else p).lower() != hero_name.lower()
+        ]
+        must_have = [hero_name] + [x for x in must_have if _clean_text_compact(x).lower() != hero_name.lower()]
     # generic drift locks
     character = _clean_text_compact(canon.get("character") or "")[:120]
     if character:
@@ -19559,6 +19611,8 @@ Priorities in order:
 4. Required canon props must remain explicit in subject_unit.props and subject_unit.must_have.
 5. Hair color/style, signature costume system, motifs, and recognition anchors should not be lost or replaced by generic glamour styling.
 6. Keep the result as a single-image task card, concise and production-ready.
+7. If CHARACTER CANON JSON has any signature_props with required=true, that prop must be the visible primary action/hero prop. Do not allow an invented book, pendant, cup, generic sword, or other story prop to become the main action or a must-have unless Daxia explicitly requested it.
+8. A required transforming/segmented weapon must remain visibly recognizable in that signature form; do not collapse it into a small generic dagger at the waist.
 Return JSON only."""
 
     user_prompt = f"""Please review this cosplay director package.
@@ -19809,7 +19863,8 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 4. must_have 只列「缺了就不能算拍對」的視覺元素。
 5. must_not_drift 用來防止畫面變成另一件事，例如淨灘變海邊擺拍、Ivy 變 generic gothic woman。
 6. cosplay 時，cosplay_canon_json 是「角色事實層」最高權威。它決定角色髮色/髮型、代表性服裝系統、主色、signature prop、motif 與 recognition anchors；本次 story/cosplay_state 只能決定今天演什麼，不能改寫 canon。
-7. cosplay 的 subject_unit 必須把 canon 中 high-confidence 的辨識元素具體轉成 hair / outfit / props / must_have。若 canon signature_props 中 required=true，必須放入 props 與 must_have，不可省略成氣氛描述。
+7. cosplay 的 subject_unit 必須把 canon 中 high-confidence 的辨識元素具體轉成 hair / outfit / props / must_have。若 canon signature_props 中 required=true，必須放入 props 與 must_have，而且 required signature prop 必須成為 primary_action 的主角並清楚可見；不得把它收在腰間、藏在背景、縮成一般短劍，或讓魔法書/鍊墜等創作道具搶走主要動作。
+7a. 除非大俠明確指定，story 中自行發明的魔法書、魔典、鍊墜等非 canon 道具，只能當背景小物或 secondary detail，不可列入 must_have，也不可成為 primary_action。
 8. xiaoxia_interpretation 是「小俠版美學層」：保留 canon-first sexy cosplay 的漂亮、成熟、電影寫真感，但性感與華麗只能在 canon costume system 內重新詮釋，不能拿 generic glamour outfit 取代角色。
 9. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
 10. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
@@ -19876,6 +19931,7 @@ def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, d
             "- XIAOXIA INTERPRETATION is the beauty/style layer: keep the established canon-first sexy cosplay look — polished, mature, cinematic, alluring, and distinctly Xiaoxia — while staying inside the recognizable canon costume system.",
             "- If generic cosplay baseline wording or the earlier creative story conflicts with CHARACTER CANON JSON or DIRECTOR units, the canon/director data wins.",
             "- Do not replace a role-defining prop, weapon, outfit silhouette, hair requirement, or motif with a generic glamour alternative. Required canon props and subject_unit.must_have items must remain visibly readable.",
+            "- REQUIRED CANON PROP PRIORITY: if CHARACTER CANON JSON marks a signature prop required=true, make that prop the obvious visible hero prop and main interaction. Do not let a book, pendant, generic dagger, or other invented story prop become the foreground action.",
             "- Keep the result clearly readable as Xiaoxia cosplaying this named role, not as a generic gothic / fantasy / glamorous woman.",
         ]
     else:
