@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.5.59_R3"
+LOBSTER_VERSION = "1.5.59_R4"
 
 
 def _normalize_generation_level(level):
@@ -18922,9 +18922,9 @@ async def _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief
 {prompt_base}
 
 輸出 JSON：
-{
+{{
   "candidates": [
-    {
+    {{
       "id": "A",
       "title": "候選標題",
       "scene": "一句話描述具體場景",
@@ -18934,11 +18934,11 @@ async def _plan_story_scene_candidates_for_hybrid(source_context, semantic_brief
       "camera": "適合的鏡頭與構圖",
       "mood": "情緒與氛圍",
       "why_best": "這個候選為何適合做成單張照片"
-    }
+    }}
   ],
   "chosen_id": "A",
   "selection_reason": "為何選這個候選"
-}
+}}
 規則：
 1. 候選數量 2 或 3。
 2. 每個候選都要是「同一時間、同一地點、同一主要活動」的單張畫面。
