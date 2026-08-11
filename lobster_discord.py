@@ -64,6 +64,7 @@ PHOTO_CONTEXT_CARRY_KEYS = (
     "director_json", "director_schema_version", "director_time_context",
     "director_background_unit", "director_subject_unit", "director_fusion_unit",
     "director_v45_prompt", "director_v5_background_prompt",
+    "director_review_result", "director_review_issues", "director_review_pass",
     "cosplay_work_title", "cosplay_character_name", "story", "cosplay_state", "vibe_mode",
     "cosplay_anchor_lines", "cosplay_canon_json", "xiaoxia_interpretation",
 )
@@ -19212,6 +19213,208 @@ async def _build_cosplay_canon_json(source_context):
         print(f"⚠️ [COSPLAY_CANON_JSON_FAILED] {type(exc).__name__}: {exc}")
         return _sanitize_cosplay_canon_json({}, ctx)
 
+def _director_extract_required_canon_props(cosplay_canon_json):
+    props = []
+    items = (cosplay_canon_json or {}).get("signature_props") if isinstance(cosplay_canon_json, dict) else []
+    if not isinstance(items, list):
+        return props
+    for item in items[:12]:
+        if not isinstance(item, dict):
+            continue
+        if not item.get("required"):
+            continue
+        name = _clean_text_compact(item.get("name") or "")[:160]
+        if not name:
+            continue
+        props.append({
+            "name": name,
+            "type": _clean_text_compact(item.get("type") or "")[:80],
+            "visual_description": _clean_text_compact(item.get("visual_description") or "")[:260],
+            "required": True,
+        })
+    return props
+
+
+def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
+    """Post-review hard enforcement. Prevent required canon anchors from disappearing."""
+    data = copy.deepcopy(director_json or {}) if isinstance(director_json, dict) else {}
+    canon = cosplay_canon_json or {}
+    if not isinstance(canon, dict):
+        return data
+
+    subject = data.get("subject_unit") if isinstance(data.get("subject_unit"), dict) else {}
+    appearance = subject.get("appearance") if isinstance(subject.get("appearance"), dict) else {}
+    outfit = subject.get("outfit") if isinstance(subject.get("outfit"), dict) else {}
+    props = subject.get("props") if isinstance(subject.get("props"), list) else []
+    must_have = subject.get("must_have") if isinstance(subject.get("must_have"), list) else []
+    must_not_drift = subject.get("must_not_drift") if isinstance(subject.get("must_not_drift"), list) else []
+
+    canon_appearance = canon.get("appearance") if isinstance(canon.get("appearance"), dict) else {}
+    hair_color = _clean_text_compact(canon_appearance.get("hair_color") or "")[:80]
+    hair_style = _clean_text_compact(canon_appearance.get("hair_style") or "")[:120]
+    canon_hair = ", ".join([x for x in [hair_color, hair_style] if x]).strip(", ")
+    if canon_hair:
+        current_hair = _clean_text_compact(appearance.get("hair") or "")
+        low = current_hair.lower()
+        if hair_color and hair_color.lower() not in low:
+            current_hair = (current_hair + "; " if current_hair else "") + f"Canon hair color: {hair_color}"
+        if hair_style and hair_style.lower() not in current_hair.lower():
+            current_hair = (current_hair + "; " if current_hair else "") + f"Canon hair style: {hair_style}"
+        appearance["hair"] = current_hair[:320]
+
+    canon_costume = canon.get("costume") if isinstance(canon.get("costume"), dict) else {}
+    costume_bits = []
+    for bit in [canon_costume.get("silhouette"), canon_costume.get("upper_body"), canon_costume.get("lower_body"), canon_costume.get("footwear")]:
+        bit = _clean_text_compact(bit or "")[:160]
+        if bit:
+            costume_bits.append(bit)
+    if isinstance(canon_costume.get("signature_palette"), list) and canon_costume.get("signature_palette"):
+        palette = ", ".join([_clean_text_compact(x)[:40] for x in canon_costume.get("signature_palette")[:6] if x])
+        if palette:
+            costume_bits.append(f"palette: {palette}")
+    if isinstance(canon_costume.get("motifs"), list) and canon_costume.get("motifs"):
+        motifs = ", ".join([_clean_text_compact(x)[:50] for x in canon_costume.get("motifs")[:6] if x])
+        if motifs:
+            costume_bits.append(f"motifs: {motifs}")
+    if costume_bits:
+        desc = _clean_text_compact(outfit.get("description") or "")
+        supplement = "Canon costume anchors: " + " | ".join(costume_bits)
+        if supplement.lower() not in desc.lower():
+            desc = (desc + "; " if desc else "") + supplement
+        outfit["description"] = desc[:700]
+    mp = outfit.get("must_preserve") if isinstance(outfit.get("must_preserve"), list) else []
+    for anchor in (canon.get("recognition_anchors") or [])[:8]:
+        a = _clean_text_compact(anchor or "")[:180]
+        if a and a not in mp:
+            mp.append(a)
+    outfit["must_preserve"] = mp[:12]
+
+    existing_names = set()
+    normalized_props = []
+    for item in props[:12]:
+        if isinstance(item, dict):
+            name = _clean_text_compact(item.get("name") or "")[:160]
+            if name:
+                existing_names.add(name.lower())
+                normalized_props.append({
+                    "name": name,
+                    "type": _clean_text_compact(item.get("type") or "")[:80],
+                    "visual_description": _clean_text_compact(item.get("visual_description") or "")[:260],
+                    "required": bool(item.get("required")),
+                })
+        elif isinstance(item, str):
+            name = _clean_text_compact(item)[:160]
+            if name:
+                existing_names.add(name.lower())
+                normalized_props.append({"name": name, "type": "", "visual_description": "", "required": False})
+    for req in _director_extract_required_canon_props(canon):
+        if req["name"].lower() not in existing_names:
+            normalized_props.append(req)
+            existing_names.add(req["name"].lower())
+        label = req["name"]
+        if label not in must_have:
+            must_have.append(label)
+    # generic drift locks
+    character = _clean_text_compact(canon.get("character") or "")[:120]
+    if character:
+        drift = f"Do not drift into a generic glamour or generic gothic woman; she must still read clearly as {character}."
+        if drift not in must_not_drift:
+            must_not_drift.append(drift)
+    for anchor in (canon.get("recognition_anchors") or [])[:8]:
+        a = _clean_text_compact(anchor or "")[:180]
+        if a and a not in must_have:
+            must_have.append(a)
+    distinct = canon_appearance.get("distinctive_features") if isinstance(canon_appearance.get("distinctive_features"), list) else []
+    for feat in distinct[:6]:
+        f = _clean_text_compact(feat or "")[:180]
+        if f and f not in must_have:
+            must_have.append(f)
+
+    subject["appearance"] = appearance
+    subject["outfit"] = outfit
+    subject["props"] = normalized_props[:12]
+    subject["must_have"] = must_have[:12]
+    subject["must_not_drift"] = must_not_drift[:12]
+    data["subject_unit"] = subject
+    return data
+
+
+async def _review_director_json_with_openai(source_context, semantic_brief, prompt_base, director_json, cosplay_canon_json):
+    """OpenAI reviewer: minimally fix cosplay director JSON when canon anchors drift or disappear."""
+    ctx = source_context or {}
+    if not isinstance(director_json, dict) or not isinstance(cosplay_canon_json, dict) or not cosplay_canon_json:
+        reviewed = _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json)
+        return {"pass": True, "issues": [], "corrected_director_json": reviewed, "review_model": "hardlock_only"}
+
+    system_prompt = """You are the Director JSON Reviewer for Xiaoxia cosplay image generation.
+Your job is to audit a Gemini-produced DIRECTOR JSON against the CHARACTER CANON JSON.
+Priorities in order:
+1. Preserve role recognizability and canon anchors.
+2. Preserve Xiaoxia identity and the beautiful canon-first sexy cosplay style.
+3. Make only minimal corrections; do not rewrite everything unless necessary.
+4. Required canon props must remain explicit in subject_unit.props and subject_unit.must_have.
+5. Hair color/style, signature costume system, motifs, and recognition anchors should not be lost or replaced by generic glamour styling.
+6. Keep the result as a single-image task card, concise and production-ready.
+Return JSON only."""
+
+    user_prompt = f"""Please review this cosplay director package.
+
+SOURCE CONTEXT SUMMARY:
+{json.dumps({
+    'user_request': str(ctx.get('user_mode_request') or ctx.get('user_input') or ''),
+    'scene_text': str(ctx.get('scene_text') or ''),
+    'scene_summary': str(ctx.get('scene_summary') or ''),
+    'semantic_brief': str(semantic_brief or ''),
+    'prompt_base': str(prompt_base or ''),
+}, ensure_ascii=False)}
+
+CHARACTER CANON JSON (authoritative role facts):
+{json.dumps(cosplay_canon_json, ensure_ascii=False, indent=2)}
+
+CURRENT DIRECTOR JSON TO REVIEW:
+{json.dumps(director_json, ensure_ascii=False, indent=2)}
+
+Task:
+- Check whether required canon props, hair, costume system, motifs, recognition anchors, and role identity are preserved.
+- If the director JSON drifts into generic glamour / generic gothic / unrelated outfit, fix it.
+- Keep background and mood if they are already compatible.
+- Keep Xiaoxia beautiful, mature, cinematic, and alluring, but inside canon.
+- Ensure the corrected JSON still matches the same schema keys.
+
+Return ONLY this JSON object:
+{{
+  "pass": true,
+  "issues": ["..."],
+  "corrected_director_json": {{...full corrected director json...}}
+}}"""
+    fallback = {"pass": True, "issues": [], "corrected_director_json": director_json}
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        parsed = _safe_json_from_text(response.choices[0].message.content, fallback)
+    except Exception as exc:
+        print(f"⚠️ [DIRECTOR_REVIEW_FAILED] {type(exc).__name__}: {exc}")
+        parsed = dict(fallback)
+        parsed["issues"] = [f"review_failed:{type(exc).__name__}"]
+    reviewed = parsed.get("corrected_director_json") if isinstance(parsed, dict) else director_json
+    reviewed = _sanitize_director_json(reviewed, ctx, semantic_brief, prompt_base)
+    reviewed["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
+    reviewed = _apply_cosplay_canon_hardlock(reviewed, cosplay_canon_json)
+    result = {
+        "pass": bool((parsed or {}).get("pass", True)),
+        "issues": [str(x)[:240] for x in ((parsed or {}).get("issues") or [])[:12]],
+        "corrected_director_json": reviewed,
+        "review_model": "gpt-5-mini",
+    }
+    return result
+
+
 def _sanitize_director_json(data, source_context, semantic_brief, prompt_base):
     fallback = _director_fallback_json(source_context, semantic_brief, prompt_base)
     if not isinstance(data, dict):
@@ -19427,7 +19630,14 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         data = json.loads(raw, strict=False)
         sanitized = _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
         if module_key == "cosplay":
-            sanitized["cosplay_canon_json"] = cosplay_canon_json
+            sanitized["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
+            review_result = await _review_director_json_with_openai(ctx, semantic_brief, prompt_base, sanitized, cosplay_canon_json)
+            reviewed = review_result.get("corrected_director_json") if isinstance(review_result, dict) else sanitized
+            if isinstance(review_result, dict):
+                reviewed["director_review_result"] = review_result
+                reviewed["director_review_pass"] = bool(review_result.get("pass", True))
+                reviewed["director_review_issues"] = review_result.get("issues") or []
+            return reviewed
         return sanitized
     except Exception as exc:
         print(f"⚠️ [DIRECTOR_JSON_FAILED] {type(exc).__name__}: {exc}")
@@ -19550,6 +19760,9 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
     xiaoxia_interpretation = director_json.get("xiaoxia_interpretation") if isinstance(director_json, dict) else {}
 
     # v1.6.01_R2：Director-first + Canon fact layer + Xiaoxia style layer.
+    director_review_result = director_json.get("director_review_result") if isinstance(director_json, dict) else {}
+    director_review_pass = bool(director_json.get("director_review_pass", True)) if isinstance(director_json, dict) else True
+    director_review_issues = director_json.get("director_review_issues") if isinstance(director_json, dict) else []
     director_v45_prompt = _compose_director_seedream_prompt(
         prompt_base,
         director_subject_unit=director_subject_unit,
@@ -19614,6 +19827,9 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "director_background_unit": director_background_unit,
         "director_subject_unit": director_subject_unit,
         "director_fusion_unit": director_fusion_unit,
+        "director_review_result": director_review_result,
+        "director_review_pass": director_review_pass,
+        "director_review_issues": director_review_issues,
         "cosplay_canon_json": cosplay_canon_json,
         "xiaoxia_interpretation": xiaoxia_interpretation,
     }
@@ -19801,6 +20017,9 @@ async def _generate_seedream_v5_refine_from_v45(source_context, background_polic
         "director_background_unit": director_background_unit,
         "director_subject_unit": director_subject_unit,
         "director_fusion_unit": director_fusion_unit,
+        "director_review_result": director_review_result,
+        "director_review_pass": director_review_pass,
+        "director_review_issues": director_review_issues,
         "cosplay_canon_json": cosplay_canon_json,
         "xiaoxia_interpretation": xiaoxia_interpretation,
         "director_v45_prompt": director_v45_prompt,
@@ -19871,6 +20090,9 @@ async def _generate_pure_v45_from_existing_context(source_context, msg=None):
         "director_json": copy.deepcopy(context.get("director_json")) if isinstance(context.get("director_json"), dict) else {},
         "director_subject_unit": copy.deepcopy(context.get("director_subject_unit")) if isinstance(context.get("director_subject_unit"), dict) else {},
         "director_fusion_unit": copy.deepcopy(context.get("director_fusion_unit")) if isinstance(context.get("director_fusion_unit"), dict) else {},
+        "director_review_result": copy.deepcopy(context.get("director_review_result")) if isinstance(context.get("director_review_result"), dict) else {},
+        "director_review_pass": bool(context.get("director_review_pass", True)),
+        "director_review_issues": copy.deepcopy(context.get("director_review_issues")) if isinstance(context.get("director_review_issues"), list) else [],
         "cosplay_canon_json": copy.deepcopy(context.get("cosplay_canon_json")) if isinstance(context.get("cosplay_canon_json"), dict) else {},
         "xiaoxia_interpretation": copy.deepcopy(context.get("xiaoxia_interpretation")) if isinstance(context.get("xiaoxia_interpretation"), dict) else {},
         "seedream_model_id": SEEDREAM_V45_MODEL_ID,
