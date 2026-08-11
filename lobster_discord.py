@@ -12,7 +12,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.6.01_R7"
+LOBSTER_VERSION = "1.6.01_R9"
 
 
 def _normalize_generation_level(level):
@@ -4813,6 +4813,142 @@ state = {
     "current_topic_data": None
 }
 
+
+def _photo_db_rebuild_scan_output():
+    """R9 emergency recovery: rebuild missing gallery index entries from surviving image files.
+
+    Safety rules:
+    - never delete image files
+    - never replace an existing DB item
+    - only add filenames that are not already indexed
+    - mark reconstructed rows as recovered so they can be reviewed later
+    """
+    import glob
+    import os
+    import time
+    recovered = []
+    try:
+        output_dir = "/data/output"
+        patterns = (
+            os.path.join(output_dir, "xiaoxia_*.jpg"),
+            os.path.join(output_dir, "xiaoxia_*.jpeg"),
+            os.path.join(output_dir, "xiaoxia_*.png"),
+            os.path.join(output_dir, "xiaoxia_*.webp"),
+        )
+        paths = []
+        for pat in patterns:
+            paths.extend(glob.glob(pat))
+        paths = sorted(set(paths))
+        for path in paths:
+            try:
+                st = os.stat(path)
+                fn = os.path.basename(path)
+                recovered.append({
+                    "id": f"recovered_{os.path.splitext(fn)[0]}",
+                    "publish_date": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                    "topic": f"【Recovered】{fn}",
+                    "event": "由 R9 Photo DB Rebuilder 從仍存在的圖片檔重建索引；原始 metadata 待後續補回。",
+                    "composition": "",
+                    "mood": "",
+                    "mood_summary": "",
+                    "message": "",
+                    "post_text": {},
+                    "image_url": "",
+                    "local_url": f"/gallery/{fn}",
+                    "local_filename": fn,
+                    "local_path": path,
+                    "type": "recovered",
+                    "gallery_category": "uncategorized",
+                    "source_mode": "recovered",
+                    "recovered": True,
+                    "recovery_source": "r9_output_scan",
+                    "recovery_mtime": st.st_mtime,
+                })
+            except Exception as exc:
+                print(f"⚠️ [PHOTO_DB_REBUILD_FILE_SKIP] {path}: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_REBUILD_SCAN_FAILED] {type(exc).__name__}: {exc}")
+    return recovered
+
+
+def _photo_db_merge_recovered(existing_db, recovered_rows):
+    """Merge by local_filename/local_path without overwriting existing metadata."""
+    existing_db = list(existing_db or [])
+    filenames = {
+        str((row or {}).get("local_filename") or "").strip()
+        for row in existing_db if isinstance(row, dict)
+    }
+    paths = {
+        str((row or {}).get("local_path") or "").strip()
+        for row in existing_db if isinstance(row, dict)
+    }
+    added = []
+    for row in recovered_rows or []:
+        if not isinstance(row, dict):
+            continue
+        fn = str(row.get("local_filename") or "").strip()
+        lp = str(row.get("local_path") or "").strip()
+        if (fn and fn in filenames) or (lp and lp in paths):
+            continue
+        existing_db.append(row)
+        if fn:
+            filenames.add(fn)
+        if lp:
+            paths.add(lp)
+        added.append(row)
+    return existing_db, added
+
+
+def _photo_db_rebuild_if_needed(db):
+    """Emergency R9 rebuild when the DB is suspiciously tiny relative to surviving output images."""
+    db = list(db or [])
+    recovered_rows = _photo_db_rebuild_scan_output()
+    if not recovered_rows:
+        print(f"ℹ️ [PHOTO_DB_REBUILD_SCAN] surviving_images=0 db_items={len(db)}")
+        return db
+
+    indexed = {
+        str((row or {}).get("local_filename") or "").strip()
+        for row in db if isinstance(row, dict)
+    }
+    missing_count = sum(
+        1 for row in recovered_rows
+        if str(row.get("local_filename") or "").strip() not in indexed
+    )
+
+    print(
+        f"ℹ️ [PHOTO_DB_REBUILD_SCAN] surviving_images={len(recovered_rows)} "
+        f"db_items={len(db)} missing_index={missing_count}"
+    )
+
+    if missing_count <= 0:
+        return db
+
+    merged, added = _photo_db_merge_recovered(db, recovered_rows)
+    if not added:
+        return db
+
+    # Preserve a human-readable recovery snapshot before replacing the live DB.
+    try:
+        snap = DATA_PATH + ".rebuild_r9"
+        with open(snap, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        print(f"🛟 [PHOTO_DB_REBUILD_SNAPSHOT] {snap}")
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_REBUILD_SNAPSHOT_FAILED] {type(exc).__name__}: {exc}")
+
+    try:
+        _atomic_write_photo_db(merged)
+        print(
+            f"🛟 [PHOTO_DB_REBUILT_FROM_OUTPUT] "
+            f"added={len(added)} total={len(merged)}"
+        )
+        return merged
+    except Exception as exc:
+        print(f"⚠️ [PHOTO_DB_REBUILD_WRITE_FAILED] {type(exc).__name__}: {exc}")
+        return db
+
+
 def _memory_backup_path():
     return f"{DATA_PATH}.bak"
 
@@ -4958,7 +5094,8 @@ def _repair_truncated_reviewer_tail(path):
 
 def load_memory():
     if not os.path.exists(DATA_PATH):
-        return []
+        rebuilt = _photo_db_rebuild_if_needed([])
+        return rebuilt
 
     try:
         with open(DATA_PATH, "r", encoding="utf-8") as f:
@@ -4979,7 +5116,7 @@ def load_memory():
             Path(repaired_copy).write_text(repaired_text, encoding="utf-8")
             _atomic_write_photo_db(repaired, create_backup=False)
             print(f"🛟 [PHOTO_DB_REPAIRED_REVIEWER_TAIL] items={len(repaired)} repaired_copy={repaired_copy}")
-            return repaired
+            return _photo_db_rebuild_if_needed(repaired)
         except Exception as exc:
             print(f"⚠️ [PHOTO_DB_TARGETED_REPAIR_WRITE_FAILED] {type(exc).__name__}: {exc}")
 
@@ -19595,7 +19732,7 @@ def _apply_cosplay_canon_hardlock(director_json, cosplay_canon_json):
     return data
 
 
-async def _review_director_json_with_openai(source_context, semantic_brief, prompt_base, director_json, cosplay_canon_json):
+async def _review_director_json_with_openai_DISABLED_R8(source_context, semantic_brief, prompt_base, director_json, cosplay_canon_json):
     """OpenAI reviewer: minimally fix cosplay director JSON when canon anchors drift or disappear."""
     ctx = source_context or {}
     if not isinstance(director_json, dict) or not isinstance(cosplay_canon_json, dict) or not cosplay_canon_json:
@@ -19863,8 +20000,9 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
 4. must_have 只列「缺了就不能算拍對」的視覺元素。
 5. must_not_drift 用來防止畫面變成另一件事，例如淨灘變海邊擺拍、Ivy 變 generic gothic woman。
 6. cosplay 時，cosplay_canon_json 是「角色事實層」最高權威。它決定角色髮色/髮型、代表性服裝系統、主色、signature prop、motif 與 recognition anchors；本次 story/cosplay_state 只能決定今天演什麼，不能改寫 canon。
-7. cosplay 的 subject_unit 必須把 canon 中 high-confidence 的辨識元素具體轉成 hair / outfit / props / must_have。若 canon signature_props 中 required=true，必須放入 props 與 must_have，而且 required signature prop 必須成為 primary_action 的主角並清楚可見；不得把它收在腰間、藏在背景、縮成一般短劍，或讓魔法書/鍊墜等創作道具搶走主要動作。
-7a. 除非大俠明確指定，story 中自行發明的魔法書、魔典、鍊墜等非 canon 道具，只能當背景小物或 secondary detail，不可列入 must_have，也不可成為 primary_action。
+7. COSPLAY HARD CANON：CHARACTER CANON JSON 是不可修改的角色事實，不是參考建議。Director 不得改寫或替換 canon 的 hair、costume system、signature palette、recognition anchors、signature_props。Director 只負責 scene / pose / expression / camera / lighting / mood，以及不與 canon 衝突的 secondary story details。
+7a. canon signature_props 中 required=true 時，必須放入 props 與 must_have，並成為 primary_action 的可見主角；不得收在腰間、藏在背景、縮成一般短劍，或被其他故事道具取代。
+7b. 除非大俠明確指定，story 中自行發明的魔法書、魔典、鍊墜等非 canon 道具，只能當背景小物或 secondary detail，不可列入 must_have，也不可成為 primary_action。
 8. xiaoxia_interpretation 是「小俠版美學層」：保留 canon-first sexy cosplay 的漂亮、成熟、電影寫真感，但性感與華麗只能在 canon costume system 內重新詮釋，不能拿 generic glamour outfit 取代角色。
 9. wardrobe / Figure 10 若存在，不可讓文字描述重新設計衣服；outfit.must_preserve 只負責提醒關鍵結構。
 10. background_unit 不描述人物；它是專門給背景模型看的世界/空間任務。
@@ -19889,22 +20027,15 @@ async def _build_director_json(source_context, semantic_brief, prompt_base):
         data = json.loads(raw, strict=False)
         sanitized = _sanitize_director_json(data, ctx, semantic_brief, prompt_base)
         if module_key == "cosplay":
+            # R8: Canon JSON is authoritative. No per-image OpenAI reviewer.
             sanitized["cosplay_canon_json"] = copy.deepcopy(cosplay_canon_json)
-            review_result = await _review_director_json_with_openai(ctx, semantic_brief, prompt_base, sanitized, cosplay_canon_json)
-            reviewed = review_result.get("corrected_director_json") if isinstance(review_result, dict) else sanitized
-            if isinstance(review_result, dict):
-                # Store only reviewer metadata here. Do NOT embed corrected_director_json
-                # inside the corrected director object itself, otherwise JSON serialization
-                # creates a circular reference.
-                review_meta = {
-                    "pass": bool(review_result.get("pass", True)),
-                    "issues": copy.deepcopy(review_result.get("issues") or []),
-                    "review_model": str(review_result.get("review_model") or ""),
-                }
-                reviewed["director_review_result"] = review_meta
-                reviewed["director_review_pass"] = review_meta["pass"]
-                reviewed["director_review_issues"] = copy.deepcopy(review_meta["issues"])
-            return reviewed
+            locked = _apply_cosplay_canon_hardlock(sanitized, cosplay_canon_json)
+            locked["director_review_result"] = {
+                "pass": True, "issues": [], "review_model": "disabled_r8_hard_canon"
+            }
+            locked["director_review_pass"] = True
+            locked["director_review_issues"] = []
+            return locked
         return sanitized
     except Exception as exc:
         print(f"⚠️ [DIRECTOR_JSON_FAILED] {type(exc).__name__}: {exc}")
@@ -19931,6 +20062,7 @@ def _compose_director_seedream_prompt(prompt_base, director_subject_unit=None, d
             "- XIAOXIA INTERPRETATION is the beauty/style layer: keep the established canon-first sexy cosplay look — polished, mature, cinematic, alluring, and distinctly Xiaoxia — while staying inside the recognizable canon costume system.",
             "- If generic cosplay baseline wording or the earlier creative story conflicts with CHARACTER CANON JSON or DIRECTOR units, the canon/director data wins.",
             "- Do not replace a role-defining prop, weapon, outfit silhouette, hair requirement, or motif with a generic glamour alternative. Required canon props and subject_unit.must_have items must remain visibly readable.",
+            "- HARD CANON AUTHORITY: CHARACTER CANON JSON is immutable role truth. Never reinterpret, average, soften, replace, or trade away its hair, costume system, signature palette, recognition anchors, or signature props for story convenience.",
             "- REQUIRED CANON PROP PRIORITY: if CHARACTER CANON JSON marks a signature prop required=true, make that prop the obvious visible hero prop and main interaction. Do not let a book, pendant, generic dagger, or other invented story prop become the foreground action.",
             "- Keep the result clearly readable as Xiaoxia cosplaying this named role, not as a generic gothic / fantasy / glamorous woman.",
         ]
