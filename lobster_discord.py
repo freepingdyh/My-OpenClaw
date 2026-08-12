@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.7.03"
+LOBSTER_VERSION = "1.7.04"
 
 
 def _normalize_generation_level(level):
@@ -276,7 +276,7 @@ XIAOXIA_EMOJIS = {
     "xia_crown": "小俠戴著皇冠、穿著帶有王室氣勢的造型，象徵權威、尊貴、女王氣場或正式加冕。",
     "xia_doubt": "小俠帶著質疑與不太相信的眼神，適合懷疑、追問、覺得事情有點可疑。",
     "xia_wow": "小俠睜大眼睛、露出『哇！』的驚訝表情，適合意外、震撼或看到厲害事物。",
-    "xia_expect": "小俠雙眼閃亮、充滿『好期待喔！』的神情，適合期待即將發生的事或收到好消息。",
+    "xia_excited": "小俠雙眼閃亮、充滿『好期待喔！』的神情，適合期待即將發生的事或收到好消息。",
     "xia_wink": "小俠俏皮眨眼，適合調皮、默契暗示、開玩笑或甜甜的小得意。",
     "xia_idea": "小俠突然靈光一閃、想到好點子，適合提出創意、找到解法或突然想起重要事情。",
     "xia_thanks": "小俠真誠表達『謝謝』，適合感謝大俠的幫忙、體貼、禮物或稱讚。",
@@ -19000,9 +19000,15 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     if not bg_images or not isinstance(bg_images[0], dict) or not bg_images[0].get("url"):
         raise RuntimeError(f"V5_BG_UPGRADE_BG_NONE：Seedream v5.0 Pro 背景圖沒有回傳圖片：{bg_result}")
     background_generated_url = bg_images[0]["url"]
-    background_local_filename = await save_to_vault(background_generated_url)
-    background_local_url = f"https://xiaoxia0320.zeabur.app/gallery/{background_local_filename}" if background_local_filename else background_generated_url
-    background_local_path = os.path.join(OUTPUT_DIR, background_local_filename) if background_local_filename else None
+
+    # v1.7.04：v5.0 背景只是一張中間用的 Figure 9，不是雲端別墅照片。
+    # 不再 save_to_vault() 到 /data/output，避免背景板佔用 Zeabur 持久化空間、
+    # 也避免日後盤點 /data/output 時被誤認成正式照片。
+    # More / 骰子取代仍可直接沿用同一個 fal 背景 URL；若 fal URL 尚有效，
+    # _generate_with_existing_v5_background() 會走 generated_url fallback。
+    background_local_filename = None
+    background_local_url = ""
+    background_local_path = None
     _trace_stage(
         trace_context,
         "seedream_v5_background_t2i_result",
@@ -19116,7 +19122,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
 
 
 async def _generate_with_existing_v5_background(source_context, *, mode="reroll"):
-    """v1.7.03：v5.0 場景升級成圖後的延伸生成共用流程。
+    """v1.7.04：v5.0 場景升級成圖後的延伸生成共用流程。
 
     mode="reroll"：骰子取代
     mode="more"：More 延伸
