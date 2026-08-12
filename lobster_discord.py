@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.03"
+LOBSTER_VERSION = "1.8.04"
 
 
 def _normalize_generation_level(level):
@@ -10309,50 +10309,39 @@ async def build_daily_cosplay_topic():
     return legacy
 
 
-async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
+async def _draft_cosplay_post_text(story, vibe_request=None):
+    """v1.8.04: 先完成 Cosplay 文章文字，再由 Scene Writer 讀全文決定唯一「今日畫面」。"""
     candidate = story.get("cosplay_topic_candidate") or {}
     fallback = {
         "title": story.get("topic", "今日 Cosplay"),
-        "description": f"今晚小俠挑了一個新的角色題材，想把它變成只給大俠看的小俠版 cosplay。",
-        "character_intro": f"《{candidate.get('work_title') or '今日題材'}》{candidate.get('character_name') or story.get('persona', '')}，是這次的角色靈感來源。",
-        "xiaoxia_interpretation": "小俠不是要變成原作角色本人，而是用自己的臉、身形、氣質與女友感重新詮釋她。",
-        "scene_caption": visual.get("composition") if isinstance(visual, dict) else story.get("event", "小俠在角色世界裡的一個瞬間被鏡頭捕捉。"),
-        "message_to_daxia": visual.get("message") if isinstance(visual, dict) else "大俠，今天這個角色版本，你想靠近看嗎？",
+        "description": "今晚小俠挑了一個新的角色題材，想把它變成只給大俠看的小俠版 cosplay。",
+        "character_intro": f"《{candidate.get('work_title') or '今日題材'}》的 {candidate.get('character_name') or story.get('persona', '')}，是今晚的角色靈感來源。",
+        "xiaoxia_interpretation": "小俠不是要變成原作角色本人，而是用自己的臉、身形、氣質與魅力重新詮釋她。",
+        "message_to_daxia": "大俠，今晚這個角色版本，你喜歡嗎？",
     }
     prompt = f"""
-你是小俠，不是百科作者，也不是旁白。請根據今日 cosplay 題材，寫一則 Discord embed 內文。
+你是小俠。請先完成今日 Cosplay 的 Discord 文章文字，但先不要寫「今日畫面」。
+後面會有另一個 Scene Writer 看完你這篇文章與完整題材資料，再決定唯一可拿去生圖的「今日畫面」。
 
-任務：
-1. 介紹今天小俠選了哪個作品與女性角色。
-2. 簡短介紹角色特色，但不要寫成百科。
-3. 說明小俠如何用自己的氣質重新詮釋她。
-4. 把這張照片說成一個具體故事瞬間。
-5. 最後寫一段小俠給大俠的專屬留言。
+要求：
+1. 繁體中文；像小俠對大俠說話，不要百科腔。
+2. 介紹作品與女性角色、角色特色，以及小俠如何用自己的氣質重新詮釋。
+3. 可以談服裝、武器、世界觀、氣質與故事，但不要另產 scene_caption。
+4. 不要提 AI、模型、prompt、審查或生成流程。
 
-語氣：繁體中文；像小俠對大俠說話；甜、親密、有一點害羞或魅惑；不要提 AI、生成圖片、prompt、審查、模型。
-
-今日題材 JSON：
-{json.dumps(candidate, ensure_ascii=False)}
-
-故事資料：
+題材 JSON：{json.dumps(candidate, ensure_ascii=False)}
 主題：{story.get('topic')}
-背景：{story.get('event')}
+背景全文：{story.get('event')}
 角色：{story.get('persona')}
-
-視覺摘要：
-{json.dumps({k: (visual or {}).get(k) for k in ['composition','mood','message']}, ensure_ascii=False)}
-
-導演狀態摘要：
-{json.dumps({k: (cosplay_state or {}).get(k) for k in ['scenario_tw','mood_tw','activity','outfit_intent','vibe_target_zh','vibe_notes']}, ensure_ascii=False)}
+目標氛圍：{json.dumps(vibe_request or story.get('vibe_request') or {}, ensure_ascii=False)}
 
 只回 JSON：
 {{
   "title": "【今日 Cosplay｜分類】小俠 × 角色名",
-  "description": "1到2句，說明今天的角色策展方向，並自然連到大俠。",
-  "character_intro": "🎭 今日角色欄位內容，2到3句以內。",
-  "xiaoxia_interpretation": "✨ 小俠版詮釋欄位內容，說明不是複製原作，而是小俠版魅力。",
-  "scene_caption": "📸 今日畫面欄位內容，具體故事瞬間。",
-  "message_to_daxia": "💌 小俠給大俠欄位內容，像小俠親口說。"
+  "description": "1到2句",
+  "character_intro": "2到3句",
+  "xiaoxia_interpretation": "2到3句",
+  "message_to_daxia": "小俠對大俠的短句"
 }}
 """
     try:
@@ -10371,13 +10360,146 @@ async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
             )
         )
         data = _cosplay_json_from_text(getattr(response, 'text', '') or '', fallback)
-        for key, value in fallback.items():
-            if not str(data.get(key, "")).strip():
-                data[key] = value
-        return data
     except Exception as exc:
-        print(f"⚠️ [COSPLAY_POST_TEXT_FAILED] {type(exc).__name__}: {exc}")
-        return fallback
+        print(f"⚠️ [COSPLAY_POST_DRAFT_FAILED] {type(exc).__name__}: {exc}")
+        data = dict(fallback)
+    for key, value in fallback.items():
+        if not str(data.get(key, "")).strip():
+            data[key] = value
+    return data
+
+
+async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_outfit_hints=None, alternative=False):
+    """v1.8.04: 產出唯一視覺真相「今日畫面」。凡要畫出的內容都必須明寫在這裡。"""
+    candidate = story.get("cosplay_topic_candidate") or {}
+    vibe_request = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
+    user_outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
+
+    fallback_parts = []
+    if candidate.get("scene_seed"):
+        fallback_parts.append(_clean_text_compact(candidate.get("scene_seed")))
+    if candidate.get("costume_focus"):
+        fallback_parts.append("服裝：" + _clean_text_compact(candidate.get("costume_focus")))
+    anchors = _cosplay_anchor_list(candidate.get("canonical_visual_anchors"))
+    if anchors:
+        fallback_parts.append("關鍵視覺：" + "、".join(anchors[:5]))
+    if not fallback_parts:
+        fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
+    fallback_scene = _clean_text_compact(" ".join(fallback_parts))[:260]
+
+    prompt = f"""
+你是小俠 Cosplay 的 Scene Writer。
+你現在已經看完完整題材與小俠文章。請寫出 Discord 上唯一的「📸 今日畫面」。
+
+【最高原則】
+後續 Pure v4.5、Hybrid、v5 背景理解，都只能把你寫出的「今日畫面」當作故事/服裝/道具/場景的唯一內容來源。
+所以：希望圖片一定出現的東西，就必須直接寫進「今日畫面」；沒有寫的東西，後面的生圖沒有義務畫。
+
+【今日畫面必須包含】
+1. 場景 / 地點。
+2. 氛圍 / 光線。
+3. 小俠正在做的主動作，以及一個自然微動作或視線。
+4. 人物表情 / 氣質。
+5. 服裝與必要配件 / 武器。
+6. 1到2個重要環境或畫面錨點。
+
+【Cosplay 特別規則】
+- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫「穿著角色服裝」。
+- 要具體寫主色、服裝剪影/版型、材質或結構，以及角色重要的飾件、武器或道具。
+- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。
+- 若目標氛圍是「魅」，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。
+- 不要為了保守而把服裝寫成普通安全牌；也不要為了性感而洗掉角色辨識度。
+- 使用者明確服裝要求優先。
+- 今日畫面請寫成自然短文，不要 JSON 清單腔。
+- 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
+- 不要描述第二位人物；小俠是唯一主角。
+- 不要加入可讀文字、字幕、海報文字或畫面 UI。
+- 若 alternative=true，可換同一題材內另一個合理瞬間，但仍需完整寫清楚所有視覺要素。
+
+【完整題材】
+主題：{story.get('topic')}
+背景全文：{story.get('event')}
+角色：{story.get('persona')}
+題材 JSON：{json.dumps(candidate, ensure_ascii=False)}
+目標氛圍：{json.dumps(vibe_request, ensure_ascii=False)}
+使用者服裝要求：{json.dumps(user_outfit_hints, ensure_ascii=False)}
+
+【小俠完整文章】
+標題：{post_text.get('title')}
+前言：{post_text.get('description')}
+今日角色：{post_text.get('character_intro')}
+小俠版詮釋：{post_text.get('xiaoxia_interpretation')}
+給大俠：{post_text.get('message_to_daxia')}
+
+是否變奏：{"是" if alternative else "否"}
+
+只回 JSON：
+{{
+  "scene_caption": "完整的今日畫面"
+}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.55,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
+        )
+        data = _cosplay_json_from_text(getattr(response, 'text', '') or '', {"scene_caption": fallback_scene})
+    except Exception as exc:
+        print(f"⚠️ [COSPLAY_TODAY_SCENE_FAILED] {type(exc).__name__}: {exc}")
+        data = {"scene_caption": fallback_scene}
+    scene = _clean_text_compact(data.get("scene_caption") or fallback_scene)
+    if not scene:
+        scene = fallback_scene
+    return scene
+
+
+def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False):
+    """v1.8.04: Seedream 的內容語意只來自「今日畫面」；其餘僅為小俠身份/身材/單人技術外框。"""
+    scene = _clean_text_compact(scene_caption or "")
+    retry_line = ""
+    if retry_reason:
+        retry_line = f"\nTECHNICAL RETRY NOTE: improve instruction adherence without changing any stated scene facts. Previous issue: {_clean_text_compact(retry_reason)[:260]}"
+    figure_line = "Figures 1-8" if hybrid else "Figures 1-9"
+    return f"""FIGURE ROLE MAP — technical identity references only.
+{figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their pose, outfit, background, props, lighting, or composition.
+
+AUTHORITATIVE TODAY SCENE — this is the ONLY source of story, setting, costume, accessories, weapons, props, action, expression, lighting, and composition:
+{scene}
+
+TECHNICAL XIAOXIA IDENTITY / BODY LOCK — do not invent new story content:
+Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy. Preserve mature feminine allure and the scene's intended sensuality, but do not redesign the outfit or add costume details that are not written in TODAY SCENE. Hairstyle or hair color may differ only if TODAY SCENE itself specifies it.
+Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
+Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
+Render a polished photorealistic cinematic cosplay photograph faithful to TODAY SCENE.{retry_line}""".strip()
+
+
+async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
+    """v1.8.04: 發文只沿用預先完成的文章；「今日畫面」原封不動等於生圖唯一 Scene。"""
+    state = cosplay_state if isinstance(cosplay_state, dict) else {}
+    draft = state.get("post_text_draft") if isinstance(state.get("post_text_draft"), dict) else None
+    if not draft:
+        draft = await _draft_cosplay_post_text(story, vibe_request=story.get("vibe_request"))
+    data = dict(draft)
+    fixed_scene = _clean_text_compact(
+        state.get("scene_caption")
+        or state.get("scenario_tw")
+        or ((visual or {}).get("__scene_caption") if isinstance(visual, dict) else "")
+        or ((visual or {}).get("composition") if isinstance(visual, dict) else "")
+    )
+    data["scene_caption"] = fixed_scene
+    if not str(data.get("message_to_daxia") or "").strip():
+        data["message_to_daxia"] = (visual or {}).get("message") or "大俠，今晚這個角色版本，你喜歡嗎？"
+    return data
 
 
 async def generate_story_legacy(mode):
@@ -10854,21 +10976,40 @@ Return JSON only:
 
 
 async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None):
-    cosplay_state = await plan_cosplay_visual_state(
-        topic=story.get("topic", ""),
-        event=story.get("event", ""),
-        persona=story.get("persona", ""),
-        force_half_body=force_half_body,
+    """v1.8.04: 全文 → 唯一「今日畫面」→ Scene-only Seedream prompt。"""
+    vibe = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
+    outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
+    post_text_draft = await _draft_cosplay_post_text(story, vibe_request=vibe)
+    scene_caption = await _build_cosplay_today_scene(
+        story,
+        post_text_draft,
+        vibe_request=vibe,
+        user_outfit_hints=outfit_hints,
         alternative=alternative,
-        vibe_request=(vibe_request or story.get("vibe_request")),
-        user_outfit_hints=(user_outfit_hints or story.get("user_outfit_hints")),
-        user_request=story.get("user_mode_request", ""),
-        cosplay_candidate=story.get("cosplay_topic_candidate")
     )
-    visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
-    visual["__anchor_state"] = cosplay_state
-    visual["__anchor_mode"] = "cosplay"
-    return cosplay_state, visual
+    state = {
+        "scene_caption": scene_caption,
+        "scenario_tw": scene_caption,
+        "mood_tw": _clean_text_compact((story.get("cosplay_topic_candidate") or {}).get("mood") or "角色感、故事感、成熟魅力"),
+        "camera_framing": "half_body" if force_half_body else "full_body",
+        "vibe_target_zh": str(vibe.get("zh") or "魅"),
+        "vibe_target_en": str(vibe.get("en") or "alluring-max"),
+        "post_text_draft": post_text_draft,
+        "scene_authority": "discord_today_scene_only",
+    }
+    image_prompt = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=False)
+    visual = {
+        "image_prompt": image_prompt,
+        "composition": scene_caption,
+        "mood": state["mood_tw"],
+        "message": post_text_draft.get("message_to_daxia") or "大俠，今晚這個角色版本，你喜歡嗎？",
+        "__anchor_state": state,
+        "__anchor_mode": "cosplay",
+        "__scene_caption": scene_caption,
+        "__scene_authority": "discord_today_scene_only",
+    }
+    return state, visual
+
 
 # ==========================================
 # 🌙 交換日記專屬導演層：核心固定、每日狀態由 AI 依互動浮動 (純慾解禁版)
@@ -12364,19 +12505,34 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             )
             trace_context["raw_seedream_mode"] = "pose_critical_minimal"
         elif str(mode or "").lower() == "cosplay":
-            current_prompt = _build_cosplay_minimal_seedream_prompt(
-                initial_prompt,
-                visual_dict=visual_dict,
-                trace_context=trace_context,
-                retry_reason=last_adherence_reason if level > 0 else "",
-            )
+            if trace_context.get("cosplay_scene_only"):
+                scene_caption = _clean_text_compact(
+                    trace_context.get("cosplay_scene_caption")
+                    or visual_dict.get("__scene_caption")
+                    or visual_dict.get("composition")
+                    or trace_context.get("scene_seed_text")
+                    or ""
+                )
+                current_prompt = _build_cosplay_scene_only_seedream_prompt(
+                    scene_caption,
+                    retry_reason=last_adherence_reason if level > 0 else "",
+                    hybrid=bool(trace_context.get("v5_background_role_handoff")),
+                )
+                trace_context["raw_seedream_mode"] = "cosplay_today_scene_only"
+            else:
+                current_prompt = _build_cosplay_minimal_seedream_prompt(
+                    initial_prompt,
+                    visual_dict=visual_dict,
+                    trace_context=trace_context,
+                    retry_reason=last_adherence_reason if level > 0 else "",
+                )
+                trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
             visual_checklist = _build_visual_checklist(mode=mode, user_text=pose_user_request or initial_prompt, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
             trace_context["visual_checklist"] = visual_checklist
             trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
             trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
             trace_context["specified_character_interaction"] = bool(visual_checklist.get("specified_character_interaction"))
             trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
-            trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
         elif str(mode or "").lower() == "diary":
             current_prompt = _build_diary_guarded_minimal_prompt(
                 pose_user_request or initial_prompt,
@@ -12618,6 +12774,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "story": story,
             "cosplay_state": _cosplay_state,
             "visual": visual,
+            "cosplay_scene_only": True,
+            "cosplay_scene_caption": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
+            "scene_seed_text": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
         }
         _trace_stage(trace_context, "cosplay_visual_planned", data={"story": story, "cosplay_state": _cosplay_state, "visual": visual}, prompt=scene_prompt)
 
@@ -12645,7 +12804,11 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             "topic": story["topic"],
             "event": story["event"],
-            "composition": visual["composition"],
+            "composition": _cosplay_state.get("scene_caption") or visual["composition"],
+            "scene_summary": _cosplay_state.get("scene_caption") or visual["composition"],
+            "scene_text": _cosplay_state.get("scene_caption") or visual["composition"],
+            "cosplay_scene_caption": _cosplay_state.get("scene_caption") or visual["composition"],
+            "cosplay_scene_only": True,
             "mood": visual["mood"],
             "mood_summary": visual.get("mood", ""),
             "message": post_text.get("message_to_daxia") or visual["message"],
@@ -12663,6 +12826,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "gallery_category": "cosplay",
             "source_mode": "cosplay",
             "prompt_base": scene_prompt,
+            "root_prompt_base": scene_prompt,
             "user_mode_request": mode,
             "vibe_mode": vibe_mode,
             "cosplay_state": _cosplay_state,
@@ -12699,7 +12863,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         embed.add_field(name="✨ 小俠版詮釋", value=post_text.get("xiaoxia_interpretation", "小俠用自己的氣質重新詮釋這個角色。")[:1024], inline=False)
         embed.add_field(name="📸 今日畫面", value=post_text.get("scene_caption", visual["composition"])[:1024], inline=False)
         embed.add_field(name="💌 小俠給大俠", value=post_text.get("message_to_daxia", visual["message"])[:1024], inline=False)
-        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image{_generation_level_footer(payload)} | v{LOBSTER_VERSION.replace('.', '')} canon-first sexy cosplay")
+        embed.set_footer(text=f"今日額度: {state['daily_gen_count']}/12 | Seedream v4.5 image-to-image{_generation_level_footer(payload)} | v{LOBSTER_VERSION.replace('.', '')} today-scene-only cosplay")
 
         await msg.delete()
         result_view = PhotoResultView(payload)
@@ -12956,7 +13120,9 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Non
     else:
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
-    if str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
+    if isinstance(trace_context, dict) and trace_context.get("cosplay_scene_only"):
+        final_prompt = str(custom_prompt or "").strip()
+    elif str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
         final_prompt = str(custom_prompt or "").strip()
     else:
         final_prompt = _seedream_cosplay_prompt(custom_prompt)
@@ -16778,6 +16944,15 @@ async def _generate_photo_from_context(context, msg=None):
         })
         if context.get("cosplay_state"):
             trace_context.setdefault("cosplay_state", context.get("cosplay_state"))
+        if context.get("cosplay_scene_only") or context.get("cosplay_scene_caption"):
+            trace_context["cosplay_scene_only"] = True
+            trace_context["cosplay_scene_caption"] = _clean_text_compact(
+                context.get("cosplay_scene_caption")
+                or context.get("scene_summary")
+                or context.get("scene_text")
+                or ""
+            )
+            trace_context["scene_seed_text"] = trace_context["cosplay_scene_caption"]
     trace_context.setdefault("kind", "photo")
     trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
     _trace_stage(trace_context, "photo_context_input", data=context, prompt=context.get("prompt_base", ""))
@@ -18389,6 +18564,9 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "story": story,
         "cosplay_state": cosplay_state,
         "visual": visual,
+        "cosplay_scene_only": True,
+        "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition") or "",
+        "scene_seed_text": cosplay_state.get("scene_caption") or visual.get("composition") or "",
     }
     _trace_stage(trace_context, "cosplay_reroll_visual_planned", data={"story": story, "cosplay_state": cosplay_state, "visual": visual}, prompt=scene_prompt)
     generated_image_url, visual = await execute_safe_generation(
@@ -18423,7 +18601,11 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "topic": story.get("topic"),
         "event": story.get("event"),
-        "composition": visual.get("composition", ""),
+        "composition": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "scene_summary": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "scene_text": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "cosplay_scene_only": True,
         "mood": visual.get("mood", ""),
         "mood_summary": visual.get("mood", ""),
         "message": post_text.get("message_to_daxia") or visual.get("message", ""),
@@ -18440,6 +18622,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "type": "cosplay",
         "source_mode": "cosplay",
         "prompt_base": scene_prompt,
+        "root_prompt_base": scene_prompt,
         "user_mode_request": raw_mode,
         "vibe_mode": vibe_mode,
         "cosplay_state": cosplay_state,
@@ -18993,29 +19176,35 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     def _clip(value, n=700):
         return _clean_text_compact(value or "")[:n]
 
-    def _scene_semantic_brief():
-        rows = []
+    source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
+    source_mode_norm = source_mode.strip().lower()
+    is_cosplay = source_mode_norm == "cosplay" or bool(source_context.get("cosplay_scene_only"))
 
+    def _scene_semantic_brief():
+        # v1.8.04：Cosplay 的 v5 背景只能看 Discord「今日畫面」，不可再偷吃 event/canon/costume/prompt_base。
+        if is_cosplay:
+            post_text = source_context.get("post_text") if isinstance(source_context.get("post_text"), dict) else {}
+            scene = _clean_text_compact(
+                source_context.get("cosplay_scene_caption")
+                or post_text.get("scene_caption")
+                or source_context.get("scene_summary")
+                or source_context.get("composition")
+                or ""
+            )
+            return f"AUTHORITATIVE TODAY SCENE: {scene}" if scene else "AUTHORITATIVE TODAY SCENE: a cinematic cosplay scene with Xiaoxia"
+
+        rows = []
         def add(label, value, limit=700):
             cleaned = _clip(value, limit)
             if cleaned:
                 rows.append(f"{label}: {cleaned}")
-
         add("Topic", source_context.get("topic"), 360)
-        add("Work / source title", source_context.get("cosplay_work_title") or source_context.get("source"), 260)
-        add("Character / role", source_context.get("cosplay_character_name") or source_context.get("role_name"), 220)
-        add("Cosplay family", source_context.get("cosplay_family_label") or source_context.get("cosplay_family"), 160)
         add("Story / event", source_context.get("event"), 900)
         add("Requested scene", source_context.get("scene_summary") or source_context.get("scene_text"), 700)
         add("Composition", source_context.get("composition"), 700)
         add("Action", source_context.get("action_summary"), 400)
         add("Mood", source_context.get("mood_summary") or source_context.get("mood"), 320)
         add("User request", source_context.get("user_mode_request") or source_context.get("user_input"), 500)
-        post_text = source_context.get("post_text")
-        if isinstance(post_text, dict):
-            add("Character context", post_text.get("character_intro"), 600)
-            add("Xiaoxia interpretation", post_text.get("xiaoxia_interpretation"), 600)
-            add("Intended scene caption", post_text.get("scene_caption"), 700)
         add("Original generation scene prompt", source_context.get("prompt_base"), 1800)
         if not rows:
             rows.append("Scene: a visually appealing lifestyle scene suitable for Xiaoxia")
@@ -19023,9 +19212,6 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
 
     semantic_brief = _scene_semantic_brief()
     framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
-    source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
-    source_mode_norm = source_mode.strip().lower()
-    is_cosplay = source_mode_norm == "cosplay" or "cosplay" in _clip(source_context.get("user_mode_request"), 120).lower()
 
     background_prompt_lines = [
         "Create a photorealistic ENVIRONMENT-ONLY background plate for a later Xiaoxia image generation run.",
@@ -19075,6 +19261,8 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         "reference_item_url": source_context.get("reference_item_url"),
         "current_outfit_for_seedream": source_context.get("current_outfit_for_seedream"),
         "visual_checklist": source_context.get("visual_checklist"),
+        "cosplay_scene_only": bool(is_cosplay),
+        "cosplay_scene_caption": _clean_text_compact(source_context.get("cosplay_scene_caption") or ((source_context.get("post_text") or {}).get("scene_caption") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("scene_summary") or source_context.get("composition") or "") if is_cosplay else "",
     }
     _trace_stage(
         trace_context,
@@ -19151,7 +19339,18 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     else:
         wardrobe_url = None
 
-    prompt_base = source_context.get("prompt_base") or source_context.get("scene_text") or source_context.get("user_input") or source_context.get("scene_summary") or ""
+    if is_cosplay:
+        scene_caption = _clean_text_compact(
+            source_context.get("cosplay_scene_caption")
+            or ((source_context.get("post_text") or {}).get("scene_caption") if isinstance(source_context.get("post_text"), dict) else "")
+            or source_context.get("scene_summary")
+            or source_context.get("composition")
+            or ""
+        )
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=True)
+        trace_context["cosplay_scene_caption"] = scene_caption
+    else:
+        prompt_base = source_context.get("prompt_base") or source_context.get("scene_text") or source_context.get("user_input") or source_context.get("scene_summary") or ""
     if not str(prompt_base).strip():
         raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
 
@@ -19301,6 +19500,8 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
         "reference_item_url": source_context.get("reference_item_url"),
         "current_outfit_for_seedream": source_context.get("current_outfit_for_seedream"),
         "visual_checklist": source_context.get("visual_checklist"),
+        "cosplay_scene_only": bool(source_mode_norm == "cosplay" or source_context.get("cosplay_scene_only")),
+        "cosplay_scene_caption": _clean_text_compact(source_context.get("cosplay_scene_caption") or ((source_context.get("post_text") or {}).get("scene_caption") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("scene_summary") or source_context.get("composition") or ""),
     }
 
     identity_urls = await _seedream_upload_reference_images(
@@ -19341,13 +19542,16 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
     else:
         wardrobe_url = None
 
-    prompt_base = (
-        source_context.get("prompt_base")
-        or source_context.get("scene_text")
-        or source_context.get("user_input")
-        or source_context.get("scene_summary")
-        or ""
-    )
+    if trace_context.get("cosplay_scene_only"):
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(trace_context.get("cosplay_scene_caption"), hybrid=True)
+    else:
+        prompt_base = (
+            source_context.get("prompt_base")
+            or source_context.get("scene_text")
+            or source_context.get("user_input")
+            or source_context.get("scene_summary")
+            or ""
+        )
     if not str(prompt_base).strip():
         if is_more:
             raise RuntimeError("V5_BG_MORE_PROMPT_NONE：找不到 More 可用的 prompt_base。")
