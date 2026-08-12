@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.01"
+LOBSTER_VERSION = "1.8.03"
 
 
 def _normalize_generation_level(level):
@@ -3389,9 +3389,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=None, thread_context=thread_context, episode_plan=episode_plan)
-    scene_data = await _build_autonomy_scene_data_from_story_text(activity, visual_mode, share_text, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
-    prompt_base = scene_data.get("photo_prompt") or _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     world_state = active_world_events.get(getattr(message.author, "id", None), {})
     if not isinstance(world_state, dict):
@@ -3404,12 +3402,12 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "source_mode": source_mode,
         "source_module": "autonomy",
         "image_role": "autonomy_today_image",
-        "scene_text": scene_data.get("scene_card_tw") or f"小俠自主生活｜{activity.get('title')}",
-        "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
-        "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
-        "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
-        "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
-        "camera_framing": scene_data.get("camera_framing") or "lifestyle portrait",
+        "scene_text": f"小俠自主生活｜{activity.get('title')}",
+        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": activity.get("title") or "",
+        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": "lifestyle portrait",
         "prompt_base": prompt_base,
         "episode_angle": episode_plan.get("episode_angle") or "",
         "episode_plan": episode_plan,
@@ -3429,7 +3427,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "action": "xiaoxia_autonomy_today",
             "source_mode": source_mode,
             "user_input": raw,
-            "scene_seed_text": scene_data.get("scene_card_tw") or activity.get("photo_prompt_seed") or activity.get("title"),
+            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
             "wardrobe_selection": wardrobe_selection,
@@ -3456,6 +3454,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     try:
         await status.edit(content=f"📸 小俠決定今天去做：**{activity.get('title')}**。正在拍下這一刻…")
         context = await _generate_photo_from_context(context, msg=status)
+        share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
         context["message"] = share_text
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
         context["autonomy_activity"] = activity
@@ -3506,7 +3505,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "wardrobe_name": wardrobe_name or "",
             "wardrobe_source_mode": (wardrobe_selection or {}).get("selection_mode") or ("wardrobe" if wardrobe_item else "generated_fallback"),
             "wardrobe_reason": wardrobe_reason,
-            "scene": scene_data.get("scene_card_tw") or activity.get("photo_prompt_seed") or "",
+            "scene": activity.get("photo_prompt_seed") or "",
             "mood": context.get("mood_summary") or "",
             "share_text": share_text,
             "photo_sent": True,
@@ -10517,7 +10516,85 @@ COSPLAY_VISUAL_CORE = """
 """
 
 
-async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None, user_request="", scene_card_tw=""):
+
+
+def _cosplay_anchor_list(value):
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        items = [x.strip() for x in re.split(r"[,，、/|\n]", value) if x.strip()]
+    else:
+        items = []
+    cleaned = []
+    seen = set()
+    for item in items:
+        s = _clean_text_compact(item)
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(s)
+    return cleaned
+
+
+def _merge_unique_cosplay_items(*groups, limit=8):
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in _cosplay_anchor_list(group):
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _merge_unique_cosplay_lines(*groups):
+    merged = []
+    seen = set()
+    for group in groups:
+        raw = _clean_text_compact(group)
+        if not raw:
+            continue
+        key = raw.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(raw)
+    return " ".join(merged).strip()
+
+
+def _extract_cosplay_candidate_locks(cosplay_candidate=None):
+    candidate = cosplay_candidate or {}
+    anchors = _merge_unique_cosplay_items(candidate.get('canonical_visual_anchors'), candidate.get('visual_tags'), limit=8)
+    scene_seed = _clean_text_compact(candidate.get('scene_seed') or '')
+    costume_focus = _clean_text_compact(candidate.get('costume_focus') or '')
+    mood = _clean_text_compact(candidate.get('mood') or '')
+    work_title = _clean_text_compact(candidate.get('work_title') or '')
+    character_name = _clean_text_compact(candidate.get('character_name') or '')
+    must_avoid = [
+        'generic blank white or empty studio background unless canonically justified',
+        'dropping an iconic weapon, prop, emblem, or source-world visual anchor',
+        'replacing the role costume with unrelated generic black lingerie, generic fantasy glamour, or unrelated fashion styling',
+        "washing away the role's source-world atmosphere and turning it into a random beauty portrait",
+        'introducing readable poster text, magazine text, or clearly recognizable extra people in the environment',
+    ]
+    return {
+        'work_title': work_title,
+        'character_name': character_name,
+        'anchors': anchors,
+        'scene_seed': scene_seed,
+        'costume_focus': costume_focus,
+        'mood': mood,
+        'must_avoid': must_avoid,
+    }
+
+async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None, user_request="", cosplay_candidate=None):
     """
     Gemini 2.5 Flash 先做「角色/情境導演層理解」，輸出結構化 visual plan。
     v1450 加強點：除了 high-level 導演意圖，也同步輸出可供修正/重擲沿用的硬錨點欄位。
@@ -10525,6 +10602,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
     framing = "half_body" if force_half_body else "full_body"
     vibe_guide = _get_vibe_guide(vibe_request)
     outfit_control = _build_outfit_control(vibe_request, topic=topic, event=event, persona=persona, user_outfit_hints=user_outfit_hints, user_request=user_request)
+    canon_locks = _extract_cosplay_candidate_locks(cosplay_candidate)
     fallback = {
         "character_core": "小俠保留自己的辨識度，正在扮演該角色，而不是變成原角色本人。",
         "scene_design": "Use a story-appropriate setting that naturally matches the source world, with 1-2 concrete environmental details.",
@@ -10535,7 +10613,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         "camera_direction": "Create a candid story-still, not a plain studio pose or convention booth photo.",
         "negative_guardrails": "She is Xiaoxia cosplaying the role, not the original actor or character. Strictly solo Xiaoxia only. No men, no other people, no visible viewer body parts, no external hands. Natural anatomy and natural hands.",
         "camera_framing": framing,
-        "scenario_tw": _clean_text_compact(scene_card_tw or "小俠正在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。"),
+        "scenario_tw": "小俠正在角色世界的一個自然片刻裡，被鏡頭輕輕捕捉下來。",
         "mood_tw": "角色感、故事感、自然",
         "setting_anchor": "a setting that naturally matches the source world and role identity",
         "time_anchor": "a fitting story moment or time-of-day cue consistent with the role world",
@@ -10552,6 +10630,10 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
         "vibe_target_zh": str((vibe_request or {}).get("zh") or "自然"),
         "vibe_target_en": str((vibe_request or {}).get("en") or "natural"),
         "vibe_notes": str(vibe_guide.get("planner") or "Keep the requested vibe level visible in styling and emotional tone, but never sacrifice role identity or scene logic."),
+        "source_work": canon_locks.get("work_title") or "",
+        "source_role": canon_locks.get("character_name") or "",
+        "must_keep_visuals": canon_locks.get("anchors") or ["角色主色系", "服裝剪影", "標誌性道具或髮型"],
+        "must_avoid_visuals": canon_locks.get("must_avoid") or [],
         "outfit_control": outfit_control
     }
 
@@ -10563,9 +10645,12 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 
 【輸入資料】
 主題：{topic}
-全文後整理出的唯一畫面場景：{scene_card_tw or "無"}
 背景與補充資訊：{event[-2200:]}
 角色資訊：{persona}
+題材候選 JSON：{json.dumps(cosplay_candidate or {}, ensure_ascii=False)}
+原型硬錨點：{json.dumps(canon_locks.get("anchors") or [], ensure_ascii=False)}
+角色標誌性故事瞬間：{canon_locks.get("scene_seed") or "無"}
+角色服裝焦點：{canon_locks.get("costume_focus") or "無"}
 目標氛圍模式：{json.dumps(vibe_request or {"zh": "自然", "en": "natural", "target_level": 2}, ensure_ascii=False)}
 使用者明確服裝要求：{json.dumps(user_outfit_hints or {}, ensure_ascii=False)}
 服裝控制指令：{json.dumps(outfit_control, ensure_ascii=False)}
@@ -10573,10 +10658,10 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 是否為同主題變奏：{"是，請保留同主題，但換一個同樣合理又有新鮮感的瞬間" if alternative else "否，請給第一個最代表性的畫面"}
 
 【規劃要求】
-1. 先理解角色本質：她是什麼樣的人？來自什麼世界？應該長什麼氣質？若「全文後整理出的唯一畫面場景」有內容，這是你規劃畫面的最高優先摘要，scene_design、action_direction、scenario_tw、environment_trace、outfit_intent 都必須圍繞它，不可另開不相干新支線。
-2. scene_design 必須說明最適合的場景方向，優先沿用原作品世界觀或與其自然相容的生活化延伸，不要亂跳到不相干場景。
-3. costume_direction 必須描述服裝語彙與質地方向，但重點是「小俠在 cosplay」，不是讓她直接變成原角色或原演員。
-4. action_direction 必須讓畫面像正在發生一個瞬間，而不是擺拍。
+1. 先理解角色本質：她是什麼樣的人？來自什麼世界？應該長什麼氣質？
+2. scene_design 必須說明最適合的場景方向，優先沿用原作品世界觀或與其自然相容的生活化延伸，不要亂跳到不相干場景；至少交代 2 個具體環境線索，不可只寫空泛的「美麗背景」或白背景。
+3. costume_direction 必須描述服裝語彙與質地方向，且至少交代：主色系、服裝剪影/版型、關鍵材質或結構、至少一項角色標誌性道具/武器/飾件；重點是「小俠在 cosplay」，不是讓她直接變成原角色或原演員。
+4. action_direction 必須讓畫面像正在發生一個瞬間，而不是擺拍。若角色有標誌性武器或道具，動作要讓它自然地被使用、展示或清楚可見。
 5. expression_direction 要描述表情與眼神邏輯。
 6. lighting_direction 要描述光線氣氛。
 7. camera_direction 要描述鏡頭語言，若情境如「偷偷拍到、回眸、被發現前一秒」，必須避免棚拍感。
@@ -10591,11 +10676,13 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 12d-1. 角色辨識度是硬性要求：L0 不可把原角色洗成不相干的黑色性感裝、惡魔翅膀或泛用內衣造型。請把性感化建立在原角色的主色系、剪影、徽記、道具、髮型/髮色、世界觀環境與角色任務上；至少保留 2 到 3 個原型視覺錨點。
 12e. 若是職業類，職業識別只負責保留工作道具與場景，不得把「魅」壓回保守制服；若是「凜」，則要做成高效率、高專業感的俐落再詮釋。
 12f. 若使用者明確指定服裝元素，這些元素優先於角色預設服裝與場景偏好。
-13. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
-14. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
-15. pose_energy 只能是 low 或 medium。
-16. 額外輸出：vibe_target_zh, vibe_target_en, vibe_notes。
-17. 只回傳 JSON，不要多餘說明。
+13. must_keep_visuals 請列出 3 到 6 個硬性必保留視覺元素；優先來自原型硬錨點，例如主色系、服裝剪影、標誌性武器、髮型/髮色、徽記、世界觀環境。
+14. must_avoid_visuals 請列出 2 到 5 個應避免的錯誤方向，例如 generic 白棚、generic 網美性感裝、把道具洗掉、把世界觀洗掉。
+15. 同時輸出可供修正與重擲沿用的硬錨點欄位：setting_anchor, time_anchor, activity, emotion, primary_action, micro_action, gaze_target, camera_awareness, environment_trace, outfit_intent, lighting_mood, pose_energy。
+16. camera_awareness 只能是 unaware、briefly_noticing、aware 其中之一。
+17. pose_energy 只能是 low 或 medium。
+18. 額外輸出：vibe_target_zh, vibe_target_en, vibe_notes。
+19. 只回傳 JSON，不要多餘說明。
 
 回傳格式：
 {{
@@ -10625,6 +10712,10 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
   "vibe_target_zh": "...",
   "vibe_target_en": "...",
   "vibe_notes": "...",
+  "source_work": "...",
+  "source_role": "...",
+  "must_keep_visuals": ["..."],
+  "must_avoid_visuals": ["..."],
   "outfit_control": {...}
 }}"""
 
@@ -10646,9 +10737,25 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
     if planned.get("pose_energy") not in {"low", "medium"}:
         planned["pose_energy"] = fallback["pose_energy"]
     for key, default_value in fallback.items():
-        if not str(planned.get(key, "")).strip():
+        if isinstance(default_value, list):
+            current = planned.get(key)
+            if not isinstance(current, list) or not current:
+                planned[key] = list(default_value)
+        elif not str(planned.get(key, "")).strip():
             planned[key] = default_value
     planned["camera_framing"] = framing
+    planned["source_work"] = _clean_text_compact(planned.get("source_work") or canon_locks.get("work_title") or "")
+    planned["source_role"] = _clean_text_compact(planned.get("source_role") or canon_locks.get("character_name") or "")
+    planned["must_keep_visuals"] = _merge_unique_cosplay_items(planned.get("must_keep_visuals"), canon_locks.get("anchors"), limit=8) or list(fallback.get("must_keep_visuals") or [])
+    planned["must_avoid_visuals"] = _merge_unique_cosplay_items(planned.get("must_avoid_visuals"), canon_locks.get("must_avoid"), limit=8) or list(fallback.get("must_avoid_visuals") or [])
+    if canon_locks.get("scene_seed"):
+        planned["scene_design"] = _merge_unique_cosplay_lines(planned.get("scene_design"), canon_locks.get("scene_seed"))
+        planned["scenario_tw"] = _merge_unique_cosplay_lines(planned.get("scenario_tw"), canon_locks.get("scene_seed"))[:140]
+    if canon_locks.get("costume_focus"):
+        planned["costume_direction"] = _merge_unique_cosplay_lines(planned.get("costume_direction"), canon_locks.get("costume_focus"))
+        planned["outfit_intent"] = _merge_unique_cosplay_lines(planned.get("outfit_intent"), canon_locks.get("costume_focus"))
+    if canon_locks.get("mood") and not _clean_text_compact(planned.get("mood_tw") or ""):
+        planned["mood_tw"] = canon_locks.get("mood")
     return planned
 
 
@@ -10678,10 +10785,15 @@ The result must feel like a photorealistic, cinematic, story-driven cosplay stil
 - Keep Xiaoxia as Xiaoxia cosplaying the role. Do not turn her into the original actor, original character, or a different woman.
 - Preserve the original role's signature visual anchors. The sexy L0 reinterpretation must be built from the role's own color palette, silhouette, emblem/motif, prop, hair/hair color, environment, or task. Do not replace the character with unrelated black lingerie, demon wings, generic fantasy, or generic glamour styling unless those are truly part of the role.
 - Preserve setting_anchor, time_anchor, primary_action, micro_action, gaze_target, environment_trace, outfit_intent, and lighting_mood as concrete image cues.
+- HARD ROLE FIDELITY LOCK: must_keep_visuals = {json.dumps(cosplay_state.get("must_keep_visuals", []), ensure_ascii=False)}. Treat these as mandatory visual content. If one of them is an iconic weapon or prop, it must be clearly visible, being held, worn, or unmistakably present in the scene.
+- HARD AVOID LOCK: must_avoid_visuals = {json.dumps(cosplay_state.get("must_avoid_visuals", []), ensure_ascii=False)}. Actively avoid drifting into these failure modes.
 - If camera_awareness is unaware, avoid direct eye contact. If it is briefly_noticing, use a subtle natural glance. If it is aware, allow direct eye contact that still feels natural rather than posed.
 - Honor the source-world atmosphere and the situation logic.
 - The image should feel like a naturally captured story moment, not a plain studio portrait.
 - Include concrete cues for setting, costume, expression, action, light, and camera feeling.
+- The final prompt must explicitly mention the role's main costume colors, key garment silhouette/cut, and at least one signature role prop/weapon or emblem when applicable.
+- Do not let sexy reinterpretation erase the source role. The costume must still read as this role's outfit language, not merely a purple or black generic sexy outfit.
+- If the environment includes posters, signage, books, magazines, screens, movie stills, or printed matter, keep them non-readable and generic; avoid clear text and avoid clearly recognizable extra people.
 - Respect the target vibe. Vibe target: {cosplay_state.get("vibe_target_zh", "自然")} / {cosplay_state.get("vibe_target_en", "natural")}. Translation hint: {vibe_guide.get("translator")}. Do not water this down.
 - MANDATORY OUTFIT CONTROL: {json.dumps(cosplay_state.get("outfit_control", {}), ensure_ascii=False)}. Treat this as a hard visual requirement, not optional flavor text.
 - If the vibe target is 魅, always prioritize chest allure first, then choose the most suitable second attraction point between legline, waist-abdomen curve, or both according to role type, garment structure, scene mood, and pose logic. Make this legible through concrete styling and framing such as a deep V or low neckline, sweetheart neckline, off-shoulder or halter line, visible collarbones or shoulder-neck line, natural cleavage or bust contour, fitted upper silhouette, clear bust-waist ratio, intimate eye contact, softly teasing lips or smile, and warmer sculpting light — whenever these fit the role and scene. This must be a sexy Xiaoxia version of the original role language, not a totally different costume.
@@ -10741,7 +10853,7 @@ Return JSON only:
     return visual
 
 
-async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None, scene_card_tw=""):
+async def create_cosplay_visual(story, force_half_body=False, alternative=False, vibe_request=None, user_outfit_hints=None):
     cosplay_state = await plan_cosplay_visual_state(
         topic=story.get("topic", ""),
         event=story.get("event", ""),
@@ -10751,7 +10863,7 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         vibe_request=(vibe_request or story.get("vibe_request")),
         user_outfit_hints=(user_outfit_hints or story.get("user_outfit_hints")),
         user_request=story.get("user_mode_request", ""),
-        scene_card_tw=(scene_card_tw or story.get("scene_card_tw", ""))
+        cosplay_candidate=story.get("cosplay_topic_candidate")
     )
     visual = await render_cosplay_visual_prompt(cosplay_state, alternative=alternative)
     visual["__anchor_state"] = cosplay_state
@@ -10780,163 +10892,6 @@ def _safe_json_from_text(raw_text, fallback):
     except Exception:
         return fallback
 
-
-
-async def _build_scene_card_from_fulltext(module_name, full_text, fallback_scene="", locked_requirements="", outfit_lock="", people_rule="", time_rule="", extra_context=""):
-    """Read the completed full text first, then condense it into one scene card that becomes the only basis for image generation."""
-    fallback_scene = _clean_text_compact(fallback_scene or "小俠自然生活中的一個合理瞬間")[:240]
-    fallback = {
-        "scene_card_tw": fallback_scene,
-        "scene_summary": fallback_scene,
-        "outfit_summary": outfit_lock or "符合場景的完整自然穿搭",
-        "action_summary": "小俠正在場景中進行一個清楚可見的主要動作",
-        "mood_summary": "自然、有故事感、光線與情緒一致",
-        "camera_framing": "full_body",
-        "photo_prompt": (
-            f"Photorealistic lifestyle image of Xiaoxia based on this exact scene: {fallback_scene}. "
-            "Use this scene as the single source of truth for image generation. Show clear setting atmosphere, Xiaoxia's recognizable identity, the required outfit and necessary props, one main action, and one to two visible environmental anchors. "
-            "Strictly solo Xiaoxia only unless the hard rules explicitly allow otherwise. Natural anatomy, natural hands, and believable interaction with the physical world."
-        )
-    }
-    text_block = _clean_text_compact(full_text or "")
-    prompt = f"""
-你是小俠生圖流程的「場景整理員」。
-你的任務不是重寫全文，而是先完整看完全文，再整理出一段唯一用來生圖的「場景短文」。
-之後的生圖只能依據這段場景短文，不再自己從全文任性擷取別的片段。
-
-【模組】
-{module_name}
-
-【全文】
-{text_block[-2200:] or '無'}
-
-【保底場景】
-{fallback_scene}
-
-【硬性要求】
-{locked_requirements or '無'}
-
-【服裝／道具硬要求】
-{outfit_lock or '無'}
-
-【人物規則】
-{people_rule or '無'}
-
-【時間／光線規則】
-{time_rule or '無'}
-
-【其他補充】
-{extra_context or '無'}
-
-請只回傳 JSON：
-{{
-  "scene_card_tw": "繁體中文短文，120~220字，這就是唯一生圖依據。必須同時包含：場景氛圍、人物特色、服裝與必要道具、主要動作、1到2個環境錨點、鏡頭感。",
-  "scene_summary": "20~80字的場景摘要",
-  "outfit_summary": "服裝與必要道具摘要",
-  "action_summary": "主要動作摘要",
-  "mood_summary": "氛圍與光線摘要",
-  "camera_framing": "half_body 或 full_body",
-  "photo_prompt": "英文 Seedream 提示詞，忠實根據 scene_card_tw，不可另開新支線。"
-}}
-
-規則：
-1. 生圖唯一依據就是 scene_card_tw；不要把全文中的心情碎念、聊天寒暄或不適合畫面的段落混進來。
-2. 若全文與硬性要求衝突，必須優先遵守硬性要求。
-3. 若是 cosplay，必須保留角色辨識度、原作世界觀、服裝視覺錨點與必要道具。
-4. 若是日常/自主/寫真，必須讓人一眼看懂她此刻正在做什麼，而不是只剩漂亮人像。
-5. 不可加入未被要求的第二人物；若規則允許背景人物，也只能照硬性要求處理。
-6. 若服裝或道具有明確要求，必須清楚寫進 scene_card_tw 與 photo_prompt。
-7. scene_card_tw 要像導演交給攝影師的唯一畫面指令，不能像散文、日記摘要或資料清單。
-"""
-    try:
-        resp = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type='application/json', temperature=0.2),
-        )
-        data = _extract_json_object(getattr(resp, 'text', '') or '')
-        if isinstance(data, dict) and data.get('scene_card_tw'):
-            out = dict(fallback)
-            out.update({k: v for k, v in data.items() if v not in (None, '')})
-            return out
-    except Exception as exc:
-        print(f"⚠️ [SCENE_CARD_BUILD_FAILED] {module_name}: {type(exc).__name__}: {exc}")
-    return dict(fallback)
-
-
-async def _build_autonomy_scene_data_from_story_text(activity, visual_mode, share_text, wardrobe_item=None, episode_plan=None):
-    title = str(activity.get('title') or '小俠自主生活')
-    seed = str(activity.get('photo_prompt_seed') or title)
-    policy_info = _autonomy_people_policy_info(activity)
-    people_rule = _autonomy_people_policy_text(activity)
-    outfit_lock = (
-        f"衣櫃服裝本體必須忠實保留；配件採場景相容原則，合理且常見者可保留，不確定或非必要者省略。Figure 10 / 衣櫃項目：{wardrobe_item.get('id')} {wardrobe_item.get('name')}｜{_wardrobe_visual_summary_only(wardrobe_item) or wardrobe_item.get('style_summary') or wardrobe_item.get('name')}。"
-        if isinstance(wardrobe_item, dict)
-        else "若無衣櫃參考，使用最符合活動的自然完整穿搭。"
-    )
-    now_dt = datetime.now(TZ_TPE)
-    _bucket, _time_label = _autonomy_time_bucket(now_dt)
-    time_rule = f"現在是台灣時間 {now_dt.strftime('%H:%M')}（{_time_label}），畫面光線與時段必須一致。"
-    locked = (
-        f"必須明確讓人看出活動是『{title}』，不可偷換成不相干活動。"
-        f" 基礎場景線索：{seed}。"
-        f" 視覺模式：{visual_mode}。"
-    )
-    extra = (
-        f"活動類別：{activity.get('category') or ''}｜活動標籤：{'、'.join([str(x) for x in (activity.get('activity_tags') or [])])}。 "
-        f"Episode angle: {_clean_text_compact((episode_plan or {}).get('episode_angle') or '')}。"
-        f" What is new today: {_clean_text_compact((episode_plan or {}).get('what_is_new') or '')}。"
-        f" Progress focus: {_clean_text_compact((episode_plan or {}).get('progress_focus') or '')}。"
-        f" Scene focus: {_clean_text_compact((episode_plan or {}).get('scene_focus') or '')}。"
-        f" People policy key: {policy_info.get('policy_key')}。"
-    )
-    return await _build_scene_card_from_fulltext(
-        module_name='autonomy',
-        full_text=share_text,
-        fallback_scene=seed,
-        locked_requirements=locked,
-        outfit_lock=outfit_lock,
-        people_rule=people_rule,
-        time_rule=time_rule,
-        extra_context=extra,
-    )
-
-
-async def _build_cosplay_scene_card_from_post_text(story, draft_post_text):
-    candidate = story.get('cosplay_topic_candidate') or {}
-    role_name = candidate.get('character_name') or story.get('topic') or '今日角色'
-    work_title = candidate.get('work_title') or ''
-    locked = (
-        f"今日 cosplay 角色是 {role_name}" + (f"（來自 {work_title}）" if work_title else '') + "。"
-        " 場景不可違背角色核心特色、原作世界觀與角色識別。"
-        " 小俠的說法只能作為詮釋參考，不可把角色洗成不相干人物。"
-    )
-    outfit_lock = (
-        "服裝必須忠於角色的標誌性造型語言。至少保留 2 到 3 個可辨識視覺錨點，例如主色系、剪影、徽記、武器/道具、髮型髮色、材質或世界觀元素。"
-        " 若要更性感，只能在原角色語言上性感化，不可變成 generic 黑色內衣、無關惡魔翅膀或不相干奇幻裝。"
-    )
-    people_rule = "Strictly solo Xiaoxia only. No other people, no men, no external hands, no visible viewer body parts."
-    extra = (
-        f"主題：{story.get('topic') or ''}。背景：{story.get('event') or ''}。角色資訊：{story.get('persona') or ''}。"
-        f" 題材候選 JSON：{json.dumps(candidate, ensure_ascii=False)}"
-    )
-    full_text = "\n".join([
-        str(draft_post_text.get('description') or ''),
-        str(draft_post_text.get('character_intro') or ''),
-        str(draft_post_text.get('xiaoxia_interpretation') or ''),
-        str(draft_post_text.get('scene_caption') or ''),
-        str(draft_post_text.get('message_to_daxia') or ''),
-    ])
-    return await _build_scene_card_from_fulltext(
-        module_name='cosplay',
-        full_text=full_text,
-        fallback_scene=story.get('event') or story.get('topic') or '角色世界中的代表性瞬間',
-        locked_requirements=locked,
-        outfit_lock=outfit_lock,
-        people_rule=people_rule,
-        time_rule='',
-        extra_context=extra,
-    )
 
 def _scene_is_explicit_home_scene(scene_text):
     raw = str(scene_text or "")
@@ -11040,7 +10995,7 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 9. outfit_intent 應優先是符合台灣季節的自然穿著，允許大膽描述「絲質睡衣、微透視、貼身羅紋、低胸、展現曲線」等充滿女性魅力的私密居家服飾。
 10. environment_trace 保留真實生活物件痕跡，如香氛蠟燭、散落衣物、酒杯等。
 11. 允許自然使用 seductive, alluring, form-fitting, translucent, deep neckline 等字眼來描述居家私密的性感與魅力。
-12. scenario_tw 必須是自然繁體中文生活畫面描述，90 字內。它是後續生圖的唯一中文場景依據，所以必須同時讓人看出：場景氛圍、人物特色、服裝／必要道具、主要動作，以及 1 到 2 個環境錨點。
+12. scenario_tw 必須是自然繁體中文生活畫面描述，90 字內。
 
 只回傳 JSON：
 {{
@@ -12649,13 +12604,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
         story["user_outfit_hints"] = _extract_user_outfit_hints(mode)
         state["current_topic_data"] = story 
         
-        # 2. 先寫完全文，再把全文濃縮成唯一生圖場景，最後才交給 Cosplay 導演層規劃畫面。
-        await msg.edit(content=f"✨ 劇本完成！小夏正在先寫完這次 Cosplay 的完整內文，再整理出唯一的畫面場景...")
-        draft_post_text = await write_cosplay_post_text(story, visual=None, cosplay_state=None)
-        cosplay_scene_card = await _build_cosplay_scene_card_from_post_text(story, draft_post_text)
-        story["scene_card_tw"] = cosplay_scene_card.get("scene_card_tw", "")
-        await msg.edit(content=f"✨ 內文與場景完成！小夏正在依照唯一場景規劃這次 Cosplay 的自然動作與鏡頭語言...")
-        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"), scene_card_tw=story.get("scene_card_tw", ""))
+        # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
+        await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
+        _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"))
         scene_prompt = visual['image_prompt']
         trace_context = {
             "kind": "cosplay",
@@ -12665,7 +12616,6 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "story_mode": story_mode,
             "vibe_mode": vibe_mode,
             "story": story,
-            "scene_card": story.get("scene_card_tw", ""),
             "cosplay_state": _cosplay_state,
             "visual": visual,
         }
@@ -16512,7 +16462,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 規則：
 0. 優先順序：A. 大俠本次明確要求（場景／動作／姿勢／服裝／身形修正） > B. 衣服視覺參考圖 > C. 今日衣著連貫 > D. 最近 20 則對話靈感。
 1. 若大俠指定的是浪漫、床邊、燭光、等待、撩人、情侶感、男友視角等情境，必須把它改寫為「小俠單人對鏡頭或單人生活動作」；不得把大俠、男友、伴侶或第二人畫面化。
-2. 若大俠指定內容不為無，scene_summary 與 photo_prompt 必須以指定內容為主，而且畫面中必須清楚可見；不可被衣櫃資料、最近對話或模型自行腦補覆蓋。scene_summary 要視為唯一生圖依據，而不是可被後續任意改寫的參考。
+2. 若大俠指定內容不為無，scene_summary 與 photo_prompt 必須以指定內容為主，而且畫面中必須清楚可見；不可被衣櫃資料、最近對話或模型自行腦補覆蓋。
 3. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
 4. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
 5. 衣櫃建議場景只有在「衣櫃自由」挑衣時可作為選衣輔助；即使允許參考，也不得覆蓋大俠明確指定的場景。
@@ -18273,21 +18223,19 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=None, thread_context=thread_context, episode_plan=episode_plan)
-    scene_data = await _build_autonomy_scene_data_from_story_text(activity, visual_mode, share_text, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
-    prompt_base = scene_data.get("photo_prompt") or _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
+    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     context = {
         "mode": source_mode,
         "source_mode": source_mode,
         "source_module": "autonomy",
         "image_role": "autonomy_today_image",
-        "scene_text": scene_data.get("scene_card_tw") or f"小俠自主生活｜{activity.get('title')}",
-        "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
-        "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
-        "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
-        "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
-        "camera_framing": scene_data.get("camera_framing") or "lifestyle portrait",
+        "scene_text": f"小俠自主生活｜{activity.get('title')}",
+        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": activity.get("title") or "",
+        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": "lifestyle portrait",
         "prompt_base": prompt_base,
         "episode_angle": episode_plan.get("episode_angle") or "",
         "episode_plan": episode_plan,
@@ -18307,7 +18255,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
             "action": "xiaoxia_autonomy_full_reroll",
             "source_mode": source_mode,
             "user_input": raw,
-            "scene_seed_text": scene_data.get("scene_card_tw") or activity.get("photo_prompt_seed") or activity.get("title"),
+            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
             "wardrobe_selection": wardrobe_selection,
@@ -18335,6 +18283,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         await msg.edit(content=f"📸 小俠把今天的自主活動改成：**{activity.get('title')}**。正在重新拍下這一刻…")
 
     context = await _generate_photo_from_context(context, msg=msg)
+    share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
     context["message"] = share_text
     context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
     context["autonomy_activity"] = activity
@@ -18378,7 +18327,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "wardrobe_id": wardrobe_id or "",
         "wardrobe_name": wardrobe_name or "",
         "wardrobe_reason": wardrobe_reason,
-        "scene": scene_data.get("scene_card_tw") or activity.get("photo_prompt_seed") or "",
+        "scene": activity.get("photo_prompt_seed") or "",
         "mood": context.get("mood_summary") or "",
         "share_text": share_text,
         "photo_sent": True,
@@ -18421,19 +18370,13 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
     story["user_mode_request"] = raw_mode
     story["user_outfit_hints"] = _extract_user_outfit_hints(raw_mode)
     if msg:
-        await msg.edit(content="🔄 新題材完成，小俠正在先重寫完整內文，再整理唯一畫面場景…")
-    draft_post_text = await write_cosplay_post_text(story, visual=None, cosplay_state=None)
-    cosplay_scene_card = await _build_cosplay_scene_card_from_post_text(story, draft_post_text)
-    story["scene_card_tw"] = cosplay_scene_card.get("scene_card_tw", "")
-    if msg:
-        await msg.edit(content="🔄 場景完成，小俠正在依唯一場景重新生圖…")
+        await msg.edit(content="🔄 新題材完成，小俠正在重寫內文並重新生圖…")
     cosplay_state, visual = await create_cosplay_visual(
         story,
         force_half_body=False,
         alternative=False,
         vibe_request=vibe_mode,
         user_outfit_hints=story.get("user_outfit_hints"),
-        scene_card_tw=story.get("scene_card_tw", ""),
     )
     scene_prompt = visual["image_prompt"]
     trace_context = {
@@ -18444,7 +18387,6 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "story_mode": story_mode,
         "vibe_mode": vibe_mode,
         "story": story,
-        "scene_card": story.get("scene_card_tw", ""),
         "cosplay_state": cosplay_state,
         "visual": visual,
     }
