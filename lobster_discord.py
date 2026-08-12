@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.06"
+LOBSTER_VERSION = "1.8.07"
 
 
 def _normalize_generation_level(level):
@@ -3389,7 +3389,16 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
+    scene_data = await _summarize_scene_for_autonomy(
+        activity,
+        visual_mode,
+        wardrobe_item=wardrobe_item,
+        episode_plan=episode_plan,
+        thread_context=thread_context,
+        policy_info=policy_info,
+    )
+    authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or activity.get("photo_prompt_seed") or activity.get("title") or "小俠自主生活")
+    prompt_base = authoritative_scene
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     world_state = active_world_events.get(getattr(message.author, "id", None), {})
     if not isinstance(world_state, dict):
@@ -3403,11 +3412,14 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "source_module": "autonomy",
         "image_role": "autonomy_today_image",
         "scene_text": f"小俠自主生活｜{activity.get('title')}",
-        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
-        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
-        "action_summary": activity.get("title") or "",
-        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
-        "camera_framing": "lifestyle portrait",
+        "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "authoritative_scene": authoritative_scene,
+        "root_prompt_base": authoritative_scene,
+        "title": scene_data.get("scene_summary") or activity.get("title") or "",
+        "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
+        "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": scene_data.get("camera_framing") or "half_body",
         "prompt_base": prompt_base,
         "episode_angle": episode_plan.get("episode_angle") or "",
         "episode_plan": episode_plan,
@@ -3427,7 +3439,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
             "action": "xiaoxia_autonomy_today",
             "source_mode": source_mode,
             "user_input": raw,
-            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
+            "scene_seed_text": authoritative_scene,
+            "scene_data": scene_data,
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
             "wardrobe_selection": wardrobe_selection,
@@ -11275,7 +11288,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
 async def create_diary_visual(entry_content, chat_context, result, current_promises, season_rule,
                               scenario_hint="", forced_scene="", alternative=False, photo_selection=None):
 
-    """日記唯一入口：每日狀態規劃 -> 生活照片提示詞轉譯。"""
+    """v1.8.07：交換日記改成 scene-only。先規劃生活狀態，再由 Scene Writer 濃縮成唯一今日畫面。"""
     diary_state = await plan_diary_visual_state(
         entry_content=entry_content,
         chat_context=chat_context,
@@ -11288,12 +11301,45 @@ async def create_diary_visual(entry_content, chat_context, result, current_promi
     )
     if forced_scene:
         diary_state = _apply_forced_scene_to_diary_state(diary_state, forced_scene)
-    visual = await render_diary_visual_prompt(diary_state, season_rule, alternative=alternative)
+
+    scene_data = await _summarize_scene_for_diary(
+        result=result,
+        photo_selection=photo_selection,
+        season_rule=season_rule,
+        forced_scene=forced_scene,
+        planned_state=diary_state,
+    )
+    authoritative_scene = _clean_text_compact(
+        scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or diary_state.get("scenario_tw") or "小俠今天想留住的一個生活片刻"
+    )
+    diary_state = dict(diary_state or {})
+    diary_state.update({
+        "authoritative_scene": authoritative_scene,
+        "scenario_tw": scene_data.get("scene_summary") or diary_state.get("scenario_tw") or authoritative_scene,
+        "setting_anchor": scene_data.get("scene_summary") or diary_state.get("setting_anchor") or "",
+        "outfit_intent": scene_data.get("outfit_summary") or diary_state.get("outfit_intent") or "",
+        "primary_action": scene_data.get("action_summary") or diary_state.get("primary_action") or "",
+        "activity": scene_data.get("action_summary") or diary_state.get("activity") or "",
+        "lighting_mood": scene_data.get("mood_summary") or diary_state.get("lighting_mood") or "",
+        "camera_framing": scene_data.get("camera_framing") or diary_state.get("camera_framing") or "half_body",
+        "environment_trace": scene_data.get("scene_summary") or diary_state.get("environment_trace") or "",
+    })
+    composition = scene_data.get("scene_summary") or diary_state.get("scenario_tw") or "與大俠分享生活"
     if forced_scene:
-        visual["image_prompt"] = _forced_scene_diary_prompt_prefix(forced_scene) + "\n" + str(visual.get("image_prompt") or "")
-        visual["composition"] = f"小俠在「{_clean_text_compact(forced_scene)}」留下今天交換日記的自拍照，場景線索清楚可見。"
-    visual["__anchor_state"] = diary_state
-    visual["__anchor_mode"] = "diary"
+        composition = f"小俠在「{_clean_text_compact(forced_scene)}」留下今天交換日記的生活照，場景線索清楚可見。"
+    visual = {
+        "image_prompt": authoritative_scene,
+        "authoritative_scene": authoritative_scene,
+        "composition": composition,
+        "mood": scene_data.get("mood_summary") or diary_state.get("emotion") or "溫柔生活感",
+        "message": (result.get("why_this_photo") or "大俠，這就是我今晚想留給你的這一瞬間。")[:120],
+        "scene_summary": scene_data.get("scene_summary") or composition,
+        "outfit_summary": scene_data.get("outfit_summary") or diary_state.get("outfit_intent") or "",
+        "action_summary": scene_data.get("action_summary") or diary_state.get("primary_action") or "",
+        "camera_framing": scene_data.get("camera_framing") or diary_state.get("camera_framing") or "half_body",
+        "__anchor_state": diary_state,
+        "__anchor_mode": "diary",
+    }
     return diary_state, visual
 
 async def reroll_diary_visual_from_composition(composition_tw):
@@ -16774,6 +16820,112 @@ why_this_photo：{photo_selection.get('why_this_photo') or result.get('why_this_
         print(f"⚠️ [DIARY_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
     return fallback
 
+async def _summarize_scene_for_autonomy(activity, visual_mode, wardrobe_item=None, episode_plan=None, thread_context="", policy_info=None):
+    """v1.8.07：小俠自主也改成 scene-only。先看活動/延伸，再寫唯一今日畫面。"""
+    activity = _autonomy_enrich_activity(activity if isinstance(activity, dict) else {})
+    episode_plan = episode_plan if isinstance(episode_plan, dict) else {}
+    policy_info = policy_info if isinstance(policy_info, dict) else {}
+    title = _clean_text_compact(activity.get("title") or "小俠自主生活")
+    seed = _clean_text_compact(activity.get("photo_prompt_seed") or title)
+    category = _clean_text_compact(activity.get("category") or "")
+    location_type = _clean_text_compact(activity.get("location_type") or "")
+    tags = "、".join(str(x) for x in (activity.get("activity_tags") or []) if str(x).strip())
+    now_dt = datetime.now(TZ_TPE)
+    _bucket, time_label = _autonomy_time_bucket(now_dt)
+    outfit_fallback = _wardrobe_visual_summary_only(wardrobe_item) if isinstance(wardrobe_item, dict) else "符合今天活動、時段與季節的自然日常穿搭"
+    action_fallback = _clean_text_compact(episode_plan.get("scene_focus") or episode_plan.get("episode_angle") or title)
+    mood_fallback = "自然生活感、成熟漂亮、像小俠主動分享給大俠的今日瞬間"
+    people_policy = _clean_text_compact(_autonomy_people_policy_text(activity))
+    fallback_authoritative = _clean_text_compact(
+        f"小俠在{seed}的情境裡，穿著{outfit_fallback}，正在{action_fallback}，畫面保留清楚活動線索、符合{time_label}的光線，以及真實自然的生活感。"
+    )
+    fallback = {
+        "authoritative_scene": fallback_authoritative,
+        "scene_summary": seed[:80] or title[:80],
+        "outfit_summary": outfit_fallback[:60],
+        "action_summary": action_fallback[:60],
+        "mood_summary": mood_fallback[:60],
+        "camera_framing": "half_body",
+        "photo_prompt": fallback_authoritative,
+    }
+    wardrobe_block = "無衣櫃參考圖，由你替小俠把服裝寫具體。"
+    if isinstance(wardrobe_item, dict):
+        wardrobe_block = (
+            f"本次有衣櫃服裝參考：{wardrobe_item.get('id') or ''} {wardrobe_item.get('name') or ''}。"
+            f"服裝摘要：{_wardrobe_visual_summary_only(wardrobe_item) or wardrobe_item.get('style_summary') or wardrobe_item.get('name') or '依參考圖'}。"
+            " authoritative_scene 與 outfit_summary 必須明確反映這套衣服，但不可讓衣服覆蓋活動本身。"
+            " 衣櫃服裝本體必須忠實保留；配件採場景相容原則，合理且常見者可保留，不確定或非必要者省略。"
+        )
+    prompt = f"""
+你是小俠自主生活照的 Scene Writer。請看完今日活動資訊，寫出唯一一段可直接拿去生圖的「今日畫面」。
+
+【今日活動】
+標題：{title}
+活動類別：{category or '無'}
+活動標籤：{tags or '無'}
+場景種子：{seed}
+地點類型：{location_type or '無'}
+目前台灣時間：{now_dt.strftime('%Y-%m-%d %H:%M')}（{time_label}）
+視覺模式：{visual_mode}
+
+【今日延伸方向】
+Episode angle：{_clean_text_compact(episode_plan.get('episode_angle') or '')}
+What is new：{_clean_text_compact(episode_plan.get('what_is_new') or '')}
+Progress / discovery：{_clean_text_compact(episode_plan.get('progress_focus') or '')}
+Scene focus：{_clean_text_compact(episode_plan.get('scene_focus') or '')}
+
+【同題材最近脈絡】
+{thread_context[-1800:] if thread_context else '無'}
+
+【人物/社交限制】
+{people_policy}
+
+【服裝資訊】
+{wardrobe_block}
+
+請只回傳 JSON：
+{{
+  "authoritative_scene": "唯一場景短文。必須直接寫出場景、時間/光線、服裝、主要動作、神情或視線，以及 1~2 個必要環境錨點。希望成圖一定出現的東西，都要直接寫在這段裡。",
+  "scene_summary": "給 Discord 顯示的短場景摘要，40字內",
+  "outfit_summary": "服裝重點摘要，30字內",
+  "action_summary": "主要動作摘要，30字內",
+  "mood_summary": "氛圍與光線摘要，30字內",
+  "camera_framing": "half_body 或 full_body",
+  "photo_prompt": "與 authoritative_scene 同義；給內部流程沿用即可"
+}}
+
+規則：
+1. authoritative_scene 是唯一視覺真相；後續生圖只能照這段畫。沒有寫的東西，模型沒有義務補。
+2. 場景要自然短文，不要 JSON 腔、不要英文 prompt 腔、不要流水帳。
+3. 只保留一個時間、一個地點、一個主要動作；不可把前後片段混成一張圖。
+4. 場景必須忠於「今日活動」與「今日延伸方向」，避免 generic 美照或 generic 自拍。
+5. 若沒有衣櫃參考圖，也必須把 outfit_summary 與 authoritative_scene 的服裝寫具體，不可只寫「自然穿搭」。
+6. 若活動發生於上午/中午/下午/夜晚，畫面光線必須符合目前台灣時間；不要晨跑寫成午跑、不要白天寫成夜景。
+7. 小俠必須是主角。若社交規則允許其他女性，仍要讓小俠明顯是唯一主角；不允許時就只畫小俠一人。
+8. Xiaoxia Aesthetic 只當底盤：白皙甜美、高挑苗條、腰線明確、自然豐滿、柔和沙漏感，但畫面核心仍是今天這個活動瞬間。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        )
+        data = _extract_json_object(resp.text)
+        if isinstance(data, dict):
+            authoritative = _clean_text_compact(data.get("authoritative_scene") or data.get("photo_prompt") or data.get("scene_summary") or "")
+            if authoritative:
+                data["authoritative_scene"] = authoritative
+                data["photo_prompt"] = authoritative
+                data["scene_summary"] = _clean_text_compact(data.get("scene_summary") or seed or title)[:80]
+                data["outfit_summary"] = _clean_text_compact(data.get("outfit_summary") or outfit_fallback)[:60]
+                data["action_summary"] = _clean_text_compact(data.get("action_summary") or action_fallback)[:60]
+                data["mood_summary"] = _clean_text_compact(data.get("mood_summary") or mood_fallback)[:60]
+                return data
+    except Exception as exc:
+        print(f"⚠️ [AUTONOMY_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
+    return fallback
+
+
 def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None, user_scene_hardlock=""):
     scene_summary = str(scene_data.get("scene_summary", "小俠的生活照片")).strip()
     outfit_summary = str(scene_data.get("outfit_summary", "自然日常穿搭")).strip()
@@ -18583,7 +18735,16 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
-    prompt_base = _autonomy_build_photo_prompt(activity, visual_mode, wardrobe_item=wardrobe_item, episode_plan=episode_plan)
+    scene_data = await _summarize_scene_for_autonomy(
+        activity,
+        visual_mode,
+        wardrobe_item=wardrobe_item,
+        episode_plan=episode_plan,
+        thread_context=thread_context,
+        policy_info=policy_info,
+    )
+    authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or activity.get("photo_prompt_seed") or activity.get("title") or "小俠自主生活")
+    prompt_base = authoritative_scene
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     context = {
         "mode": source_mode,
@@ -18591,11 +18752,14 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "source_module": "autonomy",
         "image_role": "autonomy_today_image",
         "scene_text": f"小俠自主生活｜{activity.get('title')}",
-        "scene_summary": activity.get("photo_prompt_seed") or activity.get("title") or "",
-        "outfit_summary": (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
-        "action_summary": activity.get("title") or "",
-        "mood_summary": "小俠自主生活、自然分享、成熟有生活感",
-        "camera_framing": "lifestyle portrait",
+        "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
+        "authoritative_scene": authoritative_scene,
+        "root_prompt_base": authoritative_scene,
+        "title": scene_data.get("scene_summary") or activity.get("title") or "",
+        "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
+        "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
+        "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
+        "camera_framing": scene_data.get("camera_framing") or "half_body",
         "prompt_base": prompt_base,
         "episode_angle": episode_plan.get("episode_angle") or "",
         "episode_plan": episode_plan,
@@ -18615,7 +18779,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
             "action": "xiaoxia_autonomy_full_reroll",
             "source_mode": source_mode,
             "user_input": raw,
-            "scene_seed_text": activity.get("photo_prompt_seed") or activity.get("title"),
+            "scene_seed_text": authoritative_scene,
+            "scene_data": scene_data,
             "wardrobe_id": wardrobe_id,
             "wardrobe_name": wardrobe_name,
             "wardrobe_selection": wardrobe_selection,
