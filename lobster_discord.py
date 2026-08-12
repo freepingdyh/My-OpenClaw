@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.04"
+LOBSTER_VERSION = "1.8.06"
 
 
 def _normalize_generation_level(level):
@@ -10310,7 +10310,7 @@ async def build_daily_cosplay_topic():
 
 
 async def _draft_cosplay_post_text(story, vibe_request=None):
-    """v1.8.04: 先完成 Cosplay 文章文字，再由 Scene Writer 讀全文決定唯一「今日畫面」。"""
+    """v1.8.05：先完成 Cosplay 文章文字，再由 Scene Writer 讀全文決定唯一「今日畫面」。"""
     candidate = story.get("cosplay_topic_candidate") or {}
     fallback = {
         "title": story.get("topic", "今日 Cosplay"),
@@ -10337,7 +10337,7 @@ async def _draft_cosplay_post_text(story, vibe_request=None):
 
 只回 JSON：
 {{
-  "title": "【今日 Cosplay｜分類】小俠 × 角色名",
+  "title": "今日 Cosplay｜角色名",
   "description": "1到2句",
   "character_intro": "2到3句",
   "xiaoxia_interpretation": "2到3句",
@@ -10366,6 +10366,7 @@ async def _draft_cosplay_post_text(story, vibe_request=None):
     for key, value in fallback.items():
         if not str(data.get(key, "")).strip():
             data[key] = value
+    data["title"] = _compact_cosplay_post_title(story=story, post_text=data)
     return data
 
 
@@ -10484,7 +10485,7 @@ Render a polished photorealistic cinematic cosplay photograph faithful to TODAY 
 
 
 async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
-    """v1.8.04: 發文只沿用預先完成的文章；「今日畫面」原封不動等於生圖唯一 Scene。"""
+    """v1.8.05：發文只沿用預先完成的文章；標題改統一短化；「今日畫面」原封不動等於生圖唯一 Scene。"""
     state = cosplay_state if isinstance(cosplay_state, dict) else {}
     draft = state.get("post_text_draft") if isinstance(state.get("post_text_draft"), dict) else None
     if not draft:
@@ -11272,7 +11273,7 @@ async def render_diary_visual_prompt(diary_state, season_rule, alternative=False
     return visual
 
 async def create_diary_visual(entry_content, chat_context, result, current_promises, season_rule,
-                              scenario_hint="", forced_scene="", alternative=False):
+                              scenario_hint="", forced_scene="", alternative=False, photo_selection=None):
 
     """日記唯一入口：每日狀態規劃 -> 生活照片提示詞轉譯。"""
     diary_state = await plan_diary_visual_state(
@@ -12802,7 +12803,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         payload = {
             "id": str(uuid.uuid4()),
             "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-            "topic": story["topic"],
+            "topic": _compact_cosplay_post_title(story=story, post_text=post_text),
             "event": story["event"],
             "composition": _cosplay_state.get("scene_caption") or visual["composition"],
             "scene_summary": _cosplay_state.get("scene_caption") or visual["composition"],
@@ -12854,7 +12855,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             append_cosplay_topic_history(candidate_for_history)
 
         embed = discord.Embed(
-            title=post_text.get("title") or story["topic"],
+            title=_compact_cosplay_post_title(story=story, post_text=post_text),
             description=post_text.get("description") or story["event"],
             color=0xffb6c1,
         )
@@ -16081,6 +16082,9 @@ def _build_diary_lightweight_request(diary_visual, result=None, forced_scene="",
     lines = []
     if forced_scene:
         lines.append(f"Mandatory scene: {forced_scene}")
+    authoritative_scene = _clean_text_compact(visual.get("authoritative_scene") or state.get("authoritative_scene") or "")
+    if authoritative_scene:
+        lines.append(f"Authoritative scene: {authoritative_scene[:900]}")
     if autonomy_topic:
         lines.append(f"Source layer: today autonomy activity rewash, new diary image only; activity: {autonomy_topic.get('activity_title') or ''}")
         if autonomy_topic.get("composition"):
@@ -16323,7 +16327,7 @@ def _seedream_repair_mode_block(context):
     action_summary = _repair_clean_line(context.get("action_summary"), 220)
     outfit_summary = _repair_clean_line(context.get("outfit_summary"), 220)
     mood_summary = _repair_clean_line(context.get("mood_summary") or context.get("mood"), 220)
-    prompt_base = _repair_clean_line(context.get("prompt_base"), 320)
+    prompt_base = _repair_clean_line(_photo_context_root_scene_prompt(context), 320)
 
     if mode == "cosplay":
         state = context.get("cosplay_state") if isinstance(context.get("cosplay_state"), dict) else {}
@@ -16600,11 +16604,11 @@ async def _repair_photo_context(context, repair_request, msg=None):
 
 
 async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference, current_outfit=None, keep_today_outfit=False, pending_wardrobe_name="", wardrobe_scene_hint_allowed=False):
-    """將指定文字或最近 20 句對話整理成 /photo 可用的結構化場景。"""
+    """v1.8.05：/photo planner 改為 scene-only。先由 Gemini 產出唯一可視化場景，再交給 Seedream。"""
     recent_context = "\n".join(daily_chat_logs[-20:])
     default_scene = "溫馨自然的家中居家場景" if has_reference else "依照最近對話中的當下生活情境"
     prompt = f"""
-你是小俠照片導演。請根據大俠的 /photo 指令與最近對話，整理一張小俠照片的生成需求。
+你是小俠照片導演。請根據大俠的 /photo 指令與最近對話，整理出唯一一段「可直接拿去生圖」的場景短文。
 
 【/photo 模式】：{source_mode}
 【大俠指定內容】：{raw_scene_text or '無'}
@@ -16617,26 +16621,26 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 
 請只回傳 JSON：
 {{
-  "scene_summary": "照片場景，若大俠有指定內容則優先；若無且也無明確對話，使用 {default_scene}",
-  "outfit_summary": "最近一則明確服裝描述；若要延續今日衣著，就直接延續目前衣著；若有參考圖則描述該衣服/飾品",
-  "action_summary": "小俠正在做的自然動作",
-  "mood_summary": "氣氛與光線",
+  "authoritative_scene": "唯一場景短文。這一段必須直接寫出場景、光線/氛圍、服裝、主要動作、表情或視線，以及 1~2 個必要環境錨點。希望成圖一定出現的東西，都要直接寫在這段裡。",
+  "scene_summary": "給 Discord 顯示的短場景摘要，40字內",
+  "outfit_summary": "服裝重點摘要，30字內",
+  "action_summary": "主要動作摘要，30字內",
+  "mood_summary": "氛圍與光線摘要，30字內",
   "camera_framing": "half_body 或 full_body",
-  "photo_prompt": "英文 Seedream 提示詞，需包含場景、服裝、動作、光線；必須改寫成小俠一人的單人鏡頭，嚴格單人小俠，不出現男人、第二人、伴侶、其他人、任何男性身體部位、鏡頭持有者的手／肩／背影、外來手、倒影或影子；動作與肢體必須自然正常；完整衣著、生活感、非露骨"
+  "photo_prompt": "與 authoritative_scene 同義；給內部流程沿用即可"
 }}
 
 規則：
 0. 優先順序：A. 大俠本次明確要求（場景／動作／姿勢／服裝／身形修正） > B. 衣服視覺參考圖 > C. 今日衣著連貫 > D. 最近 20 則對話靈感。
-1. 若大俠指定的是浪漫、床邊、燭光、等待、撩人、情侶感、男友視角等情境，必須把它改寫為「小俠單人對鏡頭或單人生活動作」；不得把大俠、男友、伴侶或第二人畫面化。
-2. 若大俠指定內容不為無，scene_summary 與 photo_prompt 必須以指定內容為主，而且畫面中必須清楚可見；不可被衣櫃資料、最近對話或模型自行腦補覆蓋。
-3. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，outfit_summary 必須延續今日既有衣著，不要自行換裝。
-4. 若有參考圖，photo_prompt 要說明 Image 10 是衣服或飾品參考；若有預選衣櫃項目，也等同新衣服參考。
-5. 衣櫃建議場景只有在「衣櫃自由」挑衣時可作為選衣輔助；即使允許參考，也不得覆蓋大俠明確指定的場景。
-6. 不要從很久以前的日記或長期記憶抓衣服。
-7. 不可加入大俠沒有要求的第二人物。
-8. 即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
-9. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
-10. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條但曲線明顯、腰線明確、自然豐滿、存在感再加強的上圍、柔和沙漏感身形、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
+1. authoritative_scene 要寫成自然短文，不要清單腔，不要英文 prompt 腔。
+2. 若大俠指定內容不為無，authoritative_scene 必須以指定內容為主，而且畫面中必須清楚可見；不可被衣櫃資料、最近對話或模型自行腦補覆蓋。
+3. 若沒有衣櫃/附圖，而場景中仍需要衣服，請在 authoritative_scene 內主動把衣服寫具體一點（顏色、版型、材質或風格至少其一），不要只寫「自然穿搭」。
+4. 若「是否優先延續今日衣著」為是，且沒有新的衣服參考圖，authoritative_scene 與 outfit_summary 都必須延續今日既有衣著，不要自行換裝。
+5. 若有參考圖，請在 authoritative_scene 的服裝描述中明確反映它，但不要讓衣服覆蓋大俠指定場景。
+6. 衣櫃建議場景只有在「衣櫃自由」挑衣時可作為選衣輔助；即使允許參考，也不得覆蓋大俠明確指定的場景。
+7. 不可加入大俠沒有要求的第二人物。即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
+8. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
+9. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條但曲線明顯、腰線明確、自然豐滿、存在感再加強的上圍、柔和沙漏感身形、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -16645,26 +16649,130 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
         )
         data = _extract_json_object(resp.text)
-        if isinstance(data, dict) and data.get("photo_prompt"):
-            return data
+        if isinstance(data, dict):
+            authoritative = _clean_text_compact(data.get("authoritative_scene") or data.get("photo_prompt") or data.get("scene_summary") or "")
+            if authoritative:
+                data["authoritative_scene"] = authoritative
+                data["photo_prompt"] = authoritative
+                data["scene_summary"] = _clean_text_compact(data.get("scene_summary") or authoritative)[:80]
+                return data
     except Exception as exc:
         print(f"⚠️ [PHOTO_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
 
-    fallback_scene = raw_scene_text.strip() if raw_scene_text else default_scene
-    fallback_outfit = current_outfit if (keep_today_outfit and current_outfit) else "自然、完整、安全且符合場景的日常穿搭"
+    fallback_scene = _clean_text_compact(raw_scene_text.strip() if raw_scene_text else default_scene)
+    fallback_outfit = current_outfit if (keep_today_outfit and current_outfit) else "符合場景的自然完整日常穿搭"
+    authoritative = _clean_text_compact(
+        f"小俠在{fallback_scene}，穿著{fallback_outfit}，自然地停留在這個生活片刻裡，光線溫暖柔和，畫面保留清楚的場景線索與真實生活感。"
+    )
     return {
+        "authoritative_scene": authoritative,
         "scene_summary": fallback_scene,
         "outfit_summary": fallback_outfit,
         "action_summary": "小俠自然地待在場景中，像被大俠拍下的生活片刻",
         "mood_summary": "溫暖自然光、生活感、真實照片氛圍",
         "camera_framing": "half_body",
-        "photo_prompt": (
-            f"A candid photorealistic boyfriend-POV lifestyle photo of Xiaoxia in {fallback_scene}. "
-            f"She is wearing {fallback_outfit}, with a warm everyday mood. Preserve Xiaoxia Aesthetic by default: fair luminous skin, a sweet refined face, a tall slim yet clearly curvy feminine figure, a defined waist, a naturally full, prominent, and visually commanding bust, a soft hourglass silhouette, and long graceful legs with an elegant lower-leg line, unless Daxia explicitly requests otherwise. "
-            "Solo Xiaoxia only. Do not show any man, any other person, or any visible body part of the viewer, including foreground hands, shoulders, back, torso, silhouette, or reflections. The POV should be implied only through framing. Realistic anatomy only, with natural body movement, natural limb positions, and no awkward pose or malformed hands."
-        ),
+        "photo_prompt": authoritative,
     }
 
+
+
+async def _summarize_scene_for_diary(result, photo_selection=None, season_rule="", forced_scene="", planned_state=None):
+    """v1.8.06：交換日記也改成 scene-only。先讀完整日記與選圖決策，再濃縮成唯一可視化畫面。"""
+    result = result if isinstance(result, dict) else {}
+    photo_selection = photo_selection if isinstance(photo_selection, dict) else {}
+    planned_state = planned_state if isinstance(planned_state, dict) else {}
+    diary_full_text = "\n".join(
+        part for part in [
+            str(result.get("reply_to_daxia") or "").strip(),
+            str(result.get("xiaoxia_daily_scene") or "").strip(),
+            str(result.get("inner_monologue") or "").strip(),
+            str(result.get("xiaoxia_diary") or "").strip(),
+            str(result.get("why_this_photo") or photo_selection.get("why_this_photo") or "").strip(),
+        ] if part
+    )
+    fallback_scene = _clean_text_compact(photo_selection.get("scene") or planned_state.get("setting_anchor") or result.get("scenario_tw") or "小俠在今天想留住的一個自然生活片刻")
+    fallback_action = _clean_text_compact(photo_selection.get("action") or planned_state.get("primary_action") or "自然地停留在這個生活片刻裡")
+    fallback_outfit = _clean_text_compact(photo_selection.get("outfit") or planned_state.get("outfit_intent") or "符合今天情境與季節的自然穿著")
+    fallback_mood = _clean_text_compact(photo_selection.get("mood") or planned_state.get("lighting_mood") or "溫柔生活感與自然光線")
+    if forced_scene:
+        fallback_scene = _clean_text_compact(forced_scene)
+    fallback_authoritative = _clean_text_compact(
+        f"小俠在{fallback_scene}，穿著{fallback_outfit}，{fallback_action}，畫面帶著{fallback_mood}，並保留清楚的場景線索與真實生活感。"
+    )
+    fallback = {
+        "authoritative_scene": fallback_authoritative,
+        "scene_summary": fallback_scene[:80],
+        "outfit_summary": fallback_outfit[:60],
+        "action_summary": fallback_action[:60],
+        "mood_summary": fallback_mood[:60],
+        "camera_framing": "half_body",
+        "photo_prompt": fallback_authoritative,
+    }
+    prompt = f"""
+你是小俠交換日記的 Scene Writer。請讀完完整日記與既有選圖決策，寫出唯一一段可直接拿去生圖的「今日畫面」。
+
+【完整交換日記】
+{diary_full_text[-5200:]}
+
+【Photo Selector 決策】
+selected_memory：{photo_selection.get('selected_memory') or result.get('selected_memory') or '無'}
+scene：{photo_selection.get('scene') or '無'}
+action：{photo_selection.get('action') or '無'}
+camera：{photo_selection.get('camera') or '無'}
+mood：{photo_selection.get('mood') or '無'}
+outfit：{photo_selection.get('outfit') or result.get('diary_outfit_display') or '無'}
+why_this_photo：{photo_selection.get('why_this_photo') or result.get('why_this_photo') or '無'}
+
+【既有生活狀態規劃】
+{json.dumps(planned_state, ensure_ascii=False)}
+
+【大俠指定場景（若有）】
+{forced_scene or '無'}
+
+【季節服裝邊界】
+{season_rule or '無'}
+
+請只回傳 JSON：
+{{
+  "authoritative_scene": "唯一場景短文。必須直接寫出場景、時間/光線、服裝、主要動作、神情或視線，以及 1~2 個必要環境錨點。希望成圖一定出現的東西，都要直接寫在這段裡。",
+  "scene_summary": "給 Discord 顯示的短場景摘要，40字內",
+  "outfit_summary": "服裝重點摘要，30字內",
+  "action_summary": "主要動作摘要，30字內",
+  "mood_summary": "氛圍與光線摘要，30字內",
+  "camera_framing": "half_body 或 full_body",
+  "photo_prompt": "與 authoritative_scene 同義；給內部流程沿用即可"
+}}
+
+規則：
+0. 優先順序：A. 大俠指定場景 > B. Photo Selector 的 scene/action/outfit/why_this_photo > C. 完整日記文字 > D. 既有生活狀態規劃。
+1. authoritative_scene 要寫成自然短文，不要清單腔，不要英文 prompt 腔。
+2. 若大俠指定場景不為無，authoritative_scene 必須以該場景為主，而且畫面中必須清楚可見；不可改回 generic bedroom/sofa 自拍，除非指定場景本身就是居家。
+3. 只保留一個時間、一個地點、一個主要動作；不可把前後片段混成一張圖。
+4. 場景裡只能有小俠一人；不可加入大俠、男性、第二人、外來手部、前景肩膀或情侶互動。
+5. 若沒有衣櫃參考圖，也要把 outfit_summary 與 authoritative_scene 的服裝寫具體一點，不可只寫「自然穿搭」。
+6. 公共或外出場景不可自動退回臥室／客廳／睡衣自拍；只有日記文字或大俠要求時才可居家。
+7. Xiaoxia Aesthetic 是預設底盤，但畫面仍必須以「今天這個生活瞬間」為核心，而不是 generic glamour portrait。
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        )
+        data = _extract_json_object(resp.text)
+        if isinstance(data, dict):
+            authoritative = _clean_text_compact(data.get("authoritative_scene") or data.get("photo_prompt") or data.get("scene_summary") or "")
+            if authoritative:
+                data["authoritative_scene"] = authoritative
+                data["photo_prompt"] = authoritative
+                data["scene_summary"] = _clean_text_compact(data.get("scene_summary") or authoritative)[:80]
+                data["outfit_summary"] = _clean_text_compact(data.get("outfit_summary") or fallback_outfit)[:60]
+                data["action_summary"] = _clean_text_compact(data.get("action_summary") or fallback_action)[:60]
+                data["mood_summary"] = _clean_text_compact(data.get("mood_summary") or fallback_mood)[:60]
+                return data
+    except Exception as exc:
+        print(f"⚠️ [DIARY_SCENE_SUMMARY_FAILED] {type(exc).__name__}: {exc}")
+    return fallback
 
 def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None, user_scene_hardlock=""):
     scene_summary = str(scene_data.get("scene_summary", "小俠的生活照片")).strip()
@@ -16812,6 +16920,78 @@ def _photo_discord_file(context):
         return None, None
 
 
+def _compact_cosplay_post_title(story=None, post_text=None, context=None):
+    """v1.8.05：Cosplay 標題統一短化，避免雲端別墅與 Discord 被超長標題淹沒。"""
+    story = story if isinstance(story, dict) else {}
+    post_text = post_text if isinstance(post_text, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
+    if not isinstance(candidate, dict):
+        candidate = {}
+    if not candidate and isinstance(context.get("cosplay_topic_candidate"), dict):
+        candidate = context.get("cosplay_topic_candidate")
+    role = _clean_text_compact(
+        candidate.get("character_name")
+        or context.get("cosplay_character_name")
+        or story.get("character_name")
+        or ""
+    )
+    work = _clean_text_compact(
+        candidate.get("work_title")
+        or context.get("cosplay_work_title")
+        or story.get("work_title")
+        or ""
+    )
+    family = _clean_text_compact(
+        candidate.get("family_label")
+        or context.get("cosplay_family_label")
+        or context.get("cosplay_family")
+        or story.get("family_label")
+        or story.get("family")
+        or ""
+    )
+    if role:
+        return f"今日 Cosplay｜{role}"
+    if work:
+        return f"今日 Cosplay｜{work}"
+    if family:
+        return f"今日 Cosplay｜{family}"
+    raw = _clean_text_compact(post_text.get("title") or context.get("topic") or story.get("topic") or "今日 Cosplay")
+    raw = re.sub(r"^【[^】]+】", "", raw).strip(" ｜-—")
+    if raw.startswith("小俠 ×"):
+        raw = raw.replace("小俠 ×", "", 1).strip()
+    if not raw:
+        raw = "今日 Cosplay"
+    return raw[:32]
+
+
+def _compact_scene_title(context, fallback="快門瞬間"):
+    context = context if isinstance(context, dict) else {}
+    base = _clean_text_compact(
+        context.get("title")
+        or context.get("scene_summary")
+        or context.get("scene_text")
+        or context.get("composition")
+        or fallback
+    )
+    base = re.sub(r"\s+", " ", base).strip()
+    return base[:48] if base else fallback
+
+def _photo_context_root_scene_prompt(context):
+    """回到最原始的單一場景短文，避免 More / 骰子 / 修圖一路把附加說明疊到 prompt 裡。"""
+    context = context if isinstance(context, dict) else {}
+    root = _clean_text_compact(
+        context.get("root_prompt_base")
+        or context.get("authoritative_scene")
+        or context.get("prompt_base")
+        or context.get("scene_text")
+        or context.get("scene_summary")
+        or context.get("composition")
+        or ""
+    )
+    return root or "Xiaoxia lifestyle photo"
+
+
 def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_filename=None):
     """建立 /photo Embed。寫真模式只顯示使用者看得懂的拍攝資訊，不洩漏內部 Prompt。"""
     context = context or {}
@@ -16825,7 +17005,7 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
         user_instruction = _clean_text_compact(context.get("photobook_user_instruction") or "")
         description = user_instruction or "大俠與小俠共同完成的寫真拍攝。"
     else:
-        raw_title = f"{title_prefix}｜{context.get('scene_text') or context.get('scene_summary') or '快門瞬間'}"
+        raw_title = f"{title_prefix}｜{_compact_scene_title(context)}"
         description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
 
     embed = discord.Embed(
@@ -16858,7 +17038,7 @@ def _build_result_embed(context, title_prefix="📸 小俠照片", attachment_fi
     context = context or {}
     if str(context.get("type") or context.get("source_mode") or "").lower() == "cosplay":
         post_text = context.get("post_text") if isinstance(context.get("post_text"), dict) else {}
-        base_title = post_text.get("title") or context.get("topic") or "今日 Cosplay"
+        base_title = _compact_cosplay_post_title(post_text=post_text, context=context)
         title = f"{title_prefix}｜{base_title}" if title_prefix else base_title
         embed = discord.Embed(
             title=str(title)[:256],
@@ -16921,7 +17101,7 @@ async def _generate_photo_from_context(context, msg=None):
         "kind": "photo",
         "action": context.get("trace_action") or "photo_generate",
         "source_mode": context.get("source_mode", "photo_scene"),
-        "user_input": context.get("user_input") or context.get("scene_text") or "",
+        "user_input": context.get("user_input") or _photo_context_root_scene_prompt(context),
         "scene_seed_text": context.get("scene_text") or "",
         "photo_mode_override": context.get("photo_mode_override"),
         "wardrobe_id": context.get("wardrobe_id"),
@@ -16955,7 +17135,7 @@ async def _generate_photo_from_context(context, msg=None):
             trace_context["scene_seed_text"] = trace_context["cosplay_scene_caption"]
     trace_context.setdefault("kind", "photo")
     trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
-    _trace_stage(trace_context, "photo_context_input", data=context, prompt=context.get("prompt_base", ""))
+    _trace_stage(trace_context, "photo_context_input", data=context, prompt=_photo_context_root_scene_prompt(context))
     visual = _photo_visual_dict(
         {
             "scene_summary": context.get("scene_summary", ""),
@@ -17807,7 +17987,9 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
 
     scene_data["user_scene_hardlock"] = _clean_text_compact(scene_seed_text or raw_scene_text or "")
     scene_data["user_priority_request"] = _clean_text_compact(scene_seed_text or raw_scene_text or "")
-    prompt_base = scene_data.get("photo_prompt") or scene_seed_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo"
+    authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or scene_seed_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo")
+    scene_data["authoritative_scene"] = authoritative_scene
+    prompt_base = authoritative_scene
     if photo_mode_override == "freestyle":
         prompt_base = (
             str(prompt_base).strip()
@@ -17866,6 +18048,9 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "travel_target": travel_target,
         "scene_text": scene_seed_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
         "scene_summary": scene_data.get("scene_summary", ""),
+        "authoritative_scene": authoritative_scene,
+        "root_prompt_base": authoritative_scene,
+        "title": scene_data.get("scene_summary") or authoritative_scene,
         "outfit_summary": scene_data.get("outfit_summary", ""),
         "action_summary": scene_data.get("action_summary", ""),
         "mood_summary": scene_data.get("mood_summary", ""),
@@ -18599,7 +18784,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
     return {
         "id": str(uuid.uuid4()),
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-        "topic": story.get("topic"),
+        "topic": _compact_cosplay_post_title(story=story, post_text=post_text),
         "event": story.get("event"),
         "composition": cosplay_state.get("scene_caption") or visual.get("composition", ""),
         "scene_summary": cosplay_state.get("scene_caption") or visual.get("composition", ""),
@@ -19678,7 +19863,7 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_more"
         context["user_input"] = "More button from previous photo"
-        root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
+        root_prompt = _photo_context_root_scene_prompt(context)
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
             root_prompt
@@ -19720,7 +19905,7 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_reroll_replace"
         context["user_input"] = "骰子取代 from previous photo"
-        root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
+        root_prompt = _photo_context_root_scene_prompt(context)
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
             root_prompt
@@ -21039,7 +21224,8 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     current_promises="",
                     season_rule=season_rule,
                     scenario_hint=((diary_forced_scene + "\n") if diary_forced_scene else "") + diary_selector_hint + wardrobe_hard_note + scene_hard_note,
-                    forced_scene=diary_forced_scene
+                    forced_scene=diary_forced_scene,
+                    photo_selection=diary_photo_selection,
                 )
                 if diary_forced_scene:
                     diary_state = _apply_forced_scene_to_diary_state(diary_state, diary_forced_scene)
