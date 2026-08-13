@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.08"
+LOBSTER_VERSION = "1.8.09"
 
 
 def _normalize_generation_level(level):
@@ -17104,6 +17104,10 @@ def _photo_db_payload(context, name=None, type_override="photo"):
         "album_status": context.get("album_status"),
         "shot_number": context.get("shot_number"),
         "shot_role": context.get("shot_role"),
+        "shot_title": context.get("shot_title"),
+        "photobook_content_scene": context.get("photobook_content_scene"),
+        "photobook_camera_scene": context.get("photobook_camera_scene"),
+        "render_title_hint": context.get("render_title_hint"),
         "is_album_cover": bool(context.get("is_album_cover", False)),
         "is_xiaoxia_favorite": bool(context.get("is_xiaoxia_favorite", False)),
         "is_daxia_favorite": bool(context.get("is_daxia_favorite", False)),
@@ -17237,9 +17241,20 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
     if is_photobook:
         album_title = _clean_text_compact(context.get("album_title") or "小俠寫真")
         shot_number = int(context.get("shot_number") or 1)
-        raw_title = f"📸 小俠寫真｜{album_title}｜第 {shot_number} 張"
-        user_instruction = _clean_text_compact(context.get("photobook_user_instruction") or "")
-        description = user_instruction or "大俠與小俠共同完成的寫真拍攝。"
+        shot_title = _clean_text_compact(context.get("shot_title") or context.get("title") or f"第 {shot_number} 張")
+        raw_title = f"📸 小俠寫真｜{shot_title}"
+        content_scene = _clean_text_compact(context.get("photobook_content_scene") or "")
+        camera_scene = _clean_text_compact(context.get("photobook_camera_scene") or "")
+        if content_scene or camera_scene:
+            blocks = []
+            if content_scene:
+                blocks.append(f"**畫面內容**\n{content_scene}")
+            if camera_scene:
+                blocks.append(f"**鏡頭設計**\n{camera_scene}")
+            description = "\n\n".join(blocks)
+        else:
+            user_instruction = _clean_text_compact(context.get("photobook_user_instruction") or "")
+            description = user_instruction or f"「{album_title}」第 {shot_number} 張。"
     else:
         raw_title = f"{title_prefix}｜{_compact_scene_title(context)}"
         description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
@@ -17971,7 +17986,141 @@ def _photobook_chat_context(session):
     )
 
 
+
+def _clean_render_title(title, module=""):
+    """v1.8.09：清洗生圖用 Title，只留辨識主題。"""
+    raw = _clean_text_compact(title or "")
+    if not raw:
+        return ""
+    raw = re.sub(r"^【[^】]+】\s*", "", raw).strip()
+    raw = re.sub(r"^(?:今日\s*)?(?:小俠\s*)?(?:自主(?:活動|生活)?|寫真|照片|photo|cosplay)\s*[：:｜|\-—]*\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"^(?:小俠\s*[×xX]\s*)", "", raw)
+    raw = re.sub(r"\b小俠\b", "", raw)
+    raw = re.sub(r"\s+", " ", raw).strip(" ：:｜|-—")
+    return raw[:64]
+
+
+def _render_title_prefix(module, title):
+    clean_title = _clean_render_title(title, module=module)
+    key = str(module or "").strip().lower()
+    if key == "cosplay":
+        return f"這是一張 cosplay 照片，小俠正在扮演：{clean_title}。" if clean_title else "這是一張 cosplay 照片。"
+    if key in {"autonomy", "xiaoxia_autonomy"}:
+        return f"這是小俠自主活動，主題是：{clean_title}。" if clean_title else "這是小俠自主活動。"
+    if key in {"photobook", "photo"}:
+        return f"現在大俠正在幫小俠拍照，這一張拍的是：{clean_title}。" if clean_title else "現在大俠正在幫小俠拍照。"
+    return ""
+
+
+def _compose_title_scene_render_prompt(module, title, scene):
+    prefix = _render_title_prefix(module, title)
+    scene = str(scene or "").strip()
+    return "\n\n".join(x for x in (prefix, scene) if x).strip()
+
+
+def _compose_photobook_scene(content_scene, camera_scene):
+    content = _clean_text_compact(content_scene or "")
+    camera = _clean_text_compact(camera_scene or "")
+    parts = []
+    if content:
+        parts.append(f"畫面內容：{content}")
+    if camera:
+        parts.append(f"鏡頭設計：{camera}")
+    return "\n\n".join(parts).strip()
+
+
+async def _build_photobook_shot_plan(session, instruction, wardrobe_item=None):
+    """v1.8.09：/寫真每張先形成 Title + Content Scene + Camera Scene。"""
+    session = session if isinstance(session, dict) else {}
+    wardrobe_item = wardrobe_item if isinstance(wardrobe_item, dict) else {}
+    shot_no = int(session.get("shot_count") or 0) + 1
+    guide = PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)]
+    album_title = _clean_text_compact(session.get("album_title") or "今日寫真")
+    request = _clean_text_compact(instruction or session.get("scene_request") or "")
+    if not request:
+        request = "由小俠依目前寫真主題完成一張自然、漂亮、值得收藏的照片"
+    scene_anchor = _clean_text_compact(session.get("scene_anchor") or "")
+    wardrobe_id = _clean_text_compact(wardrobe_item.get("id") or session.get("wardrobe_id") or "")
+    wardrobe_name = _clean_text_compact(wardrobe_item.get("name") or session.get("wardrobe_name") or "")
+    wardrobe_visual = _wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else ""
+
+    wardrobe_block = "未指定衣櫃；請在畫面內容中把服裝與配件寫具體。"
+    if wardrobe_id:
+        wardrobe_block = (
+            f"本輯鎖定衣櫃：{wardrobe_id} {wardrobe_name}。"
+            f"服裝視覺摘要：{wardrobe_visual or wardrobe_name or '依 Figure 10 參考圖'}。"
+            "衣櫃服裝本體必須忠實保留；配件採場景相容原則，合理且常見者可保留，不確定或非必要者省略。"
+        )
+
+    fallback_title = _clean_render_title(request or album_title, "photobook") or f"第{shot_no}張"
+    fallback_content = _clean_text_compact(
+        f"{request}。{('延續同一場景：' + scene_anchor + '。') if scene_anchor else ''}"
+        f"{('穿著 ' + wardrobe_name + '。') if wardrobe_name else ''}"
+    )
+    fallback_camera = _clean_text_compact(guide)
+
+    prompt = f"""
+你是小俠寫真的攝影企劃。請為這一張照片產出：
+1. Shot Title：短而有辨識度的題名；
+2. Content Scene：畫面內容；
+3. Camera Scene：鏡頭設計。
+
+【整輯寫真】
+Album Title：{album_title}
+Shot：第 {shot_no} 張
+大俠本張要求：{request}
+既有場景連續：{scene_anchor or '首張，尚無固定場景'}
+建議鏡頭方向：{guide}
+服裝：{wardrobe_block}
+
+【規則】
+- 生圖參考依據是 Title + Scene；Scene 是唯一審圖標準，Title 只能點題，不能推翻 Scene。
+- Scene 必須由「畫面內容」與「鏡頭設計」兩部分組成。
+- Content Scene 要寫場景、時間/光線、服裝、主要動作、表情/視線、必要道具。
+- Camera Scene 要清楚寫景別、機位/角度、構圖重點與拍攝語氣；用自然語言，不要堆 35mm/f 值等技術參數。
+- 每張只保留一個主要動作。
+- 若已鎖定衣櫃，服裝本體不得重設計、改色、改長度或改類別。
+- 若沒有衣櫃，Content Scene 裡服裝+配件描述至少約 30 個中文字。
+- 若已有場景連續，除非大俠明確要求換場景，否則保持同一地點、時間感與光線家族。
+- 小俠是唯一主角；保持高挑苗條、明確腰身、自然豐滿且優雅的胸腰對比與自然解剖。
+
+只回 JSON：
+{{
+  "shot_title": "4~16個中文字，不含小俠/寫真/第X張等系統字眼",
+  "content_scene": "完整畫面內容",
+  "camera_scene": "完整鏡頭設計",
+  "scene_summary": "40字內短摘要",
+  "camera_framing": "closeup|bust|half_body|three_quarter|full_body|environment"
+}}
+"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.25),
+        )
+        data = _extract_json_object(getattr(resp, "text", "") or "") or {}
+    except Exception as exc:
+        print(f"⚠️ [PHOTOBOOK_SHOT_PLAN_FAILED] {type(exc).__name__}: {exc}")
+        data = {}
+
+    shot_title = _clean_render_title(data.get("shot_title") or fallback_title, "photobook") or fallback_title
+    content_scene = _clean_text_compact(data.get("content_scene") or fallback_content)
+    camera_scene = _clean_text_compact(data.get("camera_scene") or fallback_camera)
+    authoritative_scene = _compose_photobook_scene(content_scene, camera_scene)
+    return {
+        "shot_title": shot_title,
+        "content_scene": content_scene,
+        "camera_scene": camera_scene,
+        "authoritative_scene": authoritative_scene,
+        "scene_summary": _clean_text_compact(data.get("scene_summary") or content_scene)[:80],
+        "camera_framing": _clean_text_compact(data.get("camera_framing") or "half_body"),
+        "render_prompt": _compose_title_scene_render_prompt("photobook", shot_title, authoritative_scene),
+    }
+
+
 def _photobook_shot_prompt(session, instruction):
+    """Legacy fallback only; v1.8.09 主流程改用 _build_photobook_shot_plan()."""
     shot_no = int(session.get("shot_count") or 0) + 1
     guide = PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)]
     request = _clean_text_compact(instruction or "")
@@ -18067,18 +18216,34 @@ async def handle_photobook_command(message, raw_content):
     session["status"] = "shooting"
     session["last_instruction"] = args or session.get("last_instruction") or session.get("scene_request") or ""
     shot_no = int(session.get("shot_count") or 0) + 1
+    shot_plan = await _build_photobook_shot_plan(
+        session,
+        args or session.get("scene_request") or "",
+        wardrobe_item=locked_item,
+    )
     override = {
-        "db_type": "photobook", "type": "photobook", "album_id": session.get("album_id"),
+        "db_type": "photobook", "type": "photobook", "source_mode": "photobook",
+        "album_id": session.get("album_id"),
         "album_type": "photobook", "album_title": session.get("album_title"), "album_date": session.get("session_date"),
         "album_status": "shooting", "shot_number": shot_no,
         "shot_role": PHOTOBOOK_SHOT_GUIDES[(shot_no - 1) % len(PHOTOBOOK_SHOT_GUIDES)].split(",")[0],
+        "shot_title": shot_plan.get("shot_title"),
+        "title": shot_plan.get("shot_title"),
+        "photobook_content_scene": shot_plan.get("content_scene"),
+        "photobook_camera_scene": shot_plan.get("camera_scene"),
+        "authoritative_scene": shot_plan.get("authoritative_scene"),
+        "root_prompt_base": shot_plan.get("render_prompt"),
+        "prompt_base": shot_plan.get("render_prompt"),
+        "scene_summary": shot_plan.get("scene_summary"),
+        "camera_framing": shot_plan.get("camera_framing"),
+        "render_title_hint": _render_title_prefix("photobook", shot_plan.get("shot_title")),
         "source_module": "photobook", "image_role": "photobook_session_photo",
         "photobook_user_instruction": _clean_text_compact(args or ""),
         "wardrobe_id": locked_item.get("id") or session.get("wardrobe_id"),
         "wardrobe_name": locked_item.get("name") or session.get("wardrobe_name"),
     }
     photobook_generation_overrides[message.author.id] = override
-    photo_prompt = _photobook_shot_prompt(session, args or session.get("scene_request") or "")
+    photo_prompt = shot_plan.get("render_prompt") or _photobook_shot_prompt(session, args or session.get("scene_request") or "")
     try:
         generated_context = await handle_unified_photo_command(
             message, "/photo " + photo_prompt, forced_wardrobe_item=locked_item,
@@ -18089,10 +18254,14 @@ async def handle_photobook_command(message, raw_content):
     if not isinstance(generated_context, dict):
         return {"action": "handled"}
     if not session.get("scene_anchor"):
-        session["scene_anchor"] = _clean_text_compact(generated_context.get("scene_summary") or generated_context.get("scene_text") or args or session.get("scene_request") or "")[:600]
+        session["scene_anchor"] = _clean_text_compact(generated_context.get("photobook_content_scene") or generated_context.get("scene_summary") or generated_context.get("scene_text") or args or session.get("scene_request") or "")[:600]
     session["shot_count"] = shot_no
     session["last_photo_url"] = generated_context.get("local_url") or generated_context.get("image_url") or ""
     session["last_instruction"] = args or session.get("last_instruction") or ""
+    session["last_shot_title"] = generated_context.get("shot_title") or shot_plan.get("shot_title")
+    session["last_content_scene"] = generated_context.get("photobook_content_scene") or shot_plan.get("content_scene")
+    session["last_camera_scene"] = generated_context.get("photobook_camera_scene") or shot_plan.get("camera_scene")
+    session["last_authoritative_scene"] = generated_context.get("authoritative_scene") or shot_plan.get("authoritative_scene")
     session["updated_at"] = _photobook_now()
     _save_photobook_session(message.author.id, session)
     return {
@@ -18206,15 +18375,30 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         scene_seed_text = "小俠依自己的心情設計場景，並從衣櫃自由挑選一套最適合的穿搭。"
 
     wardrobe_scene_hint_allowed = photo_mode_override == "wardrobe_free"
-    scene_data = await _summarize_scene_for_photo(
-        scene_seed_text,
-        source_mode,
-        has_reference=bool(attachment or pending_wardrobe),
-        current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
-        keep_today_outfit=keep_today_outfit,
-        pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=wardrobe_scene_hint_allowed) if pending_wardrobe else "",
-        wardrobe_scene_hint_allowed=wardrobe_scene_hint_allowed,
-    )
+    photobook_override = photobook_generation_overrides.get(getattr(message.author, "id", None))
+    if photobook_mode and isinstance(photobook_override, dict) and photobook_override.get("authoritative_scene"):
+        scene_data = {
+            "authoritative_scene": photobook_override.get("authoritative_scene"),
+            "photo_prompt": photobook_override.get("authoritative_scene"),
+            "scene_summary": photobook_override.get("scene_summary") or photobook_override.get("photobook_content_scene") or "",
+            "outfit_summary": _wardrobe_visual_summary_only(pending_wardrobe) if pending_wardrobe else "",
+            "action_summary": photobook_override.get("photobook_user_instruction") or photobook_override.get("shot_title") or "",
+            "mood_summary": "",
+            "camera_framing": photobook_override.get("camera_framing") or "half_body",
+            "photobook_content_scene": photobook_override.get("photobook_content_scene") or "",
+            "photobook_camera_scene": photobook_override.get("photobook_camera_scene") or "",
+            "shot_title": photobook_override.get("shot_title") or "",
+        }
+    else:
+        scene_data = await _summarize_scene_for_photo(
+            scene_seed_text,
+            source_mode,
+            has_reference=bool(attachment or pending_wardrobe),
+            current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
+            keep_today_outfit=keep_today_outfit,
+            pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=wardrobe_scene_hint_allowed) if pending_wardrobe else "",
+            wardrobe_scene_hint_allowed=wardrobe_scene_hint_allowed,
+        )
     if pending_wardrobe:
         wardrobe_hint = _wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=photo_mode_override == "wardrobe_free")
         scene_data["outfit_summary"] = (
@@ -18228,7 +18412,14 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
     scene_data["user_priority_request"] = _clean_text_compact(scene_seed_text or raw_scene_text or "")
     authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or scene_seed_text or scene_data.get("scene_summary") or "Xiaoxia lifestyle photo")
     scene_data["authoritative_scene"] = authoritative_scene
-    prompt_base = authoritative_scene
+    if photobook_mode and isinstance(photobook_override, dict):
+        prompt_base = _compose_title_scene_render_prompt(
+            "photobook",
+            photobook_override.get("shot_title") or photobook_override.get("title"),
+            authoritative_scene,
+        )
+    else:
+        prompt_base = authoritative_scene
     if photo_mode_override == "freestyle":
         prompt_base = (
             str(prompt_base).strip()
@@ -18276,6 +18467,11 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "keep_today_outfit": keep_today_outfit,
         "explicit_outfit_change": explicit_outfit_change,
         "scene_data": scene_data,
+        "render_title_hint": (photobook_override or {}).get("render_title_hint") if isinstance(photobook_override, dict) else "",
+        "photobook_shot_title": (photobook_override or {}).get("shot_title") if isinstance(photobook_override, dict) else "",
+        "photobook_content_scene": (photobook_override or {}).get("photobook_content_scene") if isinstance(photobook_override, dict) else "",
+        "photobook_camera_scene": (photobook_override or {}).get("photobook_camera_scene") if isinstance(photobook_override, dict) else "",
+        "photobook_authoritative_scene": (photobook_override or {}).get("authoritative_scene") if isinstance(photobook_override, dict) else "",
     }
     _trace_stage(trace_context, "photo_scene_data", data=scene_data, prompt=prompt_base)
 
@@ -18308,7 +18504,6 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "__trace_context": trace_context,
     }
 
-    photobook_override = photobook_generation_overrides.get(getattr(message.author, "id", None))
     if isinstance(photobook_override, dict):
         context.update(photobook_override)
         trace_context["photobook"] = _trace_sanitize(photobook_override)
@@ -19376,23 +19571,21 @@ async def _generate_photobook_more_edit_candidate(base_context, shot, status=Non
         )
 
     camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
+    shot_title = context.get("shot_title") or context.get("title") or context.get("album_title") or "這一張寫真"
+    content_scene = context.get("photobook_content_scene") or context.get("scene_summary") or ""
+    more_scene = _compose_photobook_scene(content_scene, camera_recipe)
+    semantic_contract = _compose_title_scene_render_prompt("photobook", shot_title, more_scene)
     if str((shot or {}).get("id") or "") == "face_closeup":
         final_prompt = (
-            f"{role_note}\n"
-            "Create another photograph from the same photoshoot and the same moment. "
-            "Keep Xiaoxia's identity, hairstyle, visible outfit details near the neckline, location, and lighting naturally consistent with Figure 1. "
-            "This request is a face beauty close-up only. Crop from collarbone-up or shoulders-up only. "
-            "Her face must fill most of the frame. The composition must not show waist, hips, thighs, knees, legs, or a full-body view. "
-            "Background stays secondary and soft. Change the camera treatment only.\n"
-            f"CAMERA: {camera_recipe}"
+            f"{role_note}\n{semantic_contract}\n"
+            "Figure 1 is the current execution state. Keep the same content scene, identity, outfit, location and lighting; change camera only. "
+            "FACE BEAUTY CLOSE-UP ONLY: collarbone-up or shoulders-up; face fills most of frame; "
+            "do not show waist, hips, thighs, knees, legs, or full body."
         )
     else:
         final_prompt = (
-            f"{role_note}\n"
-            "Create another photograph from the same photoshoot and the same moment. "
-            "Keep Xiaoxia, her current action, outfit, accessories, hairstyle, location and lighting naturally consistent with Figure 1. "
-            "Change the camera treatment only.\n"
-            f"CAMERA: {camera_recipe}"
+            f"{role_note}\n{semantic_contract}\n"
+            "Figure 1 is the current execution state. Keep the same content scene, identity, outfit, location and lighting; change camera treatment only."
         )
     print(f"🧪 [PHOTOBOOK_MORE_EDIT_QUEUE] shot={shot.get('id')} inputs={len(image_urls)}")
 
@@ -19436,6 +19629,10 @@ async def _generate_photobook_more_edit_candidate(base_context, shot, status=Non
         "more_engine": "edit",
         "more_shot_id": shot.get("id"),
         "more_shot_name": shot.get("name"),
+        "photobook_camera_scene": camera_recipe,
+        "authoritative_scene": more_scene,
+        "root_prompt_base": semantic_contract,
+        "prompt_base": semantic_contract,
     })
     return candidate
 
@@ -19447,22 +19644,20 @@ async def _generate_photobook_more_generate_candidate(base_context, shot, status
     context["trace_action"] = "photobook_more_generate_fallback"
     context["more_shot_id"] = shot.get("id")
     context["more_shot_name"] = shot.get("name")
-    root_prompt = context.get("root_prompt_base") or context.get("prompt_base", "")
-    context["root_prompt_base"] = root_prompt
     camera_recipe = str((shot or {}).get("prompt") or "Use a clearly different camera composition.").strip()
     context["camera_override"] = camera_recipe
+    shot_title = context.get("shot_title") or context.get("title") or context.get("album_title") or "這一張寫真"
+    content_scene = context.get("photobook_content_scene") or context.get("scene_summary") or ""
+    more_scene = _compose_photobook_scene(content_scene, camera_recipe)
+    root_prompt = _compose_title_scene_render_prompt("photobook", shot_title, more_scene)
+    context["photobook_camera_scene"] = camera_recipe
+    context["authoritative_scene"] = more_scene
+    context["root_prompt_base"] = root_prompt
+    context["prompt_base"] = root_prompt
     if str((shot or {}).get("id") or "") == "face_closeup":
-        context["prompt_base"] = (
-            root_prompt
-            + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. FACE BEAUTY CLOSE-UP ONLY. "
-            + camera_recipe
-            + " Keep the image collarbone-up or shoulders-up only. Her face fills most of the frame. Do not show waist, hips, thighs, knees, legs, or a full-body composition."
-        )
-    else:
-        context["prompt_base"] = (
-            root_prompt
-            + "\n[[CAMERA_OVERRIDE]] Same Xiaoxia photoshoot and same location. "
-            + camera_recipe
+        context["prompt_base"] += (
+            "\nTECHNICAL CAMERA LOCK: FACE BEAUTY CLOSE-UP ONLY. Keep the image collarbone-up or shoulders-up only. "
+            "Her face fills most of the frame. Do not show waist, hips, thighs, knees, legs, or a full-body composition."
         )
     generated = await _generate_photo_from_context(context, msg=status)
     generated["more_engine"] = "generate_fallback"
@@ -19534,6 +19729,7 @@ async def _generate_photobook_more_choice(message, request):
         for key in (
             "db_type", "album_id", "album_type", "album_title", "album_date", "album_status",
             "source_module", "image_role", "wardrobe_id", "wardrobe_name",
+            "shot_title", "photobook_content_scene", "render_title_hint",
         ):
             if base_context.get(key) not in (None, ""):
                 final_context[key] = base_context.get(key)
@@ -19616,8 +19812,24 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     source_mode = str(source_context.get("source_mode") or source_context.get("mode") or "photo_scene")
     source_mode_norm = source_mode.strip().lower()
     is_cosplay = source_mode_norm == "cosplay" or bool(source_context.get("cosplay_scene_only"))
+    is_photobook = (
+        source_mode_norm == "photobook"
+        or str(source_context.get("type") or "").lower() == "photobook"
+        or str(source_context.get("db_type") or "").lower() == "photobook"
+        or str(source_context.get("album_type") or "").lower() == "photobook"
+    )
 
     def _scene_semantic_brief():
+        # v1.8.09：/寫真 v5 背景只看 Title + Scene；Scene 仍是唯一驗收標準。
+        if is_photobook:
+            title = source_context.get("shot_title") or source_context.get("title") or source_context.get("album_title") or ""
+            scene = _clean_text_compact(
+                source_context.get("authoritative_scene")
+                or _compose_photobook_scene(source_context.get("photobook_content_scene"), source_context.get("photobook_camera_scene"))
+                or source_context.get("scene_summary")
+                or ""
+            )
+            return _compose_title_scene_render_prompt("photobook", title, scene)
         # v1.8.08：凡已有 authoritative_scene，都只允許 v5 背景看這一份場景真相。
         authoritative = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("root_prompt_base") or "")
         if authoritative:
@@ -19984,6 +20196,17 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
 
     if trace_context.get("cosplay_scene_only"):
         prompt_base = _build_cosplay_scene_only_seedream_prompt(trace_context.get("cosplay_scene_caption"), hybrid=True)
+    elif (
+        source_mode_norm == "photobook"
+        or str(source_context.get("type") or "").lower() == "photobook"
+        or str(source_context.get("album_type") or "").lower() == "photobook"
+    ):
+        prompt_base = _compose_title_scene_render_prompt(
+            "photobook",
+            source_context.get("shot_title") or source_context.get("title") or source_context.get("album_title"),
+            source_context.get("authoritative_scene")
+            or _compose_photobook_scene(source_context.get("photobook_content_scene"), source_context.get("photobook_camera_scene")),
+        )
     else:
         prompt_base = _photo_context_root_scene_prompt(source_context)
     if not str(prompt_base).strip():
