@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.13"
+LOBSTER_VERSION = "1.8.14"
 
 
 def _normalize_generation_level(level):
@@ -11005,7 +11005,7 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         user_outfit_hints=outfit_hints,
         alternative=alternative,
     )
-    title_hint = post_text_draft.get("title") or story.get("character_name") or story.get("topic") or ""
+    title_hint = _cosplay_semantic_title(story=story, post_text=post_text_draft) or post_text_draft.get("title") or story.get("character_name") or story.get("topic") or ""
     state = {
         "scene_caption": scene_caption,
         "title_hint": title_hint,
@@ -16339,8 +16339,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
         if bool(trace_context.get("semantic_contract_locked")) and trace_kind != "diary":
-            trace_context["prompt_engine_version"] = "v1.8.13"
-            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1813"
+            trace_context["prompt_engine_version"] = "v1.8.14"
+            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1814"
         else:
             trace_context["prompt_engine_version"] = "v1.5.42_R2"
             trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
@@ -17126,6 +17126,64 @@ def _photo_discord_file(context):
         return None, None
 
 
+def _cosplay_semantic_title(story=None, post_text=None, context=None):
+    """v1.8.14: Cosplay Title keeps source work + role when available, while Scene remains authoritative."""
+    story = story if isinstance(story, dict) else {}
+    post_text = post_text if isinstance(post_text, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
+    if not candidate and isinstance(context.get("cosplay_topic_candidate"), dict):
+        candidate = context.get("cosplay_topic_candidate")
+
+    work = _clean_text_compact(
+        candidate.get("work_title")
+        or context.get("cosplay_work_title")
+        or story.get("work_title")
+        or ""
+    )
+    role = _clean_text_compact(
+        candidate.get("character_name")
+        or context.get("cosplay_character_name")
+        or story.get("character_name")
+        or ""
+    )
+    if work and role:
+        return f"{work}－{role}"[:64]
+
+    # Manual /cosplay requests often arrive only as user_mode_request, e.g. （動畫）火影忍者-綱手.
+    raw_mode = _clean_text_compact(
+        context.get("user_mode_request")
+        or story.get("user_mode_request")
+        or ""
+    )
+    if not raw_mode:
+        topic = _clean_text_compact(context.get("topic") or story.get("topic") or "")
+        m = re.match(r"^【([^】]+)】", topic)
+        if m:
+            raw_mode = _clean_text_compact(m.group(1))
+    raw_mode = re.sub(r"^[（(][^）)]+[）)]\s*", "", raw_mode).strip()
+    raw_mode = re.sub(r"^(?:今日\s*)?(?:小俠\s*)?(?:cosplay|變身|扮演)\s*[：:｜|\-—]*\s*", "", raw_mode, flags=re.IGNORECASE).strip()
+    if raw_mode and raw_mode.lower() not in {"auto", "每日動態選角", "今日動態選角"}:
+        parts = [p.strip() for p in re.split(r"\s*[\-－—]\s*", raw_mode) if p.strip()]
+        if len(parts) >= 2:
+            inferred_work = "－".join(parts[:-1])
+            inferred_role = parts[-1]
+            return f"{inferred_work}－{inferred_role}"[:64]
+        if role:
+            return f"{raw_mode}－{role}"[:64] if raw_mode != role else role[:64]
+        return raw_mode[:64]
+
+    if work and role:
+        return f"{work}－{role}"[:64]
+    if role:
+        return role[:64]
+    if work:
+        return work[:64]
+
+    raw = _clean_render_title(post_text.get("title") or context.get("topic") or story.get("topic") or "", module="cosplay")
+    return raw[:64]
+
+
 def _compact_cosplay_post_title(story=None, post_text=None, context=None):
     """v1.8.05：Cosplay 標題統一短化，避免雲端別墅與 Discord 被超長標題淹沒。"""
     story = story if isinstance(story, dict) else {}
@@ -17156,10 +17214,9 @@ def _compact_cosplay_post_title(story=None, post_text=None, context=None):
         or story.get("family")
         or ""
     )
-    if role:
-        return f"今日 Cosplay｜{role}"
-    if work:
-        return f"今日 Cosplay｜{work}"
+    semantic_title = _cosplay_semantic_title(story=story, post_text=post_text, context=context)
+    if semantic_title:
+        return f"今日 Cosplay｜{semantic_title}"[:48]
     if family:
         return f"今日 Cosplay｜{family}"
     raw = _clean_text_compact(post_text.get("title") or context.get("topic") or story.get("topic") or "今日 Cosplay")
@@ -20454,7 +20511,7 @@ class PhotoResultView(discord.ui.View):
             _log_wardrobe_usage_from_context(new_context, purpose="photo_more")
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
-            embed = _build_photo_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
+            embed = _build_result_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
             if file:
                 print(f"📤 [PHOTO_MORE_SEND_WITH_FILE] filename={filename}")
                 sent = await interaction.followup.send(embed=embed, file=file, view=view)
@@ -26572,6 +26629,28 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     checklist = _v1525_build_visual_checklist(mode, user_text, visual_dict, current_outfit, trace_context)
     checklist = dict(checklist or {})
     source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
+
+    # v1.8.14: Cosplay generation contract is intentionally strict-solo.
+    # Keep QA/checklist metadata aligned with the actual Seedream cosplay prompt.
+    if str(mode or "").strip().lower() == "cosplay":
+        checklist.update({
+            "private_scene": False,
+            "strict_solo_required": True,
+            "allow_background_bystanders": False,
+            "specified_character_interaction": False,
+            "people_policy": "cosplay_strict_solo",
+            "no_male_people": True,
+            "male_background_ok": False,
+            "female_background_ok": False,
+            "female_interaction_ok": False,
+        })
+        checklist["must_not_have"] = _dedupe_keep_order((checklist.get("must_not_have") or []) + [
+            "any additional human figure, companion, bystander, external hand, reflection, silhouette, or visible viewer body part",
+            "any male person anywhere in the cosplay frame",
+            "Daxia/viewer visually depicted as a person or body part",
+        ])
+        return checklist
+
     private = bool(_is_private_scene_text(source))
     explicit_solo = bool(_explicit_solo_or_empty_scene_requested(source))
     female_social = (not private) and _v1526_contains(source, _V1526_FEMALE_SOCIAL_WORDS)
@@ -26666,6 +26745,8 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
 def _seedream_people_policy_line(checklist=None):
     c = checklist if isinstance(checklist, dict) else {}
     policy = str(c.get("people_policy") or "")
+    if policy == "cosplay_strict_solo":
+        return "People rule: COSPLAY STRICT SOLO. Xiaoxia is the only visible human figure. No other woman, man, child, companion, bystander, external hand, viewer body part, reflection, shadow, silhouette, or partial person. Daxia remains an invisible camera viewpoint only."
     if c.get("strict_solo_required") or policy == "private_strict_solo":
         return "People rule: PRIVATE OR EXPLICIT SOLO SCENE. Xiaoxia is the only human figure. No other woman, man, child, external hand, viewer body part, reflection, shadow, silhouette, or partial person. Daxia remains an invisible camera viewpoint only."
     if policy == "autonomy_female_interaction_ok" or c.get("female_interaction_ok"):
