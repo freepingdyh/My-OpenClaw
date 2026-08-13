@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.09"
+LOBSTER_VERSION = "1.8.10"
 
 
 def _normalize_generation_level(level):
@@ -3398,7 +3398,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         policy_info=policy_info,
     )
     authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or activity.get("photo_prompt_seed") or activity.get("title") or "小俠自主生活")
-    prompt_base = authoritative_scene
+    prompt_base = _compose_title_scene_render_prompt("autonomy", activity.get("title") or "小俠自主活動", authoritative_scene)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     world_state = active_world_events.get(getattr(message.author, "id", None), {})
     if not isinstance(world_state, dict):
@@ -3414,8 +3414,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         "scene_text": f"小俠自主生活｜{activity.get('title')}",
         "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
         "authoritative_scene": authoritative_scene,
-        "root_prompt_base": authoritative_scene,
-        "title": scene_data.get("scene_summary") or activity.get("title") or "",
+        "root_prompt_base": prompt_base,
+        "title": activity.get("title") or scene_data.get("scene_summary") or "小俠自主活動",
         "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
         "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
         "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
@@ -10477,9 +10477,10 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     return scene
 
 
-def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False):
+def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False, title_hint=""):
     """v1.8.04: Seedream 的內容語意只來自「今日畫面」；其餘僅為小俠身份/身材/單人技術外框。"""
     scene = _clean_text_compact(scene_caption or "")
+    title_prefix = _render_title_prefix("cosplay", title_hint)
     retry_line = ""
     if retry_reason:
         retry_line = f"\nTECHNICAL RETRY NOTE: improve instruction adherence without changing any stated scene facts. Previous issue: {_clean_text_compact(retry_reason)[:260]}"
@@ -10487,7 +10488,10 @@ def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hy
     return f"""FIGURE ROLE MAP — technical identity references only.
 {figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their pose, outfit, background, props, lighting, or composition.
 
-AUTHORITATIVE TODAY SCENE — this is the ONLY source of story, setting, costume, accessories, weapons, props, action, expression, lighting, and composition:
+TITLE HINT — semantic recognition only; it may help identify the role, but must never override or contradict TODAY SCENE:
+{title_prefix}
+
+AUTHORITATIVE TODAY SCENE — this is the final render contract for story, setting, costume, accessories, weapons, props, action, expression, lighting, and composition:
 {scene}
 
 TECHNICAL XIAOXIA IDENTITY / BODY LOCK — do not invent new story content:
@@ -11001,8 +11005,10 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         user_outfit_hints=outfit_hints,
         alternative=alternative,
     )
+    title_hint = post_text_draft.get("title") or story.get("character_name") or story.get("topic") or ""
     state = {
         "scene_caption": scene_caption,
+        "title_hint": title_hint,
         "scenario_tw": scene_caption,
         "mood_tw": _clean_text_compact((story.get("cosplay_topic_candidate") or {}).get("mood") or "角色感、故事感、成熟魅力"),
         "camera_framing": "half_body" if force_half_body else "full_body",
@@ -11011,7 +11017,7 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         "post_text_draft": post_text_draft,
         "scene_authority": "discord_today_scene_only",
     }
-    image_prompt = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=False)
+    image_prompt = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=False, title_hint=title_hint)
     visual = {
         "image_prompt": image_prompt,
         "composition": scene_caption,
@@ -12565,6 +12571,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                     scene_caption,
                     retry_reason=last_adherence_reason if level > 0 else "",
                     hybrid=bool(trace_context.get("v5_background_role_handoff")),
+                    title_hint=trace_context.get("cosplay_title_hint") or ((trace_context.get("cosplay_state") or {}).get("title_hint") if isinstance(trace_context.get("cosplay_state"), dict) else ""),
                 )
                 trace_context["raw_seedream_mode"] = "cosplay_today_scene_only"
             else:
@@ -12823,6 +12830,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "cosplay_state": _cosplay_state,
             "visual": visual,
             "cosplay_scene_only": True,
+            "cosplay_title_hint": _cosplay_state.get("title_hint") or ((visual.get("__anchor_state") or {}).get("title_hint") if isinstance(visual.get("__anchor_state"), dict) else ""),
             "cosplay_scene_caption": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
             "scene_seed_text": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
         }
@@ -12857,6 +12865,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "scene_text": _cosplay_state.get("scene_caption") or visual["composition"],
             "cosplay_scene_caption": _cosplay_state.get("scene_caption") or visual["composition"],
             "cosplay_scene_only": True,
+            "cosplay_title_hint": _cosplay_state.get("title_hint") or post_text.get("title") or story.get("character_name") or "",
             "mood": visual["mood"],
             "mood_summary": visual.get("mood", ""),
             "message": post_text.get("message_to_daxia") or visual["message"],
@@ -18419,7 +18428,8 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
             authoritative_scene,
         )
     else:
-        prompt_base = authoritative_scene
+        photo_title = scene_data.get("scene_summary") or raw_scene_text or scene_seed_text or "這一刻"
+        prompt_base = _compose_title_scene_render_prompt("photo", photo_title, authoritative_scene)
     if photo_mode_override == "freestyle":
         prompt_base = (
             str(prompt_base).strip()
@@ -18484,8 +18494,8 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "scene_text": scene_seed_text or scene_data.get("scene_summary", "溫馨自然的家中居家場景"),
         "scene_summary": scene_data.get("scene_summary", ""),
         "authoritative_scene": authoritative_scene,
-        "root_prompt_base": authoritative_scene,
-        "title": scene_data.get("scene_summary") or authoritative_scene,
+        "root_prompt_base": prompt_base,
+        "title": scene_data.get("scene_summary") or raw_scene_text or "這一刻",
         "outfit_summary": scene_data.get("outfit_summary", ""),
         "action_summary": scene_data.get("action_summary", ""),
         "mood_summary": scene_data.get("mood_summary", ""),
@@ -19026,7 +19036,7 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         policy_info=policy_info,
     )
     authoritative_scene = _clean_text_compact(scene_data.get("authoritative_scene") or scene_data.get("photo_prompt") or activity.get("photo_prompt_seed") or activity.get("title") or "小俠自主生活")
-    prompt_base = authoritative_scene
+    prompt_base = _compose_title_scene_render_prompt("autonomy", activity.get("title") or "小俠自主活動", authoritative_scene)
     source_mode = "photo_reference" if wardrobe_item and reference_item_path else "photo_scene"
     context = {
         "mode": source_mode,
@@ -19036,8 +19046,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
         "scene_text": f"小俠自主生活｜{activity.get('title')}",
         "scene_summary": scene_data.get("scene_summary") or activity.get("photo_prompt_seed") or activity.get("title") or "",
         "authoritative_scene": authoritative_scene,
-        "root_prompt_base": authoritative_scene,
-        "title": scene_data.get("scene_summary") or activity.get("title") or "",
+        "root_prompt_base": prompt_base,
+        "title": activity.get("title") or scene_data.get("scene_summary") or "小俠自主活動",
         "outfit_summary": scene_data.get("outfit_summary") or (_wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "小俠依活動自由搭配合適服裝"),
         "action_summary": scene_data.get("action_summary") or activity.get("title") or "",
         "mood_summary": scene_data.get("mood_summary") or "小俠自主生活、自然分享、成熟有生活感",
@@ -19197,6 +19207,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "cosplay_state": cosplay_state,
         "visual": visual,
         "cosplay_scene_only": True,
+        "cosplay_title_hint": cosplay_state.get("title_hint") or ((visual.get("__anchor_state") or {}).get("title_hint") if isinstance(visual.get("__anchor_state"), dict) else ""),
         "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition") or "",
         "scene_seed_text": cosplay_state.get("scene_caption") or visual.get("composition") or "",
     }
@@ -19238,6 +19249,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "scene_text": cosplay_state.get("scene_caption") or visual.get("composition", ""),
         "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition", ""),
         "cosplay_scene_only": True,
+        "cosplay_title_hint": cosplay_state.get("title_hint") or post_text.get("title") or story.get("character_name") or "",
         "mood": visual.get("mood", ""),
         "mood_summary": visual.get("mood", ""),
         "message": post_text.get("message_to_daxia") or visual.get("message", ""),
@@ -19820,47 +19832,36 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     )
 
     def _scene_semantic_brief():
-        # v1.8.09：/寫真 v5 背景只看 Title + Scene；Scene 仍是唯一驗收標準。
+        source_module = str(source_context.get("source_module") or "").strip().lower()
+        is_diary = source_mode_norm == "diary" or str(source_context.get("type") or "").strip().lower() == "diary"
+        scene = _clean_text_compact(
+            source_context.get("authoritative_scene")
+            or source_context.get("cosplay_scene_caption")
+            or ((source_context.get("post_text") or {}).get("scene_caption") if isinstance(source_context.get("post_text"), dict) else "")
+            or source_context.get("composition")
+            or source_context.get("scene_summary")
+            or source_context.get("scene_text")
+            or ""
+        )
+        if is_diary:
+            return f"AUTHORITATIVE SCENE: {scene}" if scene else "AUTHORITATIVE SCENE: Xiaoxia diary moment"
         if is_photobook:
             title = source_context.get("shot_title") or source_context.get("title") or source_context.get("album_title") or ""
-            scene = _clean_text_compact(
-                source_context.get("authoritative_scene")
-                or _compose_photobook_scene(source_context.get("photobook_content_scene"), source_context.get("photobook_camera_scene"))
-                or source_context.get("scene_summary")
-                or ""
-            )
             return _compose_title_scene_render_prompt("photobook", title, scene)
-        # v1.8.08：凡已有 authoritative_scene，都只允許 v5 背景看這一份場景真相。
-        authoritative = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("root_prompt_base") or "")
-        if authoritative:
-            return f"AUTHORITATIVE SCENE: {authoritative}"
         if is_cosplay:
-            post_text = source_context.get("post_text") if isinstance(source_context.get("post_text"), dict) else {}
-            scene = _clean_text_compact(
-                source_context.get("cosplay_scene_caption")
-                or post_text.get("scene_caption")
-                or source_context.get("scene_summary")
-                or source_context.get("composition")
+            title = (
+                source_context.get("cosplay_title_hint")
+                or ((source_context.get("post_text") or {}).get("title") if isinstance(source_context.get("post_text"), dict) else "")
+                or source_context.get("cosplay_character_name")
+                or source_context.get("topic")
                 or ""
             )
-            return f"AUTHORITATIVE TODAY SCENE: {scene}" if scene else "AUTHORITATIVE TODAY SCENE: a cinematic cosplay scene with Xiaoxia"
-
-        rows = []
-        def add(label, value, limit=700):
-            cleaned = _clip(value, limit)
-            if cleaned:
-                rows.append(f"{label}: {cleaned}")
-        add("Topic", source_context.get("topic"), 360)
-        add("Story / event", source_context.get("event"), 900)
-        add("Requested scene", source_context.get("scene_summary") or source_context.get("scene_text"), 700)
-        add("Composition", source_context.get("composition"), 700)
-        add("Action", source_context.get("action_summary"), 400)
-        add("Mood", source_context.get("mood_summary") or source_context.get("mood"), 320)
-        add("User request", source_context.get("user_mode_request") or source_context.get("user_input"), 500)
-        add("Original generation scene prompt", source_context.get("prompt_base"), 1800)
-        if not rows:
-            rows.append("Scene: a visually appealing lifestyle scene suitable for Xiaoxia")
-        return "\n".join(rows)
+            return _compose_title_scene_render_prompt("cosplay", title, scene)
+        if source_module == "autonomy" or _is_autonomy_context(source_context):
+            title = source_context.get("activity_title") or source_context.get("title") or source_context.get("scene_text") or "小俠自主活動"
+            return _compose_title_scene_render_prompt("autonomy", title, scene)
+        title = source_context.get("title") or source_context.get("scene_summary") or source_context.get("scene_text") or "這一刻"
+        return _compose_title_scene_render_prompt("photo", title, scene)
 
     semantic_brief = _scene_semantic_brief()
     framing = _clip(source_context.get("camera_framing"), 80) or "portrait-oriented"
@@ -19899,7 +19900,8 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         "trace_id": _new_generation_trace_id("photo"),
         "source_mode": source_context.get("source_mode") or source_context.get("type") or "photo_scene",
         "user_input": "Seedream v5 background plate + Seedream v4.5 final render",
-        "scene_seed_text": _photo_context_root_scene_prompt(source_context),
+        "scene_seed_text": source_context.get("authoritative_scene") or source_context.get("scene_summary") or source_context.get("scene_text") or "",
+        "render_title": source_context.get("shot_title") or source_context.get("activity_title") or source_context.get("cosplay_title_hint") or source_context.get("title") or source_context.get("topic") or "",
         "seedream_model_id": SEEDREAM_V45_MODEL_ID,
         "seedream_model_label": "Seedream v4.5 + v5 BG",
         "seedream_model_id_override": SEEDREAM_V45_MODEL_ID,
@@ -19991,6 +19993,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     else:
         wardrobe_url = None
 
+    source_module = str(source_context.get("source_module") or "").strip().lower()
     if is_cosplay:
         scene_caption = _clean_text_compact(
             source_context.get("cosplay_scene_caption")
@@ -19999,10 +20002,21 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
             or source_context.get("composition")
             or ""
         )
-        prompt_base = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=True)
+        cosplay_title = source_context.get("cosplay_title_hint") or ((source_context.get("post_text") or {}).get("title") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("cosplay_character_name") or source_context.get("topic") or ""
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=True, title_hint=cosplay_title)
         trace_context["cosplay_scene_caption"] = scene_caption
+        trace_context["cosplay_title_hint"] = cosplay_title
+    elif is_photobook:
+        scene = source_context.get("authoritative_scene") or _compose_photobook_scene(source_context.get("photobook_content_scene"), source_context.get("photobook_camera_scene"))
+        prompt_base = _compose_title_scene_render_prompt("photobook", source_context.get("shot_title") or source_context.get("title") or source_context.get("album_title"), scene)
+    elif source_mode_norm == "diary" or str(source_context.get("type") or "").lower() == "diary":
+        prompt_base = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("composition") or source_context.get("scene_summary") or "")
+    elif source_module == "autonomy" or _is_autonomy_context(source_context):
+        scene = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("scene_summary") or source_context.get("scene_text") or "")
+        prompt_base = _compose_title_scene_render_prompt("autonomy", source_context.get("activity_title") or source_context.get("title") or "小俠自主活動", scene)
     else:
-        prompt_base = _photo_context_root_scene_prompt(source_context)
+        scene = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("scene_summary") or source_context.get("scene_text") or "")
+        prompt_base = _compose_title_scene_render_prompt("photo", source_context.get("title") or source_context.get("scene_summary") or "這一刻", scene)
     if not str(prompt_base).strip():
         raise RuntimeError("V5_BG_UPGRADE_PROMPT_NONE：找不到可重建場景的原始 prompt_base。")
 
@@ -20194,8 +20208,11 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
     else:
         wardrobe_url = None
 
+    source_module = str(source_context.get("source_module") or "").strip().lower()
     if trace_context.get("cosplay_scene_only"):
-        prompt_base = _build_cosplay_scene_only_seedream_prompt(trace_context.get("cosplay_scene_caption"), hybrid=True)
+        cosplay_title = source_context.get("cosplay_title_hint") or ((source_context.get("post_text") or {}).get("title") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("cosplay_character_name") or source_context.get("topic") or ""
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(trace_context.get("cosplay_scene_caption"), hybrid=True, title_hint=cosplay_title)
+        trace_context["cosplay_title_hint"] = cosplay_title
     elif (
         source_mode_norm == "photobook"
         or str(source_context.get("type") or "").lower() == "photobook"
@@ -20207,8 +20224,14 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
             source_context.get("authoritative_scene")
             or _compose_photobook_scene(source_context.get("photobook_content_scene"), source_context.get("photobook_camera_scene")),
         )
+    elif source_mode_norm == "diary" or str(source_context.get("type") or "").lower() == "diary":
+        prompt_base = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("composition") or source_context.get("scene_summary") or "")
+    elif source_module == "autonomy" or _is_autonomy_context(source_context):
+        scene = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("scene_summary") or source_context.get("scene_text") or "")
+        prompt_base = _compose_title_scene_render_prompt("autonomy", source_context.get("activity_title") or source_context.get("title") or "小俠自主活動", scene)
     else:
-        prompt_base = _photo_context_root_scene_prompt(source_context)
+        scene = _clean_text_compact(source_context.get("authoritative_scene") or source_context.get("scene_summary") or source_context.get("scene_text") or "")
+        prompt_base = _compose_title_scene_render_prompt("photo", source_context.get("title") or source_context.get("scene_summary") or "這一刻", scene)
     if not str(prompt_base).strip():
         if is_more:
             raise RuntimeError("V5_BG_MORE_PROMPT_NONE：找不到 More 可用的 prompt_base。")
