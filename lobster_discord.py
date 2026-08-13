@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.10"
+LOBSTER_VERSION = "1.8.11"
 
 
 def _normalize_generation_level(level):
@@ -11789,13 +11789,31 @@ def _allow_background_bystanders_from_text(text, mode="photo"):
     # 私密空間永遠小俠獨照；使用者明確要求空景/完全獨照時也不允許路人。
     if _is_private_scene_text(text) or _explicit_solo_or_empty_scene_requested(text):
         return False
-    # 其他場景可有不互動、不搶主體的背景路人；若使用者明確要求與某角色互動，允許該指定角色，不把它當路人錯殺。
+
+    raw = str(text or "")
+    # v1.8.11：Scene 若明確寫出背景人物，技術 people policy 不得反過來把他們刪掉。
+    # 這裡只判斷「是否允許背景人物」，不替 Scene 新增人物或改寫人物關係。
+    background_person_terms = (
+        "同學", "同学", "學員", "学员", "學生", "学生", "路人", "遊客", "游客", "顧客", "顾客",
+        "工作人員", "工作人员", "店員", "店员", "classmate", "classmates", "student", "students",
+        "bystander", "bystanders", "crowd", "customers", "staff"
+    )
+    background_cues = (
+        "背景可見", "背景可见", "背景有", "背景裡", "背景里", "背景中的", "遠處", "远处", "模糊",
+        "in the background", "background", "distant", "blurred"
+    )
+    if _contains_any_keyword(raw, background_person_terms) and _contains_any_keyword(raw, background_cues):
+        return True
+
+    # 一般公共／課程／活動場所可允許不互動、不搶主體的背景人物。
     public_keywords = [
         "街", "景點", "文創", "園區", "夜市", "市集", "車站", "捷運", "機場", "老街", "展覽", "博物館", "咖啡街",
         "旅行", "旅遊", "戶外", "公園", "海邊", "沙灘", "山", "街頭", "廣場", "餐廳", "酒吧", "舞台", "宮殿", "神殿",
+        "教室", "課堂", "课堂", "課程", "课程", "工作坊", "講座", "讲座", "教學", "教学",
         "street", "station", "airport", "market", "museum", "exhibition", "park", "travel", "tourist", "outdoor", "plaza", "bar", "stage",
+        "classroom", "class", "course", "workshop", "lecture",
     ]
-    if _contains_any_keyword(text, public_keywords):
+    if _contains_any_keyword(raw, public_keywords):
         return True
     return str(mode or "").lower() == "cosplay"
 
@@ -12129,44 +12147,7 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
     return "\n".join(lines).strip()
 
 
-def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True, visual_checklist=None):
-    user_request = _clean_text_compact(user_request or "")
-    retry_reason = _clean_text_compact(retry_reason or "")
-    lines = [
-        "FIGURE ROLE MAP — obey these roles strictly.",
-        "",
-        "Figures 1-9 are identity-only reference images of Xiaoxia.",
-        "Use Figures 1-9 only to preserve Xiaoxia's face identity, fair skin, adult East Asian appearance, long brown hair, tall slim feminine body, defined waist, and overall recognizable Xiaoxia look.",
-        "Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.",
-        "",
-        "Create a new solo photorealistic lifestyle image of Xiaoxia.",
-        _seedream_people_policy_line(visual_checklist),
-    ]
-    if has_figure10:
-        lines += [
-            "",
-            "Use Figure 10 as the primary garment and styling reference. Follow it faithfully: do not simplify, redesign, replace, or reinterpret the outfit or its distinctive design elements unless explicitly instructed.",
-            "The text request remains authoritative for the scene, action, pose, camera, lighting, and composition; Figure 10 must not redirect or weaken them.",
-        ]
-    if current_outfit:
-        lines += ["", f"Current outfit continuity, styling only: {str(current_outfit).strip()}. It may include clothing and visible accessories, but must not override the text-request scene or pose."]
-    if retry_reason:
-        lines += ["", "PREVIOUS OUTPUT WAS REJECTED:", retry_reason, "Correct the failure now. The text-request scene and action must be obeyed before beauty, fashion display, or flattering framing."]
-    lines += [
-        "",
-        "TEXT REQUEST — this controls the final scene, pose, action, and composition:",
-        "",
-        user_request,
-        "",
-        "Mandatory obedience rules:",
-        "- The requested main scene, furniture/location, and body pose/action must be visually clear.",
-        "- Follow explicit actions literally, such as sitting, standing, lying, kneeling, hugging a pillow, holding an object, cooking, or cycling.",
-        "- Do not replace the requested scene/action with a generic fashion pose or a different location.",
-        "- If the request says sofa or bed, show that furniture clearly.",
-        "- If the request says to hold or hug a pillow or prop, show that action clearly.",
-        "- Natural anatomy, single person only, candid lifestyle photo.",
-    ]
-    return "\n".join(lines).strip()
+# v1.8.11: obsolete early _build_photo_reference_minimal_seedream_prompt removed; final compact fallback is defined near the end of the module.
 
 
 async def _vision_check_instruction_adherence_image_url(image_url, prompt_text, mode="photo", trace_context=None, retry_used=False):
@@ -12530,9 +12511,13 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     }, prompt=initial_prompt)
     gpt_image2_is_fallback_only = os.environ.get("ENABLE_GPT_IMAGE2_FALLBACK", "false").lower() in {"1", "true", "yes"}
 
-    pose_user_request = _extract_pose_user_request(initial_prompt, visual_dict)
-    pose_critical = _is_pose_critical_request(pose_user_request)
-    visual_checklist = _build_visual_checklist(mode=mode, user_text=pose_user_request or initial_prompt, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
+    # v1.8.11 Semantic Contract Cutover:
+    # initial_prompt is the render semantic contract (Title + Scene; Diary may be Scene-only).
+    # _extract_pose_user_request is allowed only as a detector aid; it must never replace or shorten the contract sent to Seedream.
+    semantic_contract = str(initial_prompt or "").strip()
+    pose_probe = _extract_pose_user_request(semantic_contract, visual_dict)
+    pose_critical = _is_pose_critical_request(pose_probe or semantic_contract)
+    visual_checklist = _build_visual_checklist(mode=mode, user_text=semantic_contract, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
     trace_context["visual_checklist"] = visual_checklist
     trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
     trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
@@ -12544,14 +12529,25 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     reference_minimal = str(mode or "").lower() in {"photo_scene", "photo_reference", "travel", "shopping", "world", "scene"} or force_minimal_prompt
     if pose_critical:
         trace_context["pose_critical"] = True
-        trace_context["pose_user_request"] = pose_user_request
+        trace_context["pose_user_request"] = pose_probe
     if reference_minimal:
         trace_context["reference_minimal"] = True
     last_adherence_reason = ""
     for level in range(5):
-        if pose_critical and str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
+        semantic_locked_photo = bool(trace_context.get("semantic_contract_locked")) and str(mode or "").lower() in {"photo_scene", "photo_reference", "travel", "shopping", "world", "scene"}
+        if semantic_locked_photo:
+            current_prompt = semantic_contract
+            if level > 0 and last_adherence_reason:
+                current_prompt = (
+                    semantic_contract
+                    + "\n\nTECHNICAL RETRY NOTE: The previous image failed Scene adherence. "
+                    + _clean_text_compact(last_adherence_reason)[:500]
+                    + " Correct only that failure; do not change, summarize, or replace any Scene fact."
+                )
+            trace_context["raw_seedream_mode"] = "title_scene_semantic_contract_direct"
+        elif pose_critical and str(mode or "").lower() in {"photo_scene", "photo_reference", "diary"}:
             current_prompt = _build_pose_critical_seedream_prompt(
-                pose_user_request,
+                semantic_contract,
                 has_reference=bool(discord_image_url),
                 current_outfit=current_outfit,
                 retry_reason=last_adherence_reason if level > 0 else "",
@@ -12582,7 +12578,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                     retry_reason=last_adherence_reason if level > 0 else "",
                 )
                 trace_context["raw_seedream_mode"] = "cosplay_canon_first_sexy_minimal"
-            visual_checklist = _build_visual_checklist(mode=mode, user_text=pose_user_request or initial_prompt, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
+            visual_checklist = _build_visual_checklist(mode=mode, user_text=semantic_contract, visual_dict=visual_dict, current_outfit=current_outfit, trace_context=trace_context)
             trace_context["visual_checklist"] = visual_checklist
             trace_context["allow_background_bystanders"] = bool(visual_checklist.get("allow_background_bystanders"))
             trace_context["strict_solo_required"] = bool(visual_checklist.get("strict_solo_required"))
@@ -12590,7 +12586,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             trace_context["people_policy"] = str(visual_checklist.get("people_policy") or "")
         elif str(mode or "").lower() == "diary":
             current_prompt = _build_diary_guarded_minimal_prompt(
-                pose_user_request or initial_prompt,
+                semantic_contract,
                 visual_dict=visual_dict,
                 trace_context=trace_context,
                 visual_checklist=visual_checklist,
@@ -12602,7 +12598,7 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
             trace_context["raw_seedream_mode"] = trace_context.get("raw_seedream_mode") or "diary_guarded_minimal"
         elif reference_minimal:
             current_prompt = _build_photo_reference_minimal_seedream_prompt(
-                pose_user_request or initial_prompt,
+                semantic_contract,
                 current_outfit=current_outfit,
                 retry_reason=last_adherence_reason if level > 0 else "",
                 has_figure10=has_figure10,
@@ -12684,8 +12680,15 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
                     initial_prompt = SOLO_SCENE_REWRITE_GUARD.strip() + "\n\n" + str(initial_prompt)
                 continue
 
+            adherence_scene = _clean_text_compact(
+                trace_context.get("authoritative_scene")
+                or trace_context.get("cosplay_scene_caption")
+                or trace_context.get("scene_seed_text")
+                or semantic_contract
+            )
+            trace_context["adherence_contract_scene_only"] = adherence_scene
             adherence_ok, adherence_reason, adherence_detail = await _vision_check_instruction_adherence_image_url(
-                generated_image_url, current_prompt, mode=mode, trace_context=trace_context, retry_used=(level > 0)
+                generated_image_url, adherence_scene, mode=mode, trace_context=trace_context, retry_used=(level > 0)
             )
             _trace_stage(trace_context, f"adherence_gate_L{level}", data={
                 "adherence_ok": adherence_ok,
@@ -16115,8 +16118,32 @@ def _v1527_concise_people_policy(checklist=None):
     )
 
 
-def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
-    """v1.5.49: concise photo prompt with a face-closeup special branch for /寫真 More and direct close-up requests."""
+def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None, semantic_contract_locked=False):
+    """Seedream photo prompt. v1.8.11: preserve Title + Scene verbatim; add only short technical reference rules."""
+    if semantic_contract_locked:
+        contract = str(custom_prompt or "").strip()
+        c = visual_checklist if isinstance(visual_checklist, dict) else {}
+        if c.get("strict_solo_required") or str(c.get("people_policy") or "") == "private_strict_solo":
+            people_line = "People: only Xiaoxia is visible; never show Daxia/viewer or any external body part."
+        elif c.get("female_interaction_ok"):
+            people_line = "People: Xiaoxia is primary; Scene-specified female companions may interact as secondary characters; men may only be distant non-interacting background; never show Daxia/viewer."
+        elif c.get("allow_background_bystanders"):
+            people_line = "People: Xiaoxia is primary; Scene-specified background people may appear only as secondary non-interacting figures; no male interaction; never show Daxia/viewer."
+        else:
+            people_line = "People: Xiaoxia is the only primary subject; no companion, no male interaction, and never show Daxia/viewer."
+        sections = [
+            "REFERENCES: Figures 1-9 preserve Xiaoxia identity/body only; do not copy their pose, outfit, background or composition.",
+            "Keep Xiaoxia's established adult East Asian face and tall, slim, narrow-waisted, naturally full-busted hourglass body identity with natural anatomy.",
+            people_line,
+        ]
+        if has_reference:
+            sections.append("FIGURE 10: exact clothing / visible fashion-accessory authority only; preserve its actual design and do not let it change Scene, action, pose, camera or background.")
+        elif current_outfit:
+            sections.append("OUTFIT CONTINUITY: " + str(current_outfit).strip())
+        sections.append("TITLE + SCENE — use both for generation understanding; Scene facts are mandatory and must not be summarized, replaced or simplified:\n" + contract)
+        sections.append("QUALITY: photorealistic, natural anatomy/hands, believable lighting; do not substitute a generic portrait or different activity/location.")
+        return "\n\n".join(s for s in sections if str(s).strip()).strip()
+
     if _is_face_closeup_request_text(custom_prompt):
         return _seedream_face_closeup_prompt(
             custom_prompt,
@@ -16296,7 +16323,13 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         )
         print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.42_R2 diary prompt + shared compact identity")
     else:
-        final_prompt = _seedream_photo_prompt(custom_prompt, has_reference=bool(reference_image_path), current_outfit=current_outfit, visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None)
+        final_prompt = _seedream_photo_prompt(
+            custom_prompt,
+            has_reference=bool(reference_image_path),
+            current_outfit=current_outfit,
+            visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
+            semantic_contract_locked=bool((trace_context or {}).get("semantic_contract_locked")) if isinstance(trace_context, dict) else False,
+        )
         diary_prompt_stats = None
         print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.30 conflict-free photo prompt builder")
     if isinstance(trace_context, dict) and trace_context.get("v5_background_role_handoff"):
@@ -16305,8 +16338,12 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_id"] = model_id
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
-        trace_context["prompt_engine_version"] = "v1.5.42_R2"
-        trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
+        if bool(trace_context.get("semantic_contract_locked")) and trace_kind != "diary":
+            trace_context["prompt_engine_version"] = "v1.8.11"
+            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1811"
+        else:
+            trace_context["prompt_engine_version"] = "v1.5.42_R2"
+            trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
         if diary_prompt_stats is not None:
             trace_context["diary_prompt_stats"] = diary_prompt_stats
             trace_context["diary_seedream_prompt_exact"] = final_prompt
@@ -17360,12 +17397,23 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
 
 
 async def _generate_photo_from_context(context, msg=None):
+    # v1.8.11：Title + Scene 是生圖語意契約；authoritative_scene 是唯一審圖 Scene。
+    # scene_text / scene_summary 只可作 UI、索引、摘要或 fallback，不得覆蓋 authoritative_scene。
+    semantic_scene = _clean_text_compact(
+        context.get("authoritative_scene")
+        or _compose_photobook_scene(context.get("photobook_content_scene"), context.get("photobook_camera_scene"))
+        or context.get("scene_summary")
+        or context.get("scene_text")
+        or ""
+    )
+    semantic_contract = str(context.get("prompt_base") or context.get("root_prompt_base") or semantic_scene or "").strip()
+
     trace_context = context.get("__trace_context") if isinstance(context.get("__trace_context"), dict) else {
         "kind": "photo",
         "action": context.get("trace_action") or "photo_generate",
         "source_mode": context.get("source_mode", "photo_scene"),
         "user_input": context.get("user_input") or _photo_context_root_scene_prompt(context),
-        "scene_seed_text": context.get("scene_text") or "",
+        "scene_seed_text": semantic_scene,
         "photo_mode_override": context.get("photo_mode_override"),
         "wardrobe_id": context.get("wardrobe_id"),
         "used_pending_wardrobe": context.get("used_pending_wardrobe"),
@@ -17376,6 +17424,13 @@ async def _generate_photo_from_context(context, msg=None):
         "seedream_model_id_override": context.get("seedream_model_id_override"),
         "seedream_model_label": context.get("seedream_model_label"),
     }
+    trace_context.setdefault("authoritative_scene", semantic_scene)
+    trace_context.setdefault("semantic_contract", semantic_contract)
+    trace_context["scene_seed_text"] = semantic_scene
+    if str(context.get("source_mode") or context.get("type") or "").lower() not in {"cosplay", "diary"}:
+        trace_context["semantic_contract_locked"] = True
+    trace_context.setdefault("render_title", context.get("shot_title") or context.get("activity_title") or context.get("title") or "")
+
     if str(context.get("source_mode") or context.get("type") or "").lower() == "cosplay":
         trace_context["kind"] = "cosplay"
         trace_context.setdefault("story", {
@@ -17406,13 +17461,13 @@ async def _generate_photo_from_context(context, msg=None):
             "action_summary": context.get("action_summary", ""),
             "mood_summary": context.get("mood_summary", ""),
             "camera_framing": context.get("camera_framing", "half_body"),
-            "user_scene_hardlock": context.get("scene_text", ""),
-            "user_priority_request": context.get("scene_text", ""),
+            "user_scene_hardlock": semantic_scene,
+            "user_priority_request": semantic_scene,
         },
         context.get("source_mode", "photo_scene"),
         reference_item_path=context.get("reference_item_path"),
         reference_item_url=context.get("reference_item_url"),
-        user_scene_hardlock=context.get("scene_text", ""),
+        user_scene_hardlock=semantic_scene,
     )
     _trace_stage(trace_context, "photo_visual_dict", data=visual)
     generation_mode = context.get("generation_mode") or context.get("source_mode", "photo_scene")
@@ -17422,7 +17477,7 @@ async def _generate_photo_from_context(context, msg=None):
         discord_image_url=context.get("reference_item_path"),
         base_filename="base_xiaoxia.jpg",
         mode=generation_mode,
-        initial_prompt=context.get("prompt_base", ""),
+        initial_prompt=semantic_contract,
         visual_dict=visual,
         msg=msg,
         current_outfit=context.get("current_outfit_for_seedream"),
@@ -26636,13 +26691,6 @@ _v1525_build_pose_critical_seedream_prompt = _build_pose_critical_seedream_promp
 def _build_pose_critical_seedream_prompt(user_request, has_reference=False, current_outfit=None, retry_reason="", visual_checklist=None):
     base = _v1525_build_pose_critical_seedream_prompt(user_request, has_reference, current_outfit, retry_reason, visual_checklist)
     return _v1526_relax_old_solo_text(base, visual_checklist)
-
-_v1525_build_photo_reference_minimal_seedream_prompt = _build_photo_reference_minimal_seedream_prompt
-
-def _build_photo_reference_minimal_seedream_prompt(user_request, current_outfit=None, retry_reason="", has_figure10=True, visual_checklist=None):
-    base = _v1525_build_photo_reference_minimal_seedream_prompt(user_request, current_outfit, retry_reason, has_figure10, visual_checklist)
-    return _v1526_relax_old_solo_text(base, visual_checklist)
-
 
 
 # ==========================================
