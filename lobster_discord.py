@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.16"
+LOBSTER_VERSION = "1.8.17"
 
 
 def _normalize_generation_level(level):
@@ -637,8 +637,8 @@ def _env_int(name, default=0, min_value=None, max_value=None):
 # 可在 Zeabur 環境變數設 SEEDREAM_ENABLE_SAFETY_CHECKER=true 臨時改回開啟。
 SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", False)
 
-# 衣櫃去人化保留獨立開關，但預設同樣關閉 safety checker。
-SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER", False)
+# v1.8.17：/衣櫃 去人固定不啟用 fal.ai / Seedream safety checker。
+# 不再接受 SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER 環境變數覆寫，避免部署環境誤開。
 
 # 🧪 v1.5.26_R1：生圖後人物／指令遵循 Gate 總開關。
 # Zeabur 環境變數：PHOTO_ENABLE_GATE=on / off（亦支援 true/false、1/0）。
@@ -14858,7 +14858,7 @@ async def generate_seedream_v45_wardrobe_cleanup(reference_image_path, custom_pr
                 "image_size": SEEDREAM_V45_IMAGE_SIZE,
                 "num_images": 1,
                 "max_images": 1,
-                "enable_safety_checker": bool(SEEDREAM_WARDROBE_ENABLE_SAFETY_CHECKER),
+                "enable_safety_checker": False,
             },
             with_logs=True,
             on_queue_update=on_queue_update,
@@ -21934,7 +21934,6 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                     target_date=entry_date,
                     autonomy_candidate=None,
                     photo_selection=diary_photo_selection,
-                    wardrobe_item=(diary_wardrobe or {}).get("item"),
                 )
                 if diary_wardrobe and diary_wardrobe.get("error"):
                     print(f"⚠️ [{entry_date}] {diary_wardrobe.get('error')} item={diary_wardrobe.get('item', {}).get('id')}")
