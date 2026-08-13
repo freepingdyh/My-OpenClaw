@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.15"
+LOBSTER_VERSION = "1.8.16"
 
 
 def _normalize_generation_level(level):
@@ -10475,7 +10475,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     if not scene:
         scene = fallback_scene
 
-    # v1.8.15: Gemini may paraphrase away framing or negative constraints.
+    # v1.8.16: Gemini may paraphrase away framing or negative constraints.
     # Preserve the user's extra visual directive verbatim inside the authoritative Scene contract.
     _manual_title, _manual_directive = _cosplay_manual_request_parts(story=story)
     if _manual_directive and _manual_directive not in scene:
@@ -16345,8 +16345,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
         if bool(trace_context.get("semantic_contract_locked")) and trace_kind != "diary":
-            trace_context["prompt_engine_version"] = "v1.8.15"
-            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1815"
+            trace_context["prompt_engine_version"] = "v1.8.16"
+            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1816"
         else:
             trace_context["prompt_engine_version"] = "v1.5.42_R2"
             trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
@@ -17132,8 +17132,35 @@ def _photo_discord_file(context):
         return None, None
 
 
+def _collapse_adjacent_duplicate_cosplay_role(text):
+    """v1.8.16: Collapse accidental adjacent role repetition from manual /cosplay parsing.
+
+    Examples: "綱手 綱手" -> "綱手"; "Ivy Valentine Ivy Valentine" -> "Ivy Valentine".
+    This is only used on the inferred role segment before visual directives.
+    """
+    value = _clean_text_compact(text or "")
+    if not value:
+        return ""
+
+    # Prefer a whitespace-delimited repeated phrase so multi-word Latin names stay intact.
+    words = value.split()
+    if len(words) >= 2 and len(words) % 2 == 0:
+        half = len(words) // 2
+        if words[:half] == words[half:]:
+            return " ".join(words[:half])
+
+    # Also handle compact CJK duplication such as "綱手綱手".
+    compact = value.replace(" ", "")
+    if len(compact) >= 2 and len(compact) % 2 == 0:
+        half = len(compact) // 2
+        if compact[:half] == compact[half:]:
+            return compact[:half]
+
+    return value
+
+
 def _cosplay_manual_request_parts(story=None, context=None):
-    """v1.8.15: Split manual /cosplay input into canonical work-role title and extra visual directives."""
+    """v1.8.16: Split manual /cosplay input into canonical work-role title and extra visual directives."""
     story = story if isinstance(story, dict) else {}
     context = context if isinstance(context, dict) else {}
     candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
@@ -17182,17 +17209,18 @@ def _cosplay_manual_request_parts(story=None, context=None):
         hits = [rest.find(k) for k in markers if rest.find(k) > 0]
         cut = min(hits) if hits else -1
         if cut > 0:
-            role = _clean_text_compact(rest[:cut])
+            role = _collapse_adjacent_duplicate_cosplay_role(rest[:cut])
             directive = _clean_text_compact(rest[cut:])
         else:
-            role = rest
+            role = _collapse_adjacent_duplicate_cosplay_role(rest)
 
+    role = _collapse_adjacent_duplicate_cosplay_role(role)
     title = f"{work}－{role}" if work and role else ""
     return title[:64], directive[:360]
 
 
 def _cosplay_requested_camera_framing(story=None, context=None, force_half_body=False):
-    """v1.8.15: Respect explicit manual framing instead of defaulting every normal cosplay to full_body."""
+    """v1.8.16: Respect explicit manual framing instead of defaulting every normal cosplay to full_body."""
     if force_half_body:
         return "half_body"
     story = story if isinstance(story, dict) else {}
@@ -17207,7 +17235,7 @@ def _cosplay_requested_camera_framing(story=None, context=None, force_half_body=
 
 
 def _cosplay_semantic_title(story=None, post_text=None, context=None):
-    """v1.8.15: Cosplay Title is canonical work + role only; extra user directives belong to Scene."""
+    """v1.8.16: Cosplay Title is canonical work + role only; extra user directives belong to Scene."""
     story = story if isinstance(story, dict) else {}
     post_text = post_text if isinstance(post_text, dict) else {}
     context = context if isinstance(context, dict) else {}
@@ -26714,7 +26742,7 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     checklist = dict(checklist or {})
     source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
 
-    # v1.8.15: Cosplay generation contract is intentionally strict-solo.
+    # v1.8.16: Cosplay generation contract is intentionally strict-solo.
     # Keep QA/checklist metadata aligned with the actual Seedream cosplay prompt.
     if str(mode or "").strip().lower() == "cosplay":
         checklist.update({
