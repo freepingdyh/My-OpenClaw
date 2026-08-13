@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.14"
+LOBSTER_VERSION = "1.8.15"
 
 
 def _normalize_generation_level(level):
@@ -10474,6 +10474,12 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     scene = _clean_text_compact(data.get("scene_caption") or fallback_scene)
     if not scene:
         scene = fallback_scene
+
+    # v1.8.15: Gemini may paraphrase away framing or negative constraints.
+    # Preserve the user's extra visual directive verbatim inside the authoritative Scene contract.
+    _manual_title, _manual_directive = _cosplay_manual_request_parts(story=story)
+    if _manual_directive and _manual_directive not in scene:
+        scene = _clean_text_compact(f"{scene} 使用者指定畫面要求：{_manual_directive}")
     return scene
 
 
@@ -11011,7 +11017,7 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         "title_hint": title_hint,
         "scenario_tw": scene_caption,
         "mood_tw": _clean_text_compact((story.get("cosplay_topic_candidate") or {}).get("mood") or "角色感、故事感、成熟魅力"),
-        "camera_framing": "half_body" if force_half_body else "full_body",
+        "camera_framing": _cosplay_requested_camera_framing(story=story, force_half_body=force_half_body),
         "vibe_target_zh": str(vibe.get("zh") or "魅"),
         "vibe_target_en": str(vibe.get("en") or "alluring-max"),
         "post_text_draft": post_text_draft,
@@ -16339,8 +16345,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
         if bool(trace_context.get("semantic_contract_locked")) and trace_kind != "diary":
-            trace_context["prompt_engine_version"] = "v1.8.14"
-            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1814"
+            trace_context["prompt_engine_version"] = "v1.8.15"
+            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1815"
         else:
             trace_context["prompt_engine_version"] = "v1.5.42_R2"
             trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
@@ -17126,8 +17132,82 @@ def _photo_discord_file(context):
         return None, None
 
 
+def _cosplay_manual_request_parts(story=None, context=None):
+    """v1.8.15: Split manual /cosplay input into canonical work-role title and extra visual directives."""
+    story = story if isinstance(story, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
+    if not candidate and isinstance(context.get("cosplay_topic_candidate"), dict):
+        candidate = context.get("cosplay_topic_candidate")
+
+    raw = _clean_text_compact(context.get("user_mode_request") or story.get("user_mode_request") or "")
+    if not raw:
+        topic = _clean_text_compact(context.get("topic") or story.get("topic") or "")
+        m = re.match(r"^【([^】]+)】", topic)
+        if m:
+            raw = _clean_text_compact(m.group(1))
+    raw = re.sub(r"^[（(][^）)]+[）)]\s*", "", raw).strip()
+    raw = re.sub(r"^(?:今日\s*)?(?:小俠\s*)?(?:cosplay|變身|扮演)\s*[：:｜|\-—]*\s*", "", raw, flags=re.IGNORECASE).strip()
+    if not raw or raw.lower() in {"auto", "每日動態選角", "今日動態選角"}:
+        return "", ""
+
+    m = re.match(r"^(?P<work>.+?)\s*[\-－—]\s*(?P<rest>.+)$", raw)
+    if not m:
+        return "", ""
+    work = _clean_text_compact(m.group("work"))
+    rest = _clean_text_compact(m.group("rest"))
+
+    role = _clean_text_compact(candidate.get("character_name") or context.get("cosplay_character_name") or story.get("character_name") or "")
+    if not role:
+        persona = _clean_text_compact(context.get("persona") or story.get("persona") or "")
+        pm = re.search(r"扮演角色\s*[：:]\s*(.+?)(?:\s*[（(]|$)", persona)
+        if pm:
+            persona_core = _clean_text_compact(pm.group(1))
+            if work and persona_core.startswith(work):
+                role = _clean_text_compact(persona_core[len(work):])
+            else:
+                role = persona_core
+
+    directive = ""
+    if role and rest.startswith(role):
+        directive = _clean_text_compact(rest[len(role):])
+        # Users often repeat the role once before a framing instruction, e.g. 綱手-綱手上半身...
+        while directive.startswith(role):
+            directive = _clean_text_compact(directive[len(role):])
+    else:
+        markers = (
+            "上半身", "腰間", "半身", "全身", "近景", "特寫", "背景", "額頭", "不要",
+            "姿勢", "動作", "鏡頭", "構圖", "場景", "表情", "手持", "拿著", "穿著", "坐姿", "站姿"
+        )
+        hits = [rest.find(k) for k in markers if rest.find(k) > 0]
+        cut = min(hits) if hits else -1
+        if cut > 0:
+            role = _clean_text_compact(rest[:cut])
+            directive = _clean_text_compact(rest[cut:])
+        else:
+            role = rest
+
+    title = f"{work}－{role}" if work and role else ""
+    return title[:64], directive[:360]
+
+
+def _cosplay_requested_camera_framing(story=None, context=None, force_half_body=False):
+    """v1.8.15: Respect explicit manual framing instead of defaulting every normal cosplay to full_body."""
+    if force_half_body:
+        return "half_body"
+    story = story if isinstance(story, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    _, directive = _cosplay_manual_request_parts(story=story, context=context)
+    raw = _clean_text_compact(directive or context.get("user_mode_request") or story.get("user_mode_request") or "")
+    if any(k in raw for k in ("上半身", "腰間以上", "腰部以上", "半身", "胸像", "胸口以上", "肩部以上", "頭肩", "臉部特寫", "近景特寫", "特寫")):
+        return "half_body"
+    if any(k in raw for k in ("全身", "完整全身", "從頭到腳")):
+        return "full_body"
+    return "full_body"
+
+
 def _cosplay_semantic_title(story=None, post_text=None, context=None):
-    """v1.8.14: Cosplay Title keeps source work + role when available, while Scene remains authoritative."""
+    """v1.8.15: Cosplay Title is canonical work + role only; extra user directives belong to Scene."""
     story = story if isinstance(story, dict) else {}
     post_text = post_text if isinstance(post_text, dict) else {}
     context = context if isinstance(context, dict) else {}
@@ -17150,7 +17230,11 @@ def _cosplay_semantic_title(story=None, post_text=None, context=None):
     if work and role:
         return f"{work}－{role}"[:64]
 
-    # Manual /cosplay requests often arrive only as user_mode_request, e.g. （動畫）火影忍者-綱手.
+    # Manual /cosplay requests: keep only canonical work + role in Title; put everything after the role into Scene.
+    manual_title, _manual_directive = _cosplay_manual_request_parts(story=story, context=context)
+    if manual_title:
+        return manual_title
+
     raw_mode = _clean_text_compact(
         context.get("user_mode_request")
         or story.get("user_mode_request")
@@ -26630,7 +26714,7 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     checklist = dict(checklist or {})
     source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
 
-    # v1.8.14: Cosplay generation contract is intentionally strict-solo.
+    # v1.8.15: Cosplay generation contract is intentionally strict-solo.
     # Keep QA/checklist metadata aligned with the actual Seedream cosplay prompt.
     if str(mode or "").strip().lower() == "cosplay":
         checklist.update({
