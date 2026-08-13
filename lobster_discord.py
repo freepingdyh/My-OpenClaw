@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.12"
+LOBSTER_VERSION = "1.8.13"
 
 
 def _normalize_generation_level(level):
@@ -16339,8 +16339,8 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
         trace_context["seedream_model_label"] = model_label
         trace_context["seedream_prompt_exact"] = final_prompt
         if bool(trace_context.get("semantic_contract_locked")) and trace_kind != "diary":
-            trace_context["prompt_engine_version"] = "v1.8.12"
-            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1812"
+            trace_context["prompt_engine_version"] = "v1.8.13"
+            trace_context["prompt_engine_marker"] = "TITLE_SCENE_SEMANTIC_CONTRACT_V1813"
         else:
             trace_context["prompt_engine_version"] = "v1.5.42_R2"
             trace_context["prompt_engine_marker"] = "DIARY_SHARED_IDENTITY_V1542_R2" if trace_kind == "diary" else "HARD_SCENE_REQUIREMENTS_V1527"
@@ -18845,6 +18845,47 @@ async def _overwrite_generated_photo(original_context, repaired_context, message
 
     _sync_autonomy_today_after_photo_replace(original_context, repaired_context)
     _safe_delete_vault_image(old_url)
+
+    # v1.8.13: adoption is a state mutation, so make it visible in latest/photo_trace as well.
+    # This does not regenerate an image; it records which repaired image became canonical.
+    try:
+        new_url = repaired_context.get("local_url") or repaired_context.get("image_url") or ""
+        original_scene = _clean_text_compact(original_context.get("authoritative_scene") or original_context.get("composition") or "")
+        repaired_scene = _clean_text_compact(repaired_context.get("authoritative_scene") or repaired_context.get("composition") or "")
+        adopt_trace = {
+            "kind": "photo",
+            "action": "photo_repair_adopt",
+            "source_mode": repaired_context.get("source_mode") or original_context.get("source_mode") or "photo",
+            "source_module": repaired_context.get("source_module") or original_context.get("source_module"),
+            "source_trace_id": repaired_context.get("trace_id"),
+            "original_trace_id": original_context.get("trace_id"),
+            "episode_id": repaired_context.get("episode_id") or original_context.get("episode_id"),
+            "old_photo_url": old_url,
+            "new_photo_url": new_url,
+            "result_url": new_url,
+            "wardrobe_id": repaired_context.get("wardrobe_id") or original_context.get("wardrobe_id"),
+            "wardrobe_name": repaired_context.get("wardrobe_name") or original_context.get("wardrobe_name"),
+            "render_title": repaired_context.get("render_title") or repaired_context.get("title") or original_context.get("render_title") or original_context.get("title"),
+            "authoritative_scene": repaired_scene,
+            "authoritative_scene_preserved": bool(original_scene and repaired_scene and original_scene == repaired_scene),
+            "semantic_contract_preserved": bool(
+                _clean_text_compact(repaired_context.get("root_prompt_base") or "")
+                == _clean_text_compact(original_context.get("root_prompt_base") or "")
+            ),
+            "adopted_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _trace_stage(adopt_trace, "photo_repair_adopt", data={
+            "old_photo_url": old_url,
+            "new_photo_url": new_url,
+            "episode_id": adopt_trace.get("episode_id"),
+            "wardrobe_id": adopt_trace.get("wardrobe_id"),
+            "authoritative_scene_preserved": adopt_trace.get("authoritative_scene_preserved"),
+            "semantic_contract_preserved": adopt_trace.get("semantic_contract_preserved"),
+        })
+        _write_generation_trace("photo", adopt_trace)
+    except Exception as trace_exc:
+        print(f"⚠️ [PHOTO_REPAIR_ADOPT_TRACE_FAILED] {type(trace_exc).__name__}: {trace_exc}")
+
     return repaired_context
 
 
@@ -26600,7 +26641,15 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
         })
 
     must_not = list(checklist.get("must_not_have") or [])
-    # 移除會誤殺女性社交互動的舊禁項。
+    # v1.8.13: background bystanders and forbidden companions are different things.
+    # If the Scene/public policy allows background people, remove the legacy blanket ban that
+    # would make QA reject every bystander even though allow_background_bystanders=True.
+    if checklist.get("allow_background_bystanders") and not checklist.get("strict_solo_required"):
+        must_not = [
+            x for x in must_not
+            if "any additional human figure, companion, bystander" not in str(x).lower()
+        ]
+    # Female interaction explicitly called for by Scene must not be killed by generic companion bans.
     if checklist.get("female_interaction_ok"):
         must_not = [x for x in must_not if "interacting companion" not in str(x).lower() and "second person" not in str(x).lower()]
     must_not += [
@@ -26679,21 +26728,37 @@ def _build_pose_critical_seedream_prompt(user_request, has_reference=False, curr
 # ==========================================
 
 def _v1540_people_rule(checklist=None):
-    """v1.5.42_R1: default solo; only an explicitly requested character may join."""
+    """v1.8.13: compact people rule follows the Scene-derived checklist instead of forcing solo."""
     c = checklist if isinstance(checklist, dict) else {}
-    explicit_companion = bool(c.get("specified_character_interaction"))
+    policy = str(c.get("people_policy") or "")
 
-    if not explicit_companion:
+    if c.get("strict_solo_required") or policy == "private_strict_solo":
         return (
-            "People: Xiaoxia alone. She is the only visible human figure. "
-            "Do not add companions, bystanders, external hands, or visible viewer body parts."
+            "People: private/explicit-solo scene; Xiaoxia is the only visible human figure. "
+            "Do not add another person, external hands, reflections, shadows, or visible viewer body parts; Daxia stays invisible."
+        )
+
+    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
+        return (
+            "People: follow the Scene exactly. Scene-specified women may naturally interact with Xiaoxia but remain clearly secondary and visually distinct. "
+            "Men may appear only as incidental public background and must never interact with Xiaoxia. Do not add unstated companions; Daxia stays invisible."
+        )
+
+    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
+        return (
+            "People: follow the Scene exactly. Public/background people explicitly stated or naturally allowed by the Scene may remain secondary. "
+            "Men may appear only as incidental background and must never interact with Xiaoxia. Do not add an unstated foreground companion; Xiaoxia stays primary and Daxia stays invisible."
+        )
+
+    if c.get("specified_character_interaction"):
+        return (
+            "People: include only the additional character or characters explicitly required by the Scene, keep them secondary, "
+            "never allow male interaction with Xiaoxia, and never visualize Daxia/viewer."
         )
 
     return (
-        "People: include only the additional character or characters explicitly described in Daxia's request. "
-        "All additional people are supporting characters with understated styling and non-prominent figures. "
-        "Xiaoxia remains the most eye-catching visual focus and retains the strongest feminine hourglass silhouette. "
-        "Do not add anyone else and never visualize Daxia/viewer."
+        "People: Xiaoxia is the only primary subject. Do not add an unstated companion. "
+        "No male may interact with Xiaoxia; never visualize Daxia/viewer or external viewer body parts."
     )
 
 
@@ -26792,7 +26857,7 @@ def _build_hard_anchor_block(mode, visual_dict, initial_prompt=""):
 
 
 def _repair_semantic_contract(context):
-    """v1.8.12: Repair uses the same Title + Scene contract; Image 10 is the current visual state only."""
+    """v1.8.13: Repair uses the same Title + Scene contract; Image 10 is the current visual state only."""
     context = context if isinstance(context, dict) else {}
     mode = _repair_context_mode(context)
     scene = _clean_text_compact(
