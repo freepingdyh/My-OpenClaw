@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.06"
+LOBSTER_VERSION = "1.10.07"
 
 
 def _normalize_generation_level(level):
@@ -14087,7 +14087,8 @@ async def cosplay(ctx, *, mode: str = "auto"):
         story = await generate_story(story_mode)
         story["user_mode_request"] = mode
         story["user_outfit_hints"] = _extract_user_outfit_hints(mode)
-        _cosplay_ref_attachment, _cosplay_ref_error = await _get_photo_reference_attachment(ctx.message)
+        ctx_message = getattr(ctx, "message", None)
+        _cosplay_ref_attachment, _cosplay_ref_error = await _get_photo_reference_attachment(ctx_message)
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
         story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment)
@@ -14098,7 +14099,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"))
         scene_prompt = visual['image_prompt']
         cosplay_title_hint = _cosplay_state.get("title_hint") or ((visual.get("__anchor_state") or {}).get("title_hint") if isinstance(visual.get("__anchor_state"), dict) else "")
-        clothing_ref = await _prepare_cosplay_clothing_reference(ctx.message, title_hint=cosplay_title_hint)
+        clothing_ref = await _prepare_cosplay_clothing_reference(ctx_message, title_hint=cosplay_title_hint)
         trace_context = {
             "kind": "cosplay",
             "action": "cosplay_initial",
