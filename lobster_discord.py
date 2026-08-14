@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.03"
+LOBSTER_VERSION = "1.10.04"
 
 
 def _normalize_generation_level(level):
@@ -13826,7 +13826,7 @@ def _normalize_command_date(value):
 
 
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
-COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-2.5-flash-image-preview")
+COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
 
 def _local_image_mime_type(path):
@@ -13887,16 +13887,17 @@ async def _analyze_cosplay_clothing_reference_image(local_path, *, title_hint=""
     mime = _local_image_mime_type(local_path)
     title_text = _clean_text_compact(title_hint or "")
     prompt = f"""
-你是 cosplay 服裝分析員。請只分析圖片中的服裝與可見配件，不要評論人物臉或身材，也不要猜測看不見的細節。
-若這是一件穿在人身上的衣服，也請抽取成「可供重建的服裝規格」。
+你是 cosplay 造型分析員。請只分析圖片中的可見角色造型，不要評論人物臉型、五官身份或身材，也不要猜測看不見的細節。
+請抽取可供重建的髮型／髮色、頭部非身份特徵（如尖耳、額紋、髮飾）、服裝、鞋襪、配件與武器。
 角色題材提示：{title_text or '未提供'}
 
 只回 JSON：
 {{
-  "outfit_summary": "80字內，清楚描述主服裝與整體造型",
-  "key_items": ["最多6個重點單品或配件"],
-  "main_colors": ["最多5個主色"],
-  "must_keep_details": ["最多8個要保留的版型／剪裁／圖樣／飾件重點"],
+  "outfit_summary": "100字內，清楚描述髮型髮色、主服裝、鞋襪與主要道具",
+  "hair_and_head_features": ["最多5個髮型／髮色／尖耳／額紋／髮飾等非身份特徵"],
+  "key_items": ["最多8個重點服裝、鞋襪、配件或武器"],
+  "main_colors": ["最多6個主色"],
+  "must_keep_details": ["最多10個要保留的版型／剪裁／圖樣／飾件／武器重點"],
   "negative_avoid": ["最多5個不能亂改的點"]
 }}
 """
@@ -13907,14 +13908,16 @@ async def _analyze_cosplay_clothing_reference_image(local_path, *, title_hint=""
     )
     parsed = _safe_json_from_text(getattr(response, "text", "") or "", {})
     summary = _clean_text_compact(parsed.get("outfit_summary"))
-    key_items = [_clean_text_compact(x)[:60] for x in (parsed.get("key_items") or [])[:6] if _clean_text_compact(x)]
-    colors = [_clean_text_compact(x)[:24] for x in (parsed.get("main_colors") or [])[:5] if _clean_text_compact(x)]
-    must_keep = [_clean_text_compact(x)[:80] for x in (parsed.get("must_keep_details") or [])[:8] if _clean_text_compact(x)]
+    hair_and_head_features = [_clean_text_compact(x)[:70] for x in (parsed.get("hair_and_head_features") or [])[:5] if _clean_text_compact(x)]
+    key_items = [_clean_text_compact(x)[:60] for x in (parsed.get("key_items") or [])[:8] if _clean_text_compact(x)]
+    colors = [_clean_text_compact(x)[:24] for x in (parsed.get("main_colors") or [])[:6] if _clean_text_compact(x)]
+    must_keep = [_clean_text_compact(x)[:80] for x in (parsed.get("must_keep_details") or [])[:10] if _clean_text_compact(x)]
     negative_avoid = [_clean_text_compact(x)[:60] for x in (parsed.get("negative_avoid") or [])[:5] if _clean_text_compact(x)]
     if not summary:
         summary = "忠實保留圖中 cosplay 服裝的版型、層次與主要配件。"
     return {
         "outfit_summary": summary,
+        "hair_and_head_features": hair_and_head_features,
         "key_items": key_items,
         "main_colors": colors,
         "must_keep_details": must_keep,
@@ -13925,6 +13928,7 @@ async def _analyze_cosplay_clothing_reference_image(local_path, *, title_hint=""
 def _build_cosplay_clothing_ref_prompt_suffix(analysis):
     analysis = analysis if isinstance(analysis, dict) else {}
     summary = _clean_text_compact(analysis.get("outfit_summary") or "")
+    hair_features = ", ".join([x for x in (analysis.get("hair_and_head_features") or []) if x])
     key_items = ", ".join([x for x in (analysis.get("key_items") or []) if x])
     colors = ", ".join([x for x in (analysis.get("main_colors") or []) if x])
     must_keep = "; ".join([x for x in (analysis.get("must_keep_details") or []) if x])
@@ -13935,6 +13939,8 @@ def _build_cosplay_clothing_ref_prompt_suffix(analysis):
     ]
     if summary:
         lines.append(f"Costume summary: {summary}")
+    if hair_features:
+        lines.append(f"Role appearance anchors to keep without copying another face: {hair_features}")
     if key_items:
         lines.append(f"Key visible items/accessories to keep: {key_items}")
     if colors:
@@ -13956,15 +13962,22 @@ async def _generate_nano_cosplay_clothing_reference_board(local_path, *, analysi
     summary = _clean_text_compact(analysis.get("outfit_summary") or "")
     must_keep = "; ".join([x for x in (analysis.get("must_keep_details") or []) if x])
     title_text = _clean_text_compact(title_hint or "")
+    hair_features = "; ".join([x for x in (analysis.get("hair_and_head_features") or []) if x])
     prompt = f"""
-Create a clean cosplay clothing reference board from the provided image.
-Show the outfit and visible costume accessories only, reconstructed as a clean standalone wardrobe reference on a plain light background.
-No person, no face, no arms, no legs, no mannequin head, no extra props, no text labels, no watermark.
-Use a clean catalog / reference-sheet presentation so this image can be reused as a costume authority for later cosplay generation.
+Transform the provided character reference into a clean, photorealistic cosplay appearance reference board for a later image-generation model.
+
+Create ONE identity-neutral, faceless full-body costume figure on a plain light studio background.
+IMPORTANT: keep the HEAD and HAIR because hairstyle, hair color, ears, forehead marks, headwear, and hair accessories may be essential cosplay features.
+The face area itself must be blank / smooth / featureless: no eyes, no nose, no mouth, no recognizable facial identity, and no realistic person's face.
+Preserve the costume's real-world wearable structure, silhouette, colors, layers, trims, footwear, accessories, and weapon/prop shapes as faithfully as possible.
+Convert illustrated/anime materials into plausible real fabrics, leather, metal, gems, and props without redesigning the costume.
+Keep important items in their natural body-relative positions. If a weapon or accessory would obscure the outfit, it may also be shown cleanly beside the figure.
+No scene background, no magic effects, no flowers, no extra people, no text labels, no watermark, no UI.
+
 Role hint: {title_text or 'cosplay outfit'}.
+Appearance anchors: {hair_features or 'preserve visible hairstyle/hair color and non-face head features from the source'}.
 Outfit summary: {summary or 'preserve the visible costume faithfully'}.
-Must-keep details: {must_keep or 'preserve silhouette, colors, layers, trim, and visible accessories'}.
-Prefer one main full outfit view with any integrated accessory grouping if needed. Do not redesign the outfit.
+Must-keep details: {must_keep or 'preserve silhouette, colors, layers, trims, footwear, accessories, and weapons'}.
 """
     response = await gemini_client.aio.models.generate_content(
         model=COSPLAY_NANO_CLOTHING_REF_MODEL_ID,
@@ -13989,16 +14002,17 @@ async def _prepare_cosplay_clothing_reference(message, *, title_hint=""):
         analysis = await _analyze_cosplay_clothing_reference_image(source_path, title_hint=title_hint)
     except Exception as exc:
         print(f"⚠️ [COSPLAY_REF_ANALYZE_FAILED] {type(exc).__name__}: {exc}")
-        analysis = {"outfit_summary": "忠實保留圖中 cosplay 服裝與可見配件。", "key_items": [], "main_colors": [], "must_keep_details": [], "negative_avoid": []}
-    ref_path = source_path
-    ref_url = getattr(attachment, "url", None)
-    provider = "attachment_fallback"
+        analysis = {"outfit_summary": "忠實保留圖中 cosplay 造型、服裝與可見配件。", "hair_and_head_features": [], "key_items": [], "main_colors": [], "must_keep_details": [], "negative_avoid": []}
     try:
         board_path, board_url = await _generate_nano_cosplay_clothing_reference_board(source_path, analysis=analysis, title_hint=title_hint)
         ref_path, ref_url = board_path, board_url
         provider = COSPLAY_NANO_CLOTHING_REF_LABEL
     except Exception as exc:
-        print(f"⚠️ [COSPLAY_REF_NANO_GENERATE_FAILED] {type(exc).__name__}: {exc}")
+        print(f"⚠️ [COSPLAY_REF_NANO_GENERATE_FAILED] model={COSPLAY_NANO_CLOTHING_REF_MODEL_ID} {type(exc).__name__}: {exc}")
+        raise RuntimeError(
+            f"Nano 服裝前處理失敗（{COSPLAY_NANO_CLOTHING_REF_MODEL_ID}）：{type(exc).__name__}: {str(exc)[:700]}。"
+            "為避免把原角色臉直接當 Figure 10、也避免白燒 Seedream 圖錢，本次 Cosplay 已停止，沒有呼叫 v4.5。"
+        ) from exc
     return {
         "source_attachment_url": getattr(attachment, "url", None),
         "source_path": source_path,
