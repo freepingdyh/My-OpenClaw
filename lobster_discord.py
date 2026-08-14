@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.07"
+LOBSTER_VERSION = "1.10.08"
 
 
 def _normalize_generation_level(level):
@@ -11370,6 +11370,9 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     vibe_request = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
     user_outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
     reference_mode = bool(story.get("cosplay_reference_mode"))
+    vibe_zh = str((vibe_request or {}).get("zh") or "").strip()
+    vibe_en = str((vibe_request or {}).get("en") or "").strip().lower()
+    allure_mode = (not reference_mode) and (vibe_zh == "魅" or "allur" in vibe_en)
 
     fallback_parts = []
     if candidate.get("scene_seed"):
@@ -11385,6 +11388,10 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         else:
             fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
     fallback_scene = _clean_text_compact(" ".join(fallback_parts))[:260]
+    if allure_mode:
+        fallback_scene = _clean_text_compact(
+            f"{fallback_scene} 服裝明確露出上胸，並至少再露出腰部或腿部其中一項，可同時露出腰與腿，以成熟性感而不失角色感的方式呈現。"
+        )[:300]
 
     highest_principle = (
         "本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；"
@@ -11393,6 +11400,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
     )
     required_item_6 = "" if reference_mode else "6. 服裝與必要配件 / 武器。"
+    allure_scene_rules = ""
     if reference_mode:
         cosplay_special_rules = (
             "- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n"
@@ -11406,6 +11414,15 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
             "- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。\n"
             "- 若目標氛圍是『魅』，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。"
         )
+        if allure_mode:
+            allure_scene_rules = (
+                "\n【魅模式硬規則】\n"
+                "- 這次的『今日畫面』本身就是唯一標準，所以請把性感要求直接寫在今日畫面的服裝描述裡，不能只寫『性感』『展現曲線』『女人味』等抽象詞。\n"
+                "- 必須明確做到：露胸保底；且腰或腿至少露出一項，也可以腰與腿都露。\n"
+                "- 合格例：露胸＋露腰、露胸＋露腿、露胸＋露腰＋露腿。\n"
+                "- 不合格例：只有露胸但腰腿都沒露；只露腰或只露腿但沒露胸；高領或全包式保守穿法把胸腰腿都收掉。\n"
+                "- 請直接把上述可見外觀寫進今日畫面，例如低領/敞領露出上胸、短版或鏤空設計露出腰部、短裙/高衩/短褲清楚露出腿線；但仍要符合角色世界觀與服裝語言。"
+            )
 
     prompt = f"""
 你是小俠 Cosplay 的 Scene Writer。
@@ -11423,7 +11440,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 {required_item_6}
 
 【Cosplay 特別規則】
-{cosplay_special_rules}
+{cosplay_special_rules}{allure_scene_rules}
 - 使用者明確的場景 / 動作要求優先。
 - 今日畫面請寫成自然短文，不要 JSON 清單腔。
 - 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
