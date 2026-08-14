@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.04"
+LOBSTER_VERSION = "1.10.05"
 
 
 def _normalize_generation_level(level):
@@ -11369,17 +11369,21 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     candidate = story.get("cosplay_topic_candidate") or {}
     vibe_request = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
     user_outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
+    reference_mode = bool(story.get("cosplay_reference_mode"))
 
     fallback_parts = []
     if candidate.get("scene_seed"):
         fallback_parts.append(_clean_text_compact(candidate.get("scene_seed")))
-    if candidate.get("costume_focus"):
+    if candidate.get("costume_focus") and not reference_mode:
         fallback_parts.append("服裝：" + _clean_text_compact(candidate.get("costume_focus")))
     anchors = _cosplay_anchor_list(candidate.get("canonical_visual_anchors"))
-    if anchors:
+    if anchors and not reference_mode:
         fallback_parts.append("關鍵視覺：" + "、".join(anchors[:5]))
     if not fallback_parts:
-        fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
+        if reference_mode:
+            fallback_parts.append("小俠在符合角色世界觀的場景中自然活動，畫面清楚呈現環境、動作、表情與光線。")
+        else:
+            fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
     fallback_scene = _clean_text_compact(" ".join(fallback_parts))[:260]
 
     prompt = f"""
@@ -11387,24 +11391,19 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 你現在已經看完完整題材與小俠文章。請寫出 Discord 上唯一的「📸 今日畫面」。
 
 【最高原則】
-後續 Pure v4.5、Hybrid、v5 背景理解，都只能把你寫出的「今日畫面」當作故事/服裝/道具/場景的唯一內容來源。
-所以：希望圖片一定出現的東西，就必須直接寫進「今日畫面」；沒有寫的東西，後面的生圖沒有義務畫。
+{("本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；禁止描述或決定髮型、髮色、頭部角色特徵、服裝、鞋襪、配件與武器，這些全部由 Figure 10 決定。" if reference_mode else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。")}
 
 【今日畫面必須包含】
 1. 場景 / 地點。
 2. 氛圍 / 光線。
 3. 小俠正在做的主動作，以及一個自然微動作或視線。
 4. 人物表情 / 氣質。
-5. 服裝與必要配件 / 武器。
-6. 1到2個重要環境或畫面錨點。
+5. 1到2個重要環境或畫面錨點。
+{("" if reference_mode else "6. 服裝與必要配件 / 武器。") }
 
 【Cosplay 特別規則】
-- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫「穿著角色服裝」。
-- 要具體寫主色、服裝剪影/版型、材質或結構，以及角色重要的飾件、武器或道具。
-- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。
-- 若目標氛圍是「魅」，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。
-- 不要為了保守而把服裝寫成普通安全牌；也不要為了性感而洗掉角色辨識度。
-- 使用者明確服裝要求優先。
+{("- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n- 角色名稱只用來理解世界觀、氣質與合理活動，不可用角色常識重新發明 costume。\n- 若目標氛圍是『魅』，只透過表情、姿態、鏡頭與氛圍呈現，不要藉此改寫服裝。" if reference_mode else "- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫『穿著角色服裝』。\n- 要具體寫主色、服裝剪影/版型、材質或結構，以及角色重要的飾件、武器或道具。\n- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。\n- 若目標氛圍是『魅』，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。") }
+- 使用者明確的場景 / 動作要求優先。
 - 今日畫面請寫成自然短文，不要 JSON 清單腔。
 - 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
 - 不要描述第二位人物；小俠是唯一主角。
@@ -11464,27 +11463,44 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     return scene
 
 
-def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False, title_hint="", has_reference=False, reference_summary=""):
-    """v1.8.04: Seedream 的內容語意只來自「今日畫面」；其餘僅為小俠身份/身材/單人技術外框。"""
+def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False, title_hint="", has_reference=False, reference_summary="", reference_analysis=None):
+    """v1.10.05: reference cosplay 分離 Scene 與 Figure 10 權限。"""
     scene = _clean_text_compact(scene_caption or "")
     title_prefix = _render_title_prefix("cosplay", title_hint)
     retry_line = ""
     if retry_reason:
         retry_line = f"\nTECHNICAL RETRY NOTE: improve instruction adherence without changing any stated scene facts. Previous issue: {_clean_text_compact(retry_reason)[:260]}"
     figure_line = "Figures 1-8" if hybrid else "Figures 1-9"
-    reference_block = ""
+    analysis = reference_analysis if isinstance(reference_analysis, dict) else {}
     if has_reference:
-        summary_line = _clean_text_compact(reference_summary or "")
-        if summary_line:
-            summary_line = f" Visible outfit summary: {summary_line}"
-        reference_block = (
-            "\nFIGURE 10 COSTUME AUTHORITY:\n"
-            "Figure 10 is the clothing-only reference. Preserve its visible cosplay outfit and costume accessories faithfully rather than loosely restyling them."
-            f"{summary_line}\n"
-            "Figure 10 controls clothing and visible costume accessories only. It must not override Xiaoxia's face, body identity, or the story written in TODAY SCENE.\n"
-        )
+        hair = ", ".join(str(x) for x in (analysis.get("hair_and_head_features") or []) if str(x).strip())
+        items = ", ".join(str(x) for x in (analysis.get("key_items") or []) if str(x).strip())
+        details = "; ".join(str(x) for x in (analysis.get("must_keep_details") or []) if str(x).strip())
+        summary = _clean_text_compact(reference_summary or analysis.get("outfit_summary") or "")
+        return f"""FIGURE ROLE MAP.
+{figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their hairstyle, outfit, background, props, lighting, or composition.
+Figure 10 is the authoritative COSPLAY APPEARANCE reference. It controls hairstyle, hair color, non-face head traits, costume, footwear, accessories, props, and weapons. Do not copy any face or facial identity from Figure 10.
+Appearance summary: {summary}
+Role hair/head traits: {hair}
+Key costume / accessory / weapon items: {items}
+Must-keep appearance details: {details}
+
+TITLE HINT — use only to understand the role/world; never use title knowledge to replace Figure 10 appearance:
+{title_prefix}
+
+AUTHORITATIVE TODAY SCENE — controls ONLY setting, time, action, pose, expression, lighting, camera and composition. It has NO authority over hairstyle, hair color, costume, footwear, accessories or weapons:
+{scene}
+
+TECHNICAL XIAOXIA IDENTITY / BODY LOCK:
+Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: preserve her facial identity and core body identity, fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy.
+For this reference cosplay, Figure 10 MUST override Xiaoxia's normal hairstyle/hair color and must supply the role-specific hairstyle, hair color and non-face head traits while Xiaoxia's own facial identity stays unchanged.
+Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
+Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
+Render a polished photorealistic cinematic cosplay photograph: Xiaoxia's face/body identity from {figure_line}, cosplay appearance from Figure 10, and scene/action/camera from TODAY SCENE.{retry_line}""".strip()
+
     return f"""FIGURE ROLE MAP — technical identity references only.
-{figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their pose, outfit, background, props, lighting, or composition.{reference_block}
+{figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their pose, outfit, background, props, lighting, or composition.
+
 TITLE HINT — semantic recognition only; it may help identify the role, but must never override or contradict TODAY SCENE:
 {title_prefix}
 
@@ -13567,6 +13583,7 @@ async def _execute_safe_generation_core(discord_image_url, base_filename, mode, 
                     title_hint=trace_context.get("cosplay_title_hint") or ((trace_context.get("cosplay_state") or {}).get("title_hint") if isinstance(trace_context.get("cosplay_state"), dict) else ""),
                     has_reference=bool(trace_context.get("figure10_present") or trace_context.get("reference_item_path") or trace_context.get("reference_item_url")),
                     reference_summary=trace_context.get("cosplay_clothing_ref_summary") or trace_context.get("reference_item_summary") or "",
+                    reference_analysis=trace_context.get("cosplay_clothing_ref_analysis") or {},
                 )
                 trace_context["raw_seedream_mode"] = "cosplay_today_scene_only"
             else:
@@ -14049,6 +14066,10 @@ async def cosplay(ctx, *, mode: str = "auto"):
         story = await generate_story(story_mode)
         story["user_mode_request"] = mode
         story["user_outfit_hints"] = _extract_user_outfit_hints(mode)
+        _cosplay_ref_attachment, _cosplay_ref_error = await _get_photo_reference_attachment(ctx.message)
+        if _cosplay_ref_error:
+            raise RuntimeError(_cosplay_ref_error)
+        story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment)
         state["current_topic_data"] = story 
         
         # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
@@ -14073,7 +14094,6 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "scene_seed_text": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
         }
         if clothing_ref:
-            scene_prompt = f"{scene_prompt}\n\n{clothing_ref.get('prompt_suffix') or ''}".strip()
             identity_urls = await _seedream_upload_reference_images()
             input_urls = list(identity_urls)
             input_roles = [
