@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.05"
+LOBSTER_VERSION = "1.10.06"
 
 
 def _normalize_generation_level(level):
@@ -11386,12 +11386,33 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
             fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
     fallback_scene = _clean_text_compact(" ".join(fallback_parts))[:260]
 
+    highest_principle = (
+        "本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；"
+        "禁止描述或決定髮型、髮色、頭部角色特徵、服裝、鞋襪、配件與武器，這些全部由 Figure 10 決定。"
+        if reference_mode
+        else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
+    )
+    required_item_6 = "" if reference_mode else "6. 服裝與必要配件 / 武器。"
+    if reference_mode:
+        cosplay_special_rules = (
+            "- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n"
+            "- 角色名稱只用來理解世界觀、氣質與合理活動，不可用角色常識重新發明 costume。\n"
+            "- 若目標氛圍是『魅』，只透過表情、姿態、鏡頭與氛圍呈現，不要藉此改寫服裝。"
+        )
+    else:
+        cosplay_special_rules = (
+            "- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫『穿著角色服裝』。\n"
+            "- 要具體寫主色、服裝剪影/版型、材質或結構，以及角色重要的飾件、武器或道具。\n"
+            "- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。\n"
+            "- 若目標氛圍是『魅』，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。"
+        )
+
     prompt = f"""
 你是小俠 Cosplay 的 Scene Writer。
 你現在已經看完完整題材與小俠文章。請寫出 Discord 上唯一的「📸 今日畫面」。
 
 【最高原則】
-{("本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；禁止描述或決定髮型、髮色、頭部角色特徵、服裝、鞋襪、配件與武器，這些全部由 Figure 10 決定。" if reference_mode else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。")}
+{highest_principle}
 
 【今日畫面必須包含】
 1. 場景 / 地點。
@@ -11399,10 +11420,10 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 3. 小俠正在做的主動作，以及一個自然微動作或視線。
 4. 人物表情 / 氣質。
 5. 1到2個重要環境或畫面錨點。
-{("" if reference_mode else "6. 服裝與必要配件 / 武器。") }
+{required_item_6}
 
 【Cosplay 特別規則】
-{("- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n- 角色名稱只用來理解世界觀、氣質與合理活動，不可用角色常識重新發明 costume。\n- 若目標氛圍是『魅』，只透過表情、姿態、鏡頭與氛圍呈現，不要藉此改寫服裝。" if reference_mode else "- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫『穿著角色服裝』。\n- 要具體寫主色、服裝剪影/版型、材質或結構，以及角色重要的飾件、武器或道具。\n- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。\n- 若目標氛圍是『魅』，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。") }
+{cosplay_special_rules}
 - 使用者明確的場景 / 動作要求優先。
 - 今日畫面請寫成自然短文，不要 JSON 清單腔。
 - 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
