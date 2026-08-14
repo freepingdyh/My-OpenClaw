@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.01"
+LOBSTER_VERSION = "1.10.02"
 
 
 def _normalize_generation_level(level):
@@ -4643,7 +4643,7 @@ pending_photobook_wardrobe_choices = {}  # user_id -> /寫真 六宮格選衣暫
 
 # /命運牌的臨時翻牌 session。核心脈絡會寫入 daily_chat_logs，讓小俠後續聊天仍然知道剛剛發生什麼。
 fate_card_sessions = {}
-PHOTO_USER_REF_DIR = None  # initialized after Zeabur paths are ready
+PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")  # v1.10.02: keep attachment reference directory valid
 
 # !update 記憶修訂案，只存在私人助手工作室；每位管理者同時一案。
 memory_update_sessions = {}
@@ -16871,6 +16871,9 @@ async def _download_photo_reference_attachment(attachment):
     不再優先用 attachment.read()；改用 attachment.url / proxy_url 下載，
     避免某些手機端或編輯附件情境下 read() 取不到內容或內部拋 NoneType path。
     """
+    global PHOTO_USER_REF_DIR
+    if not PHOTO_USER_REF_DIR:
+        PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
     os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
     if attachment is None:
         raise RuntimeError("PHOTO_REF_ATTACHMENT_NONE：沒有取得可下載的圖片附件。")
