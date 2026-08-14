@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.9.04"
+LOBSTER_VERSION = "1.9.05"
 
 
 def _normalize_generation_level(level):
@@ -5085,6 +5085,97 @@ def _love_home_scene_fallback(now_dt=None):
     return "小俠在白天明亮的家中客廳、書房、窗邊或沙發旁，穿著漂亮舒適的居家服，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
 
 
+def _love_solo_scene_template(now_dt=None, style="scene"):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    is_night = now_dt.hour >= 18 or now_dt.hour < 6
+    if style == "action":
+        if is_night:
+            return "小俠想換上一套漂亮舒服的居家穿搭，在家裡輕抱著柔軟靠枕、整理一下頭髮，帶著甜甜又有點害羞的笑意，把今晚的心意拍給大俠。"
+        return "小俠想換上一套漂亮舒服的居家穿搭，在家裡捧著馬克杯或輕抱著靠枕，帶著被大俠逗得甜甜的笑意，把這份想念拍給大俠。"
+    if is_night:
+        return "小俠在家中柔和燈光的臥室、床邊、窗邊或沙發旁，穿著漂亮舒服的居家穿搭，輕抱著柔軟靠枕或把雙手輕輕環在自己身前，帶著有點害羞又期待的眼神看向鏡頭，想把今晚的心意留給大俠。"
+    return "小俠在白天明亮的家中客廳、書房、窗邊或沙發旁，穿著漂亮舒適的居家服，捧著馬克杯或輕抱著靠枕，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
+
+
+def _love_is_partner_dependent_text(text):
+    raw = _clean_text_compact(text or "")
+    if not raw:
+        return False
+    patterns = [
+        r"從背後抱住(?:他|大俠)",
+        r"抱住(?:他|大俠)",
+        r"環抱(?:住)?(?:他|大俠)",
+        r"摟著(?:他|大俠)",
+        r"依偎在(?:他|大俠)的(?:肩|肩膀|懷裡|身旁)",
+        r"靠在(?:他|大俠)的(?:肩|肩膀|胸口|懷裡|身上)",
+        r"埋在(?:他|大俠)的(?:肩窩|懷裡|胸口)",
+        r"牽著(?:他|大俠)的手",
+        r"摸著(?:他|大俠)",
+        r"親(?:他|大俠)",
+        r"貼近(?:他|大俠)",
+        r"倚在(?:他|大俠)身上",
+        r"對(?:他|大俠)撒嬌",
+        r"在(?:他|大俠)耳邊",
+        r"與大俠一起",
+        r"和大俠一起",
+        r"在大俠(?:身旁|旁邊|懷裡|肩上|背後)",
+    ]
+    return any(re.search(p, raw) for p in patterns)
+
+
+def _love_sanitize_action_text(text, now_dt=None):
+    text = _clean_text_compact(text or "")
+    if not text:
+        return _love_solo_scene_template(now_dt=now_dt, style="action")
+    if _love_is_partner_dependent_text(text):
+        return _love_solo_scene_template(now_dt=now_dt, style="action")
+    return text
+
+
+def _love_sanitize_scene_text(text, now_dt=None):
+    text = _clean_text_compact(text or "")
+    if not text:
+        return _love_solo_scene_template(now_dt=now_dt, style="scene")
+    if _love_is_partner_dependent_text(text):
+        return _love_solo_scene_template(now_dt=now_dt, style="scene")
+    return text
+
+
+def _love_compose_render_prompt(title, scene_text, outfit_summary="", wardrobe_id="", wardrobe_name=""):
+    base = _compose_title_scene_render_prompt("photo", title, scene_text)
+    extras = [
+        "LOVE INTENT SOLO RULES: only Xiaoxia is visible. Never draw Daxia, any viewer body part, or any second person.",
+        "LOVE INTENT POSE RULES: express affection with solo body language only, such as hugging a pillow, lightly wrapping her arms around herself, holding a mug, tucking hair behind her ear, resting her chin on her hand, leaning on the sofa, or smiling toward the camera. Never make her hug, lean on, touch, or be supported by an unseen person.",
+    ]
+    lock_label = ""
+    if wardrobe_id:
+        lock_label = wardrobe_id + (f"｜{wardrobe_name}" if wardrobe_name else "")
+    if outfit_summary or lock_label:
+        extras.append(f"LOVE INTENT OUTFIT LOCK: preserve {lock_label or 'the current outfit'} and keep the same garment continuity. Outfit summary: {outfit_summary or 'scene-appropriate home outfit.'}")
+    return "\n\n".join([base] + extras).strip()
+
+
+def _love_refresh_prompt_context(context):
+    ctx = dict(context or {})
+    title = _clean_text_compact(ctx.get("title") or ctx.get("activity_title") or ctx.get("scene_text") or "小俠愛意")
+    raw_scene = _clean_text_compact(ctx.get("scene_summary") or ctx.get("composition") or ctx.get("scene_text") or "")
+    scene_text = _love_sanitize_scene_text(_love_enforce_home_scene(raw_scene or _love_home_scene_fallback(), love_action=ctx.get("action_summary") or ""), now_dt=datetime.now(TZ_TPE))
+    outfit_summary = _clean_text_compact(ctx.get("outfit_summary") or "")
+    root_prompt = _love_compose_render_prompt(
+        title,
+        scene_text,
+        outfit_summary=outfit_summary,
+        wardrobe_id=str(ctx.get("wardrobe_id") or "").strip(),
+        wardrobe_name=str(ctx.get("wardrobe_name") or "").strip(),
+    )
+    ctx["title"] = title
+    ctx["scene_summary"] = scene_text
+    ctx["authoritative_scene"] = root_prompt
+    ctx["root_prompt_base"] = root_prompt
+    ctx["prompt_base"] = root_prompt
+    return ctx, root_prompt
+
+
 def _love_enforce_home_scene(scene_text, love_action="", now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     scene_text = _clean_text_compact(scene_text or "")
@@ -5143,9 +5234,9 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
   "trigger": true,
   "reason": "40字內，說明今天哪些互動讓小俠現在產生這個念頭",
   "title": "12字內短題名",
-  "love_action": "1~2句，描述小俠這次想怎麼表達愛意，例如換上一套漂亮居家服、整理頭髮、抱著靠枕、坐到床邊或沙發旁，只能是在家中的單一小情節",
+  "love_action": "1~2句，描述小俠這次想怎麼表達愛意，例如換上一套漂亮居家服、整理頭髮、抱著靠枕、捧著馬克杯、坐到床邊或沙發旁，只能是在家中的單一小情節，而且必須是小俠單人就能成立的動作",
   "invite_message": "小俠要先問大俠的短訊息，80字內，繁中，自然甜蜜，必須把 reason 自然講進去，像真女友講話",
-  "scene_text": "真正要拍的單一畫面構想，1~3句，明確場景、動作、服裝氛圍；場景一律限定在家中，不可出現外出場景",
+  "scene_text": "真正要拍的單一畫面構想，1~3句，明確場景、動作、服裝氛圍；場景一律限定在家中，不可出現外出場景，而且必須是小俠單人畫面，不可要求與大俠肢體接觸或依靠看不見的人",
   "mood": "8字內氛圍",
   "message": "成圖時要附給大俠的 40~120 字小訊息",
   "why_now": "40字內，解釋為什麼是現在想拍"
@@ -5160,6 +5251,7 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 6. 場景只能一個瞬間，不可把不同活動混在一起。
 7. 內容可有成熟戀人感，但不可露骨色情。
 8. invite_message 是小俠自己的話，不准寫成『系統條件成立』。
+9. love_action 與 scene_text 必須是「小俠單人就能成立」的畫面。可以藉由靠枕、馬克杯、毯子、沙發、床邊、整理頭髮、抱膝、托腮、看向鏡頭等方式表達愛意；不可寫成抱住大俠、靠在大俠肩上、埋在大俠懷裡、牽著大俠的手，或任何需要大俠實際出現在畫面中的動作。
 """
     try:
         response = await gemini_client.aio.models.generate_content(
@@ -5189,8 +5281,14 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
             "trigger_type": trigger_type,
             "trigger_detail": trigger_detail,
         }
-    love_action = _clean_text_compact(data.get("love_action") or "小俠想換上一套漂亮舒服的居家穿搭，整理一下頭髮，帶著有點害羞又期待的表情，在家中拍一張只想給大俠看的照片。")[:220]
-    scene_text = _love_enforce_home_scene(data.get("scene_text") or fallback_scene, love_action=love_action, now_dt=now_dt)
+    love_action = _love_sanitize_action_text(
+        _clean_text_compact(data.get("love_action") or "小俠想換上一套漂亮舒服的居家穿搭，整理一下頭髮，帶著有點害羞又期待的表情，在家中拍一張只想給大俠看的照片。")[:220],
+        now_dt=now_dt,
+    )
+    scene_text = _love_sanitize_scene_text(
+        _love_enforce_home_scene(data.get("scene_text") or fallback_scene, love_action=love_action, now_dt=now_dt),
+        now_dt=now_dt,
+    )
     return {
         "trigger": True,
         "id": str(uuid.uuid4()),
@@ -5211,14 +5309,16 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="", wardrobe_selection=None):
     candidate = candidate if isinstance(candidate, dict) else {}
     title = _clean_text_compact(candidate.get("title") or "小俠愛意")
-    scene_text = _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。")
-    root_prompt = _compose_title_scene_render_prompt("photo", title, scene_text)
+    scene_text = _love_sanitize_scene_text(
+        _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。")
+    )
     mood = _clean_text_compact(candidate.get("mood") or "想念")
     message = _clean_text_compact(candidate.get("message") or "小俠想把這一刻拍給大俠。")
     wardrobe_item, wardrobe_reason, selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(
         {"title": title}, wardrobe_item, wardrobe_reason, wardrobe_selection
     )
     outfit_summary = _wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "由小俠自由搭配、符合場景的自然穿搭"
+    root_prompt = _love_compose_render_prompt(title, scene_text, outfit_summary=outfit_summary, wardrobe_id=wardrobe_id, wardrobe_name=wardrobe_name)
     return {
         "type": "photo",
         "db_type": "photo",
@@ -5255,11 +5355,11 @@ def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="",
     }
 
 
-async def _love_generate_and_send(channel, candidate, *, approved_by=None):
+async def _love_generate_and_send(channel, candidate, *, approved_by=None, consume_daily_trigger=True, status_text="💗 小俠收到同意，正在把這份愛意整理成一張照片……"):
     candidate = dict(candidate or {})
     wardrobe_item, wardrobe_reason, wardrobe_selection = _love_pick_wardrobe(candidate.get("scene_text") or "")
     context = _love_build_photo_context(candidate, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, wardrobe_selection=wardrobe_selection)
-    status = await channel.send("💗 小俠收到同意，正在把這份愛意整理成一張照片……")
+    status = await channel.send(status_text)
     try:
         context = await _generate_photo_from_context(context, msg=status)
         db = load_memory()
@@ -5279,19 +5379,65 @@ async def _love_generate_and_send(channel, candidate, *, approved_by=None):
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
         love["daily_generation_count"] = int(love.get("daily_generation_count") or 0) + 1
-        _love_mark_review_finished(love, result="completed", mark_asked=True, clear_pending=True)
+        if consume_daily_trigger:
+            _love_mark_review_finished(love, result="completed", mark_asked=True, clear_pending=True)
+        else:
+            love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            love["last_manual_direct_title"] = _clean_text_compact(candidate.get("title") or context.get("title") or "小俠愛意")
+            love["last_manual_direct_scene"] = _clean_text_compact(candidate.get("scene_text") or context.get("scene_summary") or "")
+            pending_req = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else None
+            if pending_req and str(pending_req.get("id") or "") == str(candidate.get("id") or ""):
+                love["pending_request"] = None
         save_state(app_state)
         return context
     except Exception as exc:
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
-        _love_mark_review_finished(love, result="generation_failed", mark_asked=True, clear_pending=True)
+        if consume_daily_trigger:
+            _love_mark_review_finished(love, result="generation_failed", mark_asked=True, clear_pending=True)
+        else:
+            love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            love["last_manual_direct_error"] = str(exc)[:600]
         save_state(app_state)
         try:
             await status.edit(content=f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
         except Exception:
             await channel.send(f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
         return None
+
+
+async def _love_force_generate_now(channel, *, approved_by=None):
+    now_dt = datetime.now(TZ_TPE)
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+    pending = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else None
+    if pending and pending.get("status", "waiting") in {"waiting", "approved"}:
+        candidate = dict(pending)
+        candidate["status"] = "approved"
+        if approved_by is not None:
+            candidate["approved_by"] = approved_by
+        love["pending_request"] = candidate
+        save_state(app_state)
+        return await _love_generate_and_send(channel, candidate, approved_by=approved_by, consume_daily_trigger=False, status_text="💗 小俠收到大俠的指令，立刻把這份愛意整理成一張照片……")
+    candidate = await _love_build_candidate(trigger_type="manual", trigger_detail="manual_direct_force", now_dt=now_dt)
+    if not candidate.get("trigger"):
+        candidate = {
+            "trigger": True,
+            "id": str(uuid.uuid4()),
+            "date": _love_today_str(now_dt),
+            "trigger_type": "manual",
+            "trigger_detail": "manual_direct_force_fallback",
+            "reason": "大俠想立刻看看小俠的愛意模樣。",
+            "title": "只想給你看",
+            "love_action": _love_solo_scene_template(now_dt=now_dt, style="action"),
+            "invite_message": "大俠，那小俠就不等了，現在就把這份愛意拍給你看。",
+            "scene_text": _love_solo_scene_template(now_dt=now_dt, style="scene"),
+            "mood": "甜甜心動",
+            "message": "因為大俠想看，小俠就想立刻把這份心意拍給你。",
+            "why_now": "因為大俠現在就想看小俠。",
+            "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    return await _love_generate_and_send(channel, candidate, approved_by=approved_by, consume_daily_trigger=False, status_text="💗 小俠收到大俠的指令，立刻把這份愛意整理成一張照片……")
 
 
 class LoveIntentInviteView(discord.ui.View):
@@ -5533,12 +5679,19 @@ async def _handle_xiaoxia_love_message_direct(message):
             f"今日已詢問：{'是' if love.get('asked_today') else '否'}\n"
             f"待處理邀請：{pending_text}\n"
             f"高愛意值定時候選：{scheduled_text}\n"
+            f"最近手動直拍：{love.get('last_manual_direct_at') or '尚無'}\n"
             f"當前愛意值：{int(app_state.get('affection_score') or 80)}/100"
         )
         return True
 
     if args in {'現在拍', '立刻', 'force'}:
         await _love_request_if_due(message.channel, trigger_type='manual', trigger_detail='manual_force', force=True)
+        return True
+    if args in {'強制啟動', '立即啟動', '啟動', '直拍', '直接拍'}:
+        pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
+        if pending and pending.get('status', 'waiting') in {'waiting', 'approved'}:
+            await message.channel.send('💗 目前已有一筆待處理愛意邀請，小俠直接接住它，立刻幫大俠拍。')
+        await _love_force_generate_now(message.channel, approved_by=getattr(message.author, 'id', None))
         return True
     if args in {'同意', '好', '開始'}:
         pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
@@ -5556,7 +5709,7 @@ async def _handle_xiaoxia_love_message_direct(message):
         save_state(app_state)
         await message.channel.send('🌿 好呀，那今天小俠先不拍這張愛意照。')
         return True
-    await message.channel.send("用法：`/小俠愛意 開`、`/小俠愛意 關`、`/小俠愛意 狀態`、`/小俠愛意 現在拍`、`/小俠愛意 同意`、`/小俠愛意 取消`")
+    await message.channel.send("用法：`/小俠愛意 開`、`/小俠愛意 關`、`/小俠愛意 狀態`、`/小俠愛意 現在拍`、`/小俠愛意 強制啟動`、`/小俠愛意 同意`、`/小俠愛意 取消`")
     return True
 
 def load_wardrobe():
@@ -21392,7 +21545,10 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_more"
         context["user_input"] = "More button from previous photo"
-        root_prompt = _photo_context_root_scene_prompt(context)
+        if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
+            context, root_prompt = _love_refresh_prompt_context(context)
+        else:
+            root_prompt = _photo_context_root_scene_prompt(context)
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
             root_prompt
@@ -21434,7 +21590,10 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_reroll_replace"
         context["user_input"] = "骰子取代 from previous photo"
-        root_prompt = _photo_context_root_scene_prompt(context)
+        if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
+            context, root_prompt = _love_refresh_prompt_context(context)
+        else:
+            root_prompt = _photo_context_root_scene_prompt(context)
         context["root_prompt_base"] = root_prompt
         context["prompt_base"] = (
             root_prompt
