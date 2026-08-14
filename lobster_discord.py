@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.9.06"
+LOBSTER_VERSION = "1.9.07"
 
 
 def _normalize_generation_level(level):
@@ -5118,6 +5118,63 @@ def _love_apply_time_anchor_to_scene(scene_text, now_dt=None):
     return f"{_love_time_anchor_label(now_dt)}，{scene_text}"
 
 
+def _love_awareness_event_id(context):
+    context = context if isinstance(context, dict) else {}
+    candidate = context.get("love_candidate") if isinstance(context.get("love_candidate"), dict) else {}
+    return str(candidate.get("id") or context.get("love_event_id") or context.get("trace_id") or "").strip()
+
+
+def _love_awareness_memory_line(context, status="completed"):
+    context = context if isinstance(context, dict) else {}
+    event_id = _love_awareness_event_id(context) or "unknown"
+    title = _clean_text_compact(context.get("title") or context.get("activity_title") or "小俠愛意")
+    scene = _clean_text_compact(context.get("scene_summary") or context.get("composition") or "")
+    wid = _clean_text_compact(context.get("wardrobe_id") or "")
+    wname = _clean_text_compact(context.get("wardrobe_name") or "")
+    outfit = f"{wid} {wname}".strip() or _clean_text_compact(context.get("outfit_summary") or "居家穿搭")
+    time_anchor = _clean_text_compact(context.get("time_anchor") or "")
+    status_text = "已採用目前版本" if status == "adopted" else "已完成並分享"
+    facts = [
+        f"【小俠愛意已發生｜event_id={event_id}】",
+        f"小俠剛剛在家中{status_text}一張「{title}」的愛意照片給大俠。",
+        f"當時穿著：{outfit}。",
+    ]
+    if time_anchor:
+        facts.append(f"時間：{time_anchor}。")
+    if scene:
+        facts.append(f"畫面：{scene}。")
+    facts.append("這是小俠自己剛做過並知道的事情；大俠不一定在現場，不要把它說成大俠當時就在旁邊或替小俠拍照。")
+    return _clean_text_compact(" ".join(facts))
+
+
+def _love_record_awareness(context, status="completed"):
+    """Write/refresh one factual love-intent memory line in temp_chat for Xiaoxia's next replies."""
+    global daily_chat_logs
+    try:
+        event_id = _love_awareness_event_id(context)
+        if not event_id:
+            return False
+        marker = f"【小俠愛意已發生｜event_id={event_id}】"
+        line = _love_awareness_memory_line(context, status=status)
+        logs = list(daily_chat_logs if isinstance(daily_chat_logs, list) else load_temp_chat())
+        replaced = False
+        for idx in range(len(logs) - 1, -1, -1):
+            if marker in str(logs[idx] or ""):
+                logs[idx] = line
+                replaced = True
+                break
+        if not replaced:
+            logs.append(line)
+        daily_chat_logs.clear()
+        daily_chat_logs.extend(logs)
+        save_temp_chat(daily_chat_logs)
+        print(f"💗 [LOVE_AWARENESS_RECORDED] event_id={event_id} status={status} replaced={replaced}")
+        return True
+    except Exception as exc:
+        print(f"⚠️ [LOVE_AWARENESS_RECORD_FAILED] {type(exc).__name__}: {exc}")
+        return False
+
+
 def _love_solo_scene_template(now_dt=None, style="scene"):
     now_dt = now_dt or datetime.now(TZ_TPE)
     is_night = now_dt.hour >= 18 or now_dt.hour < 6
@@ -5414,6 +5471,7 @@ async def _love_generate_and_send(channel, candidate, *, approved_by=None, consu
         context["message_id"] = sent.id
         photo_generation_contexts[sent.id] = context
         view.context = context
+        _love_record_awareness(context, status="completed")
         try:
             await status.delete()
         except Exception:
@@ -17933,10 +17991,12 @@ def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, refere
     outfit_summary = str(scene_data.get("outfit_summary", "自然日常穿搭")).strip()
     action_summary = str(scene_data.get("action_summary", "自然生活動作")).strip()
     mood_summary = str(scene_data.get("mood_summary", "溫暖生活感")).strip()
+    source_mode_norm = str(source_mode or "").strip().lower()
+    result_message = action_summary if source_mode_norm == "love_intent" else f"大俠按下 /photo 留住這一刻。{action_summary}"
     return {
         "composition": scene_summary,
         "mood": mood_summary,
-        "message": f"大俠按下 /photo 留住這一刻。{action_summary}",
+        "message": result_message,
         "source_mode": source_mode,
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
@@ -20003,6 +20063,9 @@ async def _overwrite_generated_photo(original_context, repaired_context, message
     _sync_autonomy_today_after_photo_replace(original_context, repaired_context)
     _safe_delete_vault_image(old_url)
 
+    if str(repaired_context.get("source_mode") or original_context.get("source_mode") or "").strip().lower() == "love_intent":
+        _love_record_awareness(repaired_context, status="adopted")
+
     # v1.8.13: adoption is a state mutation, so make it visible in latest/photo_trace as well.
     # This does not regenerate an image; it records which repaired image became canonical.
     try:
@@ -21796,6 +21859,8 @@ class PhotoResultView(discord.ui.View):
                     adopted_context["message_id"] = target_message.id
                     photo_generation_contexts[target_message.id] = adopted_context
                     await _edit_photo_message_with_file(target_message, adopted_context, view=PhotoResultView(adopted_context), title_prefix="✅ 採用 v5.0 場景升級")
+                    if str(adopted_context.get("source_mode") or "").strip().lower() == "love_intent":
+                        _love_record_awareness(adopted_context, status="adopted")
                 except Exception as edit_exc:
                     print(f"⚠️ [V5_ADOPT_EDIT_SOURCE_FAILED] {type(edit_exc).__name__}: {edit_exc}")
             await interaction.followup.send("✅ 已採用這張 v5.0 場景升級版並取代 v4.5 來源紀錄。", ephemeral=True)
