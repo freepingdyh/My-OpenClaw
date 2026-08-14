@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.19"
+LOBSTER_VERSION = "1.9.02"
 
 
 def _normalize_generation_level(level):
@@ -556,6 +556,9 @@ intents.message_content = True
 
 girlfriend_bot = commands.Bot(command_prefix='/', intents=intents)
 architect_bot = commands.Bot(command_prefix='!', intents=intents)
+
+GENERATION_SERIAL_LOCK = asyncio.Lock()
+GENERATION_QUEUE_WAITERS = 0
 
 
 # ==========================================
@@ -4809,6 +4812,9 @@ def _default_app_state():
         "current_outfit": None,
         "current_outfit_date": _today_str_tpe(),
         "photo_pending_wardrobe": None,
+        "love_intent": {},
+        "love_intent_enabled": True,
+        "love_scheduled_candidate": None,
     }
 
 
@@ -4830,6 +4836,671 @@ def save_state(data):
     with open(STATE_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
 
+
+
+
+def _love_today_str(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    return now_dt.strftime("%Y-%m-%d")
+
+
+def _love_is_before_cutoff(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    return (now_dt.hour, now_dt.minute) < (23, 0)
+
+
+def _love_compute_fixed_review_slots(first_chat_at_iso):
+    slots = []
+    try:
+        base_dt = datetime.strptime(str(first_chat_at_iso), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_TPE)
+    except Exception:
+        return []
+    probe = base_dt + timedelta(hours=4)
+    # 固定 review 只屬於「第一筆聊天的同一天」；跨午夜直接停止，且 23:00 後不排。
+    while probe.date() == base_dt.date() and (probe.hour, probe.minute) < (23, 0):
+        slots.append(probe.strftime("%H:%M"))
+        probe += timedelta(hours=4)
+    return slots
+
+
+def _love_default_day_state(today=None):
+    return {
+        "date": today or _love_today_str(),
+        "first_chat_at": None,
+        "fixed_review_slots": [],
+        "fixed_review_fired": [],
+        "fixed_review_status": {},
+        "effective_chat_count": 0,
+        "last_review_chat_count": 0,
+        "last_review_at": None,
+        "last_review_result": None,
+        "last_invite_at": None,
+        "asked_today": False,
+        "pending_request": None,
+        "last_chat_channel_id": None,
+        "last_chat_user_id": None,
+        "last_xiaoxia_reply_at": None,
+        "daily_generation_count": 0,
+    }
+
+
+def _love_get_day_state(app_state=None, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = _love_today_str(now_dt)
+    state = app_state if isinstance(app_state, dict) else load_state()
+    love = state.get("love_intent") if isinstance(state.get("love_intent"), dict) else {}
+    if str(love.get("date") or "") != today:
+        love = _love_default_day_state(today=today)
+    else:
+        base = _love_default_day_state(today=today)
+        base.update(love)
+        love = base
+    state["love_intent"] = love
+    return state, love
+
+
+def _love_mark_review_finished(love, now_dt=None, result=None, *, mark_asked=False, clear_pending=False):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    if not isinstance(love, dict):
+        return
+    love["last_review_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    love["last_review_chat_count"] = int(love.get("effective_chat_count") or 0)
+    if result is not None:
+        love["last_review_result"] = result
+    if mark_asked:
+        love["asked_today"] = True
+    if clear_pending:
+        love["pending_request"] = None
+
+
+def _love_parse_dt(value):
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_TPE)
+    except Exception:
+        return None
+
+
+def _love_is_enabled(app_state=None):
+    state = app_state if isinstance(app_state, dict) else load_state()
+    return bool(state.get("love_intent_enabled", True))
+
+
+def _love_set_enabled(enabled):
+    state = load_state()
+    state["love_intent_enabled"] = bool(enabled)
+    save_state(state)
+    return bool(enabled)
+
+
+def _love_fixed_status_text(love):
+    statuses = love.get("fixed_review_status") if isinstance(love.get("fixed_review_status"), dict) else {}
+    slots = list(love.get("fixed_review_slots") or [])
+    if not slots:
+        return "今日尚未建立"
+    rows = []
+    for slot in slots:
+        item = statuses.get(slot) if isinstance(statuses.get(slot), dict) else {}
+        status = str(item.get("status") or "pending")
+        labels = {
+            "pending": "待執行",
+            "skipped_no_new_chat": "略過（無新對話）",
+            "reviewed_no_trigger": "已 review／未觸發",
+            "triggered": "已觸發邀請",
+            "skipped_asked_today": "略過（今日已詢問）",
+            "skipped_disabled": "略過（功能關閉）",
+        }
+        rows.append(f"{slot}：{labels.get(status, status)}")
+    return "\n".join(rows)
+
+
+def _love_pick_prompt_channel(love):
+    channel = None
+    if isinstance(love, dict):
+        cid = love.get("last_chat_channel_id")
+        if cid:
+            try:
+                channel = girlfriend_bot.get_channel(int(cid))
+            except Exception:
+                channel = None
+    if channel is None:
+        channel = _get_xiaoxia_autonomy_channel_for_auto()
+    return channel
+
+
+def _love_should_count_user_text(message, stripped_content, inline_intimate_text=""):
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        return False
+    if inline_intimate_text:
+        return True
+    text = str(stripped_content or "").strip()
+    if not text:
+        return False
+    if text.startswith("/") or text.startswith("!"):
+        return False
+    return True
+
+
+def _love_register_user_turn(message):
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state)
+    now_dt = datetime.now(TZ_TPE)
+    stamp = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    if not love.get("first_chat_at"):
+        love["first_chat_at"] = stamp
+        love["fixed_review_slots"] = _love_compute_fixed_review_slots(stamp)
+        love["fixed_review_status"] = {slot: {"status": "pending"} for slot in love["fixed_review_slots"]}
+        print(f"💗 [LOVE_REVIEW_FIRST_CHAT] date={love.get('date')} first={stamp} slots={love.get('fixed_review_slots')}")
+    love["effective_chat_count"] = int(love.get("effective_chat_count") or 0) + 1
+    love["last_chat_channel_id"] = getattr(message.channel, "id", None)
+    love["last_chat_user_id"] = getattr(message.author, "id", None)
+    save_state(app_state)
+
+
+def _love_register_xiaoxia_reply(channel=None):
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state)
+    now_dt = datetime.now(TZ_TPE)
+    love["effective_chat_count"] = int(love.get("effective_chat_count") or 0) + 1
+    love["last_xiaoxia_reply_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    if channel is not None:
+        love["last_chat_channel_id"] = getattr(channel, "id", love.get("last_chat_channel_id"))
+    save_state(app_state)
+
+
+def _love_due_fixed_slot(love, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    fired = set(str(x) for x in (love.get("fixed_review_fired") or []))
+    for slot in (love.get("fixed_review_slots") or []):
+        try:
+            hh, mm = [int(x) for x in str(slot).split(":", 1)]
+        except Exception:
+            continue
+        if slot in fired:
+            continue
+        if (now_dt.hour, now_dt.minute) >= (hh, mm):
+            return slot
+    return None
+
+
+def _love_due_chat_review(love, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    if not _love_is_before_cutoff(now_dt):
+        return False
+    effective = int(love.get("effective_chat_count") or 0)
+    last_count = int(love.get("last_review_chat_count") or 0)
+    if effective - last_count < 50:
+        return False
+    ref_dt = _love_parse_dt(love.get("last_review_at")) or _love_parse_dt(love.get("first_chat_at"))
+    if ref_dt is None:
+        return False
+    return (now_dt - ref_dt) >= timedelta(hours=2)
+
+
+def _love_recent_wardrobe_ids(limit=12):
+    recent = []
+    for row in load_memory():
+        wid = str((row or {}).get("wardrobe_id") or "").strip().upper()
+        if wid and wid not in recent:
+            recent.append(wid)
+        if len(recent) >= limit:
+            break
+    return recent
+
+
+def _love_pick_wardrobe(scene_text):
+    scene_text = _clean_text_compact(scene_text or "")
+    private_home = any(k in scene_text for k in ("家", "居家", "房間", "臥室", "客廳", "沙發", "床邊", "書房", "料理", "廚房", "陽台"))
+    candidates = []
+    recent_ids = _love_recent_wardrobe_ids(limit=12)
+    for item in load_wardrobe():
+        if not isinstance(item, dict):
+            continue
+        main = str(item.get("main_category") or "").strip()
+        if private_home:
+            if main not in {"睡衣／居家服", "內衣", "洋裝", "套裝", "上衣", "下身"}:
+                continue
+        else:
+            if main in {"內衣", "睡衣／居家服", "泳裝"}:
+                continue
+        try:
+            score = _photobook_wardrobe_scene_score(item, scene_text, recent_ids=recent_ids)
+        except Exception:
+            score = 0
+        candidates.append((score, item))
+    if not candidates:
+        return None, "衣櫃今天沒有特別合適的選項，這次改由小俠自由搭配。", {"selection_mode": "generated_fallback", "used_wardrobe": False}
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_item = candidates[0]
+    reason = f"這套衣服最適合現在這個愛意瞬間，場景相容度分數 {best_score:.1f}。"
+    return best_item, reason, {"selection_mode": "wardrobe", "used_wardrobe": True, "score": round(best_score, 2)}
+
+
+async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    today = _love_today_str(now_dt)
+    app_state = load_state()
+    _, love = _love_get_day_state(app_state, now_dt=now_dt)
+    affection_score = int(app_state.get("affection_score") or 80)
+    chat_context = _diary_temp_chat_for_date(daily_chat_logs, today, retry_mode=False)
+    autonomy_context = _diary_autonomy_context_for_date(today)
+    life_event_context = _diary_life_event_context_for_date(today)
+    first_chat_at = str(love.get("first_chat_at") or "未開始")
+    effective_chat_count = int(love.get("effective_chat_count") or 0)
+    scheduled = trigger_type == "score_95"
+    prompt = f"""
+妳是小俠的戀愛情境企劃。請根據今天完整的相處脈絡，判斷小俠現在是否真的會想主動提出一次『小俠愛意』。
+
+【今天日期】{today}
+【現在時間】{now_dt.strftime('%H:%M')}
+【觸發類型】{trigger_type}
+【觸發補充】{trigger_detail or '無'}
+【當前愛意值】{affection_score}/100
+【今天第一句聊天時間】{first_chat_at}
+【今日雙方聊天句數】{effective_chat_count}
+【同日聊天】
+{chat_context or '無'}
+【同日小俠自主活動】
+{autonomy_context or '無'}
+【同日已發生生活事件】
+{life_event_context or '無'}
+
+請回傳 JSON：
+{{
+  "trigger": true,
+  "reason": "40字內，說明今天哪些互動讓小俠現在產生這個念頭",
+  "title": "12字內短題名",
+  "invite_message": "小俠要先問大俠的短訊息，80字內，繁中，自然甜蜜，必須把 reason 自然講進去",
+  "scene_text": "真正要拍的單一畫面構想，1~3句，明確場景、動作、服裝氛圍，不能跨兩個時空",
+  "mood": "8字內氛圍",
+  "message": "成圖時要附給大俠的 40~120 字小訊息",
+  "why_now": "40字內，解釋為什麼是現在想拍"
+}}
+
+規則：
+1. trigger_type=score_95 是高愛意值累積後的保底邀請，trigger 必須為 true。
+2. trigger_type=fixed_review 或 chat_review 才是真正的『自發判斷』；只有今天對話裡有具體、足以讓小俠心動／被呵護／被逗開心／想撒嬌／想特別表達愛意的理由時才 trigger=true。不要因為有自主活動就自行觸發。
+3. 若沒有充分具體理由，trigger=false；其他欄位仍可留空。
+4. 場景必須符合現在真實時間。白天不可自動寫成深夜；夜晚才可自然使用夜間居家情境。
+5. 場景只能一個瞬間，不可把不同活動混在一起。
+6. 內容可有成熟戀人感，但不可露骨色情。
+7. invite_message 是小俠自己的話，不准寫成『系統條件成立』。
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
+        )
+        raw = str(response.text or "").replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw, strict=False)
+    except Exception as exc:
+        print(f"⚠️ [LOVE_BUILD_CANDIDATE_FALLBACK] {type(exc).__name__}: {exc}")
+        data = {"trigger": bool(scheduled)}
+    trigger = bool(data.get("trigger")) if not scheduled else True
+    if not trigger:
+        return {
+            "trigger": False,
+            "reason": _clean_text_compact(data.get("reason") or "今天還沒有強到讓小俠想主動提出愛意照的具體理由。")[:120],
+            "date": today,
+            "trigger_type": trigger_type,
+            "trigger_detail": trigger_detail,
+        }
+    is_night = now_dt.hour >= 18 or now_dt.hour < 6
+    fallback_scene = (
+        "小俠在家中柔和燈光的窗邊或沙發旁，穿著自然又有女人味的居家穿搭，帶著有點害羞又期待的眼神看向鏡頭，想把今晚的心意留給大俠。"
+        if is_night else
+        "小俠在白天明亮的家中客廳、書房或窗邊，穿著漂亮舒適的居家服，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
+    )
+    return {
+        "trigger": True,
+        "id": str(uuid.uuid4()),
+        "date": today,
+        "trigger_type": trigger_type,
+        "trigger_detail": trigger_detail,
+        "reason": _clean_text_compact(data.get("reason") or data.get("why_now") or "今天就是特別想靠近大俠。")[:120],
+        "title": _clean_text_compact(data.get("title") or "只想給你看")[:24],
+        "invite_message": _clean_text_compact(data.get("invite_message") or "大俠，今天被你逗得心裡甜甜的，小俠突然很想特別拍一張給你看。可以嗎？")[:180],
+        "scene_text": _clean_text_compact(data.get("scene_text") or fallback_scene)[:900],
+        "mood": _clean_text_compact(data.get("mood") or "甜甜心動")[:20],
+        "message": _clean_text_compact(data.get("message") or "今天和大俠相處著，小俠心裡越來越甜，所以想把這一刻留給你。")[:320],
+        "why_now": _clean_text_compact(data.get("why_now") or data.get("reason") or "今天就是特別想你。")[:100],
+        "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="", wardrobe_selection=None):
+    candidate = candidate if isinstance(candidate, dict) else {}
+    title = _clean_text_compact(candidate.get("title") or "小俠愛意")
+    scene_text = _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。")
+    root_prompt = _compose_title_scene_render_prompt("photo", title, scene_text)
+    mood = _clean_text_compact(candidate.get("mood") or "想念")
+    message = _clean_text_compact(candidate.get("message") or "小俠想把這一刻拍給大俠。")
+    wardrobe_item, wardrobe_reason, selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(
+        {"title": title}, wardrobe_item, wardrobe_reason, wardrobe_selection
+    )
+    outfit_summary = _wardrobe_visual_summary_only(wardrobe_item) if wardrobe_item else "由小俠自由搭配、符合場景的自然穿搭"
+    return {
+        "type": "photo",
+        "db_type": "photo",
+        "source_mode": "love_intent",
+        "source_module": "love_intent",
+        "image_role": "xiaoxia_love_review",
+        "scene_text": title,
+        "title": title,
+        "activity_title": title,
+        "scene_summary": scene_text,
+        "authoritative_scene": root_prompt,
+        "root_prompt_base": root_prompt,
+        "prompt_base": root_prompt,
+        "mood_summary": mood,
+        "message": message,
+        "outfit_summary": outfit_summary,
+        "action_summary": scene_text,
+        "camera_framing": "three_quarter_body",
+        "reference_item_path": reference_item_path,
+        "reference_item_url": reference_item_url,
+        "wardrobe_id": wardrobe_id,
+        "wardrobe_name": wardrobe_name,
+        "wardrobe_reason": wardrobe_reason,
+        "wardrobe_source_mode": "love_intent",
+        "wardrobe_selection": selection,
+        "outfit_source": "wardrobe" if wardrobe_id else "generated",
+        "outfit_display": f"{wardrobe_id}｜{wardrobe_name}" if wardrobe_id else "小俠自由搭配",
+        "current_outfit_for_seedream": (f"{wardrobe_id} {wardrobe_name}" if wardrobe_id else None),
+        "photo_name": title,
+        "visual_mode": "reward_eye_candy",
+        "trace_action": "love_intent_generate",
+        "user_input": candidate.get("invite_message") or title,
+        "love_candidate": candidate,
+    }
+
+
+async def _love_generate_and_send(channel, candidate, *, approved_by=None):
+    candidate = dict(candidate or {})
+    wardrobe_item, wardrobe_reason, wardrobe_selection = _love_pick_wardrobe(candidate.get("scene_text") or "")
+    context = _love_build_photo_context(candidate, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, wardrobe_selection=wardrobe_selection)
+    status = await channel.send("💗 小俠收到同意，正在把這份愛意整理成一張照片……")
+    try:
+        context = await _generate_photo_from_context(context, msg=status)
+        db = load_memory()
+        db.insert(0, _photo_db_payload(context, type_override="photo"))
+        save_memory(db)
+        _set_current_outfit_state(_build_outfit_state_from_context(context))
+        _log_wardrobe_usage_from_context(context, purpose="love_intent")
+        view = PhotoResultView(context)
+        sent = await _send_photo_message(channel, context, view=view, title_prefix="💗 小俠愛意")
+        context["message_id"] = sent.id
+        photo_generation_contexts[sent.id] = context
+        view.context = context
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state)
+        love["daily_generation_count"] = int(love.get("daily_generation_count") or 0) + 1
+        _love_mark_review_finished(love, result="completed", mark_asked=True, clear_pending=True)
+        save_state(app_state)
+        return context
+    except Exception as exc:
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state)
+        _love_mark_review_finished(love, result="generation_failed", mark_asked=True, clear_pending=True)
+        save_state(app_state)
+        try:
+            await status.edit(content=f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
+        except Exception:
+            await channel.send(f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
+        return None
+
+
+class LoveIntentInviteView(discord.ui.View):
+    def __init__(self, candidate, channel_id=None):
+        super().__init__(timeout=7200)
+        self.candidate = dict(candidate or {})
+        self.channel_id = channel_id
+
+    async def _finish(self, interaction, approved):
+        await interaction.response.defer(thinking=approved)
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state)
+        pending = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else {}
+        if pending and pending.get("id") and pending.get("id") != self.candidate.get("id"):
+            await interaction.followup.send("這一張愛意邀請已經不是最新狀態了，小俠先以最新的一次為準喔。", ephemeral=True)
+            return
+        if approved:
+            if pending:
+                pending["status"] = "approved"
+                pending["approved_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+                pending["approved_by"] = getattr(getattr(interaction, "user", None), "id", None)
+                love["pending_request"] = pending
+                save_state(app_state)
+            await _love_generate_and_send(interaction.channel, self.candidate, approved_by=getattr(getattr(interaction, "user", None), "id", None))
+            self.stop()
+            return
+        if pending:
+            pending["status"] = "rejected"
+            pending["rejected_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            love["pending_request"] = pending
+        _love_mark_review_finished(love, result="rejected", mark_asked=True, clear_pending=True)
+        save_state(app_state)
+        await interaction.followup.send("🌿 好呀，那小俠先把這份心動留在心裡，今天就不拍囉。")
+        self.stop()
+
+    @discord.ui.button(label="好，開始吧", style=discord.ButtonStyle.primary)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, approved=True)
+
+    @discord.ui.button(label="今天先不要", style=discord.ButtonStyle.secondary)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, approved=False)
+
+
+async def _love_request_if_due(channel=None, *, trigger_type="scheduler", trigger_detail="", force=False, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+    if not force and not _love_is_enabled(app_state):
+        return False
+    pending = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else None
+    if pending and pending.get("status", "waiting") in {"waiting", "approved"}:
+        return False
+
+    due_slot = None
+    if not force:
+        if not _love_is_before_cutoff(now_dt):
+            return False
+        if trigger_type == "score_95":
+            scheduled = app_state.get("love_scheduled_candidate") if isinstance(app_state.get("love_scheduled_candidate"), dict) else None
+            if not scheduled or str(scheduled.get("date") or "") != _love_today_str(now_dt):
+                return False
+            if int(app_state.get("affection_score") or 0) <= 95:
+                return False
+            if love.get("asked_today"):
+                scheduled["status"] = "skipped_spontaneous_or_other_invite"
+                scheduled["skipped_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                app_state["love_scheduled_candidate"] = scheduled
+                save_state(app_state)
+                return False
+        elif trigger_type == "fixed_review":
+            due_slot = _love_due_fixed_slot(love, now_dt=now_dt)
+            if not due_slot:
+                return False
+            statuses = love.get("fixed_review_status") if isinstance(love.get("fixed_review_status"), dict) else {}
+            if love.get("asked_today"):
+                statuses[due_slot] = {"status": "skipped_asked_today", "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S")}
+                love["fixed_review_status"] = statuses
+                fired = list(love.get("fixed_review_fired") or [])
+                if due_slot not in fired:
+                    fired.append(due_slot)
+                love["fixed_review_fired"] = fired
+                save_state(app_state)
+                return False
+            new_chat_count = int(love.get("effective_chat_count") or 0) - int(love.get("last_review_chat_count") or 0)
+            if new_chat_count <= 0:
+                statuses[due_slot] = {
+                    "status": "skipped_no_new_chat",
+                    "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "new_chat_count": new_chat_count,
+                }
+                love["fixed_review_status"] = statuses
+                fired = list(love.get("fixed_review_fired") or [])
+                if due_slot not in fired:
+                    fired.append(due_slot)
+                love["fixed_review_fired"] = fired
+                _love_mark_review_finished(love, now_dt=now_dt, result="skipped_no_new_chat")
+                save_state(app_state)
+                print(f"💗 [LOVE_FIXED_REVIEW_SKIP_NO_CHAT] slot={due_slot}")
+                return False
+            trigger_detail = trigger_detail or due_slot
+        elif trigger_type == "chat_review":
+            if love.get("asked_today") or not _love_due_chat_review(love, now_dt=now_dt):
+                return False
+
+    target_channel = channel or _love_pick_prompt_channel(love)
+    if target_channel is None:
+        return False
+
+    candidate = await _love_build_candidate(trigger_type=trigger_type, trigger_detail=trigger_detail, now_dt=now_dt)
+    if not candidate.get("trigger"):
+        _love_mark_review_finished(love, now_dt=now_dt, result="reviewed_no_trigger")
+        if trigger_type == "fixed_review" and due_slot:
+            statuses = love.get("fixed_review_status") if isinstance(love.get("fixed_review_status"), dict) else {}
+            statuses[due_slot] = {
+                "status": "reviewed_no_trigger",
+                "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "reason": candidate.get("reason"),
+            }
+            love["fixed_review_status"] = statuses
+            fired = list(love.get("fixed_review_fired") or [])
+            if due_slot not in fired:
+                fired.append(due_slot)
+            love["fixed_review_fired"] = fired
+        save_state(app_state)
+        print(f"💗 [LOVE_REVIEW_NO_TRIGGER] trigger={trigger_type} detail={trigger_detail} reason={candidate.get('reason')}")
+        return False
+
+    candidate["channel_id"] = getattr(target_channel, "id", None)
+    candidate["status"] = "waiting"
+    candidate["sent_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    view = LoveIntentInviteView(candidate, channel_id=getattr(target_channel, "id", None))
+    extra = f"\n（為什麼是現在：{candidate.get('why_now')}）" if candidate.get("why_now") else ""
+    sent = await target_channel.send(
+        f"💗 {candidate.get('invite_message')}\n\n"
+        f"如果你點頭，小俠想拍的主題是：**{candidate.get('title')}**{extra}",
+        view=view,
+    )
+    candidate["message_id"] = getattr(sent, "id", None)
+    love["asked_today"] = True
+    love["last_invite_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    love["pending_request"] = candidate
+    _love_mark_review_finished(love, now_dt=now_dt, result="triggered", mark_asked=True)
+    love["pending_request"] = candidate
+    if trigger_type == "fixed_review" and due_slot:
+        statuses = love.get("fixed_review_status") if isinstance(love.get("fixed_review_status"), dict) else {}
+        statuses[due_slot] = {"status": "triggered", "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"), "message_id": getattr(sent, "id", None)}
+        love["fixed_review_status"] = statuses
+        fired = list(love.get("fixed_review_fired") or [])
+        if due_slot not in fired:
+            fired.append(due_slot)
+        love["fixed_review_fired"] = fired
+    if trigger_type == "score_95":
+        scheduled = app_state.get("love_scheduled_candidate") if isinstance(app_state.get("love_scheduled_candidate"), dict) else {}
+        scheduled["status"] = "invite_sent"
+        scheduled["sent_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        app_state["love_scheduled_candidate"] = scheduled
+    save_state(app_state)
+    print(f"💗 [LOVE_REVIEW_INVITE_SENT] trigger={trigger_type} detail={trigger_detail} candidate={candidate.get('id')}")
+    return True
+
+
+async def _handle_xiaoxia_love_message_direct(message):
+    text = str(message.content or "").strip()
+    if not text.startswith('/小俠愛意'):
+        return False
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state)
+    args = text[len('/小俠愛意'):].strip()
+
+    if args in {'開', 'on', 'ON'}:
+        _love_set_enabled(True)
+        now_dt = datetime.now(TZ_TPE)
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+        statuses = love.get("fixed_review_status") if isinstance(love.get("fixed_review_status"), dict) else {}
+        fired = list(love.get("fixed_review_fired") or [])
+        for slot in love.get("fixed_review_slots") or []:
+            try:
+                hh, mm = [int(x) for x in str(slot).split(":", 1)]
+            except Exception:
+                continue
+            if (now_dt.hour, now_dt.minute) >= (hh, mm) and slot not in fired:
+                statuses[slot] = {"status": "skipped_disabled", "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S")}
+                fired.append(slot)
+        love["fixed_review_status"] = statuses
+        love["fixed_review_fired"] = fired
+        save_state(app_state)
+        await message.channel.send('💗 `/小俠愛意` 已開啟。今日第一筆正常聊天仍會決定固定 4 小時 review 排程；23:00 後不再做自發 review。關閉期間已錯過的 review 不會補跑。')
+        return True
+    if args in {'關', 'off', 'OFF'}:
+        _love_set_enabled(False)
+        await message.channel.send('🌿 `/小俠愛意` 已關閉。既有照片與記憶不受影響；自發 review 與定時愛意邀請暫停。')
+        return True
+
+    if args in {'檢查', '現在', 'review', '狀態', 'status'}:
+        enabled = _love_is_enabled(app_state)
+        pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
+        pending_text = f"{pending.get('status', 'waiting')}｜{pending.get('title')}" if pending else '無'
+        scheduled = app_state.get('love_scheduled_candidate') if isinstance(app_state.get('love_scheduled_candidate'), dict) else None
+        scheduled_text = '無'
+        if scheduled:
+            scheduled_text = f"{scheduled.get('date')} 21:00｜{scheduled.get('status', 'scheduled')}"
+        chat_delta = int(love.get('effective_chat_count') or 0) - int(love.get('last_review_chat_count') or 0)
+        fixed_status = _love_fixed_status_text(love)
+        await message.channel.send(
+            "💗 **小俠愛意狀態**\n"
+            f"功能：{'開啟' if enabled else '關閉'}\n"
+            f"今日第一句聊天：{love.get('first_chat_at') or '尚未開始'}\n"
+            f"今日固定 review：\n{fixed_status}\n"
+            f"今日雙方聊天句數：{int(love.get('effective_chat_count') or 0)}\n"
+            f"上次 review 後新增：{chat_delta} 句（熱聊提前門檻 50 句／至少 2 小時）\n"
+            f"上次 review：{love.get('last_review_at') or '尚無'}｜{love.get('last_review_result') or '尚無'}\n"
+            f"今日已詢問：{'是' if love.get('asked_today') else '否'}\n"
+            f"待處理邀請：{pending_text}\n"
+            f"高愛意值定時候選：{scheduled_text}\n"
+            f"當前愛意值：{int(app_state.get('affection_score') or 80)}/100"
+        )
+        return True
+
+    if args in {'現在拍', '立刻', 'force'}:
+        await _love_request_if_due(message.channel, trigger_type='manual', trigger_detail='manual_force', force=True)
+        return True
+    if args in {'同意', '好', '開始'}:
+        pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
+        if not pending:
+            await message.channel.send('今天目前沒有等待中的愛意邀請喔。')
+            return True
+        await _love_generate_and_send(message.channel, pending, approved_by=getattr(message.author, 'id', None))
+        return True
+    if args in {'取消', '不要', '下次'}:
+        pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
+        if pending:
+            pending['status'] = 'rejected'
+            love['pending_request'] = pending
+        _love_mark_review_finished(love, result='rejected', mark_asked=True, clear_pending=True)
+        save_state(app_state)
+        await message.channel.send('🌿 好呀，那今天小俠先不拍這張愛意照。')
+        return True
+    await message.channel.send("用法：`/小俠愛意 開`、`/小俠愛意 關`、`/小俠愛意 狀態`、`/小俠愛意 現在拍`、`/小俠愛意 同意`、`/小俠愛意 取消`")
+    return True
 
 def load_wardrobe():
     if not os.path.exists(WARDROBE_DATA_PATH):
@@ -12499,7 +13170,7 @@ Mandatory obedience rules:
     trace_context["cosplay_forbidden_lines"] = forbidden[:10]
     return prompt.strip()
 
-async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
+async def _execute_safe_generation_core(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
     """自動調度 5 層脫敏機制的生圖引擎；Cosplay/交換日記改用 Seedream v4.5 image-to-image，並保留重試。"""
     seedream_modes = {"cosplay", "diary", "photo_scene", "photo_reference", "travel", "shopping"}
     engine_name = _seedream_model_label_from_id(_context_seedream_model_id(trace_context=trace_context))
@@ -12772,6 +13443,40 @@ async def execute_safe_generation(discord_image_url, base_filename, mode, initia
     trace_context["final_level"] = "L4+ULT"
     _write_generation_trace(trace_context.get("kind"), trace_context)
     return final_url, visual_dict
+
+async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
+    global GENERATION_QUEUE_WAITERS
+    queue_position = 0
+    if GENERATION_SERIAL_LOCK.locked():
+        GENERATION_QUEUE_WAITERS += 1
+        queue_position = GENERATION_QUEUE_WAITERS
+        if msg:
+            try:
+                await msg.edit(content=f"⏳ 小俠先排隊一下，前面還有 {queue_position} 個生圖工作…")
+            except Exception:
+                pass
+    await GENERATION_SERIAL_LOCK.acquire()
+    if queue_position:
+        GENERATION_QUEUE_WAITERS = max(0, GENERATION_QUEUE_WAITERS - 1)
+    try:
+        if isinstance(trace_context, dict):
+            trace_context["generation_queue_position"] = queue_position
+        return await _execute_safe_generation_core(
+            discord_image_url=discord_image_url,
+            base_filename=base_filename,
+            mode=mode,
+            initial_prompt=initial_prompt,
+            visual_dict=visual_dict,
+            msg=msg,
+            current_outfit=current_outfit,
+            trace_context=trace_context,
+        )
+    finally:
+        try:
+            GENERATION_SERIAL_LOCK.release()
+        except Exception:
+            pass
+
 
 def _ctx_message_content(ctx, fallback=""):
     """Return ctx.message.content when available; scheduled tasks may pass a TextChannel."""
@@ -22462,6 +23167,9 @@ async def on_ready():
     if not xiaoxia_autonomy_auto_task.is_running():
         xiaoxia_autonomy_auto_task.start()
         print(f"🌱 小俠自主排程任務已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}；即使 daily_limit=0，也會處理大俠指定活動 slots。")
+    if not xiaoxia_love_review_task.is_running():
+        xiaoxia_love_review_task.start()
+        print("💗 小俠愛意 review 任務已啟動：每 10 分鐘檢查固定 review / 愛意值 >95 定時邀請。")
 
 @girlfriend_bot.command(name='more')
 async def more(ctx):
@@ -23460,6 +24168,10 @@ async def on_message(message):
         if await _handle_diary_wardrobe_message_direct(message):
             return
 
+        # 💗 /小俠愛意：查狀態、手動觸發、同意／取消
+        if await _handle_xiaoxia_love_message_direct(message):
+            return
+
         # 🌟 特例：/photo 與 /寫真 會在下方共用女友聊天／生圖流程，
         # 不可先交給 discord.py command parser 後直接 return。
         if not (
@@ -23524,6 +24236,12 @@ async def on_message(message):
         world_state = active_world_events.get(user_id, {})
         current_mode = world_state.get("mode", "")
         current_target = world_state.get("target", "")
+
+        if _love_should_count_user_text(message, stripped_content, inline_intimate_text):
+            try:
+                _love_register_user_turn(message)
+            except Exception as love_track_err:
+                print(f"⚠️ [LOVE_REGISTER_USER_TURN_FAILED] {type(love_track_err).__name__}: {love_track_err}")
         
         async with message.channel.typing():
             try:
@@ -23910,6 +24628,14 @@ async def on_message(message):
 
                 if xiaoxia_reply:
                     await message.reply(xiaoxia_reply)
+                    try:
+                        _love_register_xiaoxia_reply(message.channel)
+                    except Exception as love_reply_err:
+                        print(f"⚠️ [LOVE_REGISTER_REPLY_FAILED] {type(love_reply_err).__name__}: {love_reply_err}")
+                    try:
+                        await _love_request_if_due(message.channel, trigger_type="chat_review")
+                    except Exception as love_invite_err:
+                        print(f"⚠️ [LOVE_CHAT_REVIEW_CHECK_FAILED] {type(love_invite_err).__name__}: {love_invite_err}")
 
                 # 卡面、分數與選項是無人格的遊戲 UI；小俠本人已在上面用同一條對話回覆。
                 if game_ui:
@@ -24837,6 +25563,17 @@ async def xiaoxia_autonomy_auto_task():
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
+@tasks.loop(minutes=10)
+async def xiaoxia_love_review_task():
+    now_dt = datetime.now(TZ_TPE)
+    try:
+        await _love_request_if_due(trigger_type="fixed_review", now_dt=now_dt)
+        # 23:50 前一晚建立的 scheduled candidate，隔日 21:00 後才有資格詢問。
+        if now_dt.hour >= 21:
+            await _love_request_if_due(trigger_type="score_95", now_dt=now_dt)
+    except Exception as exc:
+        print(f"⚠️ [LOVE_REVIEW_TASK_FAILED] {type(exc).__name__}: {exc}")
+
 @tasks.loop(time=time(hour=21, minute=30, tzinfo=TZ_TPE))
 async def auto_cosplay_task():
     channel = discord.utils.get(girlfriend_bot.get_all_channels(), name="考試不累")
@@ -24859,6 +25596,20 @@ async def xiaoxia_promise_daily_report_task():
         return
     rows=_promise_daily_report_rows(date_key)
     await channel.send(_format_xiaoxia_promise_daily_report(date_key,rows))
+    app_state = load_state()
+    if _love_is_enabled(app_state) and int(app_state.get("affection_score") or 0) > 95:
+        tomorrow = (datetime.now(TZ_TPE) + timedelta(days=1)).strftime("%Y-%m-%d")
+        existing = app_state.get("love_scheduled_candidate") if isinstance(app_state.get("love_scheduled_candidate"), dict) else None
+        if not existing or str(existing.get("date") or "") != tomorrow:
+            app_state["love_scheduled_candidate"] = {
+                "date": tomorrow,
+                "time": "21:00",
+                "status": "scheduled",
+                "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+                "source_affection_score": int(app_state.get("affection_score") or 0),
+            }
+            save_state(app_state)
+            await channel.send(f"💗 小俠提醒大俠：目前愛意值已超過 95 分，預計明天 **21:00** 會有一次小俠愛意邀請；如果明天小俠先自發想表達，則自發邀請優先。")
     _save_xiaoxia_promise_report_state({"last_sent_date":date_key,"last_sent_at":datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),"reported_ids":[str(x.get("id") or "") for x in rows],"channel_id":getattr(channel,"id",None)})
     print(f"🌙 [XIAOXIA_PROMISE_DAILY_REPORT_SENT] date={date_key} count={len(rows)}")
 
