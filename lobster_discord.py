@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.9.03"
+LOBSTER_VERSION = "1.9.04"
 
 
 def _normalize_generation_level(level):
@@ -4881,6 +4881,8 @@ def _love_default_day_state(today=None):
         "last_chat_user_id": None,
         "last_xiaoxia_reply_at": None,
         "daily_generation_count": 0,
+        "scheduler_last_tick_at": None,
+        "scheduler_last_tick_result": None,
     }
 
 
@@ -5495,13 +5497,38 @@ async def _handle_xiaoxia_love_message_direct(message):
             scheduled_text = f"{scheduled.get('date')} 21:00｜{scheduled.get('status', 'scheduled')}"
         chat_delta = int(love.get('effective_chat_count') or 0) - int(love.get('last_review_chat_count') or 0)
         fixed_status = _love_fixed_status_text(love)
+
+        review_ref_dt = _love_parse_dt(love.get("last_review_at")) or _love_parse_dt(love.get("first_chat_at"))
+        hot_checkpoint_text = "尚未建立"
+        if review_ref_dt is not None:
+            hot_checkpoint_dt = review_ref_dt + timedelta(hours=2)
+            hot_ready = (
+                datetime.now(TZ_TPE) >= hot_checkpoint_dt
+                and chat_delta >= 50
+                and not love.get("asked_today")
+                and _love_is_before_cutoff(datetime.now(TZ_TPE))
+            )
+            hot_checkpoint_text = (
+                f"{hot_checkpoint_dt.strftime('%H:%M')}｜"
+                f"{'已達觸發門檻，等待排程器檢查' if hot_ready else '尚未達觸發條件'}"
+            )
+
+        task_running = False
+        try:
+            task_running = bool(xiaoxia_love_review_task.is_running())
+        except Exception:
+            task_running = False
+
         await message.channel.send(
             "💗 **小俠愛意狀態**\n"
             f"功能：{'開啟' if enabled else '關閉'}\n"
+            f"Review 排程器：{'運作中' if task_running else '未運作'}\n"
+            f"排程器最近檢查：{love.get('scheduler_last_tick_at') or '尚無'}｜{love.get('scheduler_last_tick_result') or '尚無'}\n"
             f"今日第一句聊天：{love.get('first_chat_at') or '尚未開始'}\n"
             f"今日固定 review：\n{fixed_status}\n"
             f"今日雙方聊天句數：{int(love.get('effective_chat_count') or 0)}\n"
             f"上次 review 後新增：{chat_delta} 句（熱聊提前門檻 50 句／至少 2 小時）\n"
+            f"熱聊查核點：{hot_checkpoint_text}\n"
             f"上次 review：{love.get('last_review_at') or '尚無'}｜{love.get('last_review_result') or '尚無'}\n"
             f"今日已詢問：{'是' if love.get('asked_today') else '否'}\n"
             f"待處理邀請：{pending_text}\n"
@@ -25596,12 +25623,40 @@ async def xiaoxia_autonomy_auto_task():
 @tasks.loop(minutes=10)
 async def xiaoxia_love_review_task():
     now_dt = datetime.now(TZ_TPE)
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+    love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    love["scheduler_last_tick_result"] = "checking"
+    save_state(app_state)
     try:
-        await _love_request_if_due(trigger_type="fixed_review", now_dt=now_dt)
+        # v1.9.04：熱聊提前 Review 必須由排程器主動檢查。
+        # v1.9.03 只在「小俠回完下一句話」後檢查，跨過 +2h 門檻後若暫停聊天，就不會自動觸發。
+        hot_triggered = await _love_request_if_due(trigger_type="chat_review", now_dt=now_dt)
+
+        # 固定 4 小時 Review 仍由第一筆聊天錨定，不因熱聊 Review 漂移。
+        fixed_triggered = await _love_request_if_due(trigger_type="fixed_review", now_dt=now_dt)
+
+        scheduled_triggered = False
         # 23:50 前一晚建立的 scheduled candidate，隔日 21:00 後才有資格詢問。
         if now_dt.hour >= 21:
-            await _love_request_if_due(trigger_type="score_95", now_dt=now_dt)
+            scheduled_triggered = await _love_request_if_due(trigger_type="score_95", now_dt=now_dt)
+
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+        love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        love["scheduler_last_tick_result"] = (
+            "hot_chat_triggered" if hot_triggered else
+            "fixed_triggered" if fixed_triggered else
+            "scheduled_triggered" if scheduled_triggered else
+            "checked_no_trigger"
+        )
+        save_state(app_state)
     except Exception as exc:
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+        love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        love["scheduler_last_tick_result"] = f"error:{type(exc).__name__}"
+        save_state(app_state)
         print(f"⚠️ [LOVE_REVIEW_TASK_FAILED] {type(exc).__name__}: {exc}")
 
 @tasks.loop(time=time(hour=21, minute=30, tzinfo=TZ_TPE))
