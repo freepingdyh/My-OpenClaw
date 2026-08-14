@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.9.05"
+LOBSTER_VERSION = "1.9.06"
 
 
 def _normalize_generation_level(level):
@@ -5085,6 +5085,39 @@ def _love_home_scene_fallback(now_dt=None):
     return "小俠在白天明亮的家中客廳、書房、窗邊或沙發旁，穿著漂亮舒適的居家服，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
 
 
+def _love_time_anchor_label(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    hour = int(now_dt.hour)
+    if 5 <= hour < 11:
+        return "早晨"
+    if 11 <= hour < 14:
+        return "中午"
+    if 14 <= hour < 18:
+        return "下午"
+    return "夜晚"
+
+
+def _love_time_anchor_text(now_dt=None):
+    label = _love_time_anchor_label(now_dt)
+    if label == "早晨":
+        return "台灣當下的早晨居家時光，室內自然晨光柔和可見"
+    if label == "中午":
+        return "台灣當下的中午居家時光，室內明亮日光自然可見"
+    if label == "下午":
+        return "台灣當下的下午居家時光，窗外與室內應呈現自然午後光線"
+    return "台灣當下的夜晚居家時光，室內燈光柔和，窗外如可見應是夜色"
+
+
+def _love_apply_time_anchor_to_scene(scene_text, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    scene_text = _clean_text_compact(scene_text or "")
+    if not scene_text:
+        return scene_text
+    if re.match(r'^(清晨|早晨|上午|中午|午後|下午|傍晚|夜晚|晚上|深夜)[，、 ]', scene_text):
+        return scene_text
+    return f"{_love_time_anchor_label(now_dt)}，{scene_text}"
+
+
 def _love_solo_scene_template(now_dt=None, style="scene"):
     now_dt = now_dt or datetime.now(TZ_TPE)
     is_night = now_dt.hour >= 18 or now_dt.hour < 6
@@ -5159,7 +5192,11 @@ def _love_refresh_prompt_context(context):
     ctx = dict(context or {})
     title = _clean_text_compact(ctx.get("title") or ctx.get("activity_title") or ctx.get("scene_text") or "小俠愛意")
     raw_scene = _clean_text_compact(ctx.get("scene_summary") or ctx.get("composition") or ctx.get("scene_text") or "")
-    scene_text = _love_sanitize_scene_text(_love_enforce_home_scene(raw_scene or _love_home_scene_fallback(), love_action=ctx.get("action_summary") or ""), now_dt=datetime.now(TZ_TPE))
+    scene_dt = _safe_parse_datetime(ctx.get("created_at") or ctx.get("sent_at") or "") or datetime.now(TZ_TPE)
+    scene_text = _love_sanitize_scene_text(_love_enforce_home_scene(raw_scene or _love_home_scene_fallback(scene_dt), love_action=ctx.get("action_summary") or "", now_dt=scene_dt), now_dt=scene_dt)
+    if not _clean_text_compact(ctx.get("time_anchor")):
+        ctx["time_anchor"] = _love_time_anchor_text(scene_dt)
+    scene_text = _love_apply_time_anchor_to_scene(scene_text, now_dt=scene_dt)
     outfit_summary = _clean_text_compact(ctx.get("outfit_summary") or "")
     root_prompt = _love_compose_render_prompt(
         title,
@@ -5309,11 +5346,15 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="", wardrobe_selection=None):
     candidate = candidate if isinstance(candidate, dict) else {}
     title = _clean_text_compact(candidate.get("title") or "小俠愛意")
+    candidate_dt = _safe_parse_datetime(candidate.get("created_at") or candidate.get("sent_at") or "") or datetime.now(TZ_TPE)
     scene_text = _love_sanitize_scene_text(
-        _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。")
+        _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。"),
+        now_dt=candidate_dt,
     )
+    scene_text = _love_apply_time_anchor_to_scene(scene_text, now_dt=candidate_dt)
     mood = _clean_text_compact(candidate.get("mood") or "想念")
     message = _clean_text_compact(candidate.get("message") or "小俠想把這一刻拍給大俠。")
+    time_anchor = _clean_text_compact(candidate.get("time_anchor") or _love_time_anchor_text(candidate_dt))
     wardrobe_item, wardrobe_reason, selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(
         {"title": title}, wardrobe_item, wardrobe_reason, wardrobe_selection
     )
@@ -5329,6 +5370,7 @@ def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="",
         "title": title,
         "activity_title": title,
         "scene_summary": scene_text,
+        "time_anchor": time_anchor,
         "authoritative_scene": root_prompt,
         "root_prompt_base": root_prompt,
         "prompt_base": root_prompt,
@@ -17886,7 +17928,7 @@ Scene focus：{_clean_text_compact(episode_plan.get('scene_focus') or '')}
     return fallback
 
 
-def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None, user_scene_hardlock=""):
+def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, reference_item_url=None, user_scene_hardlock="", time_anchor=""):
     scene_summary = str(scene_data.get("scene_summary", "小俠的生活照片")).strip()
     outfit_summary = str(scene_data.get("outfit_summary", "自然日常穿搭")).strip()
     action_summary = str(scene_data.get("action_summary", "自然生活動作")).strip()
@@ -17908,7 +17950,7 @@ def _photo_visual_dict(scene_data, source_mode, reference_item_path=None, refere
             "outfit_intent": outfit_summary,
             "lighting_mood": mood_summary,
             "setting_anchor": scene_summary,
-            "time_anchor": "",
+            "time_anchor": _clean_text_compact(time_anchor or scene_data.get("time_anchor") or ""),
             "camera_framing": scene_data.get("camera_framing", "half_body"),
             "scenario_tw": scene_summary,
             "user_scene_hardlock": _clean_text_compact(user_scene_hardlock or scene_data.get("user_scene_hardlock") or ""),
@@ -18496,11 +18538,13 @@ async def _generate_photo_from_context(context, msg=None):
             "camera_framing": context.get("camera_framing", "half_body"),
             "user_scene_hardlock": semantic_scene,
             "user_priority_request": semantic_scene,
+            "time_anchor": context.get("time_anchor", ""),
         },
         context.get("source_mode", "photo_scene"),
         reference_item_path=context.get("reference_item_path"),
         reference_item_url=context.get("reference_item_url"),
         user_scene_hardlock=semantic_scene,
+        time_anchor=context.get("time_anchor", ""),
     )
     _trace_stage(trace_context, "photo_visual_dict", data=visual)
     generation_mode = context.get("generation_mode") or context.get("source_mode", "photo_scene")
