@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.8.17"
+LOBSTER_VERSION = "1.8.19"
 
 
 def _normalize_generation_level(level):
@@ -16252,9 +16252,11 @@ def _build_diary_lightweight_request(diary_visual, result=None, forced_scene="",
 
 
 def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None):
-    """v1.5.28: lightweight, conflict-free exchange-diary prompt."""
+    """v1.8.19: scene-only exchange-diary prompt builder shared by Pure / Hybrid / More / Dice / Repair lineage."""
     cleaned_request = _v1527_strip_prompt_conflicts(custom_prompt)
     hard = _v1527_scene_hard_requirements(cleaned_request or custom_prompt)
+    people_line = _seedream_people_policy_line(visual_checklist)
+    bystanders_allowed = bool((visual_checklist or {}).get("allow_background_bystanders"))
     sections = [
         "DIARY FIGURE ROLE MAP — obey these roles strictly.",
         (
@@ -16262,15 +16264,21 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Do not copy their pose, outfit, room, background, lighting, props, or composition."
         ),
         _v1540_compact_identity_line(),
+        "DIARY SCENE CONTRACT:\n"
+        "- Treat the DIARY TEXT REQUEST below as the single authoritative story source for this image.\n"
+        "- Do not pull in other diary paragraphs, old memories, bedroom defaults, optional ideas, continuation notes, reroll notes, or generic glamour substitutions.\n"
+        "- Keep one place, one time, one main activity, and one coherent lived-in moment.",
     ]
     if hard:
         sections.append("DIARY HARD SCENE REQUIREMENTS — every item must be visible:\n" + hard)
-    sections.append(
-        "DIARY PEOPLE POLICY:\n"
-        "- Xiaoxia is the only visible human figure in this exchange-diary photo.\n"
-        "- Daxia is an invisible camera viewpoint only; never show a viewer, man, hand, arm, shoulder, reflection, shadow, or partial person.\n"
-        "- Keep Xiaoxia's anatomy, hands, fingers, posture, and movement natural."
-    )
+    people_lines = [
+        f"- {people_line}",
+        "- Daxia is an invisible camera viewpoint only; never show a visible viewer body part, reflection, shadow, or partial person.",
+        "- Keep Xiaoxia's anatomy, hands, fingers, posture, and movement natural.",
+    ]
+    if bystanders_allowed:
+        people_lines.append("- If the scene is public, incidental background people may remain only as distant secondary realism; they must never become a companion or interact with Xiaoxia.")
+    sections.append("DIARY PEOPLE POLICY:\n" + "\n".join(people_lines))
     if has_reference:
         sections.append(
             "FIGURE 10 WARDROBE ROLE:\n"
@@ -16307,10 +16315,11 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
         "hard_chars": len(hard),
         "solo_phrase_count": len(re.findall(r"\\bsolo\\b|only visible human|only human figure", final, flags=re.I)),
         "conflict_phrase_count": len(re.findall(r"female friends may|supporting women|background bystanders", final, flags=re.I)),
+        "bystanders_allowed": bystanders_allowed,
+        "people_policy": str((visual_checklist or {}).get("people_policy") or ""),
     }
-    print("🧭 [DIARY_PROMPT_STATS_V1528] " + " ".join(f"{k}={v}" for k, v in stats.items()))
+    print("🧭 [DIARY_PROMPT_STATS_V1819] " + " ".join(f"{k}={v}" for k, v in stats.items()))
     return final, stats
-
 
 async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, enable_safety_checker=None, current_outfit=None, trace_context=None, input_image_urls_override=None):
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
@@ -17355,6 +17364,26 @@ def _compact_scene_title(context, fallback="快門瞬間"):
 def _photo_context_root_scene_prompt(context):
     """回到最原始的單一場景短文，避免 More / 骰子 / 修圖一路把附加說明疊到 prompt 裡。"""
     context = context if isinstance(context, dict) else {}
+    is_diary = str(context.get("source_mode") or context.get("type") or "").strip().lower() == "diary"
+
+    if is_diary:
+        # v1.8.19：Diary 的語意契約固定只看 authoritative_scene。
+        # More / 骰子 / 修圖都不應把先前的 continuation、reroll 附註或整篇日記再疊回 prompt。
+        root = _clean_text_compact(
+            context.get("authoritative_scene")
+            or context.get("root_prompt_base")
+            or context.get("prompt_base")
+            or context.get("composition")
+            or context.get("scene_summary")
+            or context.get("scene_text")
+            or ""
+        )
+        if root:
+            root = re.sub(r"\n+TECHNICAL (?:CONTINUATION|REROLL):.*$", "", root, flags=re.I | re.S).strip()
+            root = re.sub(r"\n+CONTINUATION:.*$", "", root, flags=re.I | re.S).strip()
+            root = re.sub(r"\n+REROLL:.*$", "", root, flags=re.I | re.S).strip()
+        return root or "小俠今天想留住的一個生活片刻"
+
     root = _clean_text_compact(
         context.get("root_prompt_base")
         or context.get("authoritative_scene")
@@ -26740,10 +26769,12 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     checklist = _v1525_build_visual_checklist(mode, user_text, visual_dict, current_outfit, trace_context)
     checklist = dict(checklist or {})
     source = _visual_policy_source_text(mode, user_text, visual_dict, current_outfit, trace_context)
+    mode_norm = str(mode or "").strip().lower()
+    tc = trace_context if isinstance(trace_context, dict) else {}
 
     # v1.8.16: Cosplay generation contract is intentionally strict-solo.
     # Keep QA/checklist metadata aligned with the actual Seedream cosplay prompt.
-    if str(mode or "").strip().lower() == "cosplay":
+    if mode_norm == "cosplay":
         checklist.update({
             "private_scene": False,
             "strict_solo_required": True,
@@ -26767,6 +26798,19 @@ def _build_visual_checklist(mode="photo", user_text="", visual_dict=None, curren
     female_social = (not private) and _v1526_contains(source, _V1526_FEMALE_SOCIAL_WORDS)
     male_interaction_requested = (not private) and _v1526_contains(source, _V1526_MALE_INTERACTION_WORDS)
     public_scene = (not private) and bool(_allow_background_bystanders_from_text(source, mode=mode))
+
+    # v1.8.19：Diary 的 people policy 必須與 Hybrid / Pure / More / 骰子一致。
+    # 若上游 Photo Selector / Scene builder 已明示這是公共場景可有背景路人，
+    # checklist 需忠實承接，避免下游 prompt builder 又被寫死成 strict-solo。
+    if mode_norm == "diary":
+        diary_bystander_hint = bool(
+            tc.get("diary_allow_background_bystanders")
+            or tc.get("allow_background_bystanders")
+            or checklist.get("allow_background_bystanders")
+            or (isinstance(visual_dict, dict) and visual_dict.get("__allow_background_bystanders"))
+        )
+        if diary_bystander_hint and not private and not explicit_solo:
+            public_scene = True
 
     if private or explicit_solo:
         checklist.update({
