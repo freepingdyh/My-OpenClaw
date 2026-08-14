@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.9.02"
+LOBSTER_VERSION = "1.9.03"
 
 
 def _normalize_generation_level(level):
@@ -5075,6 +5075,37 @@ def _love_pick_wardrobe(scene_text):
     return best_item, reason, {"selection_mode": "wardrobe", "used_wardrobe": True, "score": round(best_score, 2)}
 
 
+def _love_home_scene_fallback(now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    is_night = now_dt.hour >= 18 or now_dt.hour < 6
+    if is_night:
+        return "小俠在家中柔和燈光的臥室、床邊、窗邊或沙發旁，穿著漂亮舒服的居家穿搭，帶著有點害羞又期待的眼神看向鏡頭，想把今晚的心意留給大俠。"
+    return "小俠在白天明亮的家中客廳、書房、窗邊或沙發旁，穿著漂亮舒適的居家服，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
+
+
+def _love_enforce_home_scene(scene_text, love_action="", now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    scene_text = _clean_text_compact(scene_text or "")
+    love_action = _clean_text_compact(love_action or "")
+    fallback = _love_home_scene_fallback(now_dt)
+    home_keywords = ("家", "居家", "房間", "臥室", "客廳", "沙發", "床邊", "窗邊", "書房", "陽台", "廚房", "餐桌", "梳妝台")
+    outdoor_keywords = ("外面", "街上", "咖啡廳", "餐廳", "百貨", "海邊", "山上", "公園", "車站", "捷運", "旅館外", "飯店大廳", "夜市", "公司", "辦公室", "校園")
+    if not scene_text:
+        if love_action:
+            anchor = "夜晚家中的床邊、沙發旁或窗邊" if (now_dt.hour >= 18 or now_dt.hour < 6) else "白天家中的客廳、書房、窗邊或沙發旁"
+            return f"小俠在{anchor}，{love_action}，整體氣氛溫柔、親密、只想留給大俠。"
+        return fallback
+    if any(k in scene_text for k in outdoor_keywords):
+        if love_action:
+            anchor = "夜晚家中的床邊、沙發旁或窗邊" if (now_dt.hour >= 18 or now_dt.hour < 6) else "白天家中的客廳、書房、窗邊或沙發旁"
+            return f"小俠在{anchor}，{love_action}，把這份想念收進只屬於大俠的家中畫面。"
+        return fallback
+    if not any(k in scene_text for k in home_keywords):
+        anchor = "夜晚家中的床邊、沙發旁或窗邊" if (now_dt.hour >= 18 or now_dt.hour < 6) else "白天家中的客廳、書房、窗邊或沙發旁"
+        return f"小俠在{anchor}，{scene_text}"
+    return scene_text
+
+
 async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", now_dt=None):
     now_dt = now_dt or datetime.now(TZ_TPE)
     today = _love_today_str(now_dt)
@@ -5087,6 +5118,7 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
     first_chat_at = str(love.get("first_chat_at") or "未開始")
     effective_chat_count = int(love.get("effective_chat_count") or 0)
     scheduled = trigger_type == "score_95"
+    fallback_scene = _love_home_scene_fallback(now_dt)
     prompt = f"""
 妳是小俠的戀愛情境企劃。請根據今天完整的相處脈絡，判斷小俠現在是否真的會想主動提出一次『小俠愛意』。
 
@@ -5109,8 +5141,9 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
   "trigger": true,
   "reason": "40字內，說明今天哪些互動讓小俠現在產生這個念頭",
   "title": "12字內短題名",
-  "invite_message": "小俠要先問大俠的短訊息，80字內，繁中，自然甜蜜，必須把 reason 自然講進去",
-  "scene_text": "真正要拍的單一畫面構想，1~3句，明確場景、動作、服裝氛圍，不能跨兩個時空",
+  "love_action": "1~2句，描述小俠這次想怎麼表達愛意，例如換上一套漂亮居家服、整理頭髮、抱著靠枕、坐到床邊或沙發旁，只能是在家中的單一小情節",
+  "invite_message": "小俠要先問大俠的短訊息，80字內，繁中，自然甜蜜，必須把 reason 自然講進去，像真女友講話",
+  "scene_text": "真正要拍的單一畫面構想，1~3句，明確場景、動作、服裝氛圍；場景一律限定在家中，不可出現外出場景",
   "mood": "8字內氛圍",
   "message": "成圖時要附給大俠的 40~120 字小訊息",
   "why_now": "40字內，解釋為什麼是現在想拍"
@@ -5120,10 +5153,11 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 1. trigger_type=score_95 是高愛意值累積後的保底邀請，trigger 必須為 true。
 2. trigger_type=fixed_review 或 chat_review 才是真正的『自發判斷』；只有今天對話裡有具體、足以讓小俠心動／被呵護／被逗開心／想撒嬌／想特別表達愛意的理由時才 trigger=true。不要因為有自主活動就自行觸發。
 3. 若沒有充分具體理由，trigger=false；其他欄位仍可留空。
-4. 場景必須符合現在真實時間。白天不可自動寫成深夜；夜晚才可自然使用夜間居家情境。
-5. 場景只能一個瞬間，不可把不同活動混在一起。
-6. 內容可有成熟戀人感，但不可露骨色情。
-7. invite_message 是小俠自己的話，不准寫成『系統條件成立』。
+4. 所有小俠愛意照片，一律設定在家中。即使今天有外出、旅遊或外面行程，也請轉換成『回到家後，在家裡想對大俠表達愛意』的內容。外面的小俠永遠端莊優雅，不在外面拍這類愛意照。
+5. 場景必須符合現在真實時間。白天不可自動寫成深夜；夜晚才可自然使用夜間居家情境。
+6. 場景只能一個瞬間，不可把不同活動混在一起。
+7. 內容可有成熟戀人感，但不可露骨色情。
+8. invite_message 是小俠自己的話，不准寫成『系統條件成立』。
 """
     try:
         response = await gemini_client.aio.models.generate_content(
@@ -5153,12 +5187,8 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
             "trigger_type": trigger_type,
             "trigger_detail": trigger_detail,
         }
-    is_night = now_dt.hour >= 18 or now_dt.hour < 6
-    fallback_scene = (
-        "小俠在家中柔和燈光的窗邊或沙發旁，穿著自然又有女人味的居家穿搭，帶著有點害羞又期待的眼神看向鏡頭，想把今晚的心意留給大俠。"
-        if is_night else
-        "小俠在白天明亮的家中客廳、書房或窗邊，穿著漂亮舒適的居家服，帶著被大俠逗得甜甜的笑意看向鏡頭，想把這份心動拍給大俠。"
-    )
+    love_action = _clean_text_compact(data.get("love_action") or "小俠想換上一套漂亮舒服的居家穿搭，整理一下頭髮，帶著有點害羞又期待的表情，在家中拍一張只想給大俠看的照片。")[:220]
+    scene_text = _love_enforce_home_scene(data.get("scene_text") or fallback_scene, love_action=love_action, now_dt=now_dt)
     return {
         "trigger": True,
         "id": str(uuid.uuid4()),
@@ -5167,14 +5197,14 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
         "trigger_detail": trigger_detail,
         "reason": _clean_text_compact(data.get("reason") or data.get("why_now") or "今天就是特別想靠近大俠。")[:120],
         "title": _clean_text_compact(data.get("title") or "只想給你看")[:24],
+        "love_action": love_action,
         "invite_message": _clean_text_compact(data.get("invite_message") or "大俠，今天被你逗得心裡甜甜的，小俠突然很想特別拍一張給你看。可以嗎？")[:180],
-        "scene_text": _clean_text_compact(data.get("scene_text") or fallback_scene)[:900],
+        "scene_text": _clean_text_compact(scene_text or fallback_scene)[:900],
         "mood": _clean_text_compact(data.get("mood") or "甜甜心動")[:20],
         "message": _clean_text_compact(data.get("message") or "今天和大俠相處著，小俠心裡越來越甜，所以想把這一刻留給你。")[:320],
         "why_now": _clean_text_compact(data.get("why_now") or data.get("reason") or "今天就是特別想你。")[:100],
         "created_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
     }
-
 
 def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="", wardrobe_selection=None):
     candidate = candidate if isinstance(candidate, dict) else {}
@@ -5203,7 +5233,7 @@ def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="",
         "mood_summary": mood,
         "message": message,
         "outfit_summary": outfit_summary,
-        "action_summary": scene_text,
+        "action_summary": _clean_text_compact(candidate.get("love_action") or scene_text),
         "camera_framing": "three_quarter_body",
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
