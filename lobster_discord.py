@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.08"
+LOBSTER_VERSION = "1.10.10"
 
 
 def _normalize_generation_level(level):
@@ -11370,9 +11370,6 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     vibe_request = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
     user_outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
     reference_mode = bool(story.get("cosplay_reference_mode"))
-    vibe_zh = str((vibe_request or {}).get("zh") or "").strip()
-    vibe_en = str((vibe_request or {}).get("en") or "").strip().lower()
-    allure_mode = (not reference_mode) and (vibe_zh == "魅" or "allur" in vibe_en)
 
     fallback_parts = []
     if candidate.get("scene_seed"):
@@ -11388,10 +11385,6 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         else:
             fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
     fallback_scene = _clean_text_compact(" ".join(fallback_parts))[:260]
-    if allure_mode:
-        fallback_scene = _clean_text_compact(
-            f"{fallback_scene} 服裝明確露出上胸，並至少再露出腰部或腿部其中一項，可同時露出腰與腿，以成熟性感而不失角色感的方式呈現。"
-        )[:300]
 
     highest_principle = (
         "本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；"
@@ -11400,7 +11393,6 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
     )
     required_item_6 = "" if reference_mode else "6. 服裝與必要配件 / 武器。"
-    allure_scene_rules = ""
     if reference_mode:
         cosplay_special_rules = (
             "- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n"
@@ -11414,15 +11406,6 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
             "- 若角色有招牌武器/道具且本次希望它出圖，必須直接寫入今日畫面。\n"
             "- 若目標氛圍是『魅』，請讓小俠維持成熟性感、高挑苗條、明確腰身與豐滿胸腰對比；性感應建立在角色服裝語言裡，不要洗成 generic 性感裝。"
         )
-        if allure_mode:
-            allure_scene_rules = (
-                "\n【魅模式硬規則】\n"
-                "- 這次的『今日畫面』本身就是唯一標準，所以請把性感要求直接寫在今日畫面的服裝描述裡，不能只寫『性感』『展現曲線』『女人味』等抽象詞。\n"
-                "- 必須明確做到：露胸保底；且腰或腿至少露出一項，也可以腰與腿都露。\n"
-                "- 合格例：露胸＋露腰、露胸＋露腿、露胸＋露腰＋露腿。\n"
-                "- 不合格例：只有露胸但腰腿都沒露；只露腰或只露腿但沒露胸；高領或全包式保守穿法把胸腰腿都收掉。\n"
-                "- 請直接把上述可見外觀寫進今日畫面，例如低領/敞領露出上胸、短版或鏤空設計露出腰部、短裙/高衩/短褲清楚露出腿線；但仍要符合角色世界觀與服裝語言。"
-            )
 
     prompt = f"""
 你是小俠 Cosplay 的 Scene Writer。
@@ -11440,7 +11423,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 {required_item_6}
 
 【Cosplay 特別規則】
-{cosplay_special_rules}{allure_scene_rules}
+{cosplay_special_rules}
 - 使用者明確的場景 / 動作要求優先。
 - 今日畫面請寫成自然短文，不要 JSON 清單腔。
 - 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
@@ -15116,7 +15099,9 @@ def _build_outfit_state_from_context(context):
     if not context:
         return None
     wardrobe_id = context.get("wardrobe_id")
-    if wardrobe_id:
+    source_mode = str(context.get("source_mode") or "").strip().lower()
+    has_outfit_reference = bool(context.get("reference_item_path") or context.get("reference_item_url"))
+    if wardrobe_id or (source_mode == "photo_reference" and has_outfit_reference):
         stored_reference_path = context.get("reference_item_path") or context.get("local_path")
         stored_reference_url = context.get("reference_item_url") or context.get("local_url") or context.get("image_url")
     else:
@@ -16241,6 +16226,91 @@ async def _prepare_wardrobe_image_from_attachment(attachment, remove_person=Fals
     print(f"✅ [WARDROBE_IMAGE_READY] remove_person={remove_person} path={final_path} size={os.path.getsize(str(final_path))}")
     return source_path, final_path, final_url
 
+
+async def _generate_nano_daily_clothing_reference_board(local_path, *, meta=None, title_hint=""):
+    if not local_path or not os.path.exists(str(local_path)):
+        raise RuntimeError("NANO_DAILY_REF_SOURCE_MISSING")
+    data = await asyncio.to_thread(Path(str(local_path)).read_bytes)
+    mime = _local_image_mime_type(local_path)
+    meta = meta if isinstance(meta, dict) else {}
+    title_text = _clean_text_compact(title_hint or meta.get("name") or "")
+    style_summary = _clean_text_compact(meta.get("style_summary") or "")
+    tags_text = ", ".join([_clean_text_compact(x) for x in (meta.get("tags") or []) if _clean_text_compact(x)])
+    prompt = f"""
+Transform the provided real outfit photo into a clean photorealistic everyday outfit reference board for a later image-generation model.
+
+Create ONE identity-neutral full-body fashion figure on a plain light studio background.
+The figure must be faceless and identity-free: blank / smooth / featureless face, with no recognizable facial identity.
+Do NOT preserve hairstyle, hair color, tattoos, weapons, armor, cosplay-specific body traits, or the original person's identity.
+Preserve only the visible everyday wearable items from the source image: clothing, outerwear, dress/skirt/pants, footwear, bag, belt, hat, headwear, hair accessories, earrings, necklace, bracelets, and other fashion accessories that are clearly part of the outfit.
+Keep the item's real wearable structure, silhouette, layers, hem lengths, colors, pattern density, trims, lace, transparency, straps, and accessory placement as faithfully as possible.
+If an accessory would block the clothing, it may also be shown neatly beside the figure.
+Do not keep scene background, furniture, handheld props unrelated to styling, extra people, text labels, watermark, or UI.
+
+Outfit name hint: {title_text or 'everyday outfit'}.
+Style summary: {style_summary or 'preserve the visible outfit faithfully'}.
+Key tags: {tags_text or 'preserve visible wearable items and accessories only'}.
+"""
+    response = await gemini_client.aio.models.generate_content(
+        model=COSPLAY_NANO_CLOTHING_REF_MODEL_ID,
+        contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+        config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
+    )
+    raw, out_mime = _genai_inline_image_bytes(response)
+    if not raw:
+        raise RuntimeError("NANO_DAILY_REF_NO_IMAGE")
+    return _save_generated_bytes_to_output(raw, prefix="nano_daily_ref", mime_type=out_mime)
+
+
+async def _prepare_temporary_wear_reference_from_attachment(attachment, name_hint=""):
+    if attachment is None:
+        raise RuntimeError("WARDROBE_TEMP_ATTACHMENT_NONE")
+    source_path = await _download_photo_reference_attachment(attachment)
+    if not source_path or not os.path.exists(str(source_path)):
+        raise RuntimeError(f"衣服附圖下載失敗：path={source_path}")
+
+    provider = COSPLAY_NANO_CLOTHING_REF_LABEL
+    reference_path = None
+    reference_url = None
+    meta = None
+    try:
+        meta = await _classify_wardrobe_item_from_image(source_path, name_hint=name_hint)
+    except Exception as exc:
+        print(f"⚠️ [TEMP_WEAR_CLASSIFY_SOURCE_FAILED] {type(exc).__name__}: {exc}")
+        meta = _infer_wardrobe_meta_from_name(name_hint or Path(str(source_path)).stem)
+
+    try:
+        reference_path, reference_url = await _generate_nano_daily_clothing_reference_board(source_path, meta=meta, title_hint=name_hint)
+    except Exception as exc:
+        print(f"⚠️ [TEMP_WEAR_NANO_FAILED] {type(exc).__name__}: {exc}")
+        provider = "Seedream v4.5 去人圖（fallback）"
+        _src_path, reference_path, reference_url = await _prepare_wardrobe_image_from_attachment(attachment, remove_person=True, extra_hint="")
+
+    if (not meta) or (reference_path and os.path.exists(str(reference_path))):
+        try:
+            meta = await _classify_wardrobe_item_from_image(reference_path, name_hint=name_hint)
+        except Exception as exc:
+            print(f"⚠️ [TEMP_WEAR_CLASSIFY_FINAL_FAILED] {type(exc).__name__}: {exc}")
+            meta = meta or _infer_wardrobe_meta_from_name(name_hint or Path(str(reference_path)).stem)
+
+    item = {
+        "id": "",
+        "name": (meta or {}).get("name") or _sanitize_wardrobe_name_hint(name_hint) or "臨時穿搭參考",
+        "main_category": (meta or {}).get("main_category") or "套裝",
+        "sub_category": (meta or {}).get("sub_category") or "未分類",
+        "tags": (meta or {}).get("tags") or [],
+        "style_summary": (meta or {}).get("style_summary") or ((meta or {}).get("name") or "臨時穿搭參考"),
+        "reference_image_path": reference_path,
+        "local_url": reference_url,
+        "image_storage": "zeabur_local" if str(reference_path or "").startswith(OUTPUT_DIR) else "remote_or_external",
+        "created_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "source_attachment_url": getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None),
+        "source_path": source_path,
+        "temporary_pending": True,
+        "pending_source": "wardrobe_attachment_nano",
+        "provider": provider,
+    }
+    return item
 
 
 def _build_wardrobe_item_payload(meta, reference_path, reference_url):
@@ -18921,6 +18991,23 @@ async def _generate_photo_from_context(context, msg=None):
             if context.get(key) is not None:
                 trace_context[key] = context.get(key)
         trace_context["figure10_present"] = bool(context.get("figure10_present") or context.get("reference_item_path") or trace_context.get("reference_item_path"))
+    for key in (
+        "figure10_present",
+        "reference_item_path",
+        "reference_item_url",
+        "reference_item_summary",
+        "seedream_input_images_override",
+        "seedream_input_image_roles_override",
+        "background_reference_path",
+        "background_reference_url",
+        "background_reference_provider",
+        "nano_clothing_ref_local_path",
+        "nano_clothing_ref_local_url",
+        "nano_clothing_ref_summary",
+        "nano_clothing_ref_provider",
+    ):
+        if context.get(key) is not None:
+            trace_context[key] = context.get(key)
     trace_context.setdefault("kind", "photo")
     trace_context.setdefault("trace_id", _new_generation_trace_id(trace_context.get("kind")))
     _trace_stage(trace_context, "photo_context_input", data=context, prompt=_photo_context_root_scene_prompt(context))
@@ -18985,6 +19072,13 @@ async def _generate_photo_from_context(context, msg=None):
         "reference_item_summary": trace_context.get("reference_item_summary") or context.get("reference_item_summary") or "",
         "seedream_input_images_override": trace_context.get("seedream_input_images_override") or context.get("seedream_input_images_override"),
         "seedream_input_image_roles_override": trace_context.get("seedream_input_image_roles_override") or context.get("seedream_input_image_roles_override"),
+        "background_reference_path": trace_context.get("background_reference_path") or context.get("background_reference_path"),
+        "background_reference_url": trace_context.get("background_reference_url") or context.get("background_reference_url"),
+        "background_reference_provider": trace_context.get("background_reference_provider") or context.get("background_reference_provider"),
+        "nano_clothing_ref_local_path": trace_context.get("nano_clothing_ref_local_path") or context.get("nano_clothing_ref_local_path"),
+        "nano_clothing_ref_local_url": trace_context.get("nano_clothing_ref_local_url") or context.get("nano_clothing_ref_local_url"),
+        "nano_clothing_ref_summary": trace_context.get("nano_clothing_ref_summary") or context.get("nano_clothing_ref_summary") or "",
+        "nano_clothing_ref_provider": trace_context.get("nano_clothing_ref_provider") or context.get("nano_clothing_ref_provider") or "",
         "cosplay_clothing_ref_provider": trace_context.get("cosplay_clothing_ref_provider") or context.get("cosplay_clothing_ref_provider"),
         "cosplay_clothing_ref_source_path": trace_context.get("cosplay_clothing_ref_source_path") or context.get("cosplay_clothing_ref_source_path"),
         "cosplay_clothing_ref_local_path": trace_context.get("cosplay_clothing_ref_local_path") or context.get("cosplay_clothing_ref_local_path"),
@@ -19819,7 +19913,7 @@ async def handle_photobook_command(message, raw_content):
 
 
 async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_item=None, photobook_mode=False, return_context=False):
-    """統一 /photo：有附圖=換裝/飾品融合；無附圖=情境照。回傳生成圖片 URL 或 None。"""
+    """統一 /photo：附圖時視為背景/場景參考；服裝則優先讀取 /衣櫃 穿 的預選參考。無附圖時為一般情境照。"""
     if not _is_girlfriend_xiaoxia_channel(message.channel):
         await message.channel.send("大俠，`/photo` 先只開放在女友小俠頻道使用喔。")
         return None
@@ -19834,6 +19928,20 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
     if attachment_error:
         await message.channel.send(attachment_error)
         return None
+
+    background_attachment = attachment
+    background_reference_path = None
+    background_reference_url = None
+    background_reference_provider = ""
+    if background_attachment:
+        try:
+            background_reference_path = await _download_photo_reference_attachment(background_attachment)
+            background_reference_url = getattr(background_attachment, "url", None) or getattr(background_attachment, "proxy_url", None)
+            background_reference_provider = "user_phone_photo"
+            print(f"🖼️ [PHOTO_BACKGROUND_REFERENCE_READY] path={background_reference_path} url={background_reference_url}")
+        except Exception as exc:
+            await message.channel.send(f"⚠️ 背景參考圖下載失敗：`{str(exc)[:1200]}`")
+            return None
 
     pending_wardrobe = _refresh_pending_wardrobe_from_current_db(_get_pending_wardrobe_state())
     if pending_wardrobe and not _pending_wardrobe_has_usable_reference(pending_wardrobe):
@@ -19872,25 +19980,18 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
     world_mode = str(world_state.get("mode") or "").strip().lower()
     travel_target = str(world_state.get("target") or "").strip() if world_mode == "travel" else ""
 
-    source_mode = "photo_reference" if (attachment or pending_wardrobe) else "photo_scene"
-    print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(attachment)} pending_wardrobe={bool(pending_wardrobe)} explicit_change={explicit_outfit_change}")
+    source_mode = "photo_reference" if pending_wardrobe else "photo_scene"
+    print(f"🧭 [PHOTO_MODE] {source_mode} has_attachment={bool(background_attachment)} pending_wardrobe={bool(pending_wardrobe)} explicit_change={explicit_outfit_change}")
     reference_item_path = None
     reference_item_url = None
     wardrobe_id = None
-    if attachment:
-        reference_item_url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
-        if not reference_item_url:
-            raise RuntimeError("PHOTO_ATTACHMENT_URL_NONE：Discord 沒有提供可用的附件網址。")
-        # 直接使用 Discord CDN URL 給 Seedream，避免 attachment.read()/本機路徑 NoneType 問題。
-        reference_item_path = reference_item_url
-        print(f"✅ [PHOTO_REFERENCE_URL_READY] url={reference_item_url}")
-    elif pending_wardrobe:
+    if pending_wardrobe:
         reference_item_path = pending_wardrobe.get("reference_image_path")
         reference_item_url = pending_wardrobe.get("local_url")
         if (not reference_item_path or not os.path.exists(str(reference_item_path))) and reference_item_url:
             reference_item_path = reference_item_url
         wardrobe_id = pending_wardrobe.get("id")
-        print(f"👗 [PHOTO_WARDROBE_SELECTED] {wardrobe_id} {pending_wardrobe.get('name')} category={pending_wardrobe.get('main_category')}")
+        print(f"👗 [PHOTO_WARDROBE_SELECTED] {wardrobe_id or '[temp]'} {pending_wardrobe.get('name')} category={pending_wardrobe.get('main_category')}")
 
     if source_mode == "photo_reference" and not reference_item_path:
         print("⚠️ [PHOTO_REFERENCE_MISSING_PATH] fallback_to_photo_scene")
@@ -19898,7 +19999,7 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         reference_item_url = None
         wardrobe_id = None
 
-    keep_today_outfit = bool(current_outfit_state and not attachment and not pending_wardrobe and not explicit_outfit_change and photo_mode_override == "normal")
+    keep_today_outfit = bool(current_outfit_state and not pending_wardrobe and not explicit_outfit_change and photo_mode_override == "normal")
     carried_outfit_ref = _extract_current_outfit_reference(current_outfit_state) if keep_today_outfit else None
     current_outfit_reference_reused = False
     if keep_today_outfit and carried_outfit_ref:
@@ -19941,7 +20042,7 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         scene_data = await _summarize_scene_for_photo(
             scene_seed_text,
             source_mode,
-            has_reference=bool(attachment or pending_wardrobe),
+            has_reference=bool(pending_wardrobe),
             current_outfit=(current_outfit_state or {}).get("description") if current_outfit_state else None,
             keep_today_outfit=keep_today_outfit,
             pending_wardrobe_name=_wardrobe_item_generation_hint(pending_wardrobe, include_scene_suggestion=wardrobe_scene_hint_allowed) if pending_wardrobe else "",
@@ -19982,11 +20083,48 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
             + "\nDo not let a text label override the garment category shown in Image 10."
         )
 
+    if background_reference_path:
+        prompt_base = (
+            str(prompt_base).strip()
+            + "\n\nREAL BACKGROUND PHOTO REFERENCE:\n"
+            + "A real phone photo is provided as a scene/background reference. Preserve the recognizable location, major layout, perspective, key objects, and approximate time-of-day mood from that real photo, "
+            + "but regenerate it in Seedream's own unified photographic style so Xiaoxia and the background look captured together by the same camera. "
+            + "Improve white balance, brightness, sharpness, and saturation naturally; do not paste the raw phone photo directly and do not let the background photo change Xiaoxia's identity. "
+            + "This real photo controls the setting and atmosphere only, not the outfit. If an outfit reference is also present, Figure 10 remains the outfit authority while the background photo remains the scene authority."
+        )
+
+    seedream_input_images_override = None
+    seedream_input_image_roles_override = None
+    if background_reference_path:
+        identity_urls = await _seedream_upload_reference_images(selected_figure_indexes=[1, 2, 3, 4, 5, 6, 7, 8])
+        seedream_input_images_override = list(identity_urls)
+        seedream_input_image_roles_override = [
+            {"figure": idx + 1, "role": "xiaoxia_identity", "source_figure": idx + 1, "url": url}
+            for idx, url in enumerate(identity_urls)
+        ]
+        background_upload_url = await _seedream_upload_single_file(background_reference_path)
+        seedream_input_images_override.append(background_upload_url)
+        seedream_input_image_roles_override.append({
+            "figure": len(seedream_input_images_override),
+            "role": "background_scene_reference",
+            "provider": background_reference_provider or "user_phone_photo",
+            "url": background_upload_url,
+        })
+        if reference_item_path:
+            outfit_upload_url = await _seedream_upload_single_file(reference_item_path)
+            seedream_input_images_override.append(outfit_upload_url)
+            seedream_input_image_roles_override.append({
+                "figure": len(seedream_input_images_override),
+                "role": "wardrobe_reference",
+                "provider": (pending_wardrobe or {}).get("provider") or "wardrobe",
+                "url": outfit_upload_url,
+            })
+
     pose_critical = _is_pose_critical_request(scene_seed_text or raw_scene_text or prompt_base)
     if pose_critical:
         prompt_base = _build_pose_critical_seedream_prompt(
             scene_seed_text or raw_scene_text or prompt_base,
-            has_reference=bool(attachment or pending_wardrobe),
+            has_reference=bool(pending_wardrobe),
             current_outfit=(current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
         )
 
@@ -20003,8 +20141,12 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "force_minimal_prompt": force_minimal_prompt,
         "current_outfit_reference_reused": current_outfit_reference_reused,
         "raw_seedream_mode": "pose_critical_minimal" if pose_critical else ("photo_reference_minimal" if generation_mode == "photo_reference" else ("photo_scene_minimal_current_outfit" if force_minimal_prompt else "normal_photo_pipeline")),
-        "has_attachment": bool(attachment),
+        "has_attachment": bool(background_attachment),
+        "background_reference_present": bool(background_reference_path),
+        "background_reference_url": background_reference_url,
+        "background_reference_path": background_reference_path,
         "used_pending_wardrobe": bool(pending_wardrobe),
+        "reference_item_summary": (pending_wardrobe.get("style_summary") if pending_wardrobe else "") or "",
         "wardrobe_mode": "wardrobe_free" if photo_mode_override == "wardrobe_free" else ("pending_fixed" if pending_wardrobe else "none"),
         "wardrobe_id": wardrobe_id,
         "wardrobe_name": pending_wardrobe.get("name") if pending_wardrobe else "",
@@ -20042,12 +20184,24 @@ async def handle_unified_photo_command(message, user_input, *, forced_wardrobe_i
         "prompt_base": prompt_base,
         "reference_item_path": reference_item_path,
         "reference_item_url": reference_item_url,
+        "reference_item_summary": (pending_wardrobe.get("style_summary") if pending_wardrobe else "") or "",
         "wardrobe_id": wardrobe_id,
         "generation_mode": generation_mode,
+        "background_reference_path": background_reference_path,
+        "background_reference_url": background_reference_url,
+        "background_reference_provider": background_reference_provider,
+        "seedream_input_images_override": seedream_input_images_override,
+        "seedream_input_image_roles_override": seedream_input_image_roles_override,
+        "figure10_present": bool(reference_item_path),
+        "nano_clothing_ref_local_path": (pending_wardrobe.get("reference_image_path") if pending_wardrobe and pending_wardrobe.get("temporary_pending") else None),
+        "nano_clothing_ref_local_url": (pending_wardrobe.get("local_url") if pending_wardrobe and pending_wardrobe.get("temporary_pending") else None),
+        "nano_clothing_ref_summary": (pending_wardrobe.get("style_summary") if pending_wardrobe and pending_wardrobe.get("temporary_pending") else ""),
+        "nano_clothing_ref_provider": (pending_wardrobe.get("provider") if pending_wardrobe and pending_wardrobe.get("temporary_pending") else ""),
         "force_minimal_prompt": force_minimal_prompt,
         "current_outfit_reference_reused": current_outfit_reference_reused,
         "current_outfit_for_seedream": (current_outfit_state or {}).get("description") if keep_today_outfit and current_outfit_state else None,
         "used_pending_wardrobe": bool(pending_wardrobe),
+        "reference_item_summary": (pending_wardrobe.get("style_summary") if pending_wardrobe else "") or "",
         "photo_mode_override": photo_mode_override,
         "user_input": raw_input,
         "__trace_context": trace_context,
@@ -21987,7 +22141,9 @@ class PhotoResultView(discord.ui.View):
     def _sync_debug_reference_button(self):
         mode_key = str(self.context.get("source_mode") or self.context.get("type") or "").lower()
         is_cosplay = mode_key == "cosplay"
-        has_clothing = bool(self.context.get("cosplay_clothing_ref_local_path") or self.context.get("cosplay_clothing_ref_local_url"))
+        has_cosplay_clothing = bool(self.context.get("cosplay_clothing_ref_local_path") or self.context.get("cosplay_clothing_ref_local_url"))
+        has_daily_clothing = bool(self.context.get("nano_clothing_ref_local_path") or self.context.get("nano_clothing_ref_local_url"))
+        has_clothing = has_cosplay_clothing or has_daily_clothing
         has_v5_background = bool(
             self.context.get("v5_background_local_path")
             or self.context.get("v5_background_local_url")
@@ -21995,7 +22151,7 @@ class PhotoResultView(discord.ui.View):
         )
         for child in self.children:
             if isinstance(child, discord.ui.Button) and getattr(child, "label", "") in {"🪟 查看 v5 背景", "👗 查看 Nano 服裝"}:
-                if is_cosplay and has_clothing:
+                if has_clothing:
                     child.label = "👗 查看 Nano 服裝"
                     child.disabled = False
                 else:
@@ -22178,19 +22334,19 @@ class PhotoResultView(discord.ui.View):
         context = dict(self.context)
         mode_key = str(context.get("source_mode") or context.get("type") or "").lower()
         is_cosplay = mode_key == "cosplay"
-        clothing_local_path = context.get("cosplay_clothing_ref_local_path")
-        clothing_local_url = context.get("cosplay_clothing_ref_local_url")
-        clothing_summary = _clean_text_compact(context.get("cosplay_clothing_ref_summary") or "")
-        clothing_provider = _clean_text_compact(context.get("cosplay_clothing_ref_provider") or COSPLAY_NANO_CLOTHING_REF_LABEL)
+        clothing_local_path = context.get("cosplay_clothing_ref_local_path") or context.get("nano_clothing_ref_local_path")
+        clothing_local_url = context.get("cosplay_clothing_ref_local_url") or context.get("nano_clothing_ref_local_url")
+        clothing_summary = _clean_text_compact(context.get("cosplay_clothing_ref_summary") or context.get("nano_clothing_ref_summary") or "")
+        clothing_provider = _clean_text_compact(context.get("cosplay_clothing_ref_provider") or context.get("nano_clothing_ref_provider") or COSPLAY_NANO_CLOTHING_REF_LABEL)
         bg_local_path = context.get("v5_background_local_path")
         bg_local_url = context.get("v5_background_local_url") or context.get("v5_background_generated_url")
 
-        if is_cosplay and (clothing_local_path or clothing_local_url):
+        if clothing_local_path or clothing_local_url:
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 embed = discord.Embed(
-                    title="👗 Cosplay 服裝參考（debug）",
-                    description=f"這是 {clothing_provider} 提供、交給 Seedream 當 Figure 10 使用的服裝參考。",
+                    title="👗 Nano 服裝參考（debug）",
+                    description=("這是從大俠附圖整理出的服裝參考，交給 Seedream 當 Figure 10 使用。" if not is_cosplay else f"這是 {clothing_provider} 提供、交給 Seedream 當 Figure 10 使用的服裝參考。"),
                     color=discord.Color.blurple(),
                 )
                 if clothing_summary:
@@ -24046,11 +24202,32 @@ async def wardrobe_command(ctx, *, args: str = ""):
         return
     if action == "穿":
         item = _find_wardrobe_item(payload)
-        if not item:
-            await ctx.send("找不到這個衣櫃編號喔。")
+        if item:
+            _set_pending_wardrobe_state(item)
+            await ctx.send(f"✅ 已選定 **{item.get('id')} {item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。")
             return
-        _set_pending_wardrobe_state(item)
-        await ctx.send(f"✅ 已選定 **{item.get('id')} {item.get('name')}**。下一張 `/photo` 若沒有另外附衣服圖，就會優先套用這件。")
+
+        attachment, attachment_error = await _get_photo_reference_attachment(ctx.message)
+        if attachment_error:
+            await ctx.send(attachment_error)
+            return
+        if not attachment:
+            await ctx.send("找不到這個衣櫃編號喔；若你是要用附圖臨時穿，請在 `/衣櫃 穿` 同時附上一張人物穿搭照。")
+            return
+
+        status = await ctx.send("👗 小俠正在把附圖整理成可穿的 Nano 服裝參考，等等喔...")
+        try:
+            temp_item = await _prepare_temporary_wear_reference_from_attachment(attachment, name_hint=payload)
+            _set_pending_wardrobe_state(temp_item)
+            await status.edit(
+                content=(
+                    f"✅ 已從附圖整理出臨時穿搭參考：**{temp_item.get('name')}**。\n"
+                    "下一張 `/photo` 或 `/寫真 ...` 會優先套用這套穿搭；這次只是暫時穿上，尚未收藏進衣櫃。\n"
+                    "等照片生成後，你可以用結果下方的 **👗 查看 Nano 服裝** 檢查參考圖，也可直接按 **收藏到衣櫃** 保存。"
+                )
+            )
+        except Exception as exc:
+            await status.edit(content=f"⚠️ 臨時穿搭整理失敗：`{str(exc)[:1500]}`")
         return
     if action == "修正":
         ok, result = _update_wardrobe_item_from_command(payload)
