@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.14"
+LOBSTER_VERSION = "1.10.15"
 
 
 def _normalize_generation_level(level):
@@ -13884,7 +13884,7 @@ def _normalize_command_date(value):
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
 COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
-# v1.10.14 — Optional Danbooru auto-reference resolver for Cosplay.
+# v1.10.15 — Danbooru resolver fix: search character-first aliases before work-combined aliases.
 # Manual Discord attachment always wins. If Danbooru cannot produce a clean solo/full-body
 # character reference, the normal scene-only Cosplay path continues unchanged.
 DANBOORU_API_BASE = "https://danbooru.donmai.us"
@@ -13946,7 +13946,60 @@ def _danbooru_match_pattern(value):
     parts = re.findall(r"[a-z0-9]+", value)
     if not parts:
         return ""
+    if len(parts) == 1:
+        token = parts[0]
+        return f"{token}*" if len(token) >= 3 else f"*{token}*"
     return "*" + "*".join(parts[:6]) + "*"
+
+
+def _danbooru_character_suffix_aliases(values):
+    """Extract likely character-only aliases from combined work+character aliases.
+
+    Examples:
+    - 'Frieren: Beyond Journey's End Fern' -> 'Fern'
+    - 'The King of Fighters May Lee' -> 'May Lee', 'Lee'
+    - 'Spy x Family Yor Forger' -> 'Yor Forger', 'Forger'
+    """
+    out = []
+    for value in values or []:
+        raw = _clean_text_compact(value or "")
+        if not raw:
+            continue
+        cleaned = re.sub(r"[（(][^()（）]{1,80}[)）]", " ", raw)
+        cleaned = re.sub(r"[:/|｜]", " ", cleaned)
+        cleaned = re.sub(r"[-—–]", " ", cleaned)
+        cleaned = _clean_text_compact(cleaned)
+        if not cleaned:
+            continue
+        # CJK suffixes: keep the last short block, useful when a combined alias ends with a Chinese/Japanese character name.
+        cjk_parts = re.findall(r"[㐀-鿿]{1,24}", cleaned)
+        if cjk_parts:
+            out.append(cjk_parts[-1])
+        # ASCII suffixes: last 1~3 tokens often capture the character name.
+        ascii_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'._-]*", cleaned)
+        if ascii_tokens:
+            max_take = min(3, len(ascii_tokens))
+            for n in range(1, max_take + 1):
+                out.append(" ".join(ascii_tokens[-n:]))
+    return _dedupe_casefold_list(out, limit=16)
+
+
+def _build_danbooru_tag_search_aliases(character_aliases, work_aliases, combined_aliases):
+    """Build search aliases in character-first order for Danbooru character-tag lookup."""
+    char_aliases = _dedupe_casefold_list(character_aliases or [], limit=12)
+    work_aliases = _dedupe_casefold_list(work_aliases or [], limit=12)
+    combined_aliases = _dedupe_casefold_list(combined_aliases or [], limit=12)
+    suffix_aliases = _danbooru_character_suffix_aliases(char_aliases + combined_aliases)
+
+    aliases = []
+    # 1) Prefer explicit character aliases.
+    aliases.extend(char_aliases)
+    # 2) Then likely extracted character-only suffixes such as 'Fern' or 'May Lee'.
+    aliases.extend(suffix_aliases)
+    # 3) Only then use combined aliases; they are helpful as a backup but poor as a primary tag query.
+    aliases.extend(combined_aliases)
+    # 4) Avoid work-only aliases at this stage: they are useful for scoring, but too noisy for character-tag retrieval.
+    return _dedupe_casefold_list(aliases, limit=18)
 
 
 def _danbooru_token_set(value):
@@ -14317,12 +14370,12 @@ async def _find_danbooru_cosplay_reference(story):
         alias_hints = await _resolve_danbooru_alias_hints(character_name, work_title, raw_request)
         trace["alias_hints"] = alias_hints
         tag_candidates = {}
-        search_aliases = _dedupe_casefold_list(
-            list(alias_hints.get("combined_aliases") or [])
-            + list(alias_hints.get("character_aliases") or [])
-            + list(alias_hints.get("work_aliases") or []),
-            limit=10,
+        search_aliases = _build_danbooru_tag_search_aliases(
+            alias_hints.get("character_aliases") or [],
+            alias_hints.get("work_aliases") or [],
+            alias_hints.get("combined_aliases") or [],
         )
+        trace["search_aliases"] = list(search_aliases)
         for alias in search_aliases:
             pattern = _danbooru_match_pattern(alias)
             if not pattern:
@@ -14345,7 +14398,7 @@ async def _find_danbooru_cosplay_reference(story):
                 "result_count": len(top_names),
                 "top_results": top_names[:8],
             })
-            if len(tag_candidates) >= 18:
+            if len(tag_candidates) >= 30:
                 break
 
         ranked_tags = sorted(
@@ -14735,7 +14788,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
 
-        # v1.10.14 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
+        # v1.10.15 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
         clothing_ref = None
         danbooru_ref = None
         story["cosplay_reference_source"] = "manual_attachment" if _cosplay_ref_attachment else "none"
