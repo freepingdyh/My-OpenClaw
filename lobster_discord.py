@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.19"
+LOBSTER_VERSION = "1.10.21"
 
 
 def _normalize_generation_level(level):
@@ -5455,13 +5455,29 @@ def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="",
     }
 
 
+def _love_generation_timeout_seconds():
+    """Maximum wait for one love-intent photo generation. Configurable, default 300s."""
+    try:
+        value = int(os.environ.get("LOVE_GENERATION_TIMEOUT_SECONDS", "300"))
+    except Exception:
+        value = 300
+    return max(60, min(value, 900))
+
+
 async def _love_generate_and_send(channel, candidate, *, approved_by=None, consume_daily_trigger=True, status_text="💗 小俠收到同意，正在把這份愛意整理成一張照片……"):
     candidate = dict(candidate or {})
     wardrobe_item, wardrobe_reason, wardrobe_selection = _love_pick_wardrobe(candidate.get("scene_text") or "")
     context = _love_build_photo_context(candidate, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, wardrobe_selection=wardrobe_selection)
     status = await channel.send(status_text)
+    timeout_seconds = _love_generation_timeout_seconds()
+    candidate_id = str(candidate.get("id") or "")
+    print(f"💗 [LOVE_GENERATION_START] candidate={candidate_id or 'unknown'} timeout={timeout_seconds}s")
     try:
-        context = await _generate_photo_from_context(context, msg=status)
+        context = await asyncio.wait_for(
+            _generate_photo_from_context(context, msg=status),
+            timeout=timeout_seconds,
+        )
+        print(f"✅ [LOVE_GENERATION_DONE] candidate={candidate_id or 'unknown'}")
         db = load_memory()
         db.insert(0, _photo_db_payload(context, type_override="photo"))
         save_memory(db)
@@ -5491,7 +5507,24 @@ async def _love_generate_and_send(channel, candidate, *, approved_by=None, consu
                 love["pending_request"] = None
         save_state(app_state)
         return context
+    except asyncio.TimeoutError:
+        print(f"⚠️ [LOVE_GENERATION_TIMEOUT] candidate={candidate_id or 'unknown'} timeout={timeout_seconds}s")
+        app_state = load_state()
+        app_state, love = _love_get_day_state(app_state)
+        if consume_daily_trigger:
+            _love_mark_review_finished(love, result="generation_timeout", mark_asked=True, clear_pending=True)
+        else:
+            love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            love["last_manual_direct_error"] = f"generation_timeout_{timeout_seconds}s"
+        save_state(app_state)
+        timeout_message = f"⚠️ 這次生圖等待超過 {timeout_seconds // 60} 分鐘，已停止等待。大俠可以再試一次，不會讓它一直卡著。"
+        try:
+            await status.edit(content=timeout_message)
+        except Exception:
+            await channel.send(timeout_message)
+        return None
     except Exception as exc:
+        print(f"⚠️ [LOVE_GENERATION_FAILED] candidate={candidate_id or 'unknown'} {type(exc).__name__}: {exc}")
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
         if consume_daily_trigger:
@@ -5548,7 +5581,8 @@ class LoveIntentInviteView(discord.ui.View):
         self.channel_id = channel_id
 
     async def _finish(self, interaction, approved):
-        await interaction.response.defer(thinking=approved)
+        # Component ACK only; the real progress is shown by _love_generate_and_send() as a normal channel message.
+        await interaction.response.defer(thinking=False)
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
         pending = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else {}
@@ -13687,6 +13721,7 @@ async def _execute_safe_generation_core(discord_image_url, base_filename, mode, 
                     has_reference=bool(trace_context.get("figure10_present") or trace_context.get("reference_item_path") or trace_context.get("reference_item_url")),
                     reference_summary=trace_context.get("cosplay_clothing_ref_summary") or trace_context.get("reference_item_summary") or "",
                     reference_analysis=trace_context.get("cosplay_clothing_ref_analysis") or {},
+                    reference_allure_unlock=bool(trace_context.get("cosplay_reference_allure_unlock")),
                 )
                 trace_context["raw_seedream_mode"] = "cosplay_today_scene_only"
             else:
@@ -22765,7 +22800,15 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
             or ""
         )
         cosplay_title = source_context.get("cosplay_title_hint") or ((source_context.get("post_text") or {}).get("title") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("cosplay_character_name") or source_context.get("topic") or ""
-        prompt_base = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=True, title_hint=cosplay_title, has_reference=bool(source_context.get("figure10_present") or source_context.get("reference_item_path") or source_context.get("reference_item_url")), reference_summary=source_context.get("cosplay_clothing_ref_summary") or source_context.get("reference_item_summary") or "")
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(
+            scene_caption,
+            hybrid=True,
+            title_hint=cosplay_title,
+            has_reference=bool(source_context.get("figure10_present") or source_context.get("reference_item_path") or source_context.get("reference_item_url")),
+            reference_summary=source_context.get("cosplay_clothing_ref_summary") or source_context.get("reference_item_summary") or "",
+            reference_analysis=source_context.get("cosplay_clothing_ref_analysis") or {},
+            reference_allure_unlock=bool(source_context.get("cosplay_reference_allure_unlock")),
+        )
         trace_context["cosplay_scene_caption"] = scene_caption
         trace_context["cosplay_title_hint"] = cosplay_title
     elif is_photobook:
@@ -22987,7 +23030,15 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
     source_module = str(source_context.get("source_module") or "").strip().lower()
     if trace_context.get("cosplay_scene_only"):
         cosplay_title = source_context.get("cosplay_title_hint") or ((source_context.get("post_text") or {}).get("title") if isinstance(source_context.get("post_text"), dict) else "") or source_context.get("cosplay_character_name") or source_context.get("topic") or ""
-        prompt_base = _build_cosplay_scene_only_seedream_prompt(trace_context.get("cosplay_scene_caption"), hybrid=True, title_hint=cosplay_title, has_reference=bool(source_context.get("figure10_present") or source_context.get("reference_item_path") or source_context.get("reference_item_url")), reference_summary=source_context.get("cosplay_clothing_ref_summary") or source_context.get("reference_item_summary") or "")
+        prompt_base = _build_cosplay_scene_only_seedream_prompt(
+            trace_context.get("cosplay_scene_caption"),
+            hybrid=True,
+            title_hint=cosplay_title,
+            has_reference=bool(source_context.get("figure10_present") or source_context.get("reference_item_path") or source_context.get("reference_item_url")),
+            reference_summary=source_context.get("cosplay_clothing_ref_summary") or source_context.get("reference_item_summary") or "",
+            reference_analysis=source_context.get("cosplay_clothing_ref_analysis") or {},
+            reference_allure_unlock=bool(source_context.get("cosplay_reference_allure_unlock") or trace_context.get("cosplay_reference_allure_unlock")),
+        )
         trace_context["cosplay_title_hint"] = cosplay_title
     elif (
         source_mode_norm == "photobook"
