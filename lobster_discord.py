@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.12"
+LOBSTER_VERSION = "1.10.13"
 
 
 def _normalize_generation_level(level):
@@ -13884,7 +13884,7 @@ def _normalize_command_date(value):
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
 COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
-# v1.10.12 — Optional Danbooru auto-reference resolver for Cosplay.
+# v1.10.13 — Optional Danbooru auto-reference resolver for Cosplay.
 # Manual Discord attachment always wins. If Danbooru cannot produce a clean solo/full-body
 # character reference, the normal scene-only Cosplay path continues unchanged.
 DANBOORU_API_BASE = "https://danbooru.donmai.us"
@@ -13906,22 +13906,39 @@ def _danbooru_headers():
     return {"User-Agent": f"XiaoxiaCosplayBot/{LOBSTER_VERSION} (Danbooru user {who})"}
 
 
+def _dedupe_casefold_list(values, limit=None):
+    out = []
+    seen = set()
+    for value in values or []:
+        item = _clean_text_compact(value or "").strip()
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if limit and len(out) >= int(limit):
+            break
+    return out
+
+
 def _danbooru_name_variants(value):
     raw = _clean_text_compact(value or "")
     if not raw:
         return []
-    variants = []
-    parens = re.findall(r"[（(]([^()（）]{2,80})[)）]", raw)
+    candidates = []
+    parens = re.findall(r"[（(]([^()（）]{1,80})[)）]", raw)
     stripped = re.sub(r"[（(][^()（）]*[)）]", " ", raw).strip()
-    ascii_chunks = re.findall(r"[A-Za-z0-9][A-Za-z0-9 ._:'\-]{1,80}", raw)
-    for item in parens + ascii_chunks + [stripped, raw]:
-        item = _clean_text_compact(item).strip(" -_/,:;()（）")
-        if not item:
-            continue
-        key = item.casefold()
-        if key not in {x.casefold() for x in variants}:
-            variants.append(item)
-    return variants[:5]
+    normalized = raw.replace("－", "-").replace("—", "-").replace("–", "-").replace("／", "/").replace("｜", "|")
+    parts = [p.strip() for p in re.split(r"\s*[-—–/:|｜]\s*", normalized) if p.strip()]
+    ascii_chunks = re.findall(r"[A-Za-z0-9][A-Za-z0-9 ._:'\-]{0,80}", raw)
+    cjk_chunks = re.findall(r"[㐀-鿿]{1,24}", raw)
+    for item in [raw, normalized, stripped] + parens + parts + ascii_chunks + cjk_chunks:
+        item = _clean_text_compact(item).strip(" -_/,:;()（）[]【】")
+        if item:
+            candidates.append(item)
+    return _dedupe_casefold_list(candidates, limit=12)
 
 
 def _danbooru_match_pattern(value):
@@ -13933,7 +13950,7 @@ def _danbooru_match_pattern(value):
 
 
 def _danbooru_token_set(value):
-    stop = {"the", "of", "and", "a", "an", "series", "movie", "film", "game"}
+    stop = {"the", "of", "and", "a", "an", "series", "movie", "film", "game", "anime", "character"}
     return {x for x in re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(x) >= 2 and x not in stop}
 
 
@@ -13969,12 +13986,26 @@ def _danbooru_post_tags(post):
     return set(" ".join(chunks).split())
 
 
+def _danbooru_has_multi_subject_tags(tags):
+    tags = set(tags or [])
+    if any(x in tags for x in {"multiple_girls", "multiple_boys", "multiple_others", "group", "duo", "trio"}):
+        return True
+    for tag in tags:
+        m = re.match(r"^(\d+)(girls|boys|others|people|persons)$", str(tag))
+        if m:
+            try:
+                if int(m.group(1)) >= 2:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def _score_danbooru_reference_post(post):
     tags = _danbooru_post_tags(post)
-    # Hard acceptance rule for this feature: identifiable single-character, full-body reference.
-    if "solo" not in tags or "full_body" not in tags:
+    if _danbooru_has_multi_subject_tags(tags):
         return None
-    if any(x in tags for x in {"multiple_girls", "multiple_boys", "group", "comic", "manga_(style)"}):
+    if any(x in tags for x in {"comic", "manga_(style)", "4koma", "text_focus"}):
         return None
     rating = str((post or {}).get("rating") or "").lower()
     if rating == "e":
@@ -13982,19 +14013,34 @@ def _score_danbooru_reference_post(post):
     file_url = str((post or {}).get("file_url") or (post or {}).get("large_file_url") or "").strip()
     if not file_url:
         return None
-    score = 100.0
+
+    score = 0.0
+    if "solo" in tags:
+        score += 55
+    elif "1girl" in tags or "1boy" in tags:
+        score += 18
+
+    if "full_body" in tags:
+        score += 55
+    elif "standing" in tags:
+        score += 8
+
     for good, points in {
-        "standing": 18, "official_art": 25, "game_cg": 18, "simple_background": 12,
-        "looking_at_viewer": 4, "weapon": 5, "holding_weapon": 6, "boots": 2, "shoes": 2,
+        "official_art": 24, "game_cg": 16, "simple_background": 10,
+        "looking_at_viewer": 4, "weapon": 4, "holding_weapon": 6,
+        "boots": 2, "shoes": 2, "long_sleeves": 1,
     }.items():
         if good in tags:
             score += points
+
     for bad, points in {
-        "upper_body": 80, "portrait": 55, "close-up": 80, "cropped": 45,
-        "chibi": 70, "super_deformed": 70, "from_behind": 20, "monochrome": 10,
+        "upper_body": 40, "portrait": 55, "close-up": 55, "cropped": 26,
+        "cowboy_shot": 18, "knees_up": 18, "chibi": 70, "super_deformed": 70,
+        "from_behind": 20, "monochrome": 10, "sketch": 8,
     }.items():
         if bad in tags:
             score -= points
+
     try:
         width = int((post or {}).get("image_width") or 0)
         height = int((post or {}).get("image_height") or 0)
@@ -14004,7 +14050,7 @@ def _score_danbooru_reference_post(post):
         elif pixels >= 1_000_000:
             score += 6
         if height >= width:
-            score += 6
+            score += 5
     except Exception:
         pass
     try:
@@ -14015,7 +14061,67 @@ def _score_danbooru_reference_post(post):
         score += 6
     elif rating == "s":
         score += 3
+
+    # Keep broad search permissive, but filter out obviously poor references.
+    if score < -15:
+        return None
     return score
+
+
+async def _resolve_danbooru_alias_hints(character_name="", work_title="", raw_request=""):
+    base_character = _danbooru_name_variants(character_name)
+    base_work = _danbooru_name_variants(work_title)
+    base_request = _danbooru_name_variants(raw_request)
+    result = {
+        "character_aliases": list(base_character),
+        "work_aliases": list(base_work),
+        "combined_aliases": [],
+    }
+    try:
+        prompt = f"""
+You help prepare search aliases for Danbooru character tags.
+Input may be Chinese, Japanese, or English.
+Return JSON only.
+
+Rules:
+- Prefer short, searchable aliases.
+- Include likely official English titles when known.
+- Include likely romanized Japanese titles when known.
+- Include likely English or romanized character names when known.
+- Do not explain anything.
+- Keep each list concise.
+
+Return JSON:
+{{
+  "character_aliases": ["up to 8 items"],
+  "work_aliases": ["up to 8 items"],
+  "combined_aliases": ["up to 8 items"]
+}}
+
+character_name: {character_name or 'N/A'}
+work_title: {work_title or 'N/A'}
+raw_request: {raw_request or 'N/A'}
+"""
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+        )
+        parsed = _safe_json_from_text(getattr(response, "text", "") or "", {})
+        if isinstance(parsed, dict):
+            result["character_aliases"] = _dedupe_casefold_list(base_character + list(parsed.get("character_aliases") or []), limit=12)
+            result["work_aliases"] = _dedupe_casefold_list(base_work + list(parsed.get("work_aliases") or []), limit=12)
+            result["combined_aliases"] = _dedupe_casefold_list(base_request + list(parsed.get("combined_aliases") or []), limit=12)
+    except Exception as exc:
+        print(f"⚠️ [DANBOORU_ALIAS_HINT_FAILED] {type(exc).__name__}: {exc}")
+    if not result["combined_aliases"]:
+        combined = []
+        for char in result["character_aliases"][:4]:
+            combined.append(char)
+            for work in result["work_aliases"][:3]:
+                combined.append(f"{char} {work}")
+        result["combined_aliases"] = _dedupe_casefold_list(base_request + combined, limit=12)
+    return result
 
 
 async def _danbooru_api_get(path, params=None):
@@ -14078,20 +14184,45 @@ async def _download_and_sanitize_danbooru_image(url, *, post_id=None):
 
 
 async def _find_danbooru_cosplay_reference(story):
-    """Best-effort resolver. Never blocks Cosplay: returns None on no match or any API/download failure."""
-    if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
-        print("ℹ️ [DANBOORU_REF] env missing; fallback to scene-only cosplay")
-        return None
+    """Best-effort resolver. It always returns a dict with matched=True/False and a trace block."""
     story = story if isinstance(story, dict) else {}
     character_name = _clean_text_compact(story.get("character_name") or (story.get("cosplay_topic_candidate") or {}).get("character_name") or "")
     work_title = _clean_text_compact(story.get("work_title") or (story.get("cosplay_topic_candidate") or {}).get("work_title") or "")
+    raw_request = _clean_text_compact(story.get("user_mode_request") or story.get("topic") or "")
+    trace = {
+        "matched": False,
+        "character_name": character_name,
+        "work_title": work_title,
+        "raw_request": raw_request,
+        "failure_reason": "",
+        "tag_queries": [],
+        "tag_candidates": [],
+        "selected_character_tags": [],
+        "post_queries": [],
+        "candidate_posts": [],
+        "download_attempts": [],
+    }
+    if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
+        trace["failure_reason"] = "env_missing"
+        print("ℹ️ [DANBOORU_REF] env missing; fallback to scene-only cosplay")
+        return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
     if not character_name:
+        trace["failure_reason"] = "no_character_name"
         print("ℹ️ [DANBOORU_REF] no character name; fallback to scene-only cosplay")
-        return None
+        return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
+
     try:
+        alias_hints = await _resolve_danbooru_alias_hints(character_name, work_title, raw_request)
+        trace["alias_hints"] = alias_hints
         tag_candidates = {}
-        for variant in _danbooru_name_variants(character_name):
-            pattern = _danbooru_match_pattern(variant)
+        search_aliases = _dedupe_casefold_list(
+            list(alias_hints.get("combined_aliases") or [])
+            + list(alias_hints.get("character_aliases") or [])
+            + list(alias_hints.get("work_aliases") or []),
+            limit=10,
+        )
+        for alias in search_aliases:
+            pattern = _danbooru_match_pattern(alias)
             if not pattern:
                 continue
             rows = await _danbooru_api_get("tags.json", {
@@ -14100,58 +14231,109 @@ async def _find_danbooru_cosplay_reference(story):
                 "search[order]": "count",
                 "limit": 20,
             })
+            top_names = []
             for row in rows if isinstance(rows, list) else []:
                 name = str((row or {}).get("name") or "").strip()
                 if name:
+                    top_names.append(name)
                     tag_candidates[name] = row
-            if len(tag_candidates) >= 12:
+            trace["tag_queries"].append({
+                "alias": alias,
+                "pattern": pattern,
+                "result_count": len(top_names),
+                "top_results": top_names[:8],
+            })
+            if len(tag_candidates) >= 18:
                 break
+
         ranked_tags = sorted(
             tag_candidates.values(),
             key=lambda row: _score_danbooru_character_tag(row, character_name, work_title),
             reverse=True,
-        )[:4]
+        )[:6]
+        trace["tag_candidates"] = [
+            {
+                "name": str((row or {}).get("name") or ""),
+                "post_count": int((row or {}).get("post_count") or 0),
+                "score": round(_score_danbooru_character_tag(row, character_name, work_title), 2),
+            }
+            for row in ranked_tags
+        ]
+        trace["selected_character_tags"] = [x.get("name") for x in trace["tag_candidates"] if x.get("name")]
         if not ranked_tags:
+            trace["failure_reason"] = "no_character_tag"
             print(f"ℹ️ [DANBOORU_REF] no character tag: {character_name} / {work_title}")
-            return None
+            return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
         post_pool = {}
-        for tag in ranked_tags:
+        query_specs = [
+            ("strict", lambda tag_name: f"{tag_name} solo full_body", 40),
+            ("solo", lambda tag_name: f"{tag_name} solo", 40),
+            ("full_body", lambda tag_name: f"{tag_name} full_body", 40),
+            ("broad", lambda tag_name: f"{tag_name}", 40),
+        ]
+        for tag in ranked_tags[:4]:
             tag_name = str(tag.get("name") or "").strip()
             if not tag_name:
                 continue
-            # Keep each API query within the normal two-tag search shape.
-            for second_tag in ("full_body", "solo"):
+            for query_mode, builder, query_limit in query_specs:
+                tag_query = builder(tag_name)
                 rows = await _danbooru_api_get("posts.json", {
-                    "tags": f"{tag_name} {second_tag}",
-                    "limit": 30,
+                    "tags": tag_query,
+                    "limit": query_limit,
                     "page": 1,
                 })
-                for post in rows if isinstance(rows, list) else []:
+                rows = rows if isinstance(rows, list) else []
+                trace["post_queries"].append({
+                    "character_tag": tag_name,
+                    "mode": query_mode,
+                    "tags": tag_query,
+                    "result_count": len(rows),
+                })
+                for post in rows:
                     pid = str((post or {}).get("id") or "")
-                    if pid:
-                        post_pool[pid] = (post, tag_name)
-            if len(post_pool) >= 30:
+                    if pid and pid not in post_pool:
+                        post_pool[pid] = (post, tag_name, query_mode)
+            if len(post_pool) >= 120:
                 break
 
         scored = []
-        for post, tag_name in post_pool.values():
+        for post, tag_name, query_mode in post_pool.values():
             score = _score_danbooru_reference_post(post)
-            if score is not None:
-                score += _score_danbooru_character_tag(tag_candidates.get(tag_name) or {"name": tag_name, "category": 4}, character_name, work_title) * 0.18
-                scored.append((score, post, tag_name))
+            if score is None:
+                continue
+            score += _score_danbooru_character_tag(tag_candidates.get(tag_name) or {"name": tag_name, "category": 4}, character_name, work_title) * 0.18
+            if query_mode == "strict":
+                score += 8
+            elif query_mode == "solo":
+                score += 2
+            elif query_mode == "full_body":
+                score += 2
+            scored.append((score, post, tag_name, query_mode))
         scored.sort(key=lambda x: x[0], reverse=True)
+        trace["candidate_posts"] = [
+            {
+                "post_id": int((post or {}).get("id") or 0),
+                "character_tag": tag_name,
+                "query_mode": query_mode,
+                "score": round(float(score), 2),
+                "rating": str((post or {}).get("rating") or ""),
+                "tag_string": str((post or {}).get("tag_string") or "")[:240],
+            }
+            for score, post, tag_name, query_mode in scored[:12]
+        ]
         if not scored:
-            print(f"ℹ️ [DANBOORU_REF] no acceptable solo/full_body post: {character_name} / {work_title}")
-            return None
+            trace["failure_reason"] = "no_acceptable_post"
+            print(f"ℹ️ [DANBOORU_REF] no acceptable reference post: {character_name} / {work_title}")
+            return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
-        # Try a few top candidates in case one CDN object is unavailable or invalid.
         last_error = None
-        for score, post, tag_name in scored[:5]:
+        for score, post, tag_name, query_mode in scored[:5]:
             file_url = str(post.get("file_url") or post.get("large_file_url") or "").strip()
             try:
                 source_path, local_url = await _download_and_sanitize_danbooru_image(file_url, post_id=post.get("id"))
                 result = {
+                    "matched": True,
                     "source": "danbooru",
                     "source_path": source_path,
                     "source_url": file_url,
@@ -14161,20 +14343,39 @@ async def _find_danbooru_cosplay_reference(story):
                     "character_tag": tag_name,
                     "rating": post.get("rating"),
                     "score": round(float(score), 2),
+                    "query_mode": query_mode,
                     "character_name": character_name,
                     "work_title": work_title,
+                    "trace": trace,
                 }
-                print(f"✅ [DANBOORU_REF] selected post={post.get('id')} tag={tag_name} score={result['score']}")
+                trace["matched"] = True
+                trace["selected_post"] = {
+                    "post_id": post.get("id"),
+                    "character_tag": tag_name,
+                    "query_mode": query_mode,
+                    "score": result["score"],
+                    "source_url": file_url,
+                }
+                print(f"✅ [DANBOORU_REF] selected post={post.get('id')} tag={tag_name} mode={query_mode} score={result['score']}")
                 return result
             except Exception as exc:
                 last_error = exc
+                trace["download_attempts"].append({
+                    "post_id": post.get("id"),
+                    "character_tag": tag_name,
+                    "query_mode": query_mode,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
                 print(f"⚠️ [DANBOORU_REF_CANDIDATE_FAILED] post={post.get('id')} {type(exc).__name__}: {exc}")
         if last_error:
+            trace["failure_reason"] = "candidate_download_failed"
             print(f"⚠️ [DANBOORU_REF] all candidate downloads failed: {type(last_error).__name__}: {last_error}")
-        return None
+        return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
     except Exception as exc:
+        trace["failure_reason"] = f"exception:{type(exc).__name__}"
+        trace["exception"] = f"{type(exc).__name__}: {exc}"
         print(f"⚠️ [DANBOORU_REF_FAILED] {type(exc).__name__}: {exc}")
-        return None
+        return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
 
 def _cosplay_reference_title_from_story(story):
@@ -14432,14 +14633,16 @@ async def cosplay(ctx, *, mode: str = "auto"):
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
 
-        # v1.10.12 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
+        # v1.10.13 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
         clothing_ref = None
         danbooru_ref = None
         story["cosplay_reference_source"] = "manual_attachment" if _cosplay_ref_attachment else "none"
+        story["cosplay_danbooru_trace"] = {}
         if not _cosplay_ref_attachment:
             await msg.edit(content=f"✨ 劇本完成！小夏先替【{_cosplay_reference_title_from_story(story) or mode}】找找 Danbooru 是否有合格的單人全身角色參考圖...")
             danbooru_ref = await _find_danbooru_cosplay_reference(story)
-            if danbooru_ref:
+            story["cosplay_danbooru_trace"] = dict((danbooru_ref or {}).get("trace") or {})
+            if danbooru_ref and danbooru_ref.get("matched"):
                 try:
                     clothing_ref = await _prepare_cosplay_clothing_reference(
                         ctx_message,
@@ -14451,7 +14654,6 @@ async def cosplay(ctx, *, mode: str = "auto"):
                     # Auto reference is opportunistic. If Nano cannot prepare it, return to the original no-reference path.
                     print(f"⚠️ [DANBOORU_REF_NANO_FALLBACK] {type(exc).__name__}: {exc}")
                     clothing_ref = None
-                    danbooru_ref = None
                     story["cosplay_reference_source"] = "none"
         story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment or clothing_ref)
         state["current_topic_data"] = story
@@ -14477,6 +14679,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "cosplay_title_hint": cosplay_title_hint,
             "cosplay_scene_caption": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
             "scene_seed_text": _cosplay_state.get("scene_caption") or visual.get("composition") or "",
+            "cosplay_danbooru_trace": dict(story.get("cosplay_danbooru_trace") or {}),
         }
         if clothing_ref:
             identity_urls = await _seedream_upload_reference_images()
@@ -14511,6 +14714,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
                 "cosplay_clothing_ref_summary": clothing_ref.get("summary") or "",
                 "cosplay_clothing_ref_analysis": clothing_ref.get("analysis") or {},
                 "cosplay_danbooru_ref": clothing_ref.get("danbooru") or None,
+                "cosplay_danbooru_trace": dict(((clothing_ref.get("danbooru") or {}).get("trace") or trace_context.get("cosplay_danbooru_trace") or {})),
             })
         _trace_stage(trace_context, "cosplay_visual_planned", data={"story": story, "cosplay_state": _cosplay_state, "visual": visual, "clothing_ref": clothing_ref}, prompt=scene_prompt)
 
@@ -14588,6 +14792,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "cosplay_clothing_ref_summary": trace_context.get("cosplay_clothing_ref_summary") or "",
             "cosplay_clothing_ref_analysis": trace_context.get("cosplay_clothing_ref_analysis") or {},
             "cosplay_danbooru_ref": trace_context.get("cosplay_danbooru_ref"),
+            "cosplay_danbooru_trace": trace_context.get("cosplay_danbooru_trace") or {},
         }
         db = load_memory()
         db.insert(0, payload)
@@ -22540,7 +22745,8 @@ class PhotoResultView(discord.ui.View):
         is_cosplay = mode_key == "cosplay"
         has_cosplay_clothing = bool(self.context.get("cosplay_clothing_ref_local_path") or self.context.get("cosplay_clothing_ref_local_url"))
         has_daily_clothing = bool(self.context.get("nano_clothing_ref_local_path") or self.context.get("nano_clothing_ref_local_url"))
-        has_clothing = has_cosplay_clothing or has_daily_clothing
+        has_danbooru_trace = bool(self.context.get("cosplay_danbooru_trace")) if is_cosplay else False
+        has_clothing = has_cosplay_clothing or has_daily_clothing or has_danbooru_trace
         has_v5_background = bool(
             self.context.get("v5_background_local_path")
             or self.context.get("v5_background_local_url")
@@ -22693,7 +22899,7 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary, row=1)
     async def try_seedream_v5(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
@@ -22726,7 +22932,7 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ v5.0 場景升級失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="🪟 查看 v5 背景", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🪟 查看 v5 背景", style=discord.ButtonStyle.secondary, row=1)
     async def show_v5_background(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = dict(self.context)
         mode_key = str(context.get("source_mode") or context.get("type") or "").lower()
@@ -22737,8 +22943,9 @@ class PhotoResultView(discord.ui.View):
         clothing_provider = _clean_text_compact(context.get("cosplay_clothing_ref_provider") or context.get("nano_clothing_ref_provider") or COSPLAY_NANO_CLOTHING_REF_LABEL)
         bg_local_path = context.get("v5_background_local_path")
         bg_local_url = context.get("v5_background_local_url") or context.get("v5_background_generated_url")
+        danbooru_trace = context.get("cosplay_danbooru_trace") or {}
 
-        if clothing_local_path or clothing_local_url:
+        if clothing_local_path or clothing_local_url or (is_cosplay and danbooru_trace):
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 source_path = context.get("cosplay_clothing_ref_source_path") if is_cosplay else None
@@ -22747,13 +22954,28 @@ class PhotoResultView(discord.ui.View):
                 source_page_url = context.get("cosplay_clothing_ref_source_page_url") if is_cosplay else None
                 source_kind = _clean_text_compact(context.get("cosplay_clothing_ref_source_kind") or "") if is_cosplay else ""
 
-                nano_embed = discord.Embed(
-                    title="👗 Nano 服裝參考（debug）",
-                    description=("這是從大俠附圖整理出的服裝參考，交給 Seedream 當 Figure 10 使用。" if not is_cosplay else f"這是 {clothing_provider} 提供、交給 Seedream 當 Figure 10 使用的服裝參考。"),
-                    color=discord.Color.blurple(),
-                )
-                if clothing_summary:
-                    nano_embed.add_field(name="服裝摘要", value=clothing_summary[:1024], inline=False)
+                def _join_items(items, limit=6, cap=900):
+                    vals = [str(x).strip() for x in (items or []) if str(x).strip()]
+                    vals = vals[:limit]
+                    text = "\n".join([f"• {x}" for x in vals])
+                    return text[:cap] if text else "（無）"
+
+                def _join_pairs(rows, limit=6, cap=900):
+                    vals = []
+                    for row in (rows or [])[:limit]:
+                        if not isinstance(row, dict):
+                            continue
+                        label = str(row.get("alias") or row.get("tags") or row.get("character_tag") or "").strip()
+                        count = row.get("result_count")
+                        mode = str(row.get("mode") or row.get("query_mode") or "").strip()
+                        piece = label
+                        if mode:
+                            piece = f"[{mode}] {piece}"
+                        if count is not None:
+                            piece = f"{piece} ({count})"
+                        vals.append(piece)
+                    text = "\n".join([f"• {x}" for x in vals])
+                    return text[:cap] if text else "（無）"
 
                 embeds = []
                 files = []
@@ -22775,17 +22997,62 @@ class PhotoResultView(discord.ui.View):
                         source_embed.set_image(url=str(source_local_url or source_original_url))
                     embeds.append(source_embed)
 
-                if clothing_local_path and os.path.exists(str(clothing_local_path)):
-                    filename = f"nano_{os.path.basename(str(clothing_local_path))}"
-                    file = discord.File(str(clothing_local_path), filename=filename)
-                    files.append(file)
-                    nano_embed.set_image(url=f"attachment://{filename}")
-                    if clothing_local_url:
+                if clothing_local_path or clothing_local_url:
+                    nano_embed = discord.Embed(
+                        title="👗 Nano 服裝參考（debug）",
+                        description=("這是從大俠附圖整理出的服裝參考，交給 Seedream 當 Figure 10 使用。" if not is_cosplay else f"這是 {clothing_provider} 提供、交給 Seedream 當 Figure 10 使用的服裝參考。"),
+                        color=discord.Color.blurple(),
+                    )
+                    if clothing_summary:
+                        nano_embed.add_field(name="服裝摘要", value=clothing_summary[:1024], inline=False)
+                    if clothing_local_path and os.path.exists(str(clothing_local_path)):
+                        filename = f"nano_{os.path.basename(str(clothing_local_path))}"
+                        file = discord.File(str(clothing_local_path), filename=filename)
+                        files.append(file)
+                        nano_embed.set_image(url=f"attachment://{filename}")
+                        if clothing_local_url:
+                            nano_embed.add_field(name="Nano Image URL", value=str(clothing_local_url)[:1024], inline=False)
+                    elif clothing_local_url:
+                        nano_embed.set_image(url=str(clothing_local_url))
                         nano_embed.add_field(name="Nano Image URL", value=str(clothing_local_url)[:1024], inline=False)
-                elif clothing_local_url:
-                    nano_embed.set_image(url=str(clothing_local_url))
-                    nano_embed.add_field(name="Nano Image URL", value=str(clothing_local_url)[:1024], inline=False)
-                embeds.append(nano_embed)
+                    embeds.append(nano_embed)
+                elif is_cosplay and danbooru_trace:
+                    matched = bool(danbooru_trace.get("matched"))
+                    diag = discord.Embed(
+                        title="👗 Cosplay 參考診斷（debug）",
+                        description=("這次有跑 Danbooru 自動搜尋，但最後沒有做出可用的 Nano 服裝參考。" if not matched else "這次有跑 Danbooru 自動搜尋。"),
+                        color=discord.Color.orange(),
+                    )
+                    char_name = _clean_text_compact(danbooru_trace.get("character_name") or context.get("cosplay_character_name") or "")
+                    work_title = _clean_text_compact(danbooru_trace.get("work_title") or context.get("cosplay_work_title") or "")
+                    failure_reason = _clean_text_compact(danbooru_trace.get("failure_reason") or "")
+                    if char_name or work_title:
+                        diag.add_field(name="角色 / 作品", value=f"{char_name or '（未解析）'}\n{work_title or '（未解析）'}"[:1024], inline=False)
+                    if failure_reason:
+                        diag.add_field(name="未採用原因", value=failure_reason[:1024], inline=False)
+                    alias_hints = danbooru_trace.get("alias_hints") or {}
+                    diag.add_field(name="查詢別名", value=_join_items((alias_hints.get("combined_aliases") or []) + (alias_hints.get("character_aliases") or []), limit=8), inline=False)
+                    diag.add_field(name="候選角色 tag", value=_join_items(danbooru_trace.get("selected_character_tags") or [], limit=8), inline=False)
+                    diag.add_field(name="tag 查詢紀錄", value=_join_pairs(danbooru_trace.get("tag_queries") or [], limit=6), inline=False)
+                    diag.add_field(name="post 查詢紀錄", value=_join_pairs(danbooru_trace.get("post_queries") or [], limit=6), inline=False)
+                    selected_post = danbooru_trace.get("selected_post") or {}
+                    if selected_post:
+                        diag.add_field(name="最終採用 post", value=str(selected_post)[:1024], inline=False)
+                    elif danbooru_trace.get("candidate_posts"):
+                        preview = []
+                        for row in (danbooru_trace.get("candidate_posts") or [])[:5]:
+                            if not isinstance(row, dict):
+                                continue
+                            preview.append(f"post {row.get('post_id')} | {row.get('character_tag')} | {row.get('query_mode')} | {row.get('score')}")
+                        diag.add_field(name="候選 post 前幾名", value=_join_items(preview, limit=5), inline=False)
+                    if danbooru_trace.get("download_attempts"):
+                        preview = []
+                        for row in (danbooru_trace.get("download_attempts") or [])[:4]:
+                            if not isinstance(row, dict):
+                                continue
+                            preview.append(f"post {row.get('post_id')}: {str(row.get('error') or '')[:120]}")
+                        diag.add_field(name="下載失敗紀錄", value=_join_items(preview, limit=4), inline=False)
+                    embeds.append(diag)
                 await interaction.followup.send(embeds=embeds, files=files, ephemeral=True)
             except Exception as exc:
                 await interaction.followup.send(f"⚠️ 顯示服裝參考圖失敗：`{str(exc)[:1500]}`", ephemeral=True)
@@ -22817,7 +23084,7 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 顯示 v5.0 背景圖失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="✅ 採用升級版", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 採用升級版", style=discord.ButtonStyle.success, row=1)
     async def adopt_v5_source(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = dict(self.context)
         target_url = context.get("v5_replace_target_url")
@@ -22846,19 +23113,19 @@ class PhotoResultView(discord.ui.View):
         except Exception as exc:
             await interaction.followup.send(f"⚠️ 採用 v5.0 場景升級版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
-    @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🩹 修正這張", style=discord.ButtonStyle.primary, row=1)
     async def repair_photo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PhotoRepairModal(self.context))
 
-    @discord.ui.button(label="收藏到衣櫃", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="收藏到衣櫃", style=discord.ButtonStyle.success, row=2)
     async def save_wardrobe(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(WardrobeSaveModal(self.context))
 
-    @discord.ui.button(label="上傳成為 Project", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="上傳成為 Project", style=discord.ButtonStyle.success, row=2)
     async def upload_project(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PhotoNameModal(self.context, "project"))
 
-    @discord.ui.button(label="上傳成為 Diary", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="上傳成為 Diary", style=discord.ButtonStyle.success, row=2)
     async def upload_diary(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PhotoNameModal(self.context, "diary"))
 
