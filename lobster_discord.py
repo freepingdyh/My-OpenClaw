@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.13"
+LOBSTER_VERSION = "1.10.14"
 
 
 def _normalize_generation_level(level):
@@ -11600,7 +11600,7 @@ async def generate_story_legacy(mode):
             f"2. 內容必須介紹該職業的日常工作內容、所需的專業技能與人格特質。\n"
             f"3. 妳必須扮演該職業，並換上該職業的『高級時尚再詮釋版』現代制服。\n"
             f"4. {style_desc}\n"
-            f'回傳 JSON 格式：{{"topic": "【{mode}】現代職業名稱", "event": "200字職業日常與專業特質介紹", "persona": "扮演職業(現代制服)"}}' 
+            f'回傳 JSON 格式：{{"topic": "【{mode}】現代職業名稱", "event": "200字職業日常與專業特質介紹", "persona": "扮演職業(現代制服)", "work_title": "", "character_name": ""}}' 
         )
     elif "歷史" in mode:
         prompt = (
@@ -11608,14 +11608,14 @@ async def generate_story_legacy(mode):
             f"[絕對限制]：\n"
             f"1. 必須挑選歷史上真實在「{month}月{day}日」發生的事件！\n"
             f"2. {style_desc}\n"
-            f'回傳 JSON 格式：{{"topic": "【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色"}}' 
+            f'回傳 JSON 格式：{{"topic": "【{mode}】YYYY.{month:02d}.{day:02d} 副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色", "work_title": "作品/事件名稱", "character_name": "角色姓名"}}' 
         )
     else:
         prompt = (
             f"今天日期是 {year}年{month}月{day}日。大俠指定了【{mode}】模式。\n"
             f"請發想一個適合小俠 Cosplay 的題材。\n"
             f"[絕對限制]：{style_desc}\n"
-            f'回傳 JSON 格式：{{"topic": "【{mode}】副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色"}}' 
+            f'回傳 JSON 格式：{{"topic": "【{mode}】副標題(人物: 姓名)", "event": "200字背景介紹與服裝描述", "persona": "扮演角色", "work_title": "原作名稱", "character_name": "角色姓名"}}' 
         )
 
     response = await gemini_client.aio.models.generate_content(
@@ -13884,7 +13884,7 @@ def _normalize_command_date(value):
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
 COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
-# v1.10.13 — Optional Danbooru auto-reference resolver for Cosplay.
+# v1.10.14 — Optional Danbooru auto-reference resolver for Cosplay.
 # Manual Discord attachment always wins. If Danbooru cannot produce a clean solo/full-body
 # character reference, the normal scene-only Cosplay path continues unchanged.
 DANBOORU_API_BASE = "https://danbooru.donmai.us"
@@ -14068,6 +14068,108 @@ def _score_danbooru_reference_post(post):
     return score
 
 
+def _strip_cosplay_category_prefix(value):
+    raw = _clean_text_compact(value or "")
+    if not raw:
+        return ""
+    # Remove leading category markers such as （動畫）, (電玩), 【電影】, [文學].
+    raw = re.sub(r"^\s*[（(【\[]\s*[^）)】\]]{1,12}\s*[）)】\]]\s*", "", raw).strip()
+    return raw
+
+
+def _split_explicit_cosplay_identity(raw_request):
+    """Best-effort deterministic parser for explicit requests such as '（動畫）葬送的芙莉蓮-費倫'."""
+    raw = _strip_cosplay_category_prefix(raw_request)
+    if not raw:
+        return "", ""
+    normalized = raw.replace("－", "-").replace("—", "-").replace("–", "-").replace("｜", "|")
+    # For a user-specified work-character form, split only once from the right so work titles may contain punctuation.
+    if "-" in normalized:
+        left, right = normalized.rsplit("-", 1)
+        work = _clean_text_compact(left).strip(" -_/,:;()（）[]【】")
+        char = _clean_text_compact(right).strip(" -_/,:;()（）[]【】")
+        if work and char:
+            return work, char
+    for sep in ("／", "/", "|", "｜"):
+        if sep in normalized:
+            left, right = normalized.rsplit(sep, 1)
+            work = _clean_text_compact(left).strip(" -_/,:;()（）[]【】")
+            char = _clean_text_compact(right).strip(" -_/,:;()（）[]【】")
+            if work and char:
+                return work, char
+    return "", ""
+
+
+async def _infer_danbooru_story_identity(story):
+    """Fill missing work_title / character_name before any Danbooru API search."""
+    story = story if isinstance(story, dict) else {}
+    candidate = story.get("cosplay_topic_candidate") if isinstance(story.get("cosplay_topic_candidate"), dict) else {}
+    character_name = _clean_text_compact(story.get("character_name") or candidate.get("character_name") or "")
+    work_title = _clean_text_compact(story.get("work_title") or candidate.get("work_title") or "")
+    raw_request = _clean_text_compact(story.get("user_mode_request") or story.get("topic") or "")
+    inference = {
+        "source": "existing" if character_name else "",
+        "raw_request": raw_request,
+        "character_name_before": character_name,
+        "work_title_before": work_title,
+    }
+    if character_name:
+        inference.update({"character_name": character_name, "work_title": work_title})
+        return character_name, work_title, inference
+
+    # First use the user's explicit syntax; this is deterministic and avoids an unnecessary LLM call.
+    parsed_work, parsed_char = _split_explicit_cosplay_identity(raw_request)
+    if parsed_char:
+        character_name = parsed_char
+        if not work_title:
+            work_title = parsed_work
+        inference["source"] = "raw_request_split"
+
+    # If the request is only a character name (e.g. '/cosplay 費倫'), let Gemini identify the likely canonical work/name.
+    if not character_name:
+        stripped = _strip_cosplay_category_prefix(raw_request)
+        persona = _clean_text_compact(story.get("persona") or "")
+        topic = _clean_text_compact(story.get("topic") or "")
+        try:
+            prompt = f"""
+Identify the fictional cosplay character explicitly requested by the user. Return JSON only.
+Do not invent a character when the request is a generic profession, generic archetype, or original concept.
+If a known character is present, provide a concise canonical work title and character name, preferably with English/romanized alias in parentheses when useful for search.
+
+Return JSON:
+{{"character_name":"", "work_title":"", "confidence":0}}
+
+raw_request: {stripped or raw_request or 'N/A'}
+topic: {topic or 'N/A'}
+persona: {persona or 'N/A'}
+"""
+            response = await gemini_client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+            )
+            parsed = _safe_json_from_text(getattr(response, "text", "") or "", {})
+            confidence = int(parsed.get("confidence") or 0) if isinstance(parsed, dict) else 0
+            guessed_char = _clean_text_compact(parsed.get("character_name") or "") if isinstance(parsed, dict) else ""
+            guessed_work = _clean_text_compact(parsed.get("work_title") or "") if isinstance(parsed, dict) else ""
+            if guessed_char and confidence >= 60:
+                character_name = guessed_char
+                if not work_title:
+                    work_title = guessed_work
+                inference["source"] = "gemini_identity_resolver"
+                inference["confidence"] = confidence
+        except Exception as exc:
+            inference["gemini_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"⚠️ [DANBOORU_IDENTITY_INFER_FAILED] {type(exc).__name__}: {exc}")
+
+    if character_name:
+        story["character_name"] = character_name
+    if work_title:
+        story["work_title"] = work_title
+    inference.update({"character_name": character_name, "work_title": work_title})
+    return character_name, work_title, inference
+
+
 async def _resolve_danbooru_alias_hints(character_name="", work_title="", raw_request=""):
     base_character = _danbooru_name_variants(character_name)
     base_work = _danbooru_name_variants(work_title)
@@ -14186,8 +14288,7 @@ async def _download_and_sanitize_danbooru_image(url, *, post_id=None):
 async def _find_danbooru_cosplay_reference(story):
     """Best-effort resolver. It always returns a dict with matched=True/False and a trace block."""
     story = story if isinstance(story, dict) else {}
-    character_name = _clean_text_compact(story.get("character_name") or (story.get("cosplay_topic_candidate") or {}).get("character_name") or "")
-    work_title = _clean_text_compact(story.get("work_title") or (story.get("cosplay_topic_candidate") or {}).get("work_title") or "")
+    character_name, work_title, identity_inference = await _infer_danbooru_story_identity(story)
     raw_request = _clean_text_compact(story.get("user_mode_request") or story.get("topic") or "")
     trace = {
         "matched": False,
@@ -14201,6 +14302,7 @@ async def _find_danbooru_cosplay_reference(story):
         "post_queries": [],
         "candidate_posts": [],
         "download_attempts": [],
+        "identity_inference": identity_inference,
     }
     if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
         trace["failure_reason"] = "env_missing"
@@ -14633,7 +14735,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
 
-        # v1.10.13 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
+        # v1.10.14 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
         clothing_ref = None
         danbooru_ref = None
         story["cosplay_reference_source"] = "manual_attachment" if _cosplay_ref_attachment else "none"
