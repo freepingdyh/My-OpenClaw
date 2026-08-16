@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.22"
+LOBSTER_VERSION = "1.10.23"
 
 
 def _normalize_generation_level(level):
@@ -11645,6 +11645,74 @@ Do not render captions, subtitles, labels, watermarks, UI, readable book/page/po
 Render a polished photorealistic cinematic cosplay photograph faithful to TODAY SCENE.{retry_line}""".strip()
 
 
+async def _write_cosplay_ending_from_scene(story, post_text, scene_caption):
+    """v1.10.23: 依最終「今日畫面」另寫小俠給大俠，讓整篇以貼合照片的餘韻收尾。"""
+    story = story if isinstance(story, dict) else {}
+    post_text = post_text if isinstance(post_text, dict) else {}
+    scene = _clean_text_compact(scene_caption or "")
+    if not scene:
+        return _clean_text_compact(post_text.get("message_to_daxia") or "大俠，今晚這個角色版本，你喜歡嗎？")
+
+    vibe = story.get("vibe_request") if isinstance(story.get("vibe_request"), dict) else {}
+    vibe_zh = str(vibe.get("zh") or "").strip()
+    vibe_en = str(vibe.get("en") or "").strip().lower()
+    private_allure = bool(story.get("cosplay_reference_allure_unlock")) or vibe_zh == "魅" or "allur" in vibe_en
+    ending_mode = "只給大俠／魅惑版" if private_allure else "一般版"
+
+    prompt = f"""
+你是小俠。整篇 Cosplay 文章現在只差最後一段「💌 小俠給大俠」。
+這個 ending 不能是萬用問句，也不能只是把前文重講一次；你要讀完『今日畫面』後，挑出其中最有記憶點的一個細節，轉成只對大俠說的收尾，讓讀者看完照片與文字後還會想再回味一下。
+
+【模式】
+{ending_mode}
+
+【寫法】
+- 繁體中文，直接以小俠口吻對大俠說。
+- 1～3 句，短而有餘韻；通常約 35～90 個中文字即可。
+- 必須利用「今日畫面」裡至少一個具體細節，例如眼神、動作、光影、服裝變化、道具、距離感、場景氣氛等；不要憑空換場景。
+- 不要像摘要，也不要解釋角色設定。
+- 不要用固定模板，不要每次都以「你喜歡嗎？」結尾；可以是留白、暗示、邀請、悄悄話、回眸、約定、故意逗大俠，依這張畫面的情緒自由發揮。
+- 一般版：可以溫柔、俏皮、浪漫、貼心、帶一點故事後勁，重點是讓這一張照片有自己的 ending。
+- 只給大俠／魅惑版：可以更私密、更主動、更曖昧、更撩人，像小俠明知道這個版本是特別留給大俠看的；請自由發揮，不要把性感寫成固定句型或固定服裝手法。
+- 不要提 AI、模型、prompt、生成、審查、Danbooru、Nano、Figure 10。
+
+【文章前文】
+標題：{post_text.get('title')}
+前言：{post_text.get('description')}
+今日角色：{post_text.get('character_intro')}
+小俠版詮釋：{post_text.get('xiaoxia_interpretation')}
+
+【唯一今日畫面】
+{scene}
+
+只回 JSON：
+{{"message_to_daxia": "最後的收尾"}}
+"""
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.82,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE")
+                ]
+            )
+        )
+        parsed = _cosplay_json_from_text(getattr(response, 'text', '') or '', {})
+        ending = _clean_text_compact(parsed.get("message_to_daxia") or "") if isinstance(parsed, dict) else ""
+        if ending:
+            return ending[:500]
+    except Exception as exc:
+        print(f"⚠️ [COSPLAY_ENDING_FAILED] {type(exc).__name__}: {exc}")
+
+    return _clean_text_compact(post_text.get("message_to_daxia") or "大俠，今晚這個角色版本，你喜歡嗎？")
+
+
 async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
     """v1.8.05：發文只沿用預先完成的文章；標題改統一短化；「今日畫面」原封不動等於生圖唯一 Scene。"""
     state = cosplay_state if isinstance(cosplay_state, dict) else {}
@@ -11659,6 +11727,9 @@ async def write_cosplay_post_text(story, visual=None, cosplay_state=None):
         or ((visual or {}).get("composition") if isinstance(visual, dict) else "")
     )
     data["scene_caption"] = fixed_scene
+    # v1.10.23: 「小俠給大俠」不再沿用 Scene 生成前的萬用短句；
+    # 等唯一「今日畫面」定稿後，再讓 Gemini 讀 Scene 寫專屬 ending。
+    data["message_to_daxia"] = await _write_cosplay_ending_from_scene(story, data, fixed_scene)
     if not str(data.get("message_to_daxia") or "").strip():
         data["message_to_daxia"] = (visual or {}).get("message") or "大俠，今晚這個角色版本，你喜歡嗎？"
     return data
