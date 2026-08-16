@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.24"
+LOBSTER_VERSION = "1.10.25"
 
 
 def _normalize_generation_level(level):
@@ -25948,7 +25948,15 @@ async def _cosplay_delete_flow(send_target, author, channel, date_str: str = Non
         await send_target.send("找不到符合的紀錄喔！(格式範例: `/cosplay_delete 2026.07.20` 或 `/cosplay_delete 2026-7-20`)")
         return
 
-    msg_content = f"{msg_prefix}\n大俠，你要刪除哪一組圖文？請輸入數字 (1-{len(matching_records)})，或輸入 `c` 取消：\n\n"
+    msg_content = (
+        f"{msg_prefix}\n"
+        f"大俠，你要刪除哪幾組圖文？可單選或複選：\n"
+        f"- 單筆：`2`\n"
+        f"- 複選：`1,3,5` 或 `1 3 5`\n"
+        f"- 連續：`2-4`\n"
+        f"- 混合：`1,3-5`\n"
+        f"輸入 `c` 取消。可選範圍：1-{len(matching_records)}\n\n"
+    )
     for i, (original_idx, record) in enumerate(matching_records):
         topic = _vault_record_delete_label(record)
         publish_date = str(record.get('publish_date') or '')
@@ -25968,28 +25976,96 @@ async def _cosplay_delete_flow(send_target, author, channel, date_str: str = Non
     finally:
         pending_inputs.discard(author.id)
 
-    if str(msg.content or "").strip().lower() == 'c':
+    raw_choice = str(msg.content or "").strip()
+    if raw_choice.lower() == 'c':
         await send_target.send("✅ 已取消刪除。")
         return
 
-    try:
-        choice = int(str(msg.content or "").strip()) - 1
-        if 0 <= choice < len(matching_records):
-            target_idx = matching_records[choice][0]
-            deleted_record = db.pop(target_idx)
-            save_memory(db)
+    def _parse_delete_choices(raw_text: str, max_choice: int):
+        normalized = re.sub(r"[，、;；]+", ",", str(raw_text or "").strip())
+        normalized = re.sub(r"\s+", ",", normalized)
+        tokens = [t.strip() for t in normalized.split(",") if t.strip()]
+        if not tokens:
+            raise ValueError("empty")
 
-            local_url = str(deleted_record.get("local_url") or "")
-            if local_url:
-                filename = local_url.split("/")[-1]
-                filepath = os.path.join(OUTPUT_DIR, filename)
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            await send_target.send(f"🗑️ 成功銷毀：**{deleted_record.get('topic') or deleted_record.get('event') or '未命名 cosplay'}** (文字紀錄與圖片檔案均已徹底抹除)")
-        else:
-            await send_target.send("⚠️ 輸入的數字不在選項內，操作已取消。")
+        selected = set()
+        for token in tokens:
+            range_match = re.fullmatch(r"(\d+)\s*[-~～]\s*(\d+)", token)
+            if range_match:
+                start_num = int(range_match.group(1))
+                end_num = int(range_match.group(2))
+                if start_num > end_num:
+                    start_num, end_num = end_num, start_num
+                if start_num < 1 or end_num > max_choice:
+                    raise IndexError("out_of_range")
+                selected.update(range(start_num, end_num + 1))
+                continue
+
+            if not re.fullmatch(r"\d+", token):
+                raise ValueError("bad_token")
+            number = int(token)
+            if number < 1 or number > max_choice:
+                raise IndexError("out_of_range")
+            selected.add(number)
+
+        return sorted(selected)
+
+    try:
+        selected_numbers = _parse_delete_choices(raw_choice, len(matching_records))
+    except IndexError:
+        await send_target.send(f"⚠️ 選項超出範圍，請輸入 1-{len(matching_records)} 之間的數字；刪除操作已取消。")
+        return
     except ValueError:
-        await send_target.send("⚠️ 格式錯誤，必須輸入純數字，操作已取消。")
+        await send_target.send("⚠️ 格式錯誤。可輸入 `2`、`1,3,5`、`2-4` 或 `1,3-5`；刪除操作已取消。")
+        return
+
+    # matching_records 是顯示順序；真正刪除 db 時必須依原始 index 由大到小，避免前一筆 pop 後 index 位移。
+    selected_pairs = [matching_records[number - 1] for number in selected_numbers]
+    selected_pairs.sort(key=lambda pair: pair[0], reverse=True)
+
+    deleted_records = []
+    for target_idx, _record in selected_pairs:
+        if 0 <= target_idx < len(db):
+            deleted_record = db.pop(target_idx)
+            deleted_records.append(deleted_record)
+
+    if not deleted_records:
+        await send_target.send("⚠️ 沒有成功選到可刪除的紀錄，操作已取消。")
+        return
+
+    save_memory(db)
+
+    removed_files = 0
+    for deleted_record in deleted_records:
+        local_url = str(deleted_record.get("local_url") or "")
+        if local_url:
+            filename = local_url.split("/")[-1]
+            filepath = os.path.join(OUTPUT_DIR, filename)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    removed_files += 1
+                except Exception as exc:
+                    print(f"⚠️ [COSPLAY_DELETE_FILE_FAILED] {type(exc).__name__}: {exc} | {filepath}")
+
+    deleted_records.reverse()  # 回復成使用者選擇的顯示順序，方便閱讀。
+    deleted_labels = [
+        _vault_record_delete_label(record)
+        for record in deleted_records
+    ]
+    if len(deleted_labels) == 1:
+        await send_target.send(
+            f"🗑️ 成功銷毀：**{deleted_labels[0]}** "
+            f"(文字紀錄已刪除；圖片檔案已同步處理)"
+        )
+    else:
+        summary_lines = "\n".join(f"- {label}" for label in deleted_labels[:20])
+        extra = "" if len(deleted_labels) <= 20 else f"\n…另有 {len(deleted_labels) - 20} 筆"
+        await send_target.send(
+            f"🗑️ 已批次銷毀 **{len(deleted_labels)} 筆**紀錄：\n"
+            f"{summary_lines}{extra}\n"
+            f"📁 同步刪除本地圖片檔案：{removed_files} 個"
+        )
 
 
 async def _handle_cosplay_delete_message_direct(message):
