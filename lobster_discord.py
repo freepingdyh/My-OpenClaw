@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.15"
+LOBSTER_VERSION = "1.10.16"
 
 
 def _normalize_generation_level(level):
@@ -13884,7 +13884,7 @@ def _normalize_command_date(value):
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
 COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
-# v1.10.15 — Danbooru resolver fix: search character-first aliases before work-combined aliases.
+# v1.10.16 — Danbooru post-query fix: keep API searches within two-tag limit.
 # Manual Discord attachment always wins. If Danbooru cannot produce a clean solo/full-body
 # character reference, the normal scene-only Cosplay path continues unchanged.
 DANBOORU_API_BASE = "https://danbooru.donmai.us"
@@ -14421,8 +14421,10 @@ async def _find_danbooru_cosplay_reference(story):
             return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
         post_pool = {}
+        # Danbooru basic/API searches may reject queries with too many tags.
+        # Keep each network query to character + at most one qualifier, then let
+        # our local scorer prefer posts that actually contain BOTH solo and full_body.
         query_specs = [
-            ("strict", lambda tag_name: f"{tag_name} solo full_body", 40),
             ("solo", lambda tag_name: f"{tag_name} solo", 40),
             ("full_body", lambda tag_name: f"{tag_name} full_body", 40),
             ("broad", lambda tag_name: f"{tag_name}", 40),
@@ -14458,9 +14460,7 @@ async def _find_danbooru_cosplay_reference(story):
             if score is None:
                 continue
             score += _score_danbooru_character_tag(tag_candidates.get(tag_name) or {"name": tag_name, "category": 4}, character_name, work_title) * 0.18
-            if query_mode == "strict":
-                score += 8
-            elif query_mode == "solo":
+            if query_mode == "solo":
                 score += 2
             elif query_mode == "full_body":
                 score += 2
@@ -14529,6 +14529,7 @@ async def _find_danbooru_cosplay_reference(story):
     except Exception as exc:
         trace["failure_reason"] = f"exception:{type(exc).__name__}"
         trace["exception"] = f"{type(exc).__name__}: {exc}"
+        trace["exception_message"] = str(exc)[:800]
         print(f"⚠️ [DANBOORU_REF_FAILED] {type(exc).__name__}: {exc}")
         return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
@@ -14788,7 +14789,7 @@ async def cosplay(ctx, *, mode: str = "auto"):
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
 
-        # v1.10.15 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
+        # v1.10.16 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
         clothing_ref = None
         danbooru_ref = None
         story["cosplay_reference_source"] = "manual_attachment" if _cosplay_ref_attachment else "none"
