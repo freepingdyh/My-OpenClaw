@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.16"
+LOBSTER_VERSION = "1.10.18"
 
 
 def _normalize_generation_level(level):
@@ -11371,20 +11371,21 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     vibe_request = vibe_request or story.get("vibe_request") or {"zh": "魅", "en": "alluring-max", "level": 6}
     user_outfit_hints = user_outfit_hints or story.get("user_outfit_hints") or {}
     reference_mode = bool(story.get("cosplay_reference_mode"))
+    reference_allure_unlock = bool(story.get("cosplay_reference_allure_unlock"))
     vibe_zh = str((vibe_request or {}).get("zh") or "").strip()
     vibe_en = str((vibe_request or {}).get("en") or "").strip().lower()
-    allure_mode = (not reference_mode) and (vibe_zh == "魅" or "allur" in vibe_en)
+    allure_mode = ((not reference_mode) or reference_allure_unlock) and (vibe_zh == "魅" or "allur" in vibe_en)
 
     fallback_parts = []
     if candidate.get("scene_seed"):
         fallback_parts.append(_clean_text_compact(candidate.get("scene_seed")))
-    if candidate.get("costume_focus") and not reference_mode:
+    if candidate.get("costume_focus") and not (reference_mode and not reference_allure_unlock):
         fallback_parts.append("服裝：" + _clean_text_compact(candidate.get("costume_focus")))
     anchors = _cosplay_anchor_list(candidate.get("canonical_visual_anchors"))
-    if anchors and not reference_mode:
+    if anchors and not (reference_mode and not reference_allure_unlock):
         fallback_parts.append("關鍵視覺：" + "、".join(anchors[:5]))
     if not fallback_parts:
-        if reference_mode:
+        if reference_mode and not reference_allure_unlock:
             fallback_parts.append("小俠在符合角色世界觀的場景中自然活動，畫面清楚呈現環境、動作、表情與光線。")
         else:
             fallback_parts.append(_clean_text_compact(story.get("event") or "小俠在符合角色世界觀的場景中留下自然的 Cosplay 故事瞬間。"))
@@ -11395,19 +11396,41 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         )[:300]
 
     highest_principle = (
-        "本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；"
-        "禁止描述或決定髮型、髮色、頭部角色特徵、服裝、鞋襪、配件與武器，這些全部由 Figure 10 決定。"
-        if reference_mode
-        else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
+        (
+            "本次有使用者附圖。今日畫面只負責場景、時間、動作、姿勢、表情、光線與構圖；"
+            "禁止描述或決定髮型、髮色、頭部角色特徵、服裝、鞋襪、配件與武器，這些全部由 Figure 10 決定。"
+        )
+        if (reference_mode and not reference_allure_unlock)
+        else (
+            "本次有附圖。Figure 10 提供角色外觀與服裝語言的基底參考；若這次啟用『魅的幻想』，"
+            "今日畫面可以直接描述性感化後的小俠版服裝，但仍必須保留角色辨識度與 Figure 10 的核心服裝語言。"
+            if reference_mode
+            else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
+        )
     )
-    required_item_6 = "" if reference_mode else "6. 服裝與必要配件 / 武器。"
+    required_item_6 = "" if (reference_mode and not reference_allure_unlock) else "6. 服裝與必要配件 / 武器。"
     allure_scene_rules = ""
-    if reference_mode:
+    if reference_mode and not reference_allure_unlock:
         cosplay_special_rules = (
             "- 本次有附圖：不要寫任何衣服、髮型、髮色、尖耳/額紋等頭部特徵、鞋襪、配件、武器的具體外觀；即使背景全文或文章提到，也忽略那些外觀描述。\n"
             "- 角色名稱只用來理解世界觀、氣質與合理活動，不可用角色常識重新發明 costume。\n"
             "- 若目標氛圍是『魅』，只透過表情、姿態、鏡頭與氛圍呈現，不要藉此改寫服裝。"
         )
+    elif reference_mode and reference_allure_unlock:
+        cosplay_special_rules = (
+            "- 本次有附圖：Figure 10 是角色外觀與服裝語言的基底參考，不是逐像素照抄。\n"
+            "- 這次啟用『魅的幻想』：允許把 Figure 10 的服裝做成更成熟性感的小俠版再詮釋，但必須保留至少 2 到 3 個角色可辨識元素，例如主色系、剪影、髮型/髮色、外袍或徽記、鞋襪、道具或武器。\n"
+            "- 今日畫面必須直接寫出可見服裝結果，不可只寫抽象的『性感』『有魅力』。\n"
+            "- 仍需維持角色世界觀與 Figure 10 的整體服裝語言，不可洗成 generic 晚禮服或無關的性感裝。"
+        )
+        if allure_mode:
+            allure_scene_rules = (
+                "\n【魅的幻想硬規則】\n"
+                "- 必須明確做到：露胸保底；且腰或腿至少露出一項，也可以腰與腿都露。\n"
+                "- 合格例：露胸＋露腰、露胸＋露腿、露胸＋露腰＋露腿。\n"
+                "- 不合格例：只有露胸但腰腿都沒露；只露腰或只露腿但沒露胸；高領或全包式保守穿法把胸腰腿都收掉。\n"
+                "- 請把上述可見外觀直接寫進今日畫面，例如低領/敞領露出上胸、短版或鏤空設計露出腰部、短裙/高衩/短褲清楚露出腿線；但仍要保留角色語言與 Figure 10 的核心辨識。"
+            )
     else:
         cosplay_special_rules = (
             "- 服裝與配件是 Cosplay 核心，服裝/配件/武器描述合計至少 30 個中文字；不要只寫『穿著角色服裝』。\n"
@@ -11425,6 +11448,18 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
                 "- 請直接把上述可見外觀寫進今日畫面，例如低領/敞領露出上胸、短版或鏤空設計露出腰部、短裙/高衩/短褲清楚露出腿線；但仍要符合角色世界觀與服裝語言。"
             )
 
+    allure_tone_rules = ""
+    if reference_allure_unlock and allure_mode:
+        allure_tone_rules = (
+            "\n【魅的幻想文風】\n"
+            "- 『今日畫面』除了把服裝與露膚條件寫清楚，也要整段帶有成熟、柔媚、撩人但高級的魅惑感。\n"
+            "- 可以自然強調眼神停留、唇角微笑、肩頸與鎖骨線條、胸腰對比、腰身、腿部線條、布料貼合與光影掠過肌膚的感覺。\n"
+            "- 描寫要像電影感的角色寫真，不要變成色情敘述、器官描寫、性行為或低俗挑逗。\n"
+            "- 不要只寫『性感』『魅惑』『有女人味』等抽象詞；要用姿態、視線、服裝剪裁、露膚位置、光線與動作把魅惑具體寫出來。\n"
+            "- 仍然必須維持角色世界觀、角色辨識度與正在發生的故事瞬間；魅惑是角色再詮釋，不是把場景改成 generic 性感棚拍。\n"
+            "- 文字讀起來應有『小俠明知道大俠正在看她，所以有一點故意撩人』的含蓄感，但不要直接描述性行為。"
+        )
+
     prompt = f"""
 你是小俠 Cosplay 的 Scene Writer。
 你現在已經看完完整題材與小俠文章。請寫出 Discord 上唯一的「📸 今日畫面」。
@@ -11441,7 +11476,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 {required_item_6}
 
 【Cosplay 特別規則】
-{cosplay_special_rules}{allure_scene_rules}
+{cosplay_special_rules}{allure_scene_rules}{allure_tone_rules}
 - 使用者明確的場景 / 動作要求優先。
 - 今日畫面請寫成自然短文，不要 JSON 清單腔。
 - 建議約 130～230 個中文字；以完整清楚為優先，不要硬湊字數。
@@ -11494,15 +11529,12 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     if not scene:
         scene = fallback_scene
 
-    # v1.8.16: Gemini may paraphrase away framing or negative constraints.
-    # Preserve the user's extra visual directive verbatim inside the authoritative Scene contract.
     _manual_title, _manual_directive = _cosplay_manual_request_parts(story=story)
     if _manual_directive and _manual_directive not in scene:
         scene = _clean_text_compact(f"{scene} 使用者指定畫面要求：{_manual_directive}")
     return scene
 
-
-def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False, title_hint="", has_reference=False, reference_summary="", reference_analysis=None):
+def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hybrid=False, title_hint="", has_reference=False, reference_summary="", reference_analysis=None, reference_allure_unlock=False):
     """v1.10.05: reference cosplay 分離 Scene 與 Figure 10 權限。"""
     scene = _clean_text_compact(scene_caption or "")
     title_prefix = _render_title_prefix("cosplay", title_hint)
@@ -11516,6 +11548,29 @@ def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hy
         items = ", ".join(str(x) for x in (analysis.get("key_items") or []) if str(x).strip())
         details = "; ".join(str(x) for x in (analysis.get("must_keep_details") or []) if str(x).strip())
         summary = _clean_text_compact(reference_summary or analysis.get("outfit_summary") or "")
+        if reference_allure_unlock:
+            return f"""FIGURE ROLE MAP.
+{figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their hairstyle, outfit, background, props, lighting, or composition.
+Figure 10 is the BASE COSPLAY APPEARANCE reference. It provides the role's hairstyle, hair color, non-face head traits, costume language, footwear, accessories, props, and weapons. Do not copy any face or facial identity from Figure 10.
+For ALLURE FANTASY mode, Figure 10 is a role-language base, not a pixel-perfect uniform lock: preserve at least 2 to 3 recognizable role elements such as main colors, silhouette, hair/head traits, outer layer, emblem, footwear, prop, or weapon, while adapting the outfit into a more mature, fitted, seductive Xiaoxia-version.
+Appearance summary: {summary}
+Role hair/head traits: {hair}
+Key costume / accessory / weapon items: {items}
+Must-keep appearance details: {details}
+
+TITLE HINT — use only to understand the role/world; never use title knowledge to replace Figure 10 appearance:
+{title_prefix}
+
+AUTHORITATIVE TODAY SCENE — controls setting, time, action, pose, expression, lighting, camera, composition, and the final alluring adaptation details. When TODAY SCENE requests allure, chest allure is mandatory, and the second attraction point must be waist-abdomen exposure, legline exposure, or both when natural:
+{scene}
+
+TECHNICAL XIAOXIA IDENTITY / BODY LOCK:
+Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: preserve her facial identity and core body identity, fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy.
+For this reference cosplay, Figure 10 MUST still override Xiaoxia's normal hairstyle/hair color and supply the role-specific hairstyle, hair color and non-face head traits while Xiaoxia's own facial identity stays unchanged.
+Do NOT collapse this into a conservative closed-collar robe, fully covered uniform, or merely elegant costume if TODAY SCENE requests allure. The final outfit should read as a sexy Xiaoxia-version of the original role language, not a random unrelated sexy costume.
+Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
+Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
+Render a polished photorealistic cinematic cosplay photograph: Xiaoxia's face/body identity from {figure_line}, role-language appearance adapted from Figure 10, and scene/action/camera from TODAY SCENE.{retry_line}""".strip()
         return f"""FIGURE ROLE MAP.
 {figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their hairstyle, outfit, background, props, lighting, or composition.
 Figure 10 is the authoritative COSPLAY APPEARANCE reference. It controls hairstyle, hair color, non-face head traits, costume, footwear, accessories, props, and weapons. Do not copy any face or facial identity from Figure 10.
@@ -12069,7 +12124,15 @@ async def create_cosplay_visual(story, force_half_body=False, alternative=False,
         "post_text_draft": post_text_draft,
         "scene_authority": "discord_today_scene_only",
     }
-    image_prompt = _build_cosplay_scene_only_seedream_prompt(scene_caption, hybrid=False, title_hint=title_hint)
+    image_prompt = _build_cosplay_scene_only_seedream_prompt(
+        scene_caption,
+        hybrid=False,
+        title_hint=title_hint,
+        has_reference=bool(story.get("cosplay_reference_mode")),
+        reference_summary=story.get("cosplay_reference_summary") or "",
+        reference_analysis=story.get("cosplay_reference_analysis") or {},
+        reference_allure_unlock=bool(story.get("cosplay_reference_allure_unlock")),
+    )
     visual = {
         "image_prompt": image_prompt,
         "composition": scene_caption,
@@ -14812,6 +14875,9 @@ async def cosplay(ctx, *, mode: str = "auto"):
                     clothing_ref = None
                     story["cosplay_reference_source"] = "none"
         story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment or clothing_ref)
+        if clothing_ref:
+            story["cosplay_reference_summary"] = clothing_ref.get("summary") or ""
+            story["cosplay_reference_analysis"] = clothing_ref.get("analysis") or {}
         state["current_topic_data"] = story
 
         # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
@@ -21689,6 +21755,180 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     return context
 
 
+def _rebuild_cosplay_story_from_context(context):
+    context = context or {}
+    story = dict(context.get("cosplay_story") or {})
+    post_text = context.get("post_text") if isinstance(context.get("post_text"), dict) else {}
+    candidate = dict(story.get("cosplay_topic_candidate") or context.get("cosplay_topic_candidate") or {})
+    if not candidate:
+        candidate = {
+            "topic": context.get("topic") or post_text.get("title") or "今日 Cosplay",
+            "work_title": context.get("cosplay_work_title") or "",
+            "character_name": context.get("cosplay_character_name") or "",
+            "mood": context.get("mood_summary") or context.get("mood") or "",
+            "scene_seed": context.get("scene_summary") or context.get("composition") or post_text.get("scene_caption") or "",
+        }
+    story.setdefault("topic", context.get("topic") or post_text.get("title") or candidate.get("topic") or "今日 Cosplay")
+    story.setdefault("event", context.get("event") or post_text.get("description") or context.get("scene_summary") or context.get("composition") or "")
+    story.setdefault("persona", context.get("cosplay_character_name") or context.get("cosplay_family_label") or "")
+    story.setdefault("family", context.get("cosplay_family") or "")
+    story.setdefault("family_label", context.get("cosplay_family_label") or "")
+    story.setdefault("work_title", context.get("cosplay_work_title") or candidate.get("work_title") or "")
+    story.setdefault("character_name", context.get("cosplay_character_name") or candidate.get("character_name") or "")
+    story["cosplay_topic_candidate"] = candidate
+    story.setdefault("user_mode_request", context.get("user_mode_request") or "auto")
+    story.setdefault("user_outfit_hints", _extract_user_outfit_hints(story.get("user_mode_request") or ""))
+    return story
+
+
+async def _create_cosplay_allure_fantasy_context(base_context, msg=None):
+    """同一個 cosplay 題材下，產生『魅的幻想』版本；保留角色辨識，允許性感化服裝再詮釋。"""
+    context = dict(base_context or {})
+    story = _rebuild_cosplay_story_from_context(context)
+    vibe_mode = _hard_sexy_vibe_mode()
+    raw_mode = str(context.get("user_mode_request") or story.get("user_mode_request") or "auto").strip() or "auto"
+    story["user_mode_request"] = raw_mode
+    story["user_outfit_hints"] = _extract_user_outfit_hints(raw_mode)
+    story["vibe_request"] = vibe_mode
+    story["cosplay_reference_mode"] = bool(context.get("figure10_present") or context.get("reference_item_path") or context.get("reference_item_url"))
+    story["cosplay_reference_allure_unlock"] = True
+    story["cosplay_reference_summary"] = context.get("cosplay_clothing_ref_summary") or context.get("reference_item_summary") or ""
+    story["cosplay_reference_analysis"] = context.get("cosplay_clothing_ref_analysis") or {}
+    if msg:
+        await msg.edit(content="💋 小俠正在把這個角色改成『魅的幻想』版本…")
+    cosplay_state, visual = await create_cosplay_visual(
+        story,
+        force_half_body=False,
+        alternative=False,
+        vibe_request=vibe_mode,
+        user_outfit_hints=story.get("user_outfit_hints"),
+    )
+    scene_prompt = _build_cosplay_scene_only_seedream_prompt(
+        cosplay_state.get("scene_caption") or visual.get("composition") or "",
+        hybrid=False,
+        title_hint=cosplay_state.get("title_hint") or context.get("cosplay_title_hint") or story.get("character_name") or "",
+        has_reference=bool(context.get("figure10_present") or context.get("reference_item_path") or context.get("reference_item_url")),
+        reference_summary=context.get("cosplay_clothing_ref_summary") or context.get("reference_item_summary") or "",
+        reference_analysis=context.get("cosplay_clothing_ref_analysis") or {},
+        reference_allure_unlock=True,
+    )
+    visual["image_prompt"] = scene_prompt
+    trace_context = {
+        "kind": "cosplay",
+        "action": "cosplay_allure_fantasy",
+        "user_input": f"魅的幻想 from cosplay: {story.get('character_name') or story.get('work_title') or story.get('topic')}",
+        "user_mode_request": raw_mode,
+        "story_mode": raw_mode,
+        "vibe_mode": vibe_mode,
+        "story": story,
+        "cosplay_state": cosplay_state,
+        "visual": visual,
+        "cosplay_scene_only": True,
+        "cosplay_title_hint": cosplay_state.get("title_hint") or context.get("cosplay_title_hint") or "",
+        "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition") or "",
+        "scene_seed_text": cosplay_state.get("scene_caption") or visual.get("composition") or "",
+        "cosplay_danbooru_trace": dict(context.get("cosplay_danbooru_trace") or {}),
+        "cosplay_reference_allure_unlock": True,
+    }
+    for key in (
+        "figure10_present",
+        "reference_item_path",
+        "reference_item_url",
+        "reference_item_summary",
+        "seedream_input_images_override",
+        "seedream_input_image_roles_override",
+        "cosplay_clothing_ref_provider",
+        "cosplay_clothing_ref_source_kind",
+        "cosplay_clothing_ref_source_path",
+        "cosplay_clothing_ref_source_original_url",
+        "cosplay_clothing_ref_source_local_url",
+        "cosplay_clothing_ref_source_page_url",
+        "cosplay_clothing_ref_local_path",
+        "cosplay_clothing_ref_local_url",
+        "cosplay_clothing_ref_summary",
+        "cosplay_clothing_ref_analysis",
+        "cosplay_danbooru_ref",
+    ):
+        if context.get(key) is not None:
+            trace_context[key] = context.get(key)
+    _trace_stage(trace_context, "cosplay_allure_fantasy_planned", data={"story": story, "cosplay_state": cosplay_state, "visual": visual}, prompt=scene_prompt)
+    generated_image_url, visual = await execute_safe_generation(
+        discord_image_url=None,
+        base_filename="base_xiaoxia.jpg",
+        mode="cosplay",
+        initial_prompt=scene_prompt,
+        visual_dict=visual,
+        msg=msg,
+        trace_context=trace_context,
+    )
+    post_text = await write_cosplay_post_text(story, visual=visual, cosplay_state=cosplay_state)
+    local_filename = await save_to_vault(generated_image_url)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{local_filename}" if local_filename else generated_image_url
+    try:
+        state["daily_gen_count"] += 1
+    except Exception:
+        pass
+    return {
+        "id": str(uuid.uuid4()),
+        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": _compact_cosplay_post_title(story=story, post_text=post_text),
+        "event": story.get("event"),
+        "composition": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "scene_summary": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "scene_text": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "cosplay_scene_caption": cosplay_state.get("scene_caption") or visual.get("composition", ""),
+        "cosplay_scene_only": True,
+        "cosplay_title_hint": cosplay_state.get("title_hint") or post_text.get("title") or story.get("character_name") or "",
+        "mood": visual.get("mood", ""),
+        "mood_summary": visual.get("mood", ""),
+        "message": post_text.get("message_to_daxia") or visual.get("message", ""),
+        "post_text": post_text,
+        "cosplay_topic_candidate": story.get("cosplay_topic_candidate", {}),
+        "cosplay_family": story.get("family"),
+        "cosplay_family_label": story.get("family_label"),
+        "cosplay_work_title": story.get("work_title"),
+        "cosplay_character_name": story.get("character_name"),
+        "cosplay_story": story,
+        "image_url": generated_image_url,
+        "local_url": local_url,
+        "local_filename": local_filename,
+        "local_path": os.path.join(OUTPUT_DIR, local_filename) if local_filename else None,
+        "type": "cosplay",
+        "gallery_category": "cosplay",
+        "source_mode": "cosplay",
+        "prompt_base": scene_prompt,
+        "root_prompt_base": scene_prompt,
+        "user_mode_request": raw_mode,
+        "vibe_mode": vibe_mode,
+        "cosplay_state": cosplay_state,
+        "cosplay_reference_allure_unlock": True,
+        "trace_id": trace_context.get("trace_id"),
+        "final_level": trace_context.get("final_level") or visual.get("final_level"),
+        "generation_level": trace_context.get("final_level") or visual.get("generation_level") or visual.get("final_level"),
+        "seedream_model_id": trace_context.get("seedream_model_id") or visual.get("seedream_model_id"),
+        "seedream_model_label": trace_context.get("seedream_model_label") or visual.get("seedream_model_label"),
+        "visual_checklist": trace_context.get("visual_checklist"),
+        "figure10_present": bool(trace_context.get("figure10_present")),
+        "reference_item_path": trace_context.get("reference_item_path"),
+        "reference_item_url": trace_context.get("reference_item_url"),
+        "reference_item_summary": trace_context.get("reference_item_summary") or "",
+        "seedream_input_images_override": trace_context.get("seedream_input_images_override"),
+        "seedream_input_image_roles_override": trace_context.get("seedream_input_image_roles_override"),
+        "cosplay_clothing_ref_provider": trace_context.get("cosplay_clothing_ref_provider"),
+        "cosplay_clothing_ref_source_kind": trace_context.get("cosplay_clothing_ref_source_kind"),
+        "cosplay_clothing_ref_source_path": trace_context.get("cosplay_clothing_ref_source_path"),
+        "cosplay_clothing_ref_source_original_url": trace_context.get("cosplay_clothing_ref_source_original_url"),
+        "cosplay_clothing_ref_source_local_url": trace_context.get("cosplay_clothing_ref_source_local_url"),
+        "cosplay_clothing_ref_source_page_url": trace_context.get("cosplay_clothing_ref_source_page_url"),
+        "cosplay_clothing_ref_local_path": trace_context.get("cosplay_clothing_ref_local_path"),
+        "cosplay_clothing_ref_local_url": trace_context.get("cosplay_clothing_ref_local_url"),
+        "cosplay_clothing_ref_summary": trace_context.get("cosplay_clothing_ref_summary") or "",
+        "cosplay_clothing_ref_analysis": trace_context.get("cosplay_clothing_ref_analysis") or {},
+        "cosplay_danbooru_ref": trace_context.get("cosplay_danbooru_ref"),
+        "cosplay_danbooru_trace": trace_context.get("cosplay_danbooru_trace") or {},
+    }
+
+
 async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_topic=True):
     """完整重擲：重新選題、重新內文、重新生圖，回傳可直接覆蓋訊息的 cosplay context。"""
     raw_mode = str(mode or "auto").strip() or "auto"
@@ -21779,6 +22019,7 @@ async def _create_cosplay_context_for_reroll(mode="auto", msg=None, force_new_to
         "cosplay_family_label": story.get("family_label"),
         "cosplay_work_title": story.get("work_title"),
         "cosplay_character_name": story.get("character_name"),
+        "cosplay_story": story,
         "image_url": generated_image_url,
         "local_url": local_url,
         "local_filename": local_filename,
@@ -22899,6 +23140,9 @@ class PhotoResultView(discord.ui.View):
     def _sync_debug_reference_button(self):
         mode_key = str(self.context.get("source_mode") or self.context.get("type") or "").lower()
         is_cosplay = mode_key == "cosplay"
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and getattr(child, "label", "") == "💋 魅的幻想":
+                child.disabled = not is_cosplay
         has_cosplay_clothing = bool(self.context.get("cosplay_clothing_ref_local_path") or self.context.get("cosplay_clothing_ref_local_url"))
         has_daily_clothing = bool(self.context.get("nano_clothing_ref_local_path") or self.context.get("nano_clothing_ref_local_url"))
         has_danbooru_trace = bool(self.context.get("cosplay_danbooru_trace")) if is_cosplay else False
@@ -23053,6 +23297,45 @@ class PhotoResultView(discord.ui.View):
                 except Exception:
                     pass
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
+
+
+    @discord.ui.button(label="💋 魅的幻想", style=discord.ButtonStyle.secondary, row=1)
+    async def allure_fantasy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        context = dict(self.context)
+        if str(context.get("type") or context.get("source_mode") or "").lower() != "cosplay":
+            await interaction.followup.send("💋『魅的幻想』目前只支援 cosplay 圖。", ephemeral=True)
+            return
+        status = None
+        try:
+            status = await interaction.followup.send("💋 小俠正在把這個角色帶進『魅的幻想』版本…", wait=True)
+            new_context = await _create_cosplay_allure_fantasy_context(context, msg=status)
+            db = load_memory()
+            db.insert(0, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
+            save_memory(db)
+            view = PhotoResultView(new_context)
+            file, filename = _photo_discord_file(new_context)
+            embed = _build_result_embed(new_context, title_prefix="💋 魅的幻想", attachment_filename=filename if file else None)
+            if file:
+                sent = await interaction.followup.send(embed=embed, file=file, view=view)
+            else:
+                sent = await interaction.followup.send(embed=embed, view=view)
+            new_context["message_id"] = sent.id
+            photo_generation_contexts[sent.id] = new_context
+            view.context = new_context
+            if status:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+        except Exception as exc:
+            if status:
+                try:
+                    await status.edit(content=f"⚠️ 魅的幻想失敗：`{str(exc)[:1500]}`")
+                    return
+                except Exception:
+                    pass
+            await interaction.followup.send(f"⚠️ 魅的幻想失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
     @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary, row=1)
