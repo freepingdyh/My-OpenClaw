@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.18"
+LOBSTER_VERSION = "1.10.19"
 
 
 def _normalize_generation_level(level):
@@ -11402,7 +11402,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
         )
         if (reference_mode and not reference_allure_unlock)
         else (
-            "本次有附圖。Figure 10 提供角色外觀與服裝語言的基底參考；若這次啟用『魅的幻想』，"
+            "本次有附圖。Figure 10（通常就是 Nano Banana 2 產生的服飾圖）提供角色外觀與服裝語言的基底參考；若這次啟用『只給大俠』，"
             "今日畫面可以直接描述性感化後的小俠版服裝，但仍必須保留角色辨識度與 Figure 10 的核心服裝語言。"
             if reference_mode
             else "後續 Pure v4.5、Hybrid、v5 背景理解，都把今日畫面作為完整故事/服裝/道具/場景內容來源。"
@@ -11419,13 +11419,14 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     elif reference_mode and reference_allure_unlock:
         cosplay_special_rules = (
             "- 本次有附圖：Figure 10 是角色外觀與服裝語言的基底參考，不是逐像素照抄。\n"
-            "- 這次啟用『魅的幻想』：允許把 Figure 10 的服裝做成更成熟性感的小俠版再詮釋，但必須保留至少 2 到 3 個角色可辨識元素，例如主色系、剪影、髮型/髮色、外袍或徽記、鞋襪、道具或武器。\n"
-            "- 今日畫面必須直接寫出可見服裝結果，不可只寫抽象的『性感』『有魅力』。\n"
-            "- 仍需維持角色世界觀與 Figure 10 的整體服裝語言，不可洗成 generic 晚禮服或無關的性感裝。"
+            "- 這次啟用『只給大俠』：必須以 Figure 10（通常就是 Nano Banana 2 產生的服飾圖）作為服裝修改的主要基底。先保留它的主色系、主要版型 / 層次 / 剪影與關鍵單品，再在這個基底上做更成熟性感的小俠版再詮釋。\n"
+            "- 至少保留 2 到 3 個角色可辨識元素，例如主色系、剪影、髮型/髮色、外袍或徽記、鞋襪、道具或武器。\n"
+            "- 可接受的性感化調整包括：加深領口露出上胸、加強收腰、加入高衩 / 短裙 / 露腰 / 鏤空等；但不可以把 Figure 10 整套洗成無關的 generic 晚禮服或完全不同的性感裝。\n"
+            "- 今日畫面必須直接寫出可見服裝結果，不可只寫抽象的『性感』『有魅力』。"
         )
         if allure_mode:
             allure_scene_rules = (
-                "\n【魅的幻想硬規則】\n"
+                "\n【只給大俠硬規則】\n"
                 "- 必須明確做到：露胸保底；且腰或腿至少露出一項，也可以腰與腿都露。\n"
                 "- 合格例：露胸＋露腰、露胸＋露腿、露胸＋露腰＋露腿。\n"
                 "- 不合格例：只有露胸但腰腿都沒露；只露腰或只露腿但沒露胸；高領或全包式保守穿法把胸腰腿都收掉。\n"
@@ -11451,13 +11452,13 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
     allure_tone_rules = ""
     if reference_allure_unlock and allure_mode:
         allure_tone_rules = (
-            "\n【魅的幻想文風】\n"
+            "\n【只給大俠文風】\n"
             "- 『今日畫面』除了把服裝與露膚條件寫清楚，也要整段帶有成熟、柔媚、撩人但高級的魅惑感。\n"
             "- 可以自然強調眼神停留、唇角微笑、肩頸與鎖骨線條、胸腰對比、腰身、腿部線條、布料貼合與光影掠過肌膚的感覺。\n"
             "- 描寫要像電影感的角色寫真，不要變成色情敘述、器官描寫、性行為或低俗挑逗。\n"
             "- 不要只寫『性感』『魅惑』『有女人味』等抽象詞；要用姿態、視線、服裝剪裁、露膚位置、光線與動作把魅惑具體寫出來。\n"
             "- 仍然必須維持角色世界觀、角色辨識度與正在發生的故事瞬間；魅惑是角色再詮釋，不是把場景改成 generic 性感棚拍。\n"
-            "- 文字讀起來應有『小俠明知道大俠正在看她，所以有一點故意撩人』的含蓄感，但不要直接描述性行為。"
+            "- 文字讀起來應有『這是小俠只給大俠看的版本』的情緒價值：像是她明知道大俠正在看她，所以有一點故意撩人、故意漂亮給大俠看的含蓄感，但不要直接描述性行為。"
         )
 
     prompt = f"""
@@ -11551,8 +11552,8 @@ def _build_cosplay_scene_only_seedream_prompt(scene_caption, retry_reason="", hy
         if reference_allure_unlock:
             return f"""FIGURE ROLE MAP.
 {figure_line} preserve Xiaoxia's recognizable facial identity and core body identity only. Do not copy their hairstyle, outfit, background, props, lighting, or composition.
-Figure 10 is the BASE COSPLAY APPEARANCE reference. It provides the role's hairstyle, hair color, non-face head traits, costume language, footwear, accessories, props, and weapons. Do not copy any face or facial identity from Figure 10.
-For ALLURE FANTASY mode, Figure 10 is a role-language base, not a pixel-perfect uniform lock: preserve at least 2 to 3 recognizable role elements such as main colors, silhouette, hair/head traits, outer layer, emblem, footwear, prop, or weapon, while adapting the outfit into a more mature, fitted, seductive Xiaoxia-version.
+Figure 10 is the PRIMARY OUTFIT BASE reference. It provides the role's hairstyle, hair color, non-face head traits, costume language, footwear, accessories, props, and weapons. Do not copy any face or facial identity from Figure 10.
+For ALLURE FANTASY mode, do NOT use Figure 10 as loose inspiration only. Start from Figure 10's actual garment arrangement, layer structure, main silhouette, color blocks, and key pieces, then adapt that same costume into a more mature, fitted, seductive Xiaoxia-version. Preserve at least 2 to 3 recognizable role elements such as main colors, silhouette, hair/head traits, outer layer, emblem, footwear, prop, or weapon. Allowed changes include a deeper neckline to reveal upper chest, stronger waist shaping, slit / shorter hem / cutout to reveal waist or legs, or both when natural. Forbidden: replacing Figure 10 with a generic glamorous dress, unrelated sexy gown, or a costume that no longer reads as the Figure 10 outfit family.
 Appearance summary: {summary}
 Role hair/head traits: {hair}
 Key costume / accessory / weapon items: {items}
@@ -11561,13 +11562,13 @@ Must-keep appearance details: {details}
 TITLE HINT — use only to understand the role/world; never use title knowledge to replace Figure 10 appearance:
 {title_prefix}
 
-AUTHORITATIVE TODAY SCENE — controls setting, time, action, pose, expression, lighting, camera, composition, and the final alluring adaptation details. When TODAY SCENE requests allure, chest allure is mandatory, and the second attraction point must be waist-abdomen exposure, legline exposure, or both when natural:
+AUTHORITATIVE TODAY SCENE — controls setting, time, action, pose, expression, lighting, camera, composition, and the final alluring adaptation details. When TODAY SCENE requests allure, chest allure is mandatory, and the second attraction point must be waist-abdomen exposure, legline exposure, or both when natural. The alluring adaptation must still visibly read as a sexy modification of Figure 10's outfit base, not a replacement outfit:
 {scene}
 
 TECHNICAL XIAOXIA IDENTITY / BODY LOCK:
 Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: preserve her facial identity and core body identity, fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy.
 For this reference cosplay, Figure 10 MUST still override Xiaoxia's normal hairstyle/hair color and supply the role-specific hairstyle, hair color and non-face head traits while Xiaoxia's own facial identity stays unchanged.
-Do NOT collapse this into a conservative closed-collar robe, fully covered uniform, or merely elegant costume if TODAY SCENE requests allure. The final outfit should read as a sexy Xiaoxia-version of the original role language, not a random unrelated sexy costume.
+Do NOT collapse this into a conservative closed-collar robe, fully covered uniform, or merely elegant costume if TODAY SCENE requests allure. Also do NOT discard Figure 10 and replace it with a random unrelated sexy costume. The final outfit should read as a sexy Xiaoxia-version of the Figure 10 outfit base and original role language.
 Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
 Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
 Render a polished photorealistic cinematic cosplay photograph: Xiaoxia's face/body identity from {figure_line}, role-language appearance adapted from Figure 10, and scene/action/camera from TODAY SCENE.{retry_line}""".strip()
@@ -21782,7 +21783,7 @@ def _rebuild_cosplay_story_from_context(context):
 
 
 async def _create_cosplay_allure_fantasy_context(base_context, msg=None):
-    """同一個 cosplay 題材下，產生『魅的幻想』版本；保留角色辨識，允許性感化服裝再詮釋。"""
+    """同一個 cosplay 題材下，產生『只給大俠』版本；保留角色辨識，允許性感化服裝再詮釋。"""
     context = dict(base_context or {})
     story = _rebuild_cosplay_story_from_context(context)
     vibe_mode = _hard_sexy_vibe_mode()
@@ -21795,7 +21796,7 @@ async def _create_cosplay_allure_fantasy_context(base_context, msg=None):
     story["cosplay_reference_summary"] = context.get("cosplay_clothing_ref_summary") or context.get("reference_item_summary") or ""
     story["cosplay_reference_analysis"] = context.get("cosplay_clothing_ref_analysis") or {}
     if msg:
-        await msg.edit(content="💋 小俠正在把這個角色改成『魅的幻想』版本…")
+        await msg.edit(content="💋 小俠正在把這個角色改成『只給大俠』版本…")
     cosplay_state, visual = await create_cosplay_visual(
         story,
         force_half_body=False,
@@ -21816,7 +21817,7 @@ async def _create_cosplay_allure_fantasy_context(base_context, msg=None):
     trace_context = {
         "kind": "cosplay",
         "action": "cosplay_allure_fantasy",
-        "user_input": f"魅的幻想 from cosplay: {story.get('character_name') or story.get('work_title') or story.get('topic')}",
+        "user_input": f"只給大俠 from cosplay: {story.get('character_name') or story.get('work_title') or story.get('topic')}",
         "user_mode_request": raw_mode,
         "story_mode": raw_mode,
         "vibe_mode": vibe_mode,
@@ -23141,7 +23142,7 @@ class PhotoResultView(discord.ui.View):
         mode_key = str(self.context.get("source_mode") or self.context.get("type") or "").lower()
         is_cosplay = mode_key == "cosplay"
         for child in self.children:
-            if isinstance(child, discord.ui.Button) and getattr(child, "label", "") == "💋 魅的幻想":
+            if isinstance(child, discord.ui.Button) and getattr(child, "label", "") in {"💋 魅的幻想", "💋 只給大俠"}:
                 child.disabled = not is_cosplay
         has_cosplay_clothing = bool(self.context.get("cosplay_clothing_ref_local_path") or self.context.get("cosplay_clothing_ref_local_url"))
         has_daily_clothing = bool(self.context.get("nano_clothing_ref_local_path") or self.context.get("nano_clothing_ref_local_url"))
@@ -23299,23 +23300,23 @@ class PhotoResultView(discord.ui.View):
             await interaction.followup.send(f"⚠️ 重擲失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
-    @discord.ui.button(label="💋 魅的幻想", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="💋 只給大俠", style=discord.ButtonStyle.secondary, row=1)
     async def allure_fantasy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         context = dict(self.context)
         if str(context.get("type") or context.get("source_mode") or "").lower() != "cosplay":
-            await interaction.followup.send("💋『魅的幻想』目前只支援 cosplay 圖。", ephemeral=True)
+            await interaction.followup.send("💋『只給大俠』目前只支援 cosplay 圖。", ephemeral=True)
             return
         status = None
         try:
-            status = await interaction.followup.send("💋 小俠正在把這個角色帶進『魅的幻想』版本…", wait=True)
+            status = await interaction.followup.send("💋 小俠正在把這個角色帶進『只給大俠』版本…", wait=True)
             new_context = await _create_cosplay_allure_fantasy_context(context, msg=status)
             db = load_memory()
             db.insert(0, _photo_db_payload(new_context, type_override=_context_db_type(new_context)))
             save_memory(db)
             view = PhotoResultView(new_context)
             file, filename = _photo_discord_file(new_context)
-            embed = _build_result_embed(new_context, title_prefix="💋 魅的幻想", attachment_filename=filename if file else None)
+            embed = _build_result_embed(new_context, title_prefix="💋 只給大俠", attachment_filename=filename if file else None)
             if file:
                 sent = await interaction.followup.send(embed=embed, file=file, view=view)
             else:
@@ -23331,11 +23332,11 @@ class PhotoResultView(discord.ui.View):
         except Exception as exc:
             if status:
                 try:
-                    await status.edit(content=f"⚠️ 魅的幻想失敗：`{str(exc)[:1500]}`")
+                    await status.edit(content=f"⚠️ 只給大俠失敗：`{str(exc)[:1500]}`")
                     return
                 except Exception:
                     pass
-            await interaction.followup.send(f"⚠️ 魅的幻想失敗：`{str(exc)[:1500]}`", ephemeral=True)
+            await interaction.followup.send(f"⚠️ 只給大俠失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
     @discord.ui.button(label="✨ v5.0 場景升級", style=discord.ButtonStyle.secondary, row=1)
