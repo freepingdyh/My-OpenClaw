@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.11"
+LOBSTER_VERSION = "1.10.12"
 
 
 def _normalize_generation_level(level):
@@ -495,6 +495,7 @@ import random
 import shutil
 from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
 
 import discord
@@ -13883,6 +13884,307 @@ def _normalize_command_date(value):
 COSPLAY_NANO_CLOTHING_REF_LABEL = os.environ.get("COSPLAY_NANO_CLOTHING_REF_LABEL", "Nano Banana 2 Lite")
 COSPLAY_NANO_CLOTHING_REF_MODEL_ID = os.environ.get("COSPLAY_NANO_CLOTHING_REF_MODEL_ID", "gemini-3.1-flash-lite-image")
 
+# v1.10.12 — Optional Danbooru auto-reference resolver for Cosplay.
+# Manual Discord attachment always wins. If Danbooru cannot produce a clean solo/full-body
+# character reference, the normal scene-only Cosplay path continues unchanged.
+DANBOORU_API_BASE = "https://danbooru.donmai.us"
+DANBOORU_LOGIN = os.environ.get("DANBOORU_LOGIN", "").strip()
+DANBOORU_API_KEY = os.environ.get("DANBOORU_API_KEY", "").strip()
+DANBOORU_REF_MAX_BYTES = 15 * 1024 * 1024
+DANBOORU_REF_MAX_PIXELS = 40_000_000
+DANBOORU_ALLOWED_IMAGE_HOST_SUFFIXES = (".donmai.us",)
+
+
+def _danbooru_auth():
+    if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
+        return None
+    return aiohttp.BasicAuth(DANBOORU_LOGIN, DANBOORU_API_KEY)
+
+
+def _danbooru_headers():
+    who = DANBOORU_LOGIN or "anonymous"
+    return {"User-Agent": f"XiaoxiaCosplayBot/{LOBSTER_VERSION} (Danbooru user {who})"}
+
+
+def _danbooru_name_variants(value):
+    raw = _clean_text_compact(value or "")
+    if not raw:
+        return []
+    variants = []
+    parens = re.findall(r"[（(]([^()（）]{2,80})[)）]", raw)
+    stripped = re.sub(r"[（(][^()（）]*[)）]", " ", raw).strip()
+    ascii_chunks = re.findall(r"[A-Za-z0-9][A-Za-z0-9 ._:'\-]{1,80}", raw)
+    for item in parens + ascii_chunks + [stripped, raw]:
+        item = _clean_text_compact(item).strip(" -_/,:;()（）")
+        if not item:
+            continue
+        key = item.casefold()
+        if key not in {x.casefold() for x in variants}:
+            variants.append(item)
+    return variants[:5]
+
+
+def _danbooru_match_pattern(value):
+    value = _clean_text_compact(value or "").lower()
+    parts = re.findall(r"[a-z0-9]+", value)
+    if not parts:
+        return ""
+    return "*" + "*".join(parts[:6]) + "*"
+
+
+def _danbooru_token_set(value):
+    stop = {"the", "of", "and", "a", "an", "series", "movie", "film", "game"}
+    return {x for x in re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(x) >= 2 and x not in stop}
+
+
+def _score_danbooru_character_tag(tag, character_name="", work_title=""):
+    name = str((tag or {}).get("name") or "").lower()
+    if not name:
+        return -9999
+    score = 0.0
+    if int((tag or {}).get("category") or -1) == 4:
+        score += 100.0
+    char_tokens = _danbooru_token_set(character_name)
+    work_tokens = _danbooru_token_set(work_title)
+    name_tokens = _danbooru_token_set(name.replace("_", " "))
+    score += 18.0 * len(char_tokens & name_tokens)
+    score += 8.0 * len(work_tokens & name_tokens)
+    if char_tokens and char_tokens.issubset(name_tokens):
+        score += 35.0
+    if work_tokens and (work_tokens & name_tokens):
+        score += 12.0
+    try:
+        score += min(20.0, math.log10(max(1, int((tag or {}).get("post_count") or 0))) * 4.0)
+    except Exception:
+        pass
+    return score
+
+
+def _danbooru_post_tags(post):
+    chunks = []
+    for key in ("tag_string", "tag_string_general", "tag_string_character", "tag_string_copyright", "tag_string_meta"):
+        value = str((post or {}).get(key) or "").strip()
+        if value:
+            chunks.append(value)
+    return set(" ".join(chunks).split())
+
+
+def _score_danbooru_reference_post(post):
+    tags = _danbooru_post_tags(post)
+    # Hard acceptance rule for this feature: identifiable single-character, full-body reference.
+    if "solo" not in tags or "full_body" not in tags:
+        return None
+    if any(x in tags for x in {"multiple_girls", "multiple_boys", "group", "comic", "manga_(style)"}):
+        return None
+    rating = str((post or {}).get("rating") or "").lower()
+    if rating == "e":
+        return None
+    file_url = str((post or {}).get("file_url") or (post or {}).get("large_file_url") or "").strip()
+    if not file_url:
+        return None
+    score = 100.0
+    for good, points in {
+        "standing": 18, "official_art": 25, "game_cg": 18, "simple_background": 12,
+        "looking_at_viewer": 4, "weapon": 5, "holding_weapon": 6, "boots": 2, "shoes": 2,
+    }.items():
+        if good in tags:
+            score += points
+    for bad, points in {
+        "upper_body": 80, "portrait": 55, "close-up": 80, "cropped": 45,
+        "chibi": 70, "super_deformed": 70, "from_behind": 20, "monochrome": 10,
+    }.items():
+        if bad in tags:
+            score -= points
+    try:
+        width = int((post or {}).get("image_width") or 0)
+        height = int((post or {}).get("image_height") or 0)
+        pixels = width * height
+        if pixels >= 2_000_000:
+            score += 12
+        elif pixels >= 1_000_000:
+            score += 6
+        if height >= width:
+            score += 6
+    except Exception:
+        pass
+    try:
+        score += min(20.0, max(-10.0, float((post or {}).get("score") or 0) / 10.0))
+    except Exception:
+        pass
+    if rating == "g":
+        score += 6
+    elif rating == "s":
+        score += 3
+    return score
+
+
+async def _danbooru_api_get(path, params=None):
+    url = DANBOORU_API_BASE.rstrip("/") + "/" + str(path or "").lstrip("/")
+    timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=18)
+    async with aiohttp.ClientSession(timeout=timeout, headers=_danbooru_headers(), auth=_danbooru_auth()) as session:
+        async with session.get(url, params=params or {}, allow_redirects=False) as resp:
+            if resp.status != 200:
+                body = (await resp.text())[:300]
+                raise RuntimeError(f"DANBOORU_HTTP_{resp.status}: {body}")
+            return await resp.json(content_type=None)
+
+
+async def _download_and_sanitize_danbooru_image(url, *, post_id=None):
+    raw_url = str(url or "").strip()
+    parsed = urlparse(raw_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not any(host.endswith(suffix) for suffix in DANBOORU_ALLOWED_IMAGE_HOST_SUFFIXES):
+        raise RuntimeError(f"DANBOORU_IMAGE_HOST_REJECTED:{host or 'missing'}")
+    timeout = aiohttp.ClientTimeout(total=35, connect=8, sock_read=25)
+    async with aiohttp.ClientSession(timeout=timeout, headers=_danbooru_headers()) as session:
+        async with session.get(raw_url, allow_redirects=False) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"DANBOORU_IMAGE_HTTP_{resp.status}")
+            ctype = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if not ctype.startswith("image/"):
+                raise RuntimeError(f"DANBOORU_IMAGE_BAD_MIME:{ctype or 'missing'}")
+            try:
+                announced = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                announced = 0
+            if announced and announced > DANBOORU_REF_MAX_BYTES:
+                raise RuntimeError("DANBOORU_IMAGE_TOO_LARGE")
+            chunks, total = [], 0
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > DANBOORU_REF_MAX_BYTES:
+                    raise RuntimeError("DANBOORU_IMAGE_TOO_LARGE")
+                chunks.append(chunk)
+    raw = b"".join(chunks)
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            im.load()
+            width, height = im.size
+            if width <= 0 or height <= 0 or width * height > DANBOORU_REF_MAX_PIXELS:
+                raise RuntimeError("DANBOORU_IMAGE_BAD_DIMENSIONS")
+            clean = ImageOps.exif_transpose(im).convert("RGB")
+            max_side = 3200
+            if max(clean.size) > max_side:
+                clean.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            filename = f"danbooru_cosplay_source_{post_id or 'post'}_{uuid.uuid4().hex[:8]}.jpg"
+            path = os.path.join(OUTPUT_DIR, filename)
+            clean.save(path, format="JPEG", quality=94, optimize=True)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"DANBOORU_IMAGE_DECODE_FAILED:{type(exc).__name__}") from exc
+    return path, f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+
+
+async def _find_danbooru_cosplay_reference(story):
+    """Best-effort resolver. Never blocks Cosplay: returns None on no match or any API/download failure."""
+    if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
+        print("ℹ️ [DANBOORU_REF] env missing; fallback to scene-only cosplay")
+        return None
+    story = story if isinstance(story, dict) else {}
+    character_name = _clean_text_compact(story.get("character_name") or (story.get("cosplay_topic_candidate") or {}).get("character_name") or "")
+    work_title = _clean_text_compact(story.get("work_title") or (story.get("cosplay_topic_candidate") or {}).get("work_title") or "")
+    if not character_name:
+        print("ℹ️ [DANBOORU_REF] no character name; fallback to scene-only cosplay")
+        return None
+    try:
+        tag_candidates = {}
+        for variant in _danbooru_name_variants(character_name):
+            pattern = _danbooru_match_pattern(variant)
+            if not pattern:
+                continue
+            rows = await _danbooru_api_get("tags.json", {
+                "search[name_matches]": pattern,
+                "search[category]": 4,
+                "search[order]": "count",
+                "limit": 20,
+            })
+            for row in rows if isinstance(rows, list) else []:
+                name = str((row or {}).get("name") or "").strip()
+                if name:
+                    tag_candidates[name] = row
+            if len(tag_candidates) >= 12:
+                break
+        ranked_tags = sorted(
+            tag_candidates.values(),
+            key=lambda row: _score_danbooru_character_tag(row, character_name, work_title),
+            reverse=True,
+        )[:4]
+        if not ranked_tags:
+            print(f"ℹ️ [DANBOORU_REF] no character tag: {character_name} / {work_title}")
+            return None
+
+        post_pool = {}
+        for tag in ranked_tags:
+            tag_name = str(tag.get("name") or "").strip()
+            if not tag_name:
+                continue
+            # Keep each API query within the normal two-tag search shape.
+            for second_tag in ("full_body", "solo"):
+                rows = await _danbooru_api_get("posts.json", {
+                    "tags": f"{tag_name} {second_tag}",
+                    "limit": 30,
+                    "page": 1,
+                })
+                for post in rows if isinstance(rows, list) else []:
+                    pid = str((post or {}).get("id") or "")
+                    if pid:
+                        post_pool[pid] = (post, tag_name)
+            if len(post_pool) >= 30:
+                break
+
+        scored = []
+        for post, tag_name in post_pool.values():
+            score = _score_danbooru_reference_post(post)
+            if score is not None:
+                score += _score_danbooru_character_tag(tag_candidates.get(tag_name) or {"name": tag_name, "category": 4}, character_name, work_title) * 0.18
+                scored.append((score, post, tag_name))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if not scored:
+            print(f"ℹ️ [DANBOORU_REF] no acceptable solo/full_body post: {character_name} / {work_title}")
+            return None
+
+        # Try a few top candidates in case one CDN object is unavailable or invalid.
+        last_error = None
+        for score, post, tag_name in scored[:5]:
+            file_url = str(post.get("file_url") or post.get("large_file_url") or "").strip()
+            try:
+                source_path, local_url = await _download_and_sanitize_danbooru_image(file_url, post_id=post.get("id"))
+                result = {
+                    "source": "danbooru",
+                    "source_path": source_path,
+                    "source_url": file_url,
+                    "source_local_url": local_url,
+                    "source_page_url": f"{DANBOORU_API_BASE}/posts/{post.get('id')}",
+                    "post_id": post.get("id"),
+                    "character_tag": tag_name,
+                    "rating": post.get("rating"),
+                    "score": round(float(score), 2),
+                    "character_name": character_name,
+                    "work_title": work_title,
+                }
+                print(f"✅ [DANBOORU_REF] selected post={post.get('id')} tag={tag_name} score={result['score']}")
+                return result
+            except Exception as exc:
+                last_error = exc
+                print(f"⚠️ [DANBOORU_REF_CANDIDATE_FAILED] post={post.get('id')} {type(exc).__name__}: {exc}")
+        if last_error:
+            print(f"⚠️ [DANBOORU_REF] all candidate downloads failed: {type(last_error).__name__}: {last_error}")
+        return None
+    except Exception as exc:
+        print(f"⚠️ [DANBOORU_REF_FAILED] {type(exc).__name__}: {exc}")
+        return None
+
+
+def _cosplay_reference_title_from_story(story):
+    story = story if isinstance(story, dict) else {}
+    work = _clean_text_compact(story.get("work_title") or (story.get("cosplay_topic_candidate") or {}).get("work_title") or "")
+    char = _clean_text_compact(story.get("character_name") or (story.get("cosplay_topic_candidate") or {}).get("character_name") or "")
+    if work and char:
+        return f"{work}－{char}"
+    return char or work or _clean_text_compact(story.get("topic") or "")
+
 
 def _local_image_mime_type(path):
     ext = os.path.splitext(str(path or ""))[1].lower()
@@ -14045,13 +14347,29 @@ Must-keep details: {must_keep or 'preserve silhouette, colors, layers, trims, fo
     return _save_generated_bytes_to_output(raw, prefix="nano_cosplay_ref", mime_type=out_mime)
 
 
-async def _prepare_cosplay_clothing_reference(message, *, title_hint=""):
-    attachment, error = await _get_photo_reference_attachment(message)
-    if error:
-        raise RuntimeError(error)
-    if not attachment:
-        return None
-    source_path = await _download_photo_reference_attachment(attachment)
+async def _prepare_cosplay_clothing_reference(message, *, title_hint="", external_source=None):
+    external_source = external_source if isinstance(external_source, dict) else None
+    attachment = None
+    if external_source:
+        source_path = external_source.get("source_path")
+        if not source_path or not os.path.exists(str(source_path)):
+            raise RuntimeError("COSPLAY_EXTERNAL_REF_SOURCE_MISSING")
+        source_kind = str(external_source.get("source") or "external")
+        source_original_url = external_source.get("source_url")
+        source_local_url = external_source.get("source_local_url")
+        source_page_url = external_source.get("source_page_url")
+    else:
+        attachment, error = await _get_photo_reference_attachment(message)
+        if error:
+            raise RuntimeError(error)
+        if not attachment:
+            return None
+        source_path = await _download_photo_reference_attachment(attachment)
+        source_kind = "manual_attachment"
+        source_original_url = getattr(attachment, "url", None)
+        source_local_url = None
+        source_page_url = None
+
     analysis = None
     try:
         analysis = await _analyze_cosplay_clothing_reference_image(source_path, title_hint=title_hint)
@@ -14061,7 +14379,7 @@ async def _prepare_cosplay_clothing_reference(message, *, title_hint=""):
     try:
         board_path, board_url = await _generate_nano_cosplay_clothing_reference_board(source_path, analysis=analysis, title_hint=title_hint)
         ref_path, ref_url = board_path, board_url
-        provider = COSPLAY_NANO_CLOTHING_REF_LABEL
+        provider = (f"Danbooru → {COSPLAY_NANO_CLOTHING_REF_LABEL}" if source_kind == "danbooru" else COSPLAY_NANO_CLOTHING_REF_LABEL)
     except Exception as exc:
         print(f"⚠️ [COSPLAY_REF_NANO_GENERATE_FAILED] model={COSPLAY_NANO_CLOTHING_REF_MODEL_ID} {type(exc).__name__}: {exc}")
         raise RuntimeError(
@@ -14069,7 +14387,11 @@ async def _prepare_cosplay_clothing_reference(message, *, title_hint=""):
             "為避免把原角色臉直接當 Figure 10、也避免白燒 Seedream 圖錢，本次 Cosplay 已停止，沒有呼叫 v4.5。"
         ) from exc
     return {
-        "source_attachment_url": getattr(attachment, "url", None),
+        "source_kind": source_kind,
+        "source_attachment_url": getattr(attachment, "url", None) if attachment else None,
+        "source_original_url": source_original_url,
+        "source_local_url": source_local_url,
+        "source_page_url": source_page_url,
         "source_path": source_path,
         "reference_path": ref_path,
         "reference_url": ref_url,
@@ -14077,6 +14399,7 @@ async def _prepare_cosplay_clothing_reference(message, *, title_hint=""):
         "analysis": analysis,
         "prompt_suffix": _build_cosplay_clothing_ref_prompt_suffix(analysis),
         "summary": _clean_text_compact((analysis or {}).get("outfit_summary") or "")[:300],
+        "danbooru": dict(external_source or {}) if source_kind == "danbooru" else None,
     }
 
 
@@ -14108,15 +14431,38 @@ async def cosplay(ctx, *, mode: str = "auto"):
         _cosplay_ref_attachment, _cosplay_ref_error = await _get_photo_reference_attachment(ctx_message)
         if _cosplay_ref_error:
             raise RuntimeError(_cosplay_ref_error)
-        story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment)
-        state["current_topic_data"] = story 
-        
+
+        # v1.10.12 reference priority: manual attachment > Danbooru auto-reference > original scene-only creation.
+        clothing_ref = None
+        danbooru_ref = None
+        story["cosplay_reference_source"] = "manual_attachment" if _cosplay_ref_attachment else "none"
+        if not _cosplay_ref_attachment:
+            await msg.edit(content=f"✨ 劇本完成！小夏先替【{_cosplay_reference_title_from_story(story) or mode}】找找 Danbooru 是否有合格的單人全身角色參考圖...")
+            danbooru_ref = await _find_danbooru_cosplay_reference(story)
+            if danbooru_ref:
+                try:
+                    clothing_ref = await _prepare_cosplay_clothing_reference(
+                        ctx_message,
+                        title_hint=_cosplay_reference_title_from_story(story),
+                        external_source=danbooru_ref,
+                    )
+                    story["cosplay_reference_source"] = "danbooru"
+                except Exception as exc:
+                    # Auto reference is opportunistic. If Nano cannot prepare it, return to the original no-reference path.
+                    print(f"⚠️ [DANBOORU_REF_NANO_FALLBACK] {type(exc).__name__}: {exc}")
+                    clothing_ref = None
+                    danbooru_ref = None
+                    story["cosplay_reference_source"] = "none"
+        story["cosplay_reference_mode"] = bool(_cosplay_ref_attachment or clothing_ref)
+        state["current_topic_data"] = story
+
         # 2. Cosplay 導演層：先規劃人物當下的自然行為，再轉譯成 Seedream v4.5 可執行的提示詞
         await msg.edit(content=f"✨ 劇本完成！小夏正在安排這次 Cosplay 的自然動作與鏡頭語言，並套用 Seedream v4.5 參考底稿...")
         _cosplay_state, visual = await create_cosplay_visual(story, state["retry_count"] >= 2, alternative=False, vibe_request=vibe_mode, user_outfit_hints=story.get("user_outfit_hints"))
         scene_prompt = visual['image_prompt']
         cosplay_title_hint = _cosplay_state.get("title_hint") or ((visual.get("__anchor_state") or {}).get("title_hint") if isinstance(visual.get("__anchor_state"), dict) else "")
-        clothing_ref = await _prepare_cosplay_clothing_reference(ctx_message, title_hint=cosplay_title_hint)
+        if _cosplay_ref_attachment:
+            clothing_ref = await _prepare_cosplay_clothing_reference(ctx_message, title_hint=cosplay_title_hint)
         trace_context = {
             "kind": "cosplay",
             "action": "cosplay_initial",
@@ -14155,11 +14501,16 @@ async def cosplay(ctx, *, mode: str = "auto"):
                 "seedream_input_images_override": list(input_urls),
                 "seedream_input_image_roles_override": list(input_roles),
                 "cosplay_clothing_ref_provider": clothing_ref.get("provider") or COSPLAY_NANO_CLOTHING_REF_LABEL,
+                "cosplay_clothing_ref_source_kind": clothing_ref.get("source_kind") or "manual_attachment",
                 "cosplay_clothing_ref_source_path": clothing_ref.get("source_path"),
+                "cosplay_clothing_ref_source_original_url": clothing_ref.get("source_original_url") or clothing_ref.get("source_attachment_url"),
+                "cosplay_clothing_ref_source_local_url": clothing_ref.get("source_local_url"),
+                "cosplay_clothing_ref_source_page_url": clothing_ref.get("source_page_url"),
                 "cosplay_clothing_ref_local_path": clothing_ref.get("reference_path"),
                 "cosplay_clothing_ref_local_url": clothing_ref.get("reference_url"),
                 "cosplay_clothing_ref_summary": clothing_ref.get("summary") or "",
                 "cosplay_clothing_ref_analysis": clothing_ref.get("analysis") or {},
+                "cosplay_danbooru_ref": clothing_ref.get("danbooru") or None,
             })
         _trace_stage(trace_context, "cosplay_visual_planned", data={"story": story, "cosplay_state": _cosplay_state, "visual": visual, "clothing_ref": clothing_ref}, prompt=scene_prompt)
 
@@ -14227,11 +14578,16 @@ async def cosplay(ctx, *, mode: str = "auto"):
             "seedream_input_images_override": trace_context.get("seedream_input_images_override"),
             "seedream_input_image_roles_override": trace_context.get("seedream_input_image_roles_override"),
             "cosplay_clothing_ref_provider": trace_context.get("cosplay_clothing_ref_provider"),
+            "cosplay_clothing_ref_source_kind": trace_context.get("cosplay_clothing_ref_source_kind"),
             "cosplay_clothing_ref_source_path": trace_context.get("cosplay_clothing_ref_source_path"),
+            "cosplay_clothing_ref_source_original_url": trace_context.get("cosplay_clothing_ref_source_original_url"),
+            "cosplay_clothing_ref_source_local_url": trace_context.get("cosplay_clothing_ref_source_local_url"),
+            "cosplay_clothing_ref_source_page_url": trace_context.get("cosplay_clothing_ref_source_page_url"),
             "cosplay_clothing_ref_local_path": trace_context.get("cosplay_clothing_ref_local_path"),
             "cosplay_clothing_ref_local_url": trace_context.get("cosplay_clothing_ref_local_url"),
             "cosplay_clothing_ref_summary": trace_context.get("cosplay_clothing_ref_summary") or "",
             "cosplay_clothing_ref_analysis": trace_context.get("cosplay_clothing_ref_analysis") or {},
+            "cosplay_danbooru_ref": trace_context.get("cosplay_danbooru_ref"),
         }
         db = load_memory()
         db.insert(0, payload)
@@ -22385,25 +22741,52 @@ class PhotoResultView(discord.ui.View):
         if clothing_local_path or clothing_local_url:
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
-                embed = discord.Embed(
+                source_path = context.get("cosplay_clothing_ref_source_path") if is_cosplay else None
+                source_original_url = context.get("cosplay_clothing_ref_source_original_url") if is_cosplay else None
+                source_local_url = context.get("cosplay_clothing_ref_source_local_url") if is_cosplay else None
+                source_page_url = context.get("cosplay_clothing_ref_source_page_url") if is_cosplay else None
+                source_kind = _clean_text_compact(context.get("cosplay_clothing_ref_source_kind") or "") if is_cosplay else ""
+
+                nano_embed = discord.Embed(
                     title="👗 Nano 服裝參考（debug）",
                     description=("這是從大俠附圖整理出的服裝參考，交給 Seedream 當 Figure 10 使用。" if not is_cosplay else f"這是 {clothing_provider} 提供、交給 Seedream 當 Figure 10 使用的服裝參考。"),
                     color=discord.Color.blurple(),
                 )
                 if clothing_summary:
-                    embed.add_field(name="服裝摘要", value=clothing_summary[:1024], inline=False)
+                    nano_embed.add_field(name="服裝摘要", value=clothing_summary[:1024], inline=False)
+
+                embeds = []
+                files = []
+                if is_cosplay and (source_path or source_original_url or source_local_url):
+                    source_label = "Danbooru 自動角色參考原圖" if source_kind == "danbooru" else "大俠提供的原始角色參考圖"
+                    source_embed = discord.Embed(
+                        title="🖼️ 原始角色參考圖（debug）",
+                        description=source_label,
+                        color=discord.Color.dark_teal(),
+                    )
+                    if source_page_url:
+                        source_embed.add_field(name="來源頁", value=str(source_page_url)[:1024], inline=False)
+                    if source_path and os.path.exists(str(source_path)):
+                        src_filename = f"source_{os.path.basename(str(source_path))}"
+                        src_file = discord.File(str(source_path), filename=src_filename)
+                        files.append(src_file)
+                        source_embed.set_image(url=f"attachment://{src_filename}")
+                    elif source_local_url or source_original_url:
+                        source_embed.set_image(url=str(source_local_url or source_original_url))
+                    embeds.append(source_embed)
+
                 if clothing_local_path and os.path.exists(str(clothing_local_path)):
-                    filename = os.path.basename(str(clothing_local_path))
+                    filename = f"nano_{os.path.basename(str(clothing_local_path))}"
                     file = discord.File(str(clothing_local_path), filename=filename)
-                    embed.set_image(url=f"attachment://{filename}")
+                    files.append(file)
+                    nano_embed.set_image(url=f"attachment://{filename}")
                     if clothing_local_url:
-                        embed.add_field(name="Image URL", value=str(clothing_local_url)[:1024], inline=False)
-                    await interaction.followup.send(embed=embed, file=file, ephemeral=True)
-                else:
-                    if clothing_local_url:
-                        embed.set_image(url=str(clothing_local_url))
-                        embed.add_field(name="Image URL", value=str(clothing_local_url)[:1024], inline=False)
-                    await interaction.followup.send(embed=embed, ephemeral=True)
+                        nano_embed.add_field(name="Nano Image URL", value=str(clothing_local_url)[:1024], inline=False)
+                elif clothing_local_url:
+                    nano_embed.set_image(url=str(clothing_local_url))
+                    nano_embed.add_field(name="Nano Image URL", value=str(clothing_local_url)[:1024], inline=False)
+                embeds.append(nano_embed)
+                await interaction.followup.send(embeds=embeds, files=files, ephemeral=True)
             except Exception as exc:
                 await interaction.followup.send(f"⚠️ 顯示服裝參考圖失敗：`{str(exc)[:1500]}`", ephemeral=True)
             return
