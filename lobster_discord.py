@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.23"
+LOBSTER_VERSION = "1.10.24"
 
 
 def _normalize_generation_level(level):
@@ -106,6 +106,13 @@ Preserve her long-hair feminine aura, long graceful legs, and photorealistic lif
 """
 
 XIAOXIA_CLOTHING_FLATTER_RULE = "Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it."
+
+# v1.10.24 — Shared Chinese body baseline for Gemini Scene Writers.
+# Keep upstream scene planning aligned with the same global Xiaoxia body identity used by Seedream.
+XIAOXIA_SCENE_WRITER_BODY_BASELINE_ZH = (
+    "白皙甜美、高挑苗條且曲線明顯、腰線明確、自然豐滿且存在感再加強的上圍、"
+    "明顯胸腰對比、柔和沙漏曲線、修長腿部（尤其小腿線條）；衣服應自然襯托而非削弱這個體態。"
+)
 
 
 XIAOXIA_HAIR_RULE_GENERAL = """
@@ -9286,7 +9293,9 @@ def build_committed_diary_visual_from_task(task, season_rule="", wardrobe_hint="
     image_prompt = f"""FIGURE ROLE MAP — obey these roles strictly.
 
 Figures 1-9 are identity-only reference images of Xiaoxia.
-Use Figures 1-9 only to preserve Xiaoxia's face identity, fair luminous skin, adult East Asian appearance, long brown hair, tall slim feminine body, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, and overall recognizable Xiaoxia look. Even in full-body, long-shot, or side-facing compositions, keep that contrast clearly visible without exaggerating anatomy. Clothing should naturally complement and flatter her signature hourglass figure rather than minimizing it.
+GLOBAL XIAOXIA BODY IDENTITY — use the shared global baseline, not a weaker diary-specific rewrite:
+{XIAOXIA_APPEARANCE_CORE.strip()}
+{XIAOXIA_CLOTHING_FLATTER_RULE}
 Do NOT copy the pose, background, room, chair, standing posture, sitting posture, lighting setup, outfit, or composition from Figures 1-9.
 
 DIARY SINGLE-PHOTO TASK — this is the only photo promise to fulfill today.
@@ -19037,7 +19046,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 6. 衣櫃建議場景只有在「衣櫃自由」挑衣時可作為選衣輔助；即使允許參考，也不得覆蓋大俠明確指定的場景。
 7. 不可加入大俠沒有要求的第二人物。即使是男友視角，也不可畫出大俠本人、任何男性、任何男性肢體，或鏡頭前景中的手、肩、背影；只能用構圖暗示 POV。
 8. 小俠的動作、手勢、四肢、關節、手指都必須自然正常，不可出現不合理姿勢。
-9. Xiaoxia Aesthetic 要作為預設美感底盤：白皙甜美、高挑苗條但曲線明顯、腰線明確、自然豐滿、存在感再加強的上圍、柔和沙漏感身形、修長腿部（尤其小腿線條），但若大俠有明確修正詞，必須以大俠修正為優先。
+9. Xiaoxia Aesthetic 要作為預設美感底盤：{XIAOXIA_SCENE_WRITER_BODY_BASELINE_ZH} 若大俠有明確修正詞，必須以大俠修正為優先。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
@@ -19279,7 +19288,7 @@ Scene focus：{_clean_text_compact(episode_plan.get('scene_focus') or '')}
 5. 若沒有衣櫃參考圖，也必須把 outfit_summary 與 authoritative_scene 的服裝寫具體，不可只寫「自然穿搭」。
 6. 若活動發生於上午/中午/下午/夜晚，畫面光線必須符合目前台灣時間；不要晨跑寫成午跑、不要白天寫成夜景。
 7. 小俠必須是主角。若社交規則允許其他女性，仍要讓小俠明顯是唯一主角；不允許時就只畫小俠一人。
-8. Xiaoxia Aesthetic 只當底盤：白皙甜美、高挑苗條、腰線明確、自然豐滿、柔和沙漏感，但畫面核心仍是今天這個活動瞬間。
+8. Xiaoxia Aesthetic 只當底盤：{XIAOXIA_SCENE_WRITER_BODY_BASELINE_ZH} 畫面核心仍是今天這個活動瞬間。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
