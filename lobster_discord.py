@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.34"
+LOBSTER_VERSION = "1.10.35"
 
 
 def _normalize_generation_level(level):
@@ -1481,6 +1481,37 @@ async def _xiaoxia_calendar_weekly_planner_scheduler():
             print(f"⚠️ [XIAOXIA_CALENDAR_WEEKLY_PLANNER_FAILED] {type(exc).__name__}: {exc}")
             await asyncio.sleep(60)
 
+
+def _xiaoxia_calendar_planner_preview_rows(created, limit=12):
+    """
+    v1.10.35:
+    Planner completion preview must show Asia/Taipei time, not raw Google UTC,
+    and must be sorted chronologically before truncating.
+    """
+    rows = []
+    for row in created or []:
+        raw_start = str((row or {}).get("start") or "").strip()
+        dt = _xiaoxia_calendar_parse_event_dt(raw_start)
+        if dt is None:
+            # Put unparseable rows at the end but keep them visible.
+            sort_key = datetime.max.replace(tzinfo=TZ_TPE)
+            when = f"{(row or {}).get('date') or '日期未定'} 時間未定"
+        else:
+            sort_key = dt
+            weekday = "一二三四五六日"[dt.weekday()]
+            when = dt.strftime("%m/%d") + f"（{weekday}）" + dt.strftime(" %H:%M")
+        rows.append({
+            "sort_key": sort_key,
+            "when": when,
+            "title": _clean_text_compact((row or {}).get("title") or "未命名活動"),
+        })
+
+    rows.sort(key=lambda x: (x["sort_key"], x["title"]))
+    shown = rows[:max(1, int(limit or 12))]
+    lines = [f"• {x['when']}｜{x['title']}" for x in shown]
+    return lines, len(rows)
+
+
 async def _handle_xiaoxia_calendar_message_direct(message):
     """
     v1.10.32 MVP commands:
@@ -1562,9 +1593,19 @@ async def _handle_xiaoxia_calendar_message_direct(message):
         try:
             result = await _xiaoxia_calendar_plan_14_days()
             created = result.get("created") or []
-            preview = "\n".join(f"• {r.get('date')} {str(r.get('start') or '')[11:16]}｜{r.get('title')}" for r in created[:12])
-            more = f"\n…另有 {len(created)-12} 筆" if len(created) > 12 else ""
-            await msg.edit(content="✅ **小俠兩週 Planner 完成**\n" + f"新增活動：{len(created)} 筆\n" + (preview or "沒有需要新增的活動。") + more + "\n\n既有 Calendar 行程保留不動；週末只排 0～1 個自主活動。")
+            preview_lines, total_rows = _xiaoxia_calendar_planner_preview_rows(created, limit=12)
+            preview = "\n".join(preview_lines)
+            more = f"\n…另有 {total_rows - 12} 筆" if total_rows > 12 else ""
+            await msg.edit(
+                content=(
+                    "✅ **小俠兩週 Planner 完成**\n"
+                    f"新增活動：{len(created)} 筆\n"
+                    "以下時間皆為 **台灣時間 UTC+8**，並依時間由早到晚排序：\n"
+                    + (preview or "沒有需要新增的活動。")
+                    + more
+                    + "\n\n既有 Calendar 行程保留不動；週末只排 0～1 個自主活動。"
+                )
+            )
         except Exception as exc:
             await msg.edit(content=f"❌ 兩週 Planner 失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
