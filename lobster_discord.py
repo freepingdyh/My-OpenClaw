@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.33_R1"
+LOBSTER_VERSION = "1.10.34"
 
 
 def _normalize_generation_level(level):
@@ -614,6 +614,7 @@ XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autono
 XIAOXIA_CALENDAR_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_cache.json") # 📅 v1.10.33：未來14天快取
 XIAOXIA_CALENDAR_CONTEXT_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_context.json") # 📅 v1.10.33：近3天聊天摘要
 XIAOXIA_DAILY_MAINLINE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_daily_mainline.json") # 📅 v1.10.33：今日活動主線
+XIAOXIA_CALENDAR_PLANNER_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_planner_state.json") # 📅 v1.10.34：兩週 Planner 狀態
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_promise_daily_report_state.json")
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
@@ -1272,6 +1273,214 @@ def _xiaoxia_calendar_chat_context(user_text):
         print(f"⚠️ [XIAOXIA_CALENDAR_CHAT_CONTEXT_FAILED_OPEN] {type(exc).__name__}: {exc}")
         return ""
 
+
+def _xiaoxia_calendar_planner_state_load():
+    d = _load_json_file_or_default(XIAOXIA_CALENDAR_PLANNER_STATE_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+def _xiaoxia_calendar_planner_state_save(data):
+    _xiaoxia_calendar_save(XIAOXIA_CALENDAR_PLANNER_STATE_PATH, data if isinstance(data, dict) else {})
+
+def _xiaoxia_calendar_extract_activity_catalog():
+    catalog = load_xiaoxia_activity_catalog()
+    raw = catalog.get("activities") if isinstance(catalog, dict) else catalog
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_text_compact(item.get("title") or "")
+        if not title:
+            continue
+        out.append({
+            "id": str(item.get("id") or item.get("activity_id") or title),
+            "title": title,
+            "category": _clean_text_compact(item.get("category") or item.get("theme") or item.get("type") or "日常"),
+            "description": _clean_text_compact(item.get("description") or item.get("seed_prompt") or item.get("scene") or item.get("summary") or ""),
+        })
+    return out
+
+def _xiaoxia_calendar_is_recurring_like(title, description=""):
+    t = f"{title} {description}"
+    return any(k in t for k in ("固定","每週","課程","訓練","上課","教課","授課","值班","練習","復健","回診","社團","工作坊","排練"))
+
+def _xiaoxia_calendar_time_policy_for_activity(item, date_obj):
+    title = _clean_text_compact(item.get("title") or "")
+    desc = _clean_text_compact(item.get("description") or "")
+    t = f"{title} {desc}"
+    weekday = date_obj.weekday() < 5
+    if any(k in t for k in ("夜市","夜景","星空","看夜景","晚餐","酒吧")):
+        hour = random.choice([18,19,20]); minute = random.choice([0,30])
+    elif any(k in t for k in ("淨灘","海邊","登山","健行","步道","晨跑")):
+        hour = random.choice([7,8,9,16,17]); minute = random.choice([0,30])
+    elif "早餐" in t or "早午餐" in t:
+        hour = random.choice([8,9,10]); minute = random.choice([0,30])
+    elif "午餐" in t:
+        hour = random.choice([11,12]); minute = random.choice([0,30])
+    else:
+        hour = random.choice([9,10,14,15,16]) if weekday else random.choice([10,14,15,16])
+        minute = random.choice([0,30])
+    duration = 120 if any(k in t for k in ("旅行","登山","健行","淨灘","看展","展覽","市集")) else 90
+    start = datetime.combine(date_obj, time(hour, minute), tzinfo=TZ_TPE)
+    return start, start + timedelta(minutes=duration)
+
+def _xiaoxia_calendar_overlap(start_dt, end_dt, events):
+    for ev in events or []:
+        s = _xiaoxia_calendar_parse_event_dt(ev.get("start"))
+        e = _xiaoxia_calendar_parse_event_dt(ev.get("end"))
+        if not s:
+            continue
+        e = e or (s + timedelta(hours=1))
+        if start_dt < e and end_dt > s:
+            return True
+    return False
+
+def _xiaoxia_calendar_build_event_description(item):
+    body = _clean_text_compact(item.get("description") or "")
+    lines = ["來源：小俠自主", "鎖定：否", f"類型：{item.get('category') or '日常'}"]
+    if body:
+        lines += ["", body]
+    return "\n".join(lines)
+
+async def _xiaoxia_calendar_plan_14_days(start_date=None):
+    await _xiaoxia_calendar_refresh_cache(reason="planner_preflight", regenerate_today=False)
+    cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+    existing_by_date = {}
+    for ev in cache.get("events") or []:
+        d = _xiaoxia_calendar_event_date(ev)
+        if d:
+            existing_by_date.setdefault(d.isoformat(), []).append(ev)
+
+    catalog = _xiaoxia_calendar_extract_activity_catalog()
+    if not catalog:
+        raise RuntimeError("XIAOXIA_ACTIVITY_CATALOG_EMPTY")
+
+    now_date = datetime.now(TZ_TPE).date()
+    start_date = start_date or now_date
+    created = []
+    used_by_week = {}
+    recent_titles = set()
+
+    episodes = _load_json_file_or_default(XIAOXIA_AUTONOMY_EPISODE_LOG_PATH, [])
+    if isinstance(episodes, list):
+        for row in episodes[-30:]:
+            if isinstance(row, dict):
+                t = _clean_text_compact(row.get("activity_title") or row.get("title") or "")
+                if t:
+                    recent_titles.add(t)
+
+    for i in range(14):
+        d = start_date + timedelta(days=i)
+        key = d.isoformat()
+        existing = existing_by_date.setdefault(key, [])
+        week_key = f"{d.isocalendar().year}-W{d.isocalendar().week:02d}"
+        used = used_by_week.setdefault(week_key, set())
+        target = 2 if d.weekday() < 5 else random.choice([0,1])
+
+        existing_auto = 0
+        for ev in existing:
+            meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+            if meta.get("來源") == "小俠自主":
+                existing_auto += 1
+                used.add(_clean_text_compact(ev.get("summary") or ""))
+
+        needed = max(0, target - existing_auto)
+        attempts = 0
+        while needed and attempts < 40:
+            attempts += 1
+            pool = []
+            for item in catalog:
+                title = item["title"]
+                recurring = _xiaoxia_calendar_is_recurring_like(title, item.get("description") or "")
+                if not recurring and (title in used or title in recent_titles):
+                    continue
+                pool.append(item)
+            if not pool:
+                pool = catalog[:]
+            item = random.choice(pool)
+            start_dt, end_dt = _xiaoxia_calendar_time_policy_for_activity(item, d)
+            for _ in range(4):
+                if not _xiaoxia_calendar_overlap(start_dt, end_dt, existing):
+                    break
+                start_dt += timedelta(hours=1); end_dt += timedelta(hours=1)
+            if _xiaoxia_calendar_overlap(start_dt, end_dt, existing):
+                continue
+
+            ev = await _xiaoxia_calendar_create_event(
+                item["title"], start_dt, end_dt,
+                description=_xiaoxia_calendar_build_event_description(item)
+            )
+            nev = _xiaoxia_calendar_normalize_event(ev)
+            existing.append(nev)
+            created.append({
+                "date": key, "event_id": nev.get("id"), "title": item["title"],
+                "start": nev.get("start"), "end": nev.get("end"),
+                "activity_id": item["id"], "category": item["category"],
+            })
+            used.add(item["title"])
+            recent_titles.add(item["title"])
+            needed -= 1
+
+    refreshed = await _xiaoxia_calendar_refresh_cache(reason="planner_14d_completed", regenerate_today=True)
+    st = _xiaoxia_calendar_planner_state_load()
+    st.update({
+        "last_plan_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "window_start": start_date.isoformat(),
+        "window_end": (start_date + timedelta(days=13)).isoformat(),
+        "created_count": len(created),
+        "created": created[-100:],
+    })
+    _xiaoxia_calendar_planner_state_save(st)
+    return {"created": created, "refreshed": refreshed}
+
+async def _xiaoxia_calendar_review_next_week():
+    await _xiaoxia_calendar_refresh_cache(reason="weekly_review_preflight", regenerate_today=False)
+    cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+    now_date = datetime.now(TZ_TPE).date()
+    days = (7 - now_date.weekday()) % 7 or 7
+    mon = now_date + timedelta(days=days)
+    sun = mon + timedelta(days=6)
+    reviewed, locked = [], []
+    for ev in cache.get("events") or []:
+        d = _xiaoxia_calendar_event_date(ev)
+        if d and mon <= d <= sun:
+            meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+            row = {"date": d.isoformat(), "title": ev.get("summary"), "locked": meta.get("鎖定") == "是", "source": meta.get("來源") or ""}
+            reviewed.append(row)
+            if row["locked"]:
+                locked.append(row)
+
+    plan = await _xiaoxia_calendar_plan_14_days(start_date=now_date)
+    st = _xiaoxia_calendar_planner_state_load()
+    st.update({
+        "last_review_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "reviewed_next_week": reviewed,
+        "locked_next_week_count": len(locked),
+    })
+    _xiaoxia_calendar_planner_state_save(st)
+    return {"reviewed": reviewed, "locked": locked, "planner_created": plan.get("created") or []}
+
+async def _xiaoxia_calendar_weekly_planner_scheduler():
+    print("📅 [XIAOXIA_CALENDAR_WEEKLY_PLANNER] background loop started")
+    while True:
+        try:
+            now_dt = datetime.now(TZ_TPE)
+            days_ahead = (7 - now_dt.weekday()) % 7
+            target_date = now_dt.date() + timedelta(days=days_ahead)
+            target = datetime.combine(target_date, time(1,15), tzinfo=TZ_TPE)
+            if target <= now_dt:
+                target += timedelta(days=7)
+            await asyncio.sleep(max(1.0, (target - now_dt).total_seconds()))
+            if _xiaoxia_calendar_config_status().get("configured"):
+                await _xiaoxia_calendar_review_next_week()
+                print("📅 [XIAOXIA_CALENDAR_WEEKLY_PLANNER] review completed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_CALENDAR_WEEKLY_PLANNER_FAILED] {type(exc).__name__}: {exc}")
+            await asyncio.sleep(60)
+
 async def _handle_xiaoxia_calendar_message_direct(message):
     """
     v1.10.32 MVP commands:
@@ -1306,6 +1515,8 @@ async def _handle_xiaoxia_calendar_message_direct(message):
             "• `/小俠月曆 狀態`\n"
             "• `/小俠月曆 測試` → Zeabur 端執行讀取/新增/修改/刪除並自動清理\n"
             "• `/小俠月曆 更新` → 同步14天快取＋近3天摘要＋今日主線\n"
+            "• `/小俠月曆 規劃14天` → 以現有生活活動庫排未來兩週\n"
+            "• `/小俠月曆 review` → Review 下一週並補齊兩週滾動視窗\n"
             "• `/小俠月曆 未來14天`\n"
             "• `/小俠月曆 本週`\n"
             "• `/小俠月曆 下週`\n\n"
@@ -1344,6 +1555,33 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                 "📅 **小俠月曆連線狀態：❌ 失敗**\n"
                 f"`{type(exc).__name__}: {str(exc)[:1300]}`"
             )
+        return True
+
+    if raw in {"規劃14天", "規劃兩週", "planner", "plan14"}:
+        msg = await message.channel.send("📅 小俠正在把未來兩週生活排進 Google Calendar；既有行程不會被覆蓋……")
+        try:
+            result = await _xiaoxia_calendar_plan_14_days()
+            created = result.get("created") or []
+            preview = "\n".join(f"• {r.get('date')} {str(r.get('start') or '')[11:16]}｜{r.get('title')}" for r in created[:12])
+            more = f"\n…另有 {len(created)-12} 筆" if len(created) > 12 else ""
+            await msg.edit(content="✅ **小俠兩週 Planner 完成**\n" + f"新增活動：{len(created)} 筆\n" + (preview or "沒有需要新增的活動。") + more + "\n\n既有 Calendar 行程保留不動；週末只排 0～1 個自主活動。")
+        except Exception as exc:
+            await msg.edit(content=f"❌ 兩週 Planner 失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+
+    if raw in {"review", "檢查", "週檢查", "review下週"}:
+        msg = await message.channel.send("📅 小俠正在 review 下一週 Calendar，並補齊兩週滾動生活視窗……")
+        try:
+            result = await _xiaoxia_calendar_review_next_week()
+            await msg.edit(content=(
+                "✅ **小俠 Calendar Review 完成**\n"
+                f"下一週既有事件：{len(result.get('reviewed') or [])} 筆\n"
+                f"鎖定事件：{len(result.get('locked') or [])} 筆\n"
+                f"本次補入活動：{len(result.get('planner_created') or [])} 筆\n"
+                "目前採保守模式：Calendar 現況就是權威，不自動移動或刪除大俠已調整事件。"
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ Calendar Review 失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
 
     if raw in {"更新", "refresh", "同步"}:
@@ -31682,6 +31920,12 @@ async def main():
     )
     print("📅 [LOBSTER_MAIN] Calendar scheduler task created independently")
 
+    calendar_weekly_planner_task = asyncio.create_task(
+        _xiaoxia_calendar_weekly_planner_scheduler(),
+        name="xiaoxia_calendar_weekly_planner_scheduler",
+    )
+    print("📅 [LOBSTER_MAIN] Weekly Calendar Planner scheduler task created independently")
+
     try:
         await asyncio.gather(
             server.serve(),
@@ -31691,8 +31935,14 @@ async def main():
     finally:
         if not calendar_scheduler_task.done():
             calendar_scheduler_task.cancel()
+        if not calendar_weekly_planner_task.done():
+            calendar_weekly_planner_task.cancel()
         try:
             await calendar_scheduler_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await calendar_weekly_planner_task
         except asyncio.CancelledError:
             pass
         print("🛑 [LOBSTER_MAIN_EXIT]")
