@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.25"
+LOBSTER_VERSION = "1.10.26"
 
 
 def _normalize_generation_level(level):
@@ -3480,6 +3480,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         context = await _generate_photo_from_context(context, msg=status)
         share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
         context["message"] = share_text
+        context["autonomy_share_text"] = share_text
+        context["original_autonomy_share_text"] = share_text
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
         context["autonomy_activity"] = activity
         context["visual_mode"] = visual_mode
@@ -19003,6 +19005,7 @@ async def _repair_photo_context(context, repair_request, msg=None):
         "allow_background_bystanders": bool(context.get("allow_background_bystanders") or context.get("diary_allow_background_bystanders")),
         "diary_allow_background_bystanders": bool(context.get("diary_allow_background_bystanders")),
     })
+    repaired = _inherit_autonomy_presentation(context, repaired)
     trace_context["result_url"] = local_url
     _write_generation_trace("repair", trace_context)
     return repaired
@@ -19725,6 +19728,76 @@ def _compact_scene_title(context, fallback="快門瞬間"):
     base = re.sub(r"\s+", " ", base).strip()
     return base[:48] if base else fallback
 
+def _autonomy_display_share_text(context):
+    """Return the canonical human-facing autonomy share text for original/More/Dice/Repair/Hybrid descendants."""
+    context = context if isinstance(context, dict) else {}
+    candidates = [
+        context.get("autonomy_share_text"),
+        context.get("original_autonomy_share_text"),
+        context.get("share_text"),
+        context.get("message"),
+    ]
+    generic_prefix = re.compile(r"^\s*大俠按下\s*/photo\s*留住這一刻[。.!！]?\s*", flags=re.I)
+    generic_only = {"大俠按下 /photo 留住這一刻。", "大俠按下/photo 留住這一刻。"}
+    fallback_action = ""
+    for raw in candidates:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value in generic_only:
+            continue
+        cleaned = generic_prefix.sub("", value).strip()
+        if cleaned and cleaned != value:
+            fallback_action = cleaned
+            continue
+        if cleaned:
+            return cleaned
+
+    # Old contexts created before v1.10.26 may not carry autonomy_share_text.
+    # Recover it from today's canonical autonomy state when the lineage still matches.
+    try:
+        state = load_xiaoxia_autonomy_state()
+        today = state.get("today") if isinstance(state, dict) and isinstance(state.get("today"), dict) else {}
+        if today and _autonomy_context_matches_today(today, context):
+            recovered = str(today.get("share_text") or "").strip()
+            if recovered:
+                return recovered
+    except Exception:
+        pass
+    return fallback_action or str(context.get("action_summary") or "").strip()
+
+
+def _inherit_autonomy_presentation(source_context, target_context):
+    """Keep /小俠自主's narrative/UI lineage intact across More, Dice, Repair and Hybrid variants."""
+    source = source_context if isinstance(source_context, dict) else {}
+    target = target_context if isinstance(target_context, dict) else {}
+    if not _is_autonomy_context(source):
+        return target
+
+    share_text = _autonomy_display_share_text(source)
+    target["source_module"] = "autonomy"
+    target["image_role"] = source.get("image_role") or "autonomy_today_image"
+    target["photo_mode_override"] = source.get("photo_mode_override") or "xiaoxia_autonomy"
+    if share_text:
+        target["message"] = share_text
+        target["autonomy_share_text"] = share_text
+        target["original_autonomy_share_text"] = str(source.get("original_autonomy_share_text") or source.get("autonomy_share_text") or share_text).strip()
+
+    # These are the activity's semantic/display facts. Derived images may vary camera/pose,
+    # but must not collapse back to generic /photo copy or a shortened scene summary.
+    for key in (
+        "autonomy_activity", "episode_id", "episode_angle", "episode_plan", "visual_mode",
+        "photo_name", "title", "activity_title", "scene_text", "scene_summary",
+        "authoritative_scene", "root_prompt_base", "outfit_summary", "action_summary",
+        "wardrobe_id", "wardrobe_name", "wardrobe_reason", "wardrobe_selection",
+        "wardrobe_source_mode", "reference_item_path", "reference_item_url",
+    ):
+        value = source.get(key)
+        if value not in (None, "", [], {}):
+            target[key] = value
+    return target
+
+
 def _photo_context_root_scene_prompt(context):
     """回到最原始的單一場景短文，避免 More / 骰子 / 修圖一路把附加說明疊到 prompt 裡。"""
     context = context if isinstance(context, dict) else {}
@@ -19785,7 +19858,10 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
             description = user_instruction or f"「{album_title}」第 {shot_number} 張。"
     else:
         raw_title = f"{title_prefix}｜{_compact_scene_title(context)}"
-        description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
+        if _is_autonomy_context(context):
+            description = _autonomy_display_share_text(context) or str(context.get("action_summary") or "小俠今天的自主生活片刻。")
+        else:
+            description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
 
     embed = discord.Embed(
         title=str(raw_title)[:256],
@@ -19801,6 +19877,8 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
     is_diary = str(context.get("source_mode") or context.get("type") or "").lower() == "diary"
     if (not is_photobook) and is_diary and (context.get("authoritative_scene") or context.get("composition")):
         embed.add_field(name="📸 寫真構想", value=str(context.get("authoritative_scene") or context.get("composition"))[:1024], inline=False)
+    elif (not is_photobook) and _is_autonomy_context(context) and (context.get("authoritative_scene") or context.get("scene_summary")):
+        embed.add_field(name="場景", value=str(context.get("authoritative_scene") or context.get("scene_summary"))[:1024], inline=False)
     elif (not is_photobook) and context.get("scene_summary"):
         embed.add_field(name="場景", value=str(context.get("scene_summary"))[:900], inline=False)
     if context.get("outfit_summary"):
@@ -19879,6 +19957,7 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
 
 
 async def _generate_photo_from_context(context, msg=None):
+    source_context_for_presentation = dict(context or {})
     # v1.8.11：Title + Scene 是生圖語意契約；authoritative_scene 是唯一審圖 Scene。
     # scene_text / scene_summary 只可作 UI、索引、摘要或 fallback，不得覆蓋 authoritative_scene。
     semantic_scene = _clean_text_compact(
@@ -20045,6 +20124,7 @@ async def _generate_photo_from_context(context, msg=None):
         "cosplay_clothing_ref_summary": trace_context.get("cosplay_clothing_ref_summary") or context.get("cosplay_clothing_ref_summary") or "",
         "cosplay_clothing_ref_analysis": trace_context.get("cosplay_clothing_ref_analysis") or context.get("cosplay_clothing_ref_analysis") or {},
     })
+    context = _inherit_autonomy_presentation(source_context_for_presentation, context)
     trace_context.update({
         "source_mode": context.get("source_mode"),
         "generation_mode": generation_mode,
@@ -21823,6 +21903,8 @@ async def _create_autonomy_context_for_full_reroll(original_context, msg=None):
     context = await _generate_photo_from_context(context, msg=msg)
     share_text = await _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, result_context=context, thread_context=thread_context, episode_plan=episode_plan)
     context["message"] = share_text
+    context["autonomy_share_text"] = share_text
+    context["original_autonomy_share_text"] = share_text
     context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
     context["autonomy_activity"] = activity
     context["visual_mode"] = visual_mode
@@ -23014,6 +23096,7 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
         "v5_handoff_input_count": len(input_urls),
     })
     trace_context["result_url"] = local_url or generated_image_url
+    refined = _inherit_autonomy_presentation(source_context, refined)
     _trace_stage(trace_context, "seedream_v45_final_result_after_v5_background_handoff", data={"result_url": trace_context["result_url"]})
     _write_generation_trace("photo", trace_context)
     return refined
@@ -23269,6 +23352,7 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
         "seedream_v45_more_result_with_reused_v5_background" if is_more else "seedream_v45_reroll_result_with_reused_v5_background",
         data={"result_url": trace_context["result_url"]},
     )
+    regenerated = _inherit_autonomy_presentation(source_context, regenerated)
     _write_generation_trace("photo", trace_context)
     return regenerated
 
