@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.31"
+LOBSTER_VERSION = "1.10.33_R1"
 
 
 def _normalize_generation_level(level):
@@ -502,7 +502,7 @@ import random
 import shutil
 from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import base64  # 🌟 補上這個，用來將加密代碼轉回圖片
 
 import discord
@@ -611,6 +611,9 @@ XIAOXIA_AUTONOMY_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_state.j
 XIAOXIA_AUTONOMY_EPISODE_LOG_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_episode_log.json") # 🌱 R4：自主活動 episode 長期紀錄
 XIAOXIA_AUTONOMY_THREADS_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_threads.json") # 🌱 R4：自主活動主題線索引
 XIAOXIA_AUTONOMY_SELECTION_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_autonomy_selection_cache.json") # 🌱 R4：指定類別/活動清單快取
+XIAOXIA_CALENDAR_CACHE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_cache.json") # 📅 v1.10.33：未來14天快取
+XIAOXIA_CALENDAR_CONTEXT_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_context.json") # 📅 v1.10.33：近3天聊天摘要
+XIAOXIA_DAILY_MAINLINE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_daily_mainline.json") # 📅 v1.10.33：今日活動主線
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_promise_daily_report_state.json")
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
@@ -672,6 +675,23 @@ XIAOXIA_AUTONOMY_ACTIVE_END_HOUR = _env_int("XIAOXIA_AUTONOMY_ACTIVE_END_HOUR", 
 XIAOXIA_AUTONOMY_CHANNEL_ID = _env_int("XIAOXIA_AUTONOMY_CHANNEL_ID", 0, 0, None)
 XIAOXIA_AUTONOMY_CHANNEL_NAME = os.environ.get("XIAOXIA_AUTONOMY_CHANNEL_NAME", "唐分糕").strip() or "唐分糕"
 
+
+# 📅 v1.10.32：女友小俠專用 Google Calendar
+# 與既有小夏/工作用 GOOGLE_* OAuth 完全分離，避免覆蓋原本服務。
+XIAOXIA_GOOGLE_CLIENT_ID = (os.environ.get("XIAOXIA_GOOGLE_CLIENT_ID") or "").strip()
+XIAOXIA_GOOGLE_CLIENT_SECRET = (os.environ.get("XIAOXIA_GOOGLE_CLIENT_SECRET") or "").strip()
+XIAOXIA_GOOGLE_REFRESH_TOKEN = (os.environ.get("XIAOXIA_GOOGLE_REFRESH_TOKEN") or "").strip()
+XIAOXIA_GOOGLE_CALENDAR_ID = (os.environ.get("XIAOXIA_GOOGLE_CALENDAR_ID") or "primary").strip() or "primary"
+XIAOXIA_GOOGLE_CALENDAR_SCOPE = (
+    os.environ.get("XIAOXIA_GOOGLE_CALENDAR_SCOPE")
+    or "https://www.googleapis.com/auth/calendar.events"
+).strip()
+
+_XIAOXIA_CALENDAR_TOKEN_CACHE = {
+    "access_token": "",
+    "expires_at": 0.0,
+}
+
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
 WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
 WARDROBE_IMPORT_DIR = os.path.join(WARDROBE_DIR, "imports")
@@ -709,6 +729,718 @@ os.makedirs(GENERATION_TRACE_DIR, exist_ok=True)
 os.makedirs(FATE_CARD_DIR, exist_ok=True)
 PHOTO_USER_REF_DIR = os.path.join(SEEDREAM_V45_REF_DIR, "user_refs")
 os.makedirs(PHOTO_USER_REF_DIR, exist_ok=True)
+
+
+# ==========================================
+# 📅 v1.10.32：女友小俠 Google Calendar MVP
+# ==========================================
+def _xiaoxia_calendar_config_status():
+    missing = []
+    if not XIAOXIA_GOOGLE_CLIENT_ID:
+        missing.append("XIAOXIA_GOOGLE_CLIENT_ID")
+    if not XIAOXIA_GOOGLE_CLIENT_SECRET:
+        missing.append("XIAOXIA_GOOGLE_CLIENT_SECRET")
+    if not XIAOXIA_GOOGLE_REFRESH_TOKEN:
+        missing.append("XIAOXIA_GOOGLE_REFRESH_TOKEN")
+    return {
+        "configured": not missing,
+        "missing": missing,
+        "calendar_id": XIAOXIA_GOOGLE_CALENDAR_ID,
+        "scope": XIAOXIA_GOOGLE_CALENDAR_SCOPE,
+    }
+
+
+async def _xiaoxia_calendar_access_token(force_refresh=False):
+    """以 refresh token 換短效 access token；只存在記憶體，不把 token 寫進 repo / volume。"""
+    import time as _time
+    now_ts = _time.time()
+    cached = str(_XIAOXIA_CALENDAR_TOKEN_CACHE.get("access_token") or "").strip()
+    expires_at = float(_XIAOXIA_CALENDAR_TOKEN_CACHE.get("expires_at") or 0.0)
+
+    if cached and not force_refresh and now_ts < (expires_at - 60):
+        return cached
+
+    status = _xiaoxia_calendar_config_status()
+    if not status["configured"]:
+        raise RuntimeError("XIAOXIA_CALENDAR_ENV_MISSING: " + ", ".join(status["missing"]))
+
+    payload = {
+        "client_id": XIAOXIA_GOOGLE_CLIENT_ID,
+        "client_secret": XIAOXIA_GOOGLE_CLIENT_SECRET,
+        "refresh_token": XIAOXIA_GOOGLE_REFRESH_TOKEN,
+        "grant_type": "refresh_token",
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://oauth2.googleapis.com/token", data=payload) as resp:
+            body = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"GOOGLE_TOKEN_HTTP_{resp.status}: {body[:800]}")
+            try:
+                data = json.loads(body)
+            except Exception:
+                raise RuntimeError(f"GOOGLE_TOKEN_BAD_JSON: {body[:800]}")
+
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError(f"GOOGLE_TOKEN_MISSING_ACCESS_TOKEN: {str(data)[:800]}")
+    expires_in = int(data.get("expires_in") or 3600)
+    _XIAOXIA_CALENDAR_TOKEN_CACHE["access_token"] = token
+    _XIAOXIA_CALENDAR_TOKEN_CACHE["expires_at"] = now_ts + max(60, expires_in)
+    return token
+
+
+def _xiaoxia_calendar_event_url(event_id=None):
+    base = (
+        "https://www.googleapis.com/calendar/v3/calendars/"
+        + quote(XIAOXIA_GOOGLE_CALENDAR_ID, safe="")
+        + "/events"
+    )
+    if event_id:
+        return base + "/" + quote(str(event_id), safe="")
+    return base
+
+
+async def _xiaoxia_calendar_request(method, url, *, params=None, json_body=None, retry_auth=True):
+    token = await _xiaoxia_calendar_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(
+            method.upper(),
+            url,
+            headers=headers,
+            params=params,
+            json=json_body,
+        ) as resp:
+            body = await resp.text()
+
+    if resp.status == 401 and retry_auth:
+        await _xiaoxia_calendar_access_token(force_refresh=True)
+        return await _xiaoxia_calendar_request(
+            method,
+            url,
+            params=params,
+            json_body=json_body,
+            retry_auth=False,
+        )
+
+    if resp.status >= 400:
+        raise RuntimeError(f"GOOGLE_CALENDAR_HTTP_{resp.status}: {body[:1200]}")
+
+    if resp.status == 204 or not body.strip():
+        return {}
+    try:
+        return json.loads(body)
+    except Exception:
+        raise RuntimeError(f"GOOGLE_CALENDAR_BAD_JSON: {body[:1200]}")
+
+
+async def _xiaoxia_calendar_list_events(start_dt=None, end_dt=None, max_results=50):
+    start_dt = start_dt or datetime.now(TZ_TPE)
+    end_dt = end_dt or (start_dt + timedelta(days=14))
+    params = {
+        "timeMin": start_dt.isoformat(),
+        "timeMax": end_dt.isoformat(),
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": str(max(1, min(int(max_results or 50), 2500))),
+    }
+    data = await _xiaoxia_calendar_request("GET", _xiaoxia_calendar_event_url(), params=params)
+    return list(data.get("items") or [])
+
+
+async def _xiaoxia_calendar_create_event(
+    summary,
+    start_dt,
+    end_dt,
+    *,
+    description="",
+    location="",
+):
+    body = {
+        "summary": str(summary or "").strip() or "小俠行程",
+        "description": str(description or "").strip(),
+        "start": {
+            "dateTime": start_dt.isoformat(),
+            "timeZone": "Asia/Taipei",
+        },
+        "end": {
+            "dateTime": end_dt.isoformat(),
+            "timeZone": "Asia/Taipei",
+        },
+    }
+    if location:
+        body["location"] = str(location).strip()
+    return await _xiaoxia_calendar_request("POST", _xiaoxia_calendar_event_url(), json_body=body)
+
+
+async def _xiaoxia_calendar_update_event(event_id, patch):
+    if not event_id:
+        raise ValueError("event_id is required")
+    return await _xiaoxia_calendar_request(
+        "PATCH",
+        _xiaoxia_calendar_event_url(event_id),
+        json_body=dict(patch or {}),
+    )
+
+
+async def _xiaoxia_calendar_delete_event(event_id):
+    if not event_id:
+        raise ValueError("event_id is required")
+    return await _xiaoxia_calendar_request("DELETE", _xiaoxia_calendar_event_url(event_id))
+
+
+def _xiaoxia_calendar_event_start_text(event):
+    start = (event or {}).get("start") or {}
+    raw = str(start.get("dateTime") or start.get("date") or "").strip()
+    if not raw:
+        return "時間未定"
+    if "T" not in raw:
+        return raw + "（全天）"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(TZ_TPE)
+        return dt.strftime("%m/%d（%a） %H:%M").replace(
+            "Mon", "一").replace("Tue", "二").replace("Wed", "三").replace(
+            "Thu", "四").replace("Fri", "五").replace("Sat", "六").replace("Sun", "日")
+    except Exception:
+        return raw[:16]
+
+
+async def _xiaoxia_calendar_connection_test():
+    """
+    Zeabur 端完整 CRUD smoke test：
+    list -> create -> patch -> delete。
+    測試 event 約 15 分鐘後開始，完成後自動刪除。
+    """
+    now_dt = datetime.now(TZ_TPE)
+    result = {
+        "list_ok": False,
+        "create_ok": False,
+        "update_ok": False,
+        "delete_ok": False,
+        "event_id": "",
+    }
+
+    existing = await _xiaoxia_calendar_list_events(now_dt, now_dt + timedelta(days=14), max_results=5)
+    result["list_ok"] = True
+    result["existing_count"] = len(existing)
+
+    start_dt = now_dt + timedelta(minutes=15)
+    end_dt = start_dt + timedelta(minutes=30)
+    created = None
+    try:
+        created = await _xiaoxia_calendar_create_event(
+            "🧪 Xiaoxia Zeabur Calendar Test",
+            start_dt,
+            end_dt,
+            description=(
+                "v1.10.32 Zeabur 端 Calendar API 測試。\n"
+                "程式會自動修改後刪除此活動。"
+            ),
+        )
+        event_id = str(created.get("id") or "")
+        result["event_id"] = event_id
+        result["create_ok"] = bool(event_id)
+        if not event_id:
+            raise RuntimeError("CREATE_RETURNED_NO_EVENT_ID")
+
+        updated = await _xiaoxia_calendar_update_event(
+            event_id,
+            {
+                "summary": "🧪 Xiaoxia Zeabur Calendar Test｜修改成功",
+                "description": (
+                    "v1.10.32 Zeabur 端 Calendar API 測試。\n"
+                    "修改測試：成功。\n"
+                    "程式稍後會自動刪除此活動。"
+                ),
+            },
+        )
+        result["update_ok"] = bool(updated.get("id") == event_id)
+
+        await _xiaoxia_calendar_delete_event(event_id)
+        result["delete_ok"] = True
+        return result
+    except Exception:
+        # create 成功但 update 失敗時，best effort 清掉測試垃圾。
+        if created and result.get("event_id") and not result.get("delete_ok"):
+            try:
+                await _xiaoxia_calendar_delete_event(result["event_id"])
+                result["cleanup_delete_ok"] = True
+            except Exception as cleanup_exc:
+                result["cleanup_delete_error"] = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+        raise
+
+
+
+def _xiaoxia_calendar_normalize_event(event):
+    event = event if isinstance(event, dict) else {}
+    start = event.get("start") or {}
+    end = event.get("end") or {}
+    return {
+        "id": str(event.get("id") or ""),
+        "summary": _clean_text_compact(event.get("summary") or "未命名行程"),
+        "description": str(event.get("description") or "").strip(),
+        "location": str(event.get("location") or "").strip(),
+        "start": start.get("dateTime") or start.get("date") or "",
+        "end": end.get("dateTime") or end.get("date") or "",
+        "updated": str(event.get("updated") or ""),
+    }
+
+def _xiaoxia_calendar_parse_event_dt(raw):
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    try:
+        if "T" in raw:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(TZ_TPE)
+        d = datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        return datetime.combine(d, time.min, tzinfo=TZ_TPE)
+    except Exception:
+        return None
+
+def _xiaoxia_calendar_event_date(event):
+    dt = _xiaoxia_calendar_parse_event_dt((event or {}).get("start"))
+    return dt.date() if dt else None
+
+def _xiaoxia_calendar_event_time_text(event):
+    raw = str((event or {}).get("start") or "")
+    if "T" not in raw:
+        return "全天"
+    dt = _xiaoxia_calendar_parse_event_dt(raw)
+    return dt.strftime("%H:%M") if dt else raw[11:16]
+
+def _xiaoxia_calendar_parse_description_metadata(description):
+    meta, body = {}, []
+    for raw in str(description or "").splitlines():
+        m = re.match(r"^(同行|來源|鎖定|類型)\s*[：:]\s*(.+)$", raw.strip())
+        if m:
+            meta[m.group(1)] = m.group(2).strip()
+        else:
+            body.append(raw)
+    meta["body"] = "\n".join(body).strip()
+    return meta
+
+def _xiaoxia_calendar_load(path):
+    data = _load_json_file_or_default(path, {})
+    return data if isinstance(data, dict) else {}
+
+def _xiaoxia_calendar_save(path, payload):
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def _xiaoxia_calendar_three_day_context(events, now_dt):
+    out = {"updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"), "today": [], "tomorrow": [], "day_after_tomorrow": []}
+    date_map = {
+        now_dt.date(): "today",
+        (now_dt + timedelta(days=1)).date(): "tomorrow",
+        (now_dt + timedelta(days=2)).date(): "day_after_tomorrow",
+    }
+    for ev in events:
+        key = date_map.get(_xiaoxia_calendar_event_date(ev))
+        if not key:
+            continue
+        meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+        out[key].append({
+            "id": ev.get("id"),
+            "time": _xiaoxia_calendar_event_time_text(ev),
+            "title": ev.get("summary") or "未命名行程",
+            "location": ev.get("location") or "",
+            "companions": meta.get("同行") or "",
+            "source": meta.get("來源") or "",
+            "type": meta.get("類型") or "",
+            "locked": meta.get("鎖定") or "",
+        })
+    for key in ("today", "tomorrow", "day_after_tomorrow"):
+        out[key].sort(key=lambda x: (x.get("time") or "", x.get("title") or ""))
+    return out
+
+def _xiaoxia_calendar_recent_context_text():
+    ctx = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CONTEXT_PATH)
+    if not ctx:
+        return ""
+    lines = ["【小俠近日行程｜Calendar】"]
+    for key, label in (("today", "今天"), ("tomorrow", "明天"), ("day_after_tomorrow", "後天")):
+        rows = ctx.get(key) or []
+        if not rows:
+            lines.append(f"{label}：目前沒有已排定行程。")
+            continue
+        items = []
+        for row in rows[:8]:
+            who = f"（同行：{row.get('companions')}）" if row.get("companions") else ""
+            loc = f" @ {row.get('location')}" if row.get("location") else ""
+            items.append(f"{row.get('time')} {row.get('title')}{who}{loc}")
+        lines.append(f"{label}：" + "；".join(items))
+    lines.append("以上是已知行程；未發生的行程不得當成已發生。")
+    return "\n".join(lines)
+
+def _xiaoxia_daily_mainline_for_chat_text():
+    data = _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH)
+    if str(data.get("date") or "") != datetime.now(TZ_TPE).strftime("%Y-%m-%d"):
+        return ""
+    rows = data.get("activities") or []
+    if not rows:
+        return ""
+    lines = ["【小俠今日活動主線｜只知道主線，不知道未來劇情】"]
+    for row in rows[:8]:
+        lines.append(f"- {row.get('time')}｜{row.get('title')}：{row.get('mainline')}")
+    lines.append("不可提前預告未發生的細節。")
+    return "\n".join(lines)
+
+def _xiaoxia_calendar_find_activity_seed(title):
+    catalog = load_xiaoxia_activity_catalog()
+    items = catalog.get("activities") if isinstance(catalog, dict) else catalog
+    if not isinstance(items, list):
+        return None
+    title = _clean_text_compact(title or "")
+    exact, partial = [], []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        it = _clean_text_compact(item.get("title") or "")
+        if it == title:
+            exact.append(item)
+        elif it and (it in title or title in it):
+            partial.append(item)
+    return (exact or partial or [None])[0]
+
+def _xiaoxia_calendar_recent_episode_for_event(title):
+    rows = _load_json_file_or_default(XIAOXIA_AUTONOMY_EPISODE_LOG_PATH, [])
+    if not isinstance(rows, list):
+        return None
+    title = _clean_text_compact(title or "")
+    for row in reversed(rows[-100:]):
+        if not isinstance(row, dict):
+            continue
+        rt = _clean_text_compact(row.get("activity_title") or row.get("title") or "")
+        if rt and (rt == title or rt in title or title in rt):
+            return row
+    return None
+
+async def _xiaoxia_generate_today_mainline(today_events, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    activities = []
+    for ev in today_events:
+        title = _clean_text_compact(ev.get("summary") or "未命名行程")
+        meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+        seed = _xiaoxia_calendar_find_activity_seed(title)
+        episode = _xiaoxia_calendar_recent_episode_for_event(title)
+
+        if isinstance(episode, dict):
+            base = _clean_text_compact(
+                episode.get("episode_summary") or episode.get("summary") or episode.get("what_happened")
+                or episode.get("progress_focus") or episode.get("episode_angle") or ""
+            )
+            source = "既有 episode"
+        elif isinstance(seed, dict):
+            base = _clean_text_compact(
+                seed.get("seed_prompt") or seed.get("description") or seed.get("scene") or seed.get("title") or ""
+            )
+            source = "活動種子"
+        elif meta.get("body"):
+            base, source = _clean_text_compact(meta.get("body") or ""), "Calendar 說明"
+        else:
+            base, source = title, "Calendar 行程"
+
+        prompt = f"""你是女友小俠生活線的今日主線編劇助手。
+只替今天這一筆已排定活動寫一個非常簡短的「主線」，讓小俠知道今天這件事目前大概要做什麼、走到哪裡。
+不要預言今天會發生什麼，不要寫可能事件，不要寫 future hook，不要安排結果、巧遇或驚喜。
+若有既有 episode，只延續目前階段，不要跨很多階段。
+活動：{title}
+時間：{_xiaoxia_calendar_event_time_text(ev)}
+來源：{source}
+可用背景：{base[:1200]}
+只回傳一行繁體中文，40~90字，不要標題、不用 JSON。"""
+        try:
+            r = await gemini_client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.35),
+            )
+            mainline = _clean_text_compact(getattr(r, "text", "") or "")
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_DAILY_MAINLINE_GEMINI_FAILED] title={title} {type(exc).__name__}: {exc}")
+            mainline = ""
+
+        if not mainline:
+            mainline = f"依今天已排定的「{title}」自然進行，不預設結果。"
+
+        activities.append({
+            "event_id": ev.get("id"),
+            "time": _xiaoxia_calendar_event_time_text(ev),
+            "title": title,
+            "mainline": mainline,
+            "source": source,
+        })
+
+    payload = {
+        "date": now_dt.strftime("%Y-%m-%d"),
+        "generated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "activities": activities,
+        "rule": "only_mainline_no_future_plot",
+    }
+    _xiaoxia_calendar_save(XIAOXIA_DAILY_MAINLINE_PATH, payload)
+    return payload
+
+async def _xiaoxia_calendar_refresh_cache(*, reason="manual", regenerate_today=True):
+    now_dt = datetime.now(TZ_TPE)
+    raw = await _xiaoxia_calendar_list_events(
+        now_dt.replace(hour=0, minute=0, second=0, microsecond=0),
+        now_dt + timedelta(days=14),
+        max_results=250,
+    )
+    events = [_xiaoxia_calendar_normalize_event(x) for x in raw if isinstance(x, dict)]
+    cache = {
+        "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason,
+        "window_start": now_dt.strftime("%Y-%m-%d"),
+        "window_end": (now_dt + timedelta(days=14)).strftime("%Y-%m-%d"),
+        "event_count": len(events),
+        "events": events,
+    }
+    _xiaoxia_calendar_save(XIAOXIA_CALENDAR_CACHE_PATH, cache)
+    ctx = _xiaoxia_calendar_three_day_context(events, now_dt)
+    _xiaoxia_calendar_save(XIAOXIA_CALENDAR_CONTEXT_PATH, ctx)
+    if regenerate_today:
+        today_events = [x for x in events if _xiaoxia_calendar_event_date(x) == now_dt.date()]
+        await _xiaoxia_generate_today_mainline(today_events, now_dt)
+    print(f"📅 [XIAOXIA_CALENDAR_CACHE_REFRESHED] reason={reason} events={len(events)}")
+    return {"cache": cache, "context": ctx, "daily_mainline": _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH)}
+
+def _xiaoxia_calendar_mentions_non_near_term(user_text):
+    t = str(user_text or "")
+    return any(k in t for k in ("下週","下下週","下個星期","月底","這個月","下個月","幾號","哪一天","什麼時候","行程","月曆","日曆")) or bool(re.search(r"\b\d{1,2}[/-]\d{1,2}\b", t))
+
+def _xiaoxia_calendar_relevant_cache_text(user_text):
+    if not _xiaoxia_calendar_mentions_non_near_term(user_text):
+        return ""
+    cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+    events = cache.get("events") or []
+    if not events:
+        return ""
+    lines = ["【小俠未來14天行程快取】"]
+    for ev in events[:12]:
+        dt = _xiaoxia_calendar_parse_event_dt(ev.get("start"))
+        when = dt.strftime("%m/%d %H:%M") if dt else str(ev.get("start") or "")
+        lines.append(f"- {when}｜{ev.get('summary')}")
+    lines.append("若大俠剛手動改 Google Calendar，先用 /小俠月曆 更新。")
+    return "\n".join(lines)
+
+def _daxia_reality_context_text(now_dt=None, user_text=""):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    wd = now_dt.weekday()
+    t = str(user_text or "")
+    explicit_home = bool(re.search(r"(今天|我).{0,6}(休假|請假|放假|在家工作|居家辦公|WFH)", t, re.I))
+    explicit_out = bool(re.search(r"(今天|我).{0,6}(出差|外出|不在公司)", t, re.I))
+    if explicit_home:
+        state = "大俠今天已明確表示休假／請假／在家工作；不要假設他人在公司。"
+    elif explicit_out:
+        state = "大俠今天已明確表示出差或不在公司；不要套用一般公司位置。"
+    elif wd >= 5:
+        state = "今天是週末，預設休假；除非大俠另說要上班。"
+    elif 7 <= now_dt.hour < 18:
+        state = "今天是一般週間；正常工時08:00–17:00。07:00–18:00若無例外說明，預設大俠人在公司、通勤或準備上下班，不要描述他正和小俠在家中同一空間。"
+    else:
+        state = "今天是一般週間，但目前不在07:00–18:00公司預設時段。"
+    return (
+        "【大俠當下生活狀態】\n"
+        f"時間：{now_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        "正常工時：08:00–17:00\n"
+        "公司/通勤預設時段：07:00–18:00\n"
+        f"判定：{state}\n"
+        "國定假日：v1.10.33 暫不判定。"
+    )
+
+def _xiaoxia_calendar_chat_context(user_text):
+    """Calendar/reality context is enrichment only; any failure must never break ordinary chat."""
+    try:
+        return "\n\n".join(x for x in (
+            _daxia_reality_context_text(user_text=user_text),
+            _xiaoxia_calendar_recent_context_text(),
+            _xiaoxia_daily_mainline_for_chat_text(),
+            _xiaoxia_calendar_relevant_cache_text(user_text),
+        ) if x).strip()
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_CALENDAR_CHAT_CONTEXT_FAILED_OPEN] {type(exc).__name__}: {exc}")
+        return ""
+
+async def _handle_xiaoxia_calendar_message_direct(message):
+    """
+    v1.10.32 MVP commands:
+      /小俠月曆
+      /小俠月曆 狀態
+      /小俠月曆 測試
+      /小俠月曆 未來14天
+      /小俠月曆 本週
+      /小俠月曆 下週
+
+    此版只驗證 Zeabur 與女友小俠 Calendar 的獨立 OAuth CRUD，
+    尚不接 weekly planner / autonomy 排程，避免一次改太多。
+    """
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/小俠月曆(?:\s+|$)", content, flags=re.IGNORECASE):
+        return False
+
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/小俠月曆` 目前只在女友小俠頻道使用。")
+        return True
+
+    raw = re.sub(r"^/小俠月曆(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    status = _xiaoxia_calendar_config_status()
+
+    if raw in {"", "help", "幫助", "說明"}:
+        configured_text = "✅ 已設定" if status["configured"] else "❌ 尚缺：" + ", ".join(status["missing"])
+        await message.channel.send(
+            "📅 **小俠月曆 v1.10.32 MVP**\n"
+            f"OAuth 環境變數：{configured_text}\n"
+            f"Calendar ID：`{status['calendar_id']}`\n\n"
+            "可用：\n"
+            "• `/小俠月曆 狀態`\n"
+            "• `/小俠月曆 測試` → Zeabur 端執行讀取/新增/修改/刪除並自動清理\n"
+            "• `/小俠月曆 更新` → 同步14天快取＋近3天摘要＋今日主線\n"
+            "• `/小俠月曆 未來14天`\n"
+            "• `/小俠月曆 本週`\n"
+            "• `/小俠月曆 下週`\n\n"
+            "v1.10.33：聊天會讀近3天行程與今日活動主線。"
+        )
+        return True
+
+    if raw in {"狀態", "status"}:
+        if not status["configured"]:
+            await message.channel.send(
+                "📅 **小俠月曆連線狀態：未完成**\n"
+                "缺少：" + ", ".join(f"`{x}`" for x in status["missing"])
+            )
+            return True
+        try:
+            events = await _xiaoxia_calendar_list_events(
+                datetime.now(TZ_TPE),
+                datetime.now(TZ_TPE) + timedelta(days=1),
+                max_results=3,
+            )
+            cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+            context = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CONTEXT_PATH)
+            mainline = _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH)
+            await message.channel.send(
+                "📅 **小俠月曆連線狀態：✅ 正常**\n"
+                f"Calendar ID：`{status['calendar_id']}`\n"
+                f"Scope：`{status['scope']}`\n"
+                f"未來 24 小時可讀事件：{len(events)} 筆\n"
+                f"14天快取最後更新：`{cache.get('updated_at') or '尚未建立'}`\n"
+                f"14天快取事件：{cache.get('event_count', 0)} 筆\n"
+                f"近3天摘要：{'✅' if context else '尚未建立'}\n"
+                f"今日主線：{'✅' if mainline and mainline.get('date') == datetime.now(TZ_TPE).strftime('%Y-%m-%d') else '尚未建立'}"
+            )
+        except Exception as exc:
+            await message.channel.send(
+                "📅 **小俠月曆連線狀態：❌ 失敗**\n"
+                f"`{type(exc).__name__}: {str(exc)[:1300]}`"
+            )
+        return True
+
+    if raw in {"更新", "refresh", "同步"}:
+        wait_msg = await message.channel.send("📅 小俠正在同步 Google Calendar：未來14天快取 → 近3天摘要 → 今日活動主線……")
+        try:
+            result = await _xiaoxia_calendar_refresh_cache(reason="discord_manual_refresh", regenerate_today=True)
+            cache = result.get("cache") or {}
+            daily = result.get("daily_mainline") or {}
+            await wait_msg.edit(content=(
+                "✅ **小俠月曆已更新**\n"
+                f"未來14天事件：{cache.get('event_count', 0)} 筆\n"
+                f"快取時間：`{cache.get('updated_at')}`\n"
+                f"今日主線活動：{len(daily.get('activities') or [])} 筆"
+            ))
+        except Exception as exc:
+            await wait_msg.edit(content=f"❌ 小俠月曆更新失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+
+    if raw in {"測試", "test"}:
+        if not status["configured"]:
+            await message.channel.send(
+                "❌ 小俠月曆環境變數尚未完整："
+                + ", ".join(f"`{x}`" for x in status["missing"])
+            )
+            return True
+        wait_msg = await message.channel.send(
+            "🧪 小俠正在從 **Zeabur** 測試自己的 Google Calendar：讀取 → 新增 → 修改 → 刪除……"
+        )
+        try:
+            result = await _xiaoxia_calendar_connection_test()
+            await wait_msg.edit(
+                content=(
+                    "✅ **小俠 Google Calendar｜Zeabur 端完整測試通過**\n"
+                    f"讀取：{'✅' if result.get('list_ok') else '❌'} "
+                    f"（原有近期事件 {result.get('existing_count', 0)} 筆）\n"
+                    f"新增：{'✅' if result.get('create_ok') else '❌'}\n"
+                    f"修改：{'✅' if result.get('update_ok') else '❌'}\n"
+                    f"刪除：{'✅' if result.get('delete_ok') else '❌'}\n\n"
+                    "測試活動已自動刪除；沒有在小俠月曆留下垃圾。"
+                )
+            )
+        except Exception as exc:
+            await wait_msg.edit(
+                content=(
+                    "❌ **小俠 Google Calendar｜Zeabur 端測試失敗**\n"
+                    f"`{type(exc).__name__}: {str(exc)[:1500]}`"
+                )
+            )
+        return True
+
+    now_dt = datetime.now(TZ_TPE)
+    if raw in {"未來14天", "14天", "未來兩週"}:
+        start_dt = now_dt
+        end_dt = now_dt + timedelta(days=14)
+        label = "未來 14 天"
+    elif raw in {"本週", "這週"}:
+        start_date = now_dt.date() - timedelta(days=now_dt.weekday())
+        start_dt = datetime.combine(start_date, time.min, tzinfo=TZ_TPE)
+        end_dt = start_dt + timedelta(days=7)
+        label = "本週"
+    elif raw in {"下週"}:
+        start_date = now_dt.date() - timedelta(days=now_dt.weekday()) + timedelta(days=7)
+        start_dt = datetime.combine(start_date, time.min, tzinfo=TZ_TPE)
+        end_dt = start_dt + timedelta(days=7)
+        label = "下週"
+    else:
+        await message.channel.send(
+            "我現在先支援：`/小俠月曆 狀態`、`測試`、`未來14天`、`本週`、`下週`。"
+        )
+        return True
+
+    try:
+        events = await _xiaoxia_calendar_list_events(start_dt, end_dt, max_results=80)
+    except Exception as exc:
+        await message.channel.send(
+            f"❌ 讀取小俠月曆失敗：`{type(exc).__name__}: {str(exc)[:1300]}`"
+        )
+        return True
+
+    if not events:
+        await message.channel.send(f"📅 **小俠月曆｜{label}**\n目前沒有任何已排定行程。")
+        return True
+
+    rows = []
+    for event in events[:30]:
+        title = _clean_text_compact(event.get("summary") or "未命名行程")
+        start_text = _xiaoxia_calendar_event_start_text(event)
+        rows.append(f"• **{start_text}**｜{title}")
+
+    more = ""
+    if len(events) > 30:
+        more = f"\n…另有 {len(events) - 30} 筆未顯示。"
+    await message.channel.send(
+        f"📅 **小俠月曆｜{label}**\n" + "\n".join(rows) + more
+    )
+    return True
+
 
 # ==========================================
 # 🧭 v1.4.82：Generation Trace Framework
@@ -25973,6 +26705,7 @@ async def diary_ui(ctx):
 
 @girlfriend_bot.event
 async def on_ready():
+    print(f"🟢 [GIRLFRIEND_ON_READY_ENTER] version={LOBSTER_VERSION} user={girlfriend_bot.user}")
     print(f'🌸 小俠 {girlfriend_bot.user} 已上線！網域：https://xiaoxia0320.zeabur.app')
     print("💗 /intimate 當下互動模式已載入：單獨輸入切換；同一則訊息後接正文也可直接啟用。")
     print("🧹 記憶欄位防護已載入：自動略過並清理缺少 text 的殘缺記憶。")
@@ -25980,6 +26713,18 @@ async def on_ready():
         print(f"🎴 今晚命運牌服務：{couple_game_service.status_text()}")
     except Exception as exc:
         print(f"⚠️ 今晚命運牌服務狀態讀取失敗：{type(exc).__name__}: {exc}")
+    try:
+        _cal_status = _xiaoxia_calendar_config_status()
+        if _cal_status.get("configured"):
+            print(
+                f"📅 小俠專用 Calendar：ENV=OK calendar={_cal_status.get('calendar_id')} "
+                f"scope={_cal_status.get('scope')}（尚未發 API，使用 /小俠月曆 測試 驗證）"
+            )
+        else:
+            print(f"⚠️ 小俠專用 Calendar 尚缺環境變數：{', '.join(_cal_status.get('missing') or [])}")
+    except Exception as exc:
+        print(f"⚠️ 小俠專用 Calendar 狀態讀取失敗：{type(exc).__name__}: {exc}")
+    print("📅 小俠月曆 01:00 排程由 main() 獨立背景 scheduler 管理。")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
@@ -26023,6 +26768,8 @@ async def on_ready():
     if not xiaoxia_love_score_invite_task.is_running():
         xiaoxia_love_score_invite_task.start()
         print("💗 小俠愛意 >95 候選邀請任務已啟動：每日 21:00 精準檢查。")
+
+    print("🟢 [GIRLFRIEND_ON_READY_EXIT] startup tasks configured")
 
 @girlfriend_bot.command(name='more')
 async def more(ctx):
@@ -27007,6 +27754,12 @@ async def life_events_cmd(ctx):
 @girlfriend_bot.event
 async def on_message(message):
     global daily_chat_logs
+    try:
+        if not getattr(message.author, "bot", False):
+            _rx = str(getattr(message, "content", "") or "").replace("\n", " ")[:120]
+            print(f"📨 [GIRLFRIEND_RX] channel={getattr(message.channel, 'id', None)} user={getattr(message.author, 'id', None)} text={_rx!r}")
+    except Exception:
+        pass
 
     # 0. 私人女友 Bot 不服務公開 2_Xiaoxia；亦不介入新舊故事頻道及其 Thread。
     if getattr(getattr(message.channel, "guild", None), "id", None) == PUBLIC_GUILD_ID:
@@ -27094,6 +27847,14 @@ async def on_message(message):
 
     # 2. 處理其他斜線指令
     if message.content.startswith('/') and not inline_intimate_text:
+        if message.content.strip().lower() == "/diary_ui":
+            try:
+                await message.channel.send("大俠，專屬交換日記本已經準備好了👇", view=DiaryButtonView())
+            except Exception as exc:
+                print(f"⚠️ [DIARY_UI_DIRECT_FAILED] {type(exc).__name__}: {exc}")
+                await message.channel.send(f"⚠️ 日記介面暫時開啟失敗：`{type(exc).__name__}: {str(exc)[:900]}`")
+            return
+
         # 🎭 /cosplay_delete 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_cosplay_delete_message_direct(message):
             return
@@ -27109,6 +27870,22 @@ async def on_message(message):
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_wardrobe_message_direct(message):
             return
+
+        # 📅 /小俠月曆：Calendar 是可選增強；Calendar 例外不得阻斷其他指令。
+        try:
+            if await _handle_xiaoxia_calendar_message_direct(message):
+                return
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_CALENDAR_DIRECT_HANDLER_FAILED_OPEN] {type(exc).__name__}: {exc}")
+            if message.content.startswith("/小俠月曆"):
+                try:
+                    await message.channel.send(
+                        f"⚠️ 小俠月曆暫時發生錯誤，但女友 Bot 仍會繼續運作："
+                        f"`{type(exc).__name__}: {str(exc)[:900]}`"
+                    )
+                except Exception:
+                    pass
+                return
 
         # 🌱 /小俠自主：v1.5.17 手動自主生活
         if await _handle_xiaoxia_autonomy_message_direct(message):
@@ -27411,6 +28188,7 @@ async def on_message(message):
                     "妳是小俠，24歲台灣女孩，是大俠親密、懂事且深情的女友。\n"
                     "妳喜歡以溫柔、俏皮、有陪伴感的方式和大俠互動。\n"
                     f"{GENERAL_SHARED_SCENE_RULES}\n"
+                    f"{_xiaoxia_calendar_chat_context(getattr(message, 'content', '') or '')}\n"
                     f"{COUPLE_GAME_BACKGROUND_RULE}\n"
                     f"{_asset_catalog_for_prompt()}\n\n"
                     + (
@@ -27433,7 +28211,7 @@ async def on_message(message):
                     "【核心行為守則】：\n"
                     "1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。\n"
                     "1-A. 本次連續會話紀錄的優先級高於長期記憶與事件摘要。必須記住本次聊天中已完成的動作、剛做出的選擇、已吃完的餐點、已下訂的物品與大俠剛糾正的事實；不可把已完成的事重新說成尚未開始。\n"
-                    "1-B. 在私人小俠頻道，除非大俠主動提到媒介、距離或分開，否則預設你們正在同一段共同生活情境中；即使只是一句早安，也要像身邊的人回應，不可把自己寫成傳訊息、讀文字或線上陪伴的人。\n"
+                    "1-B. 在私人小俠頻道，若【大俠當下生活狀態】明示他目前在公司、通勤、出差或不在家，該狀態優先，禁止硬寫成兩人在家中同一空間；只有沒有現實距離資訊時，才預設共同生活情境。即使只是一句早安，也不可把自己寫成客服或線上陪伴的人。\n"
                     "1-C. 即使正在玩命運牌，妳仍然永遠是同一個日常的小俠，不可切換成主持人、裁判、系統助理或另一個人格。牌面與分數只是背景；大俠真正說的內容、你們的聊天與情緒互動永遠優先。\n"
                     "1-D. 除非大俠主動開啟 Discord、手機、文字、AI、通話、遠距或技術話題，妳不得主動說「傳訊息」「看到你的文字」「我正在回覆」「隔著螢幕」「線上」或「感覺像在身邊」；要直接留在共同情境裡說話。\n"
                     "1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。\n"
@@ -28522,6 +29300,32 @@ async def xiaoxia_autonomy_auto_task():
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
+async def _xiaoxia_calendar_daily_refresh_scheduler():
+    """Independent asyncio loop; Calendar scheduling must never control Discord Bot lifecycle."""
+    print("📅 [XIAOXIA_CALENDAR_SCHEDULER] background loop started")
+    while True:
+        try:
+            now_dt = datetime.now(TZ_TPE)
+            if now_dt.hour < 1:
+                target = now_dt.replace(hour=1, minute=0, second=0, microsecond=0)
+            else:
+                target = (now_dt + timedelta(days=1)).replace(hour=1, minute=0, second=0, microsecond=0)
+            wait_seconds = max(1.0, (target - now_dt).total_seconds())
+            print(f"📅 [XIAOXIA_CALENDAR_SCHEDULER] next={target.strftime('%Y-%m-%d %H:%M:%S')} wait={int(wait_seconds)}s")
+            await asyncio.sleep(wait_seconds)
+
+            if _xiaoxia_calendar_config_status().get("configured"):
+                await _xiaoxia_calendar_refresh_cache(reason="daily_0100", regenerate_today=True)
+                print("📅 [XIAOXIA_CALENDAR_DAILY_0100] refresh completed")
+            else:
+                print("⚠️ [XIAOXIA_CALENDAR_DAILY_0100] skipped: env not configured")
+        except asyncio.CancelledError:
+            print("📅 [XIAOXIA_CALENDAR_SCHEDULER] cancelled")
+            raise
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_CALENDAR_DAILY_0100_FAILED] {type(exc).__name__}: {exc}")
+            await asyncio.sleep(60)
+
 # v1.10.29：愛意 review 不再每 10 分鐘 polling；愛意生圖另有優先排隊保護。
 # - 今日第一句聊天建立 2h 計數查核點與 4h Gemini 語意 review 點。
 # - _love_review_timer_worker 只在那些錨定時間醒來。
@@ -30856,22 +31660,49 @@ def _seedream_repair_prompt(custom_prompt, context=None, interpreted_request=Non
 # 🚀 終極啟動器
 # ==========================================
 async def main():
-    # 🌟 加上這行：在系統啟動前先檢查並安裝套件
-    auto_heal_environment() 
-    
+    print(f"🚀 [LOBSTER_MAIN_ENTER] version={LOBSTER_VERSION}")
+    auto_heal_environment()
+
     if not GIRLFRIEND_TOKEN or not ARCHITECT_TOKEN:
         print("❌ 錯誤：缺少環境變數，請確認 GIRLFRIEND_TOKEN 與 ARCHITECT_TOKEN 皆已設定！")
         return
 
-    config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
-    server = uvicorn.Server(config)
-    
-    await asyncio.gather(
-        server.serve(),
-        girlfriend_bot.start(GIRLFRIEND_TOKEN),
-        architect_bot.start(ARCHITECT_TOKEN)
+    print(
+        "🚀 [LOBSTER_MAIN_TOKENS] "
+        f"girlfriend={'OK' if GIRLFRIEND_TOKEN else 'MISSING'} "
+        f"architect={'OK' if ARCHITECT_TOKEN else 'MISSING'}"
     )
 
+    config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
+    server = uvicorn.Server(config)
+
+    calendar_scheduler_task = asyncio.create_task(
+        _xiaoxia_calendar_daily_refresh_scheduler(),
+        name="xiaoxia_calendar_daily_refresh_scheduler",
+    )
+    print("📅 [LOBSTER_MAIN] Calendar scheduler task created independently")
+
+    try:
+        await asyncio.gather(
+            server.serve(),
+            girlfriend_bot.start(GIRLFRIEND_TOKEN),
+            architect_bot.start(ARCHITECT_TOKEN)
+        )
+    finally:
+        if not calendar_scheduler_task.done():
+            calendar_scheduler_task.cancel()
+        try:
+            await calendar_scheduler_task
+        except asyncio.CancelledError:
+            pass
+        print("🛑 [LOBSTER_MAIN_EXIT]")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    print(f"🚀 [LOBSTER_ENTRYPOINT] version={LOBSTER_VERSION}")
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        print(f"❌ [LOBSTER_FATAL] {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        raise
 
