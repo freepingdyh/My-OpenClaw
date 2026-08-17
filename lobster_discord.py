@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.30"
+LOBSTER_VERSION = "1.10.31"
 
 
 def _normalize_generation_level(level):
@@ -14462,6 +14462,12 @@ DANBOORU_REF_MAX_BYTES = 15 * 1024 * 1024
 DANBOORU_REF_MAX_PIXELS = 40_000_000
 DANBOORU_ALLOWED_IMAGE_HOST_SUFFIXES = (".donmai.us",)
 
+# v1.10.31：Danbooru tag 只做寬鬆候選搜尋；真正「是不是這個角色/作品」
+# 改由 Gemini Vision 依圖片的非臉部證據做相容性 Gate，再送 Nano Banana 2 Lite。
+DANBOORU_VISION_GATE_MODEL = (os.environ.get("DANBOORU_VISION_GATE_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+DANBOORU_VISION_GATE_MIN_CONFIDENCE = _env_int("DANBOORU_VISION_GATE_MIN_CONFIDENCE", 70, 0, 100)
+DANBOORU_VISION_GATE_MAX_CANDIDATES = _env_int("DANBOORU_VISION_GATE_MAX_CANDIDATES", 5, 1, 10)
+
 
 def _danbooru_auth():
     if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
@@ -14906,8 +14912,125 @@ async def _download_and_sanitize_danbooru_image(url, *, post_id=None):
     return path, f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
 
 
+async def _verify_danbooru_candidate_with_vision(
+    local_path,
+    *,
+    character_name="",
+    work_title="",
+    character_tag="",
+    post=None,
+):
+    """
+    v1.10.31:
+    Danbooru tags stay permissive. Gemini Vision is the actual compatibility gate.
+
+    Important boundary:
+    - Do NOT identify or name a real person from the image.
+    - Do NOT rely on facial identity.
+    - Judge whether the visual depiction is plausibly compatible with the requested fictional
+      character/work using non-face evidence: medium, costume, hair/head features, props,
+      species/creature type, franchise/world cues, text/signage if visible, and overall design.
+    - Missing work tags or generic backgrounds are NOT automatic failures.
+    - Clear contradiction (wrong franchise, robot/animal/childlike cartoon vs live-action adult detective,
+      incompatible costume/props/world, etc.) should fail.
+    - If evidence is too generic/uncertain to confirm, fail safe and let the next candidate try.
+    """
+    if not local_path or not os.path.exists(str(local_path)):
+        raise RuntimeError("DANBOORU_VISION_IMAGE_MISSING")
+
+    data = await asyncio.to_thread(Path(str(local_path)).read_bytes)
+    mime = _local_image_mime_type(local_path)
+    post = post if isinstance(post, dict) else {}
+
+    prompt = f"""
+You are a strict but practical visual compatibility gate for a cosplay reference pipeline.
+
+TARGET FICTIONAL CHARACTER:
+- character: {character_name or 'unknown'}
+- work/franchise: {work_title or 'unknown'}
+- Danbooru character tag candidate: {character_tag or 'unknown'}
+
+Your task is NOT to identify a real person and NOT to perform face recognition.
+Do not name any real actor/person visible in the image.
+
+Judge only whether this IMAGE is plausibly compatible with the requested fictional character/work
+using NON-FACE visual evidence such as:
+- illustration/live-action/3D medium and overall franchise/world style
+- costume silhouette and colors
+- hairstyle/hair color/head features without using facial identity
+- signature props/weapons/accessories
+- species/robot/animal/human presentation
+- setting/world cues or visible text if useful
+
+Rules:
+1. Danbooru tags are only weak hints. Missing work/copyright tags is NOT a reason to reject.
+2. A generic image can pass only if its visible design is still reasonably consistent with the target.
+3. If the image clearly belongs to another franchise/character/world, reject.
+4. If the evidence is too ambiguous to confidently say it is compatible, reject safely; the pipeline can try another candidate.
+5. Also judge whether this image is useful as a costume/appearance reference. Crowded group shots, tiny subjects,
+   severe occlusion, extreme chibi, or mostly unrelated scenery should be rejected.
+
+Return JSON only:
+{{
+  "compatible": true,
+  "confidence": 0,
+  "usable_reference": true,
+  "reason": "brief Traditional Chinese explanation",
+  "visual_evidence": ["up to 5 concise non-face cues"],
+  "obvious_conflict": "brief contradiction if any, else empty"
+}}
+
+Danbooru metadata (weak hints only):
+- post_id: {post.get('id') or ''}
+- tag_string_character: {str(post.get('tag_string_character') or '')[:500]}
+- tag_string_copyright: {str(post.get('tag_string_copyright') or '')[:500]}
+- tag_string_general: {str(post.get('tag_string_general') or '')[:800]}
+"""
+    response = await gemini_client.aio.models.generate_content(
+        model=DANBOORU_VISION_GATE_MODEL,
+        contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+    )
+    parsed = _safe_json_from_text(getattr(response, "text", "") or "", {})
+    if not isinstance(parsed, dict):
+        raise RuntimeError("DANBOORU_VISION_BAD_JSON")
+
+    compatible = bool(parsed.get("compatible"))
+    usable = bool(parsed.get("usable_reference"))
+    try:
+        confidence = int(float(parsed.get("confidence") or 0))
+    except Exception:
+        confidence = 0
+    confidence = max(0, min(100, confidence))
+
+    reason = _clean_text_compact(parsed.get("reason") or "")[:500]
+    conflict = _clean_text_compact(parsed.get("obvious_conflict") or "")[:500]
+    evidence = [
+        _clean_text_compact(x)[:160]
+        for x in (parsed.get("visual_evidence") or [])[:5]
+        if _clean_text_compact(x)
+    ]
+
+    accepted = bool(
+        compatible
+        and usable
+        and confidence >= int(DANBOORU_VISION_GATE_MIN_CONFIDENCE)
+    )
+    return {
+        "accepted": accepted,
+        "compatible": compatible,
+        "usable_reference": usable,
+        "confidence": confidence,
+        "min_confidence": int(DANBOORU_VISION_GATE_MIN_CONFIDENCE),
+        "reason": reason,
+        "visual_evidence": evidence,
+        "obvious_conflict": conflict,
+        "model": DANBOORU_VISION_GATE_MODEL,
+    }
+
+
 async def _find_danbooru_cosplay_reference(story):
-    """Best-effort resolver. It always returns a dict with matched=True/False and a trace block."""
+    """Best-effort resolver: permissive tag search -> ranked post candidates -> Gemini Vision gate -> Nano only after a pass."""
     story = story if isinstance(story, dict) else {}
     character_name, work_title, identity_inference = await _infer_danbooru_story_identity(story)
     raw_request = _clean_text_compact(story.get("user_mode_request") or story.get("topic") or "")
@@ -14923,6 +15046,7 @@ async def _find_danbooru_cosplay_reference(story):
         "post_queries": [],
         "candidate_posts": [],
         "download_attempts": [],
+        "vision_checks": [],
         "identity_inference": identity_inference,
     }
     if not DANBOORU_LOGIN or not DANBOORU_API_KEY:
@@ -15051,10 +15175,59 @@ async def _find_danbooru_cosplay_reference(story):
             return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
 
         last_error = None
-        for score, post, tag_name, query_mode in scored[:5]:
+        attempted_candidates = 0
+        for score, post, tag_name, query_mode in scored[:max(1, int(DANBOORU_VISION_GATE_MAX_CANDIDATES))]:
+            attempted_candidates += 1
             file_url = str(post.get("file_url") or post.get("large_file_url") or "").strip()
+            source_path = None
             try:
                 source_path, local_url = await _download_and_sanitize_danbooru_image(file_url, post_id=post.get("id"))
+
+                # v1.10.31：tag 只負責把候選送到這裡；是否真的相容，由 Vision 看圖決定。
+                try:
+                    vision = await _verify_danbooru_candidate_with_vision(
+                        source_path,
+                        character_name=character_name,
+                        work_title=work_title,
+                        character_tag=tag_name,
+                        post=post,
+                    )
+                except Exception as vision_exc:
+                    vision = {
+                        "accepted": False,
+                        "compatible": False,
+                        "usable_reference": False,
+                        "confidence": 0,
+                        "min_confidence": int(DANBOORU_VISION_GATE_MIN_CONFIDENCE),
+                        "reason": f"Vision gate error: {type(vision_exc).__name__}: {str(vision_exc)[:300]}",
+                        "visual_evidence": [],
+                        "obvious_conflict": "",
+                        "model": DANBOORU_VISION_GATE_MODEL,
+                        "error": f"{type(vision_exc).__name__}: {str(vision_exc)[:500]}",
+                    }
+
+                vision_row = {
+                    "post_id": post.get("id"),
+                    "character_tag": tag_name,
+                    "query_mode": query_mode,
+                    "score": round(float(score), 2),
+                    **vision,
+                }
+                trace["vision_checks"].append(vision_row)
+
+                if not vision.get("accepted"):
+                    print(
+                        f"ℹ️ [DANBOORU_VISION_REJECT] post={post.get('id')} tag={tag_name} "
+                        f"confidence={vision.get('confidence')} reason={vision.get('reason')}"
+                    )
+                    # Rejected candidates are not useful after Vision gate; avoid cluttering /data/output.
+                    try:
+                        if source_path and os.path.exists(str(source_path)):
+                            os.remove(str(source_path))
+                    except Exception:
+                        pass
+                    continue
+
                 result = {
                     "matched": True,
                     "source": "danbooru",
@@ -15069,6 +15242,7 @@ async def _find_danbooru_cosplay_reference(story):
                     "query_mode": query_mode,
                     "character_name": character_name,
                     "work_title": work_title,
+                    "vision_gate": dict(vision),
                     "trace": trace,
                 }
                 trace["matched"] = True
@@ -15078,8 +15252,13 @@ async def _find_danbooru_cosplay_reference(story):
                     "query_mode": query_mode,
                     "score": result["score"],
                     "source_url": file_url,
+                    "vision_confidence": vision.get("confidence"),
+                    "vision_reason": vision.get("reason"),
                 }
-                print(f"✅ [DANBOORU_REF] selected post={post.get('id')} tag={tag_name} mode={query_mode} score={result['score']}")
+                print(
+                    f"✅ [DANBOORU_REF] selected post={post.get('id')} tag={tag_name} "
+                    f"mode={query_mode} score={result['score']} vision={vision.get('confidence')}"
+                )
                 return result
             except Exception as exc:
                 last_error = exc
@@ -15090,6 +15269,16 @@ async def _find_danbooru_cosplay_reference(story):
                     "error": f"{type(exc).__name__}: {exc}",
                 })
                 print(f"⚠️ [DANBOORU_REF_CANDIDATE_FAILED] post={post.get('id')} {type(exc).__name__}: {exc}")
+
+        # Downloads may have succeeded but all candidates can still fail Vision.
+        if trace.get("vision_checks") and not trace.get("matched"):
+            trace["failure_reason"] = "vision_rejected_all_candidates"
+            print(
+                f"ℹ️ [DANBOORU_REF] Vision rejected all {len(trace.get('vision_checks') or [])} "
+                f"candidate(s): {character_name} / {work_title}"
+            )
+            return {"matched": False, "trace": trace, "character_name": character_name, "work_title": work_title}
+
         if last_error:
             trace["failure_reason"] = "candidate_download_failed"
             print(f"⚠️ [DANBOORU_REF] all candidate downloads failed: {type(last_error).__name__}: {last_error}")
@@ -24048,6 +24237,14 @@ class PhotoResultView(discord.ui.View):
                     )
                     if source_page_url:
                         source_embed.add_field(name="來源頁", value=str(source_page_url)[:1024], inline=False)
+                    if source_kind == "danbooru":
+                        selected_post = danbooru_trace.get("selected_post") or {}
+                        if selected_post:
+                            vision_text = (
+                                f"✅ 通過｜confidence={selected_post.get('vision_confidence', '—')}\n"
+                                f"{str(selected_post.get('vision_reason') or '')[:700]}"
+                            )
+                            source_embed.add_field(name="Gemini Vision Gate", value=vision_text[:1024], inline=False)
                     if source_path and os.path.exists(str(source_path)):
                         src_filename = f"source_{os.path.basename(str(source_path))}"
                         src_file = discord.File(str(source_path), filename=src_filename)
@@ -24095,6 +24292,19 @@ class PhotoResultView(discord.ui.View):
                     diag.add_field(name="候選角色 tag", value=_join_items(danbooru_trace.get("selected_character_tags") or [], limit=8), inline=False)
                     diag.add_field(name="tag 查詢紀錄", value=_join_pairs(danbooru_trace.get("tag_queries") or [], limit=6), inline=False)
                     diag.add_field(name="post 查詢紀錄", value=_join_pairs(danbooru_trace.get("post_queries") or [], limit=6), inline=False)
+                    vision_checks = danbooru_trace.get("vision_checks") or []
+                    if vision_checks:
+                        vision_preview = []
+                        for row in vision_checks[:5]:
+                            if not isinstance(row, dict):
+                                continue
+                            mark = "✅" if row.get("accepted") else "❌"
+                            vision_preview.append(
+                                f"{mark} post {row.get('post_id')} | conf {row.get('confidence')} | "
+                                f"{str(row.get('reason') or row.get('obvious_conflict') or '')[:160]}"
+                            )
+                        diag.add_field(name="Gemini Vision 驗證", value=_join_items(vision_preview, limit=5), inline=False)
+
                     selected_post = danbooru_trace.get("selected_post") or {}
                     if selected_post:
                         diag.add_field(name="最終採用 post", value=str(selected_post)[:1024], inline=False)
