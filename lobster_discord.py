@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.28"
+LOBSTER_VERSION = "1.10.29"
 
 
 def _normalize_generation_level(level):
@@ -567,6 +567,11 @@ architect_bot = commands.Bot(command_prefix='!', intents=intents)
 
 GENERATION_SERIAL_LOCK = asyncio.Lock()
 GENERATION_QUEUE_WAITERS = 0
+
+# v1.10.29：愛意生圖可插入共用生圖隊列，但不得被「小俠自主」同時啟動的工作搶掉。
+# 這不是平行生圖；仍然維持一次只跑一張，只是愛意在等待/生成期間阻止新的非愛意工作插隊。
+LOVE_GENERATION_ACTIVE_COUNT = 0
+LOVE_GENERATION_TASKS = {}
 
 
 # ==========================================
@@ -2191,6 +2196,21 @@ def _autonomy_should_reward_today(state):
     return random.random() < 0.18, gap
 
 
+def _autonomy_activity_time_suitable(activity, now_dt=None):
+    """Current daily-scheduler safeguard. Weekly Calendar planner can later schedule these at their preferred hours."""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    item = activity if isinstance(activity, dict) else {}
+    aid = str(item.get("id") or "").strip()
+    title = str(item.get("title") or "")
+    hour = int(now_dt.hour)
+
+    # 海邊淨灘屬戶外勞動；台灣白天中段不該隨機抽到。
+    # 目前 scheduler 先用 selection guard 避免 11:00~14:59；未來 Calendar planner 則應直接排早晨或 15:00 後。
+    if aid == "volunteer_beach_cleanup" or ("淨灘" in title and "海" in title):
+        return hour < 11 or hour >= 15
+    return True
+
+
 def _autonomy_pick_activity(category_filter=None, activity_filter=None):
     state = load_xiaoxia_autonomy_state()
     catalog = [x for x in load_xiaoxia_activity_catalog() if isinstance(x, dict)]
@@ -2235,6 +2255,24 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
         for row in recent_rows[-10:]
         if _activity_id_from_row(row)
     }
+
+    # v1.10.29：一般自主活動 7 個日曆日內不重複同一 activity_id。
+    # 大俠「指定活動」仍由 activity_filter 直通，不受此 guard 限制。
+    today_date = datetime.now(TZ_TPE).date()
+    recent_7day_ids = set()
+    for row in list(history) + ([current_today] if current_today else []):
+        if not isinstance(row, dict):
+            continue
+        rid = _activity_id_from_row(row)
+        raw_date = str(row.get("date") or row.get("activity_date") or row.get("created_at") or row.get("sent_at") or "")[:10]
+        try:
+            rdate = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        age = (today_date - rdate).days
+        if 0 <= age <= 6 and rid:
+            recent_7day_ids.add(rid)
+
     recent_categories = [
         str(row.get("activity_category") or row.get("category") or "")
         for row in recent_rows[-6:]
@@ -2242,7 +2280,7 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
 
     # 當天已出現與最近三筆活動優先直接排除；若指定類別的候選太少，
     # 先放寬「最近三筆」，但仍盡量不重複今天最新活動；只有完全沒有替代項時才最後回退。
-    hard_block_ids = set(last_three_ids)
+    hard_block_ids = set(last_three_ids) | set(recent_7day_ids)
     if today_activity_id:
         hard_block_ids.add(today_activity_id)
 
@@ -2264,8 +2302,20 @@ def _autonomy_pick_activity(category_filter=None, activity_filter=None):
     print(
         "🔁 [AUTONOMY_REPEAT_GUARD] "
         f"mode={repeat_guard_mode} today_id={today_activity_id or '-'} "
-        f"last3={sorted(last_three_ids)} candidates={len(candidate_catalog)}/{len(catalog)}"
+        f"last3={sorted(last_three_ids)} recent7={sorted(recent_7day_ids)} "
+        f"candidates={len(candidate_catalog)}/{len(catalog)}"
     )
+
+    time_suitable_catalog = [item for item in candidate_catalog if _autonomy_activity_time_suitable(item)]
+    if time_suitable_catalog:
+        if len(time_suitable_catalog) != len(candidate_catalog):
+            blocked = [
+                str(item.get("id") or item.get("title") or "")
+                for item in candidate_catalog
+                if item not in time_suitable_catalog
+            ]
+            print(f"🕒 [AUTONOMY_TIME_GUARD] blocked_now={blocked} hour={datetime.now(TZ_TPE).hour}")
+        candidate_catalog = time_suitable_catalog
 
     reward_due, reward_gap = _autonomy_should_reward_today(state)
     pool = []
@@ -5675,6 +5725,7 @@ def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="",
         "trace_action": "love_intent_generate",
         "user_input": candidate.get("invite_message") or title,
         "love_candidate": candidate,
+        "generation_priority": "love",
     }
 
 
@@ -5688,19 +5739,67 @@ def _love_generation_timeout_seconds():
 
 
 async def _love_generate_and_send(channel, candidate, *, approved_by=None, consume_daily_trigger=True, status_text="💗 小俠收到同意，正在把這份愛意整理成一張照片……"):
+    """
+    v1.10.29：
+    1) 排隊等待不計入 Seedream timeout，避免前面剛好有 /小俠自主 時，愛意白等五分鐘後被判 timeout。
+    2) 愛意一旦進入等待/生成狀態，新的非愛意生圖先讓愛意走完。
+    3) 真正取得生圖輪次後，才開始 LOVE_GENERATION_TIMEOUT_SECONDS 計時。
+    """
+    global LOVE_GENERATION_ACTIVE_COUNT
     candidate = dict(candidate or {})
-    wardrobe_item, wardrobe_reason, wardrobe_selection = _love_pick_wardrobe(candidate.get("scene_text") or "")
-    context = _love_build_photo_context(candidate, wardrobe_item=wardrobe_item, wardrobe_reason=wardrobe_reason, wardrobe_selection=wardrobe_selection)
-    status = await channel.send(status_text)
-    timeout_seconds = _love_generation_timeout_seconds()
-    candidate_id = str(candidate.get("id") or "")
-    print(f"💗 [LOVE_GENERATION_START] candidate={candidate_id or 'unknown'} timeout={timeout_seconds}s")
+    candidate_id = str(candidate.get("id") or "unknown")
+    LOVE_GENERATION_ACTIVE_COUNT += 1
+    status = None
     try:
-        context = await asyncio.wait_for(
-            _generate_photo_from_context(context, msg=status),
-            timeout=timeout_seconds,
+        wardrobe_item, wardrobe_reason, wardrobe_selection = _love_pick_wardrobe(candidate.get("scene_text") or "")
+        context = _love_build_photo_context(
+            candidate,
+            wardrobe_item=wardrobe_item,
+            wardrobe_reason=wardrobe_reason,
+            wardrobe_selection=wardrobe_selection,
         )
-        print(f"✅ [LOVE_GENERATION_DONE] candidate={candidate_id or 'unknown'}")
+        context["generation_priority"] = "love"
+        status = await channel.send(status_text)
+
+        # 先等既有工作完成。這段不算在「生圖 timeout」裡。
+        queue_notice_sent = False
+        while GENERATION_SERIAL_LOCK.locked() or int(GENERATION_QUEUE_WAITERS or 0) > 0:
+            if not queue_notice_sent:
+                try:
+                    await status.edit(content="💗 小俠的愛意照已排入生圖隊列，等前一張完成就優先拍；不會被後來的小俠自主取代。")
+                except Exception:
+                    pass
+                queue_notice_sent = True
+            await asyncio.sleep(1.0)
+
+        timeout_seconds = _love_generation_timeout_seconds()
+        print(f"💗 [LOVE_GENERATION_START] candidate={candidate_id} timeout={timeout_seconds}s queue_wait_excluded=true")
+        try:
+            context = await asyncio.wait_for(
+                _generate_photo_from_context(context, msg=status),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            print(f"⚠️ [LOVE_GENERATION_TIMEOUT] candidate={candidate_id} timeout={timeout_seconds}s")
+            app_state = load_state()
+            app_state, love = _love_get_day_state(app_state)
+            if consume_daily_trigger:
+                _love_mark_review_finished(love, result="generation_timeout", mark_asked=True, clear_pending=True)
+            else:
+                love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+                love["last_manual_direct_error"] = f"generation_timeout_{timeout_seconds}s"
+            save_state(app_state)
+            timeout_message = (
+                f"⚠️ 小俠已真正開始生圖，但超過 {timeout_seconds // 60} 分鐘仍未完成，這次已停止。"
+                "排隊等待時間不算在這個 timeout 裡。"
+            )
+            try:
+                await status.edit(content=timeout_message)
+            except Exception:
+                await channel.send(timeout_message)
+            return None
+
+        print(f"✅ [LOVE_GENERATION_DONE] candidate={candidate_id}")
         db = load_memory()
         db.insert(0, _photo_db_payload(context, type_override="photo"))
         save_memory(db)
@@ -5730,24 +5829,11 @@ async def _love_generate_and_send(channel, candidate, *, approved_by=None, consu
                 love["pending_request"] = None
         save_state(app_state)
         return context
-    except asyncio.TimeoutError:
-        print(f"⚠️ [LOVE_GENERATION_TIMEOUT] candidate={candidate_id or 'unknown'} timeout={timeout_seconds}s")
-        app_state = load_state()
-        app_state, love = _love_get_day_state(app_state)
-        if consume_daily_trigger:
-            _love_mark_review_finished(love, result="generation_timeout", mark_asked=True, clear_pending=True)
-        else:
-            love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
-            love["last_manual_direct_error"] = f"generation_timeout_{timeout_seconds}s"
-        save_state(app_state)
-        timeout_message = f"⚠️ 這次生圖等待超過 {timeout_seconds // 60} 分鐘，已停止等待。大俠可以再試一次，不會讓它一直卡著。"
-        try:
-            await status.edit(content=timeout_message)
-        except Exception:
-            await channel.send(timeout_message)
-        return None
+    except asyncio.CancelledError:
+        print(f"⚠️ [LOVE_GENERATION_CANCELLED] candidate={candidate_id}")
+        raise
     except Exception as exc:
-        print(f"⚠️ [LOVE_GENERATION_FAILED] candidate={candidate_id or 'unknown'} {type(exc).__name__}: {exc}")
+        print(f"⚠️ [LOVE_GENERATION_FAILED] candidate={candidate_id} {type(exc).__name__}: {exc}")
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
         if consume_daily_trigger:
@@ -5756,11 +5842,53 @@ async def _love_generate_and_send(channel, candidate, *, approved_by=None, consu
             love["last_manual_direct_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
             love["last_manual_direct_error"] = str(exc)[:600]
         save_state(app_state)
-        try:
-            await status.edit(content=f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
-        except Exception:
-            await channel.send(f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
+        if status is not None:
+            try:
+                await status.edit(content=f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
+            except Exception:
+                await channel.send(f"⚠️ 小俠剛剛想拍這份愛意時手滑了：`{str(exc)[:1500]}`")
         return None
+    finally:
+        LOVE_GENERATION_ACTIVE_COUNT = max(0, int(LOVE_GENERATION_ACTIVE_COUNT or 0) - 1)
+
+
+def _love_generation_task_running():
+    for task in list(LOVE_GENERATION_TASKS.values()):
+        if task is not None and not task.done():
+            return True
+    return False
+
+
+async def _love_start_generation_task(channel, candidate, *, approved_by=None, consume_daily_trigger=True, status_text=None):
+    """立即回傳，不讓 Discord button callback 被 5~15 分鐘生圖工作綁住。"""
+    candidate = dict(candidate or {})
+    candidate_id = str(candidate.get("id") or uuid.uuid4())
+    candidate["id"] = candidate_id
+
+    # 同一時間只允許一條愛意生圖鏈；再次按按鈕/指令不建立第二條卡住的工作。
+    if _love_generation_task_running():
+        try:
+            await channel.send("💗 小俠的愛意照已經在排隊／拍攝中了，這次不用再啟動第二次；完成後會直接送出。")
+        except Exception:
+            pass
+        return None
+
+    async def runner():
+        try:
+            return await _love_generate_and_send(
+                channel,
+                candidate,
+                approved_by=approved_by,
+                consume_daily_trigger=consume_daily_trigger,
+                status_text=status_text or "💗 小俠收到同意，正在把這份愛意整理成一張照片……",
+            )
+        finally:
+            LOVE_GENERATION_TASKS.pop(candidate_id, None)
+
+    task = asyncio.create_task(runner(), name=f"xiaoxia_love_generation_{candidate_id[:8]}")
+    LOVE_GENERATION_TASKS[candidate_id] = task
+    print(f"💗 [LOVE_GENERATION_TASK_CREATED] candidate={candidate_id}")
+    return task
 
 
 async def _love_force_generate_now(channel, *, approved_by=None):
@@ -5775,7 +5903,7 @@ async def _love_force_generate_now(channel, *, approved_by=None):
             candidate["approved_by"] = approved_by
         love["pending_request"] = candidate
         save_state(app_state)
-        return await _love_generate_and_send(channel, candidate, approved_by=approved_by, consume_daily_trigger=False, status_text="💗 小俠收到大俠的指令，立刻把這份愛意整理成一張照片……")
+        return await _love_start_generation_task(channel, candidate, approved_by=approved_by, consume_daily_trigger=False, status_text="💗 小俠收到大俠的指令，立刻把這份愛意整理成一張照片……")
     candidate = await _love_build_candidate(trigger_type="manual", trigger_detail="manual_direct_force", now_dt=now_dt)
     if not candidate.get("trigger"):
         candidate = {
@@ -5828,10 +5956,15 @@ class LoveIntentInviteView(discord.ui.View):
             love["pending_request"] = candidate
             save_state(app_state)
             print(f"💗 [LOVE_INVITE_BUTTON_APPROVED] candidate={candidate.get('id')} message={clicked_message_id}")
-            await _love_generate_and_send(
+            try:
+                await interaction.followup.send("💗 收到，小俠已把這份愛意照排進生圖隊列；按鈕不需要一直等到照片完成。", ephemeral=True)
+            except Exception:
+                pass
+            await _love_start_generation_task(
                 interaction.channel,
                 candidate,
                 approved_by=getattr(getattr(interaction, "user", None), "id", None),
+                consume_daily_trigger=True,
             )
             return
 
@@ -6073,7 +6206,7 @@ async def _handle_xiaoxia_love_message_direct(message):
         if not pending:
             await message.channel.send('今天目前沒有等待中的愛意邀請喔。')
             return True
-        await _love_generate_and_send(message.channel, pending, approved_by=getattr(message.author, 'id', None))
+        await _love_start_generation_task(message.channel, pending, approved_by=getattr(message.author, 'id', None))
         return True
     if args in {'取消', '不要', '下次'}:
         pending = love.get('pending_request') if isinstance(love.get('pending_request'), dict) else None
@@ -14239,6 +14372,27 @@ async def _execute_safe_generation_core(discord_image_url, base_filename, mode, 
 async def execute_safe_generation(discord_image_url, base_filename, mode, initial_prompt, visual_dict, msg=None, current_outfit=None, trace_context=None):
     global GENERATION_QUEUE_WAITERS
     queue_position = 0
+    trace_context = trace_context if isinstance(trace_context, dict) else {}
+    is_love_priority = bool(
+        str(trace_context.get("generation_priority") or "").lower() == "love"
+        or str(trace_context.get("source_mode") or "").lower() == "love_intent"
+    )
+
+    # v1.10.29：愛意已經在等待／生圖時，新的普通生圖先不要加入 lock 等候列。
+    # 已經正在跑的前一張不強制取消；它完成後由愛意先接手。
+    if not is_love_priority:
+        waited_for_love = False
+        while int(LOVE_GENERATION_ACTIVE_COUNT or 0) > 0:
+            waited_for_love = True
+            if msg:
+                try:
+                    await msg.edit(content="⏳ 小俠先讓已觸發的愛意照拍完，再接著處理這張照片…")
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+        if waited_for_love:
+            print("💗 [GENERATION_YIELDED_TO_LOVE] non-love generation resumed after love queue cleared")
+
     if GENERATION_SERIAL_LOCK.locked():
         GENERATION_QUEUE_WAITERS += 1
         queue_position = GENERATION_QUEUE_WAITERS
@@ -20215,6 +20369,7 @@ async def _generate_photo_from_context(context, msg=None):
         "figure10_present": bool(context.get("reference_item_path")),
         "seedream_model_id_override": context.get("seedream_model_id_override"),
         "seedream_model_label": context.get("seedream_model_label"),
+        "generation_priority": context.get("generation_priority"),
     }
     trace_context.setdefault("authoritative_scene", semantic_scene)
     trace_context.setdefault("semantic_contract", semantic_contract)
@@ -28099,6 +28254,15 @@ async def xiaoxia_autonomy_auto_task():
     if not due:
         return
 
+    # v1.10.29：愛意是聊天中突然插入的私密事件。若愛意已排隊／正在拍，
+    # 自主 slot 保持 pending，下一輪再執行，不把愛意 status/結果淹掉。
+    if int(LOVE_GENERATION_ACTIVE_COUNT or 0) > 0 or _love_generation_task_running():
+        print(
+            f"💗 [AUTONOMY_DEFERRED_FOR_LOVE] due={len(due)} "
+            f"love_active={LOVE_GENERATION_ACTIVE_COUNT} love_task={_love_generation_task_running()}"
+        )
+        return
+
     channel = _get_xiaoxia_autonomy_channel_for_auto()
     if not channel:
         print(f"⚠️ [AUTONOMY_AUTO_CHANNEL_MISSING] id={XIAOXIA_AUTONOMY_CHANNEL_ID} name={XIAOXIA_AUTONOMY_CHANNEL_NAME}")
@@ -28148,7 +28312,7 @@ async def xiaoxia_autonomy_auto_task():
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
-# v1.10.27：愛意 review 不再每 10 分鐘 polling。
+# v1.10.29：愛意 review 不再每 10 分鐘 polling；愛意生圖另有優先排隊保護。
 # - 今日第一句聊天建立 2h 計數查核點與 4h Gemini 語意 review 點。
 # - _love_review_timer_worker 只在那些錨定時間醒來。
 # - >95 的隔日邀請則獨立在 21:00 精準檢查。
