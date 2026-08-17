@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.26"
+LOBSTER_VERSION = "1.10.28"
 
 
 def _normalize_generation_level(level):
@@ -4873,6 +4873,20 @@ def _love_compute_fixed_review_slots(first_chat_at_iso):
     return slots
 
 
+def _love_compute_chat_check_slots(first_chat_at_iso):
+    """從今日第一句聊天起，每 2 小時建立查核點：2h 點達聊天門檻才做 Gemini；4h 點有新聊天就做 Gemini。"""
+    slots = []
+    try:
+        base_dt = datetime.strptime(str(first_chat_at_iso), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_TPE)
+    except Exception:
+        return []
+    probe = base_dt + timedelta(hours=2)
+    while probe.date() == base_dt.date() and (probe.hour, probe.minute) < (23, 0):
+        slots.append(probe.strftime("%H:%M"))
+        probe += timedelta(hours=2)
+    return slots
+
+
 def _love_default_day_state(today=None):
     return {
         "date": today or _love_today_str(),
@@ -4880,6 +4894,11 @@ def _love_default_day_state(today=None):
         "fixed_review_slots": [],
         "fixed_review_fired": [],
         "fixed_review_status": {},
+        "chat_check_slots": [],
+        "chat_check_fired": [],
+        "chat_check_status": {},
+        "last_chat_checkpoint_count": 0,
+        "last_chat_checkpoint_at": None,
         "effective_chat_count": 0,
         "last_review_chat_count": 0,
         "last_review_at": None,
@@ -5001,11 +5020,20 @@ def _love_register_user_turn(message):
         love["first_chat_at"] = stamp
         love["fixed_review_slots"] = _love_compute_fixed_review_slots(stamp)
         love["fixed_review_status"] = {slot: {"status": "pending"} for slot in love["fixed_review_slots"]}
-        print(f"💗 [LOVE_REVIEW_FIRST_CHAT] date={love.get('date')} first={stamp} slots={love.get('fixed_review_slots')}")
+        love["chat_check_slots"] = _love_compute_chat_check_slots(stamp)
+        love["chat_check_status"] = {slot: {"status": "pending"} for slot in love["chat_check_slots"]}
+        love["chat_check_fired"] = []
+        love["last_chat_checkpoint_count"] = 0
+        love["last_chat_checkpoint_at"] = None
+        print(
+            f"💗 [LOVE_REVIEW_FIRST_CHAT] date={love.get('date')} first={stamp} "
+            f"chat_checks={love.get('chat_check_slots')} semantic_reviews={love.get('fixed_review_slots')}"
+        )
     love["effective_chat_count"] = int(love.get("effective_chat_count") or 0) + 1
     love["last_chat_channel_id"] = getattr(message.channel, "id", None)
     love["last_chat_user_id"] = getattr(message.author, "id", None)
     save_state(app_state)
+    _love_ensure_review_timer()
 
 
 def _love_register_xiaoxia_reply(channel=None):
@@ -5017,6 +5045,192 @@ def _love_register_xiaoxia_reply(channel=None):
     if channel is not None:
         love["last_chat_channel_id"] = getattr(channel, "id", love.get("last_chat_channel_id"))
     save_state(app_state)
+
+
+LOVE_REVIEW_TIMER_TASK = None
+
+
+def _love_review_timer_running():
+    task = globals().get("LOVE_REVIEW_TIMER_TASK")
+    return bool(task is not None and not task.done())
+
+
+def _love_next_unfired_chat_checkpoint(love, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    first = _love_parse_dt(love.get("first_chat_at"))
+    if first is None or first.date() != now_dt.date():
+        return None, None
+    slots = list(love.get("chat_check_slots") or _love_compute_chat_check_slots(love.get("first_chat_at")))
+    fired = set(str(x) for x in (love.get("chat_check_fired") or []))
+    for idx, slot in enumerate(slots, start=1):
+        if slot in fired:
+            continue
+        try:
+            hh, mm = [int(x) for x in str(slot).split(":", 1)]
+            due = first.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        except Exception:
+            continue
+        return slot, due
+    return None, None
+
+
+async def _love_review_timer_worker():
+    """v1.10.28:
+    - 以今日第一句聊天為錨點，每 2 小時醒一次。
+    - 2h / 6h / 10h...：先看自上次語意 review 後是否累積至少 50 句；達門檻才呼叫 Gemini 判斷語意。
+    - 4h / 8h / 12h...：只要自上次語意 review 後有任何新聊天，就呼叫 Gemini；完全沒新聊天才略過以省 Token。
+    - 同一個 checkpoint 最多只做一次 Gemini review。
+    """
+    global LOVE_REVIEW_TIMER_TASK
+    try:
+        while True:
+            app_state = load_state()
+            app_state, love = _love_get_day_state(app_state)
+            if not _love_is_enabled(app_state) or not love.get("first_chat_at"):
+                return
+
+            slot, due_dt = _love_next_unfired_chat_checkpoint(love)
+            if not slot or due_dt is None:
+                return
+
+            now_dt = datetime.now(TZ_TPE)
+            wait_seconds = max(0.0, (due_dt - now_dt).total_seconds())
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+
+            now_dt = datetime.now(TZ_TPE)
+            app_state = load_state()
+            app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+            if not _love_is_enabled(app_state):
+                return
+
+            fired = list(love.get("chat_check_fired") or [])
+            if slot in fired:
+                continue
+
+            current_count = int(love.get("effective_chat_count") or 0)
+            previous_checkpoint_count = int(love.get("last_chat_checkpoint_count") or 0)
+            checkpoint_delta = max(0, current_count - previous_checkpoint_count)
+            since_review = max(
+                0,
+                current_count - int(love.get("last_review_chat_count") or 0),
+            )
+
+            try:
+                first_dt = _love_parse_dt(love.get("first_chat_at"))
+                elapsed_hours = int(round((due_dt - first_dt).total_seconds() / 3600.0)) if first_dt else 0
+            except Exception:
+                elapsed_hours = 0
+
+            is_fixed_4h = elapsed_hours > 0 and elapsed_hours % 4 == 0
+            checkpoint_kind = "4h_fixed" if is_fixed_4h else "2h_chat_threshold"
+
+            statuses = love.get("chat_check_status") if isinstance(love.get("chat_check_status"), dict) else {}
+            statuses[slot] = {
+                "status": "count_checked",
+                "kind": checkpoint_kind,
+                "checked_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "chat_count": current_count,
+                "new_since_checkpoint": checkpoint_delta,
+                "new_since_semantic_review": since_review,
+            }
+            love["chat_check_status"] = statuses
+            fired.append(slot)
+            love["chat_check_fired"] = fired
+            love["last_chat_checkpoint_count"] = current_count
+            love["last_chat_checkpoint_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            save_state(app_state)
+
+            if is_fixed_4h:
+                # 4 小時固定點：有任何新聊天才送 Gemini；0 句由 fixed_review 直接略過。
+                print(
+                    f"💗 [LOVE_4H_CHECK] slot={slot} total={current_count} "
+                    f"new_since_review={since_review}"
+                )
+                triggered = await _love_request_if_due(
+                    trigger_type="fixed_review",
+                    trigger_detail=slot,
+                    now_dt=now_dt,
+                )
+                app_state = load_state()
+                app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+                statuses = love.get("chat_check_status") if isinstance(love.get("chat_check_status"), dict) else {}
+                item = statuses.get(slot) if isinstance(statuses.get(slot), dict) else {}
+                item["semantic_review"] = (
+                    "triggered"
+                    if triggered
+                    else ("skipped_no_new_chat" if since_review <= 0 else "reviewed_no_trigger_or_already_asked")
+                )
+                statuses[slot] = item
+                love["chat_check_status"] = statuses
+                love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                love["scheduler_last_tick_result"] = (
+                    f"4h_semantic_triggered:{slot}"
+                    if triggered
+                    else f"4h_semantic_checked:{slot}:new_since_review={since_review}"
+                )
+                save_state(app_state)
+            else:
+                # 2 小時熱聊點：先以句數節流；達 50 句後仍必須交給 Gemini 判斷內容是否適合愛意。
+                print(
+                    f"💗 [LOVE_2H_CHECK] slot={slot} total={current_count} "
+                    f"new_since_review={since_review} threshold=50"
+                )
+                if since_review >= 50:
+                    triggered = await _love_request_if_due(
+                        trigger_type="chat_review",
+                        trigger_detail=slot,
+                        now_dt=now_dt,
+                    )
+                    app_state = load_state()
+                    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+                    statuses = love.get("chat_check_status") if isinstance(love.get("chat_check_status"), dict) else {}
+                    item = statuses.get(slot) if isinstance(statuses.get(slot), dict) else {}
+                    item["semantic_review"] = "triggered" if triggered else "reviewed_no_trigger_or_already_asked"
+                    statuses[slot] = item
+                    love["chat_check_status"] = statuses
+                    love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    love["scheduler_last_tick_result"] = (
+                        f"2h_semantic_triggered:{slot}"
+                        if triggered
+                        else f"2h_semantic_checked:{slot}:new_since_review={since_review}"
+                    )
+                    save_state(app_state)
+                else:
+                    app_state = load_state()
+                    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
+                    statuses = love.get("chat_check_status") if isinstance(love.get("chat_check_status"), dict) else {}
+                    item = statuses.get(slot) if isinstance(statuses.get(slot), dict) else {}
+                    item["semantic_review"] = "skipped_below_50"
+                    statuses[slot] = item
+                    love["chat_check_status"] = statuses
+                    love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    love["scheduler_last_tick_result"] = f"2h_skipped_below_50:{slot}:new_since_review={since_review}"
+                    save_state(app_state)
+                    print(f"💗 [LOVE_2H_SKIP_BELOW_50] slot={slot} new_since_review={since_review}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ [LOVE_REVIEW_TIMER_FAILED] {type(exc).__name__}: {exc}")
+    finally:
+        LOVE_REVIEW_TIMER_TASK = None
+
+
+def _love_ensure_review_timer():
+    global LOVE_REVIEW_TIMER_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    if LOVE_REVIEW_TIMER_TASK is not None and not LOVE_REVIEW_TIMER_TASK.done():
+        return True
+    app_state = load_state()
+    app_state, love = _love_get_day_state(app_state)
+    if not _love_is_enabled(app_state) or not love.get("first_chat_at"):
+        return False
+    LOVE_REVIEW_TIMER_TASK = loop.create_task(_love_review_timer_worker(), name="xiaoxia_love_review_timer")
+    return True
 
 
 def _love_due_fixed_slot(love, now_dt=None):
@@ -5584,44 +5798,65 @@ async def _love_force_generate_now(channel, *, approved_by=None):
 
 
 class LoveIntentInviteView(discord.ui.View):
-    def __init__(self, candidate, channel_id=None):
-        super().__init__(timeout=7200)
+    """Persistent invitation buttons. Candidate is resolved from STATE at click time so Zeabur restarts do not kill the buttons."""
+    def __init__(self, candidate=None, channel_id=None):
+        super().__init__(timeout=None)
         self.candidate = dict(candidate or {})
         self.channel_id = channel_id
 
     async def _finish(self, interaction, approved):
-        # Component ACK only; the real progress is shown by _love_generate_and_send() as a normal channel message.
         await interaction.response.defer(thinking=False)
         app_state = load_state()
         app_state, love = _love_get_day_state(app_state)
         pending = love.get("pending_request") if isinstance(love.get("pending_request"), dict) else {}
-        if pending and pending.get("id") and pending.get("id") != self.candidate.get("id"):
-            await interaction.followup.send("這一張愛意邀請已經不是最新狀態了，小俠先以最新的一次為準喔。", ephemeral=True)
+
+        if not pending or pending.get("status", "waiting") not in {"waiting", "approved"}:
+            await interaction.followup.send("這一張愛意邀請已經沒有等待中的內容了。", ephemeral=True)
             return
+
+        pending_message_id = pending.get("message_id")
+        clicked_message_id = getattr(getattr(interaction, "message", None), "id", None)
+        if pending_message_id and clicked_message_id and int(pending_message_id) != int(clicked_message_id):
+            await interaction.followup.send("這一張是舊的愛意邀請，小俠以最新的一張為準喔。", ephemeral=True)
+            return
+
+        candidate = dict(pending)
         if approved:
-            if pending:
-                pending["status"] = "approved"
-                pending["approved_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
-                pending["approved_by"] = getattr(getattr(interaction, "user", None), "id", None)
-                love["pending_request"] = pending
-                save_state(app_state)
-            await _love_generate_and_send(interaction.channel, self.candidate, approved_by=getattr(getattr(interaction, "user", None), "id", None))
-            self.stop()
+            candidate["status"] = "approved"
+            candidate["approved_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+            candidate["approved_by"] = getattr(getattr(interaction, "user", None), "id", None)
+            love["pending_request"] = candidate
+            save_state(app_state)
+            print(f"💗 [LOVE_INVITE_BUTTON_APPROVED] candidate={candidate.get('id')} message={clicked_message_id}")
+            await _love_generate_and_send(
+                interaction.channel,
+                candidate,
+                approved_by=getattr(getattr(interaction, "user", None), "id", None),
+            )
             return
-        if pending:
-            pending["status"] = "rejected"
-            pending["rejected_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
-            love["pending_request"] = pending
+
+        candidate["status"] = "rejected"
+        candidate["rejected_at"] = datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        love["pending_request"] = candidate
         _love_mark_review_finished(love, result="rejected", mark_asked=True, clear_pending=True)
         save_state(app_state)
+        print(f"💗 [LOVE_INVITE_BUTTON_REJECTED] candidate={candidate.get('id')} message={clicked_message_id}")
         await interaction.followup.send("🌿 好呀，那小俠先把這份心動留在心裡，今天就不拍囉。")
         self.stop()
 
-    @discord.ui.button(label="好，開始吧", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="好，開始吧",
+        style=discord.ButtonStyle.primary,
+        custom_id="xiaoxia_love_invite:approve",
+    )
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, approved=True)
 
-    @discord.ui.button(label="今天先不要", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="今天先不要",
+        style=discord.ButtonStyle.secondary,
+        custom_id="xiaoxia_love_invite:reject",
+    )
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._finish(interaction, approved=False)
 
@@ -5770,10 +6005,15 @@ async def _handle_xiaoxia_love_message_direct(message):
         love["fixed_review_status"] = statuses
         love["fixed_review_fired"] = fired
         save_state(app_state)
-        await message.channel.send('💗 `/小俠愛意` 已開啟。今日第一筆正常聊天仍會決定固定 4 小時 review 排程；23:00 後不再做自發 review。關閉期間已錯過的 review 不會補跑。')
+        _love_ensure_review_timer()
+        await message.channel.send('💗 `/小俠愛意` 已開啟。今日第一筆正常聊天會建立每 2 小時查核：2 小時點累積達 50 句才送 Gemini 判斷；4 小時點只要有新聊天就送 Gemini，完全沒聊天就略過。23:00 後停止。')
         return True
     if args in {'關', 'off', 'OFF'}:
         _love_set_enabled(False)
+        global LOVE_REVIEW_TIMER_TASK
+        if LOVE_REVIEW_TIMER_TASK is not None and not LOVE_REVIEW_TIMER_TASK.done():
+            LOVE_REVIEW_TIMER_TASK.cancel()
+        LOVE_REVIEW_TIMER_TASK = None
         await message.channel.send('🌿 `/小俠愛意` 已關閉。既有照片與記憶不受影響；自發 review 與定時愛意邀請暫停。')
         return True
 
@@ -5788,26 +6028,16 @@ async def _handle_xiaoxia_love_message_direct(message):
         chat_delta = int(love.get('effective_chat_count') or 0) - int(love.get('last_review_chat_count') or 0)
         fixed_status = _love_fixed_status_text(love)
 
-        review_ref_dt = _love_parse_dt(love.get("last_review_at")) or _love_parse_dt(love.get("first_chat_at"))
-        hot_checkpoint_text = "尚未建立"
-        if review_ref_dt is not None:
-            hot_checkpoint_dt = review_ref_dt + timedelta(hours=2)
-            hot_ready = (
-                datetime.now(TZ_TPE) >= hot_checkpoint_dt
-                and chat_delta >= 50
-                and not love.get("asked_today")
-                and _love_is_before_cutoff(datetime.now(TZ_TPE))
-            )
-            hot_checkpoint_text = (
-                f"{hot_checkpoint_dt.strftime('%H:%M')}｜"
-                f"{'已達觸發門檻，等待排程器檢查' if hot_ready else '尚未達觸發條件'}"
-            )
+        chat_check_slots = list(love.get("chat_check_slots") or [])
+        chat_check_fired = set(str(x) for x in (love.get("chat_check_fired") or []))
+        next_chat_check = next((slot for slot in chat_check_slots if slot not in chat_check_fired), None)
+        hot_checkpoint_text = (
+            f"下一次 2 小時計數：{next_chat_check}"
+            if next_chat_check
+            else "今日已無下一個 2 小時計數點"
+        )
 
-        task_running = False
-        try:
-            task_running = bool(xiaoxia_love_review_task.is_running())
-        except Exception:
-            task_running = False
+        task_running = _love_review_timer_running()
 
         await message.channel.send(
             "💗 **小俠愛意狀態**\n"
@@ -5817,8 +6047,9 @@ async def _handle_xiaoxia_love_message_direct(message):
             f"今日第一句聊天：{love.get('first_chat_at') or '尚未開始'}\n"
             f"今日固定 review：\n{fixed_status}\n"
             f"今日雙方聊天句數：{int(love.get('effective_chat_count') or 0)}\n"
-            f"上次 review 後新增：{chat_delta} 句（熱聊提前門檻 50 句／至少 2 小時）\n"
-            f"熱聊查核點：{hot_checkpoint_text}\n"
+            f"上次語意 review 後新增：{chat_delta} 句\n"
+            f"下一個 2 小時查核：{hot_checkpoint_text}\n"
+            f"規則：2 小時點達 50 句才送 Gemini；4 小時點只要有新聊天就送 Gemini（0 句略過）。\n"
             f"上次 review：{love.get('last_review_at') or '尚無'}｜{love.get('last_review_result') or '尚無'}\n"
             f"今日已詢問：{'是' if love.get('asked_today') else '否'}\n"
             f"待處理邀請：{pending_text}\n"
@@ -25412,9 +25643,21 @@ async def on_ready():
     if not xiaoxia_autonomy_auto_task.is_running():
         xiaoxia_autonomy_auto_task.start()
         print(f"🌱 小俠自主排程任務已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}；即使 daily_limit=0，也會處理大俠指定活動 slots。")
-    if not xiaoxia_love_review_task.is_running():
-        xiaoxia_love_review_task.start()
-        print("💗 小俠愛意 review 任務已啟動：每 10 分鐘檢查固定 review / 愛意值 >95 定時邀請。")
+    # v1.10.27：Persistent View 讓 Zeabur 重啟後，既有「好，開始吧／今天先不要」仍可按。
+    try:
+        girlfriend_bot.add_view(LoveIntentInviteView())
+        print("💗 小俠愛意 Persistent View 已註冊。")
+    except Exception as exc:
+        print(f"⚠️ [LOVE_PERSISTENT_VIEW_REGISTER_FAILED] {type(exc).__name__}: {exc}")
+
+    if _love_ensure_review_timer():
+        print("💗 小俠愛意 review timer 已恢復：以今日第一句聊天為錨點；2 小時達 50 句做 Gemini 語意 review，4 小時有新聊天就做 Gemini review。")
+    else:
+        print("💗 小俠愛意 review timer 待命：今日第一句聊天後才啟動。")
+
+    if not xiaoxia_love_score_invite_task.is_running():
+        xiaoxia_love_score_invite_task.start()
+        print("💗 小俠愛意 >95 候選邀請任務已啟動：每日 21:00 精準檢查。")
 
 @girlfriend_bot.command(name='more')
 async def more(ctx):
@@ -27905,44 +28148,16 @@ async def xiaoxia_autonomy_auto_task():
 # ==========================================
 # ⏰ 自動排程系統
 # ==========================================
-@tasks.loop(minutes=10)
-async def xiaoxia_love_review_task():
-    now_dt = datetime.now(TZ_TPE)
-    app_state = load_state()
-    app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
-    love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-    love["scheduler_last_tick_result"] = "checking"
-    save_state(app_state)
+# v1.10.27：愛意 review 不再每 10 分鐘 polling。
+# - 今日第一句聊天建立 2h 計數查核點與 4h Gemini 語意 review 點。
+# - _love_review_timer_worker 只在那些錨定時間醒來。
+# - >95 的隔日邀請則獨立在 21:00 精準檢查。
+@tasks.loop(time=time(hour=21, minute=0, tzinfo=TZ_TPE))
+async def xiaoxia_love_score_invite_task():
     try:
-        # v1.9.04：熱聊提前 Review 必須由排程器主動檢查。
-        # v1.9.03 只在「小俠回完下一句話」後檢查，跨過 +2h 門檻後若暫停聊天，就不會自動觸發。
-        hot_triggered = await _love_request_if_due(trigger_type="chat_review", now_dt=now_dt)
-
-        # 固定 4 小時 Review 仍由第一筆聊天錨定，不因熱聊 Review 漂移。
-        fixed_triggered = await _love_request_if_due(trigger_type="fixed_review", now_dt=now_dt)
-
-        scheduled_triggered = False
-        # 23:50 前一晚建立的 scheduled candidate，隔日 21:00 後才有資格詢問。
-        if now_dt.hour >= 21:
-            scheduled_triggered = await _love_request_if_due(trigger_type="score_95", now_dt=now_dt)
-
-        app_state = load_state()
-        app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
-        love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-        love["scheduler_last_tick_result"] = (
-            "hot_chat_triggered" if hot_triggered else
-            "fixed_triggered" if fixed_triggered else
-            "scheduled_triggered" if scheduled_triggered else
-            "checked_no_trigger"
-        )
-        save_state(app_state)
+        await _love_request_if_due(trigger_type="score_95", now_dt=datetime.now(TZ_TPE))
     except Exception as exc:
-        app_state = load_state()
-        app_state, love = _love_get_day_state(app_state, now_dt=now_dt)
-        love["scheduler_last_tick_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-        love["scheduler_last_tick_result"] = f"error:{type(exc).__name__}"
-        save_state(app_state)
-        print(f"⚠️ [LOVE_REVIEW_TASK_FAILED] {type(exc).__name__}: {exc}")
+        print(f"⚠️ [LOVE_SCORE_INVITE_TASK_FAILED] {type(exc).__name__}: {exc}")
 
 @tasks.loop(time=time(hour=21, minute=30, tzinfo=TZ_TPE))
 async def auto_cosplay_task():
