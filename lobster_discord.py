@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.29"
+LOBSTER_VERSION = "1.10.30"
 
 
 def _normalize_generation_level(level):
@@ -5523,7 +5523,7 @@ def _love_refresh_prompt_context(context):
     ctx = dict(context or {})
     title = _clean_text_compact(ctx.get("title") or ctx.get("activity_title") or ctx.get("scene_text") or "小俠愛意")
     raw_scene = _clean_text_compact(ctx.get("scene_summary") or ctx.get("composition") or ctx.get("scene_text") or "")
-    scene_dt = _safe_parse_datetime(ctx.get("created_at") or ctx.get("sent_at") or "") or datetime.now(TZ_TPE)
+    scene_dt = _love_parse_dt(ctx.get("created_at") or ctx.get("sent_at") or "") or datetime.now(TZ_TPE)
     scene_text = _love_sanitize_scene_text(_love_enforce_home_scene(raw_scene or _love_home_scene_fallback(scene_dt), love_action=ctx.get("action_summary") or "", now_dt=scene_dt), now_dt=scene_dt)
     if not _clean_text_compact(ctx.get("time_anchor")):
         ctx["time_anchor"] = _love_time_anchor_text(scene_dt)
@@ -5677,7 +5677,7 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 def _love_build_photo_context(candidate, wardrobe_item=None, wardrobe_reason="", wardrobe_selection=None):
     candidate = candidate if isinstance(candidate, dict) else {}
     title = _clean_text_compact(candidate.get("title") or "小俠愛意")
-    candidate_dt = _safe_parse_datetime(candidate.get("created_at") or candidate.get("sent_at") or "") or datetime.now(TZ_TPE)
+    candidate_dt = _love_parse_dt(candidate.get("created_at") or candidate.get("sent_at") or "") or datetime.now(TZ_TPE)
     scene_text = _love_sanitize_scene_text(
         _clean_text_compact(candidate.get("scene_text") or "小俠帶著溫柔心意，在自然生活場景裡看向鏡頭。"),
         now_dt=candidate_dt,
