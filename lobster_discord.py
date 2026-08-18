@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.35"
+LOBSTER_VERSION = "1.10.36"
 
 
 def _normalize_generation_level(level):
@@ -687,6 +687,19 @@ XIAOXIA_GOOGLE_CALENDAR_SCOPE = (
     os.environ.get("XIAOXIA_GOOGLE_CALENDAR_SCOPE")
     or "https://www.googleapis.com/auth/calendar.events"
 ).strip()
+
+
+# 📅 v1.10.36：Weekly Review 排程可由 Zeabur ENV 調整。
+# weekday 採 Python 慣例：Mon=0 ... Sun=6。預設 Sun 01:15（台灣時間）。
+XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY = _env_int(
+    "XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY", 6, 0, 6
+)
+XIAOXIA_CALENDAR_WEEKLY_REVIEW_HOUR = _env_int(
+    "XIAOXIA_CALENDAR_WEEKLY_REVIEW_HOUR", 1, 0, 23
+)
+XIAOXIA_CALENDAR_WEEKLY_REVIEW_MINUTE = _env_int(
+    "XIAOXIA_CALENDAR_WEEKLY_REVIEW_MINUTE", 15, 0, 59
+)
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -1461,16 +1474,37 @@ async def _xiaoxia_calendar_review_next_week():
     _xiaoxia_calendar_planner_state_save(st)
     return {"reviewed": reviewed, "locked": locked, "planner_created": plan.get("created") or []}
 
+def _xiaoxia_calendar_weekly_review_schedule_text():
+    names = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+    return (
+        f"{names[XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY]} "
+        f"{XIAOXIA_CALENDAR_WEEKLY_REVIEW_HOUR:02d}:"
+        f"{XIAOXIA_CALENDAR_WEEKLY_REVIEW_MINUTE:02d}"
+    )
+
+
 async def _xiaoxia_calendar_weekly_planner_scheduler():
     print("📅 [XIAOXIA_CALENDAR_WEEKLY_PLANNER] background loop started")
     while True:
         try:
             now_dt = datetime.now(TZ_TPE)
-            days_ahead = (7 - now_dt.weekday()) % 7
+            target_weekday = XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY
+            days_ahead = (target_weekday - now_dt.weekday()) % 7
             target_date = now_dt.date() + timedelta(days=days_ahead)
-            target = datetime.combine(target_date, time(1,15), tzinfo=TZ_TPE)
+            target = datetime.combine(
+                target_date,
+                time(
+                    XIAOXIA_CALENDAR_WEEKLY_REVIEW_HOUR,
+                    XIAOXIA_CALENDAR_WEEKLY_REVIEW_MINUTE,
+                ),
+                tzinfo=TZ_TPE,
+            )
             if target <= now_dt:
                 target += timedelta(days=7)
+            print(
+                f"📅 [XIAOXIA_CALENDAR_WEEKLY_PLANNER] schedule="
+                f"{_xiaoxia_calendar_weekly_review_schedule_text()} next={target.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
             await asyncio.sleep(max(1.0, (target - now_dt).total_seconds()))
             if _xiaoxia_calendar_config_status().get("configured"):
                 await _xiaoxia_calendar_review_next_week()
@@ -1548,6 +1582,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
             "• `/小俠月曆 更新` → 同步14天快取＋近3天摘要＋今日主線\n"
             "• `/小俠月曆 規劃14天` → 以現有生活活動庫排未來兩週\n"
             "• `/小俠月曆 review` → Review 下一週並補齊兩週滾動視窗\n"
+            f"• 自動 Review：{_xiaoxia_calendar_weekly_review_schedule_text()}（台灣時間，可由 Zeabur ENV 調整）\n"
             "• `/小俠月曆 未來14天`\n"
             "• `/小俠月曆 本週`\n"
             "• `/小俠月曆 下週`\n\n"
@@ -1579,7 +1614,8 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                 f"14天快取最後更新：`{cache.get('updated_at') or '尚未建立'}`\n"
                 f"14天快取事件：{cache.get('event_count', 0)} 筆\n"
                 f"近3天摘要：{'✅' if context else '尚未建立'}\n"
-                f"今日主線：{'✅' if mainline and mainline.get('date') == datetime.now(TZ_TPE).strftime('%Y-%m-%d') else '尚未建立'}"
+                f"今日主線：{'✅' if mainline and mainline.get('date') == datetime.now(TZ_TPE).strftime('%Y-%m-%d') else '尚未建立'}\n"
+                f"Weekly Review 排程：`{_xiaoxia_calendar_weekly_review_schedule_text()}`（台灣時間）"
             )
         except Exception as exc:
             await message.channel.send(
