@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.39"
+LOBSTER_VERSION = "1.10.40"
 
 
 def _normalize_generation_level(level):
@@ -112,6 +112,22 @@ XIAOXIA_CLOTHING_FLATTER_RULE = "Clothing should naturally complement and flatte
 XIAOXIA_SCENE_WRITER_BODY_BASELINE_ZH = (
     "白皙甜美、高挑苗條且曲線明顯、腰線明確、自然豐滿且存在感再加強的上圍、"
     "明顯胸腰對比、柔和沙漏曲線、修長腿部（尤其小腿線條）；衣服應自然襯托而非削弱這個體態。"
+)
+
+
+# v1.10.40 — Seedream body identity single source of truth.
+# Autonomy currently gives the most stable Xiaoxia body result; all main image paths
+# must now receive the same downstream body lock instead of each mode carrying weaker variants.
+XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK = (
+    "Preserve Xiaoxia's established adult East Asian face and core body identity: fair luminous skin, "
+    "a tall and slim feminine figure, a distinctly narrow and clearly defined waist, "
+    "a naturally very full and visibly prominent elegant bust, strong bust-to-waist contrast, "
+    "a refined soft hourglass silhouette, and long graceful legs with elegant lower-leg proportions. "
+    "Her fuller upper-body silhouette and narrow waist must remain clearly readable through the clothing "
+    "in front-facing, side-facing, three-quarter, seated, standing, half-body, and full-body compositions, "
+    "while anatomy stays natural and elegant. Clothing, costume, pose, camera framing, or scene styling must "
+    "not flatten, minimize, or reduce Xiaoxia's normal bust fullness or bust-to-waist contrast unless Daxia "
+    "explicitly requests a slimmer or flatter interpretation."
 )
 
 
@@ -667,7 +683,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.5.43_R1")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.40_body_identity_ssot")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1109,7 +1125,7 @@ def _xiaoxia_calendar_recent_context_text():
             loc = f" @ {row.get('location')}" if row.get("location") else ""
             items.append(f"{row.get('time')} {row.get('title')}{who}{loc}")
         lines.append(f"{label}：" + "；".join(items))
-    lines.append("以上是已知行程；未發生的行程不得當成已發生，且未進入開始前30分鐘準備期時不得主動拿下一個行程取代普通聊天。")
+    lines.append("以上是已知行程；未發生的行程不得當成已發生。")
     return "\n".join(lines)
 
 def _xiaoxia_daily_mainline_for_chat_text():
@@ -1122,7 +1138,7 @@ def _xiaoxia_daily_mainline_for_chat_text():
     lines = ["【小俠今日活動主線｜只知道主線，不知道未來劇情】"]
     for row in rows[:8]:
         lines.append(f"- {row.get('time')}｜{row.get('title')}：{row.get('mainline')}")
-    lines.append("不可提前預告未發生的細節；尚未進入活動開始前30分鐘時，主線只是背景認知，不得說現在要去、現在出發或先去準備。")
+    lines.append("不可提前預告未發生的細節。")
     return "\n".join(lines)
 
 def _xiaoxia_calendar_find_activity_seed(title):
@@ -1289,34 +1305,11 @@ def _daxia_reality_context_text(now_dt=None, user_text=""):
         "國定假日：v1.10.33 暫不判定。"
     )
 
-XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES = 30
-
-def _xiaoxia_calendar_chat_timing_guard_text(now_dt=None):
-    """
-    v1.10.39:
-    Calendar 是背景認知，不是普通聊天的強制話題。
-    所有行程統一只抓「開始前 30 分鐘」作為可自然提及的準備期，
-    避免下一個行程長時間霸佔兩個活動之間的聊天。
-    """
-    now_dt = now_dt or datetime.now(TZ_TPE)
-    return (
-        "【Calendar 對話時間邊界｜固定 30 分鐘】\n"
-        f"現在時間：{now_dt.strftime('%Y-%m-%d %H:%M')}\n"
-        f"所有尚未開始的 Calendar 行程，一律只有在『開始前 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘內』才進入合理準備期。\n"
-        f"若距離下一個行程仍超過 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘：該行程只是背景知識，不得因為它存在就主動把普通聊天拉去該行程；"
-        "不得說『我要去了』『我現在要出發』『我得先去準備』『我現在先去做』等把未來行程提前成現在狀態的話。\n"
-        f"進入開始前 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘內後，才可以自然提到等等要準備／出發；"
-        "到達活動開始時間後，才可把它視為正在進行。\n"
-        "例外：若大俠主動詢問某個未來行程，可以回答該行程資訊，但仍不可假裝它已經開始。\n"
-        "Calendar 行程的存在本身不構成回覆理由；兩個行程之間應照常聊天、生活，不得讓下一個行程霸佔對話。"
-    )
-
 def _xiaoxia_calendar_chat_context(user_text):
     """Calendar/reality context is enrichment only; any failure must never break ordinary chat."""
     try:
         return "\n\n".join(x for x in (
             _daxia_reality_context_text(user_text=user_text),
-            _xiaoxia_calendar_chat_timing_guard_text(),
             _xiaoxia_calendar_recent_context_text(),
             _xiaoxia_daily_mainline_for_chat_text(),
             _xiaoxia_calendar_relevant_cache_text(user_text),
@@ -13556,7 +13549,7 @@ AUTHORITATIVE TODAY SCENE — this is the FINAL visual authority for setting, ti
 {scene}
 
 TECHNICAL XIAOXIA IDENTITY / BODY LOCK:
-Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: preserve her facial identity and core body identity, fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy.
+{XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK}
 For this reference cosplay, Figure 10 may still supply role-specific hairstyle, hair color and non-face head traits while Xiaoxia's own facial identity stays unchanged.
 When Figure 10 and TODAY SCENE disagree about garment construction in ONLY-FOR-DAXIA mode, TODAY SCENE wins. Keep the role recognizable through selected character cues rather than by preserving every original garment detail.
 Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
@@ -13577,7 +13570,7 @@ AUTHORITATIVE TODAY SCENE — controls ONLY setting, time, action, pose, express
 {scene}
 
 TECHNICAL XIAOXIA IDENTITY / BODY LOCK:
-Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: preserve her facial identity and core body identity, fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy.
+{XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK}
 For this reference cosplay, Figure 10 MUST override Xiaoxia's normal hairstyle/hair color and must supply the role-specific hairstyle, hair color and non-face head traits while Xiaoxia's own facial identity stays unchanged.
 Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
 Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
@@ -13593,7 +13586,8 @@ AUTHORITATIVE TODAY SCENE — this is the final render contract for story, setti
 {scene}
 
 TECHNICAL XIAOXIA IDENTITY / BODY LOCK — do not invent new story content:
-Keep Xiaoxia clearly recognizable as the same adult East Asian fictional woman: fair luminous skin, tall slim feminine figure, distinctly defined narrow waist, naturally very full and elegant bust, strong bust-to-waist contrast, soft hourglass silhouette, graceful long legs, and natural anatomy. Preserve mature feminine allure and the scene's intended sensuality, but do not redesign the outfit or add costume details that are not written in TODAY SCENE. Hairstyle or hair color may differ only if TODAY SCENE itself specifies it.
+{XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK}
+Preserve mature feminine allure and the scene's intended sensuality, but do not redesign the outfit or add costume details that are not written in TODAY SCENE. Hairstyle or hair color may differ only if TODAY SCENE itself specifies it.
 Strictly solo Xiaoxia only. No other person, no man, no external hands, no viewer body parts, no reflections or silhouettes of another person. Keep hands and posture physically plausible.
 Do not render captions, subtitles, labels, watermarks, UI, readable book/page/poster/sign text, or timestamps unless TODAY SCENE explicitly asks for visible text.
 Render a polished photorealistic cinematic cosplay photograph faithful to TODAY SCENE.{retry_line}""".strip()
@@ -17542,8 +17536,9 @@ def _apply_v5_background_role_handoff_prompt(final_prompt, has_reference=False, 
 def _seedream_cosplay_prompt(custom_prompt):
     return (
         "Use all input images as reference sheets for the same adult fictional character, Xiaoxia. "
-        "Preserve her recognizable sweet East Asian facial identity, fair luminous skin, tall slim feminine figure, clearly defined waist, naturally very full and elegant bust, strong bust-to-waist contrast, long graceful legs with an elegant lower-leg line, gentle youthful-adult aura, and natural body proportions from the references. "
-        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay: refined feminine allure, a naturally very full and elegant bust with strong bust-to-waist contrast and a soft hourglass silhouette as part of Xiaoxia's core body identity, with that bust-to-waist contrast as the primary charm point, and the most suitable secondary charm point chosen between waistline, leg line, or both according to the role, outfit structure, pose logic, and scene mood. "
+        "XIAOXIA BODY IDENTITY — same baseline strength as Xiaoxia autonomy photos: "
+        + XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK + " "
+        "Apply Xiaoxia Aesthetic as the default baseline even in cosplay. Her normal body identity is not negotiable merely because this is cosplay; costume and role styling adapt around Xiaoxia rather than shrinking or flattening her body baseline. "
         "Daxia's current request still overrides this baseline. If Daxia asks for stronger role fidelity, fuller bust, slimmer body, longer lower legs, or another targeted adjustment, obey that request first while still keeping Xiaoxia recognizable. "
         "Do not copy any one reference pose or background exactly; create a new cosplay image according to the prompt. "
         "Only Xiaoxia may appear. No man, no male head, no male face, no male hair, no male hands, no male arms, no male shoulder, no male back, no male torso, no other people, no reflections of other people. "
@@ -20631,7 +20626,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             people_line = "People: Xiaoxia is the only primary subject; no companion, no male interaction, and never show Daxia/viewer."
         sections = [
             "REFERENCES: Figures 1-9 preserve Xiaoxia identity/body only; do not copy their pose, outfit, background or composition.",
-            "Keep Xiaoxia's established adult East Asian face and tall, slim, narrow-waisted, naturally full-busted hourglass body identity with natural anatomy.",
+            "XIAOXIA BODY IDENTITY — same baseline strength as Xiaoxia autonomy photos:\n" + XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK,
             people_line,
         ]
         if has_reference:
@@ -20666,6 +20661,7 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Figures 1-9 are identity-only references for Xiaoxia. Apply their face/body identity only to Xiaoxia. "
             "Do not copy their pose, outfit, background, lighting, or composition."
         ),
+        "XIAOXIA BODY IDENTITY — shared single source of truth:\n" + XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK,
     ]
     if hard:
         sections.append("HARD SCENE REQUIREMENTS — failure on any item is incorrect:\n" + hard)
@@ -20755,7 +20751,7 @@ def _seedream_diary_prompt(custom_prompt, has_reference=False, current_outfit=No
             "Figures 1-9 are identity-only references for Xiaoxia. Apply their face and body identity only to Xiaoxia. "
             "Do not copy their pose, outfit, room, background, lighting, props, or composition."
         ),
-        _v1540_compact_identity_line(),
+        "XIAOXIA BODY IDENTITY — same baseline strength as Xiaoxia autonomy photos:\n" + _v1540_compact_identity_line(),
         "DIARY SCENE CONTRACT:\n"
         "- Treat the DIARY TEXT REQUEST below as the single authoritative story source for this image.\n"
         "- Do not pull in other diary paragraphs, old memories, bedroom defaults, optional ideas, continuation notes, reroll notes, or generic glamour substitutions.\n"
@@ -32363,13 +32359,8 @@ def _v1540_people_rule(checklist=None):
 
 
 def _v1540_compact_identity_line():
-    return (
-        "Identity: preserve Xiaoxia's recognizable adult East Asian face, fair luminous skin, long brown hair, "
-        "tall slim figure, distinctly narrow waist, naturally very full and visibly prominent elegant bust, "
-        "strong bust-to-waist contrast, refined hourglass silhouette, and long graceful legs. "
-        "Her fuller upper-body silhouette and narrow waist must remain clearly readable through the clothing "
-        "in seated, standing, full-body, side-facing, and multi-person compositions, while anatomy stays natural."
-    )
+    # v1.10.40: Diary / Photo / Autonomy share the same Seedream body baseline.
+    return "Identity: " + XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK
 
 
 def _v1540_extract_request(text):
