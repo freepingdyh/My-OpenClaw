@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.38"
+LOBSTER_VERSION = "1.10.39"
 
 
 def _normalize_generation_level(level):
@@ -1109,7 +1109,7 @@ def _xiaoxia_calendar_recent_context_text():
             loc = f" @ {row.get('location')}" if row.get("location") else ""
             items.append(f"{row.get('time')} {row.get('title')}{who}{loc}")
         lines.append(f"{label}：" + "；".join(items))
-    lines.append("以上是已知行程；未發生的行程不得當成已發生。")
+    lines.append("以上是已知行程；未發生的行程不得當成已發生，且未進入開始前30分鐘準備期時不得主動拿下一個行程取代普通聊天。")
     return "\n".join(lines)
 
 def _xiaoxia_daily_mainline_for_chat_text():
@@ -1122,7 +1122,7 @@ def _xiaoxia_daily_mainline_for_chat_text():
     lines = ["【小俠今日活動主線｜只知道主線，不知道未來劇情】"]
     for row in rows[:8]:
         lines.append(f"- {row.get('time')}｜{row.get('title')}：{row.get('mainline')}")
-    lines.append("不可提前預告未發生的細節。")
+    lines.append("不可提前預告未發生的細節；尚未進入活動開始前30分鐘時，主線只是背景認知，不得說現在要去、現在出發或先去準備。")
     return "\n".join(lines)
 
 def _xiaoxia_calendar_find_activity_seed(title):
@@ -1289,11 +1289,34 @@ def _daxia_reality_context_text(now_dt=None, user_text=""):
         "國定假日：v1.10.33 暫不判定。"
     )
 
+XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES = 30
+
+def _xiaoxia_calendar_chat_timing_guard_text(now_dt=None):
+    """
+    v1.10.39:
+    Calendar 是背景認知，不是普通聊天的強制話題。
+    所有行程統一只抓「開始前 30 分鐘」作為可自然提及的準備期，
+    避免下一個行程長時間霸佔兩個活動之間的聊天。
+    """
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    return (
+        "【Calendar 對話時間邊界｜固定 30 分鐘】\n"
+        f"現在時間：{now_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        f"所有尚未開始的 Calendar 行程，一律只有在『開始前 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘內』才進入合理準備期。\n"
+        f"若距離下一個行程仍超過 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘：該行程只是背景知識，不得因為它存在就主動把普通聊天拉去該行程；"
+        "不得說『我要去了』『我現在要出發』『我得先去準備』『我現在先去做』等把未來行程提前成現在狀態的話。\n"
+        f"進入開始前 {XIAOXIA_CALENDAR_CHAT_PREP_WINDOW_MINUTES} 分鐘內後，才可以自然提到等等要準備／出發；"
+        "到達活動開始時間後，才可把它視為正在進行。\n"
+        "例外：若大俠主動詢問某個未來行程，可以回答該行程資訊，但仍不可假裝它已經開始。\n"
+        "Calendar 行程的存在本身不構成回覆理由；兩個行程之間應照常聊天、生活，不得讓下一個行程霸佔對話。"
+    )
+
 def _xiaoxia_calendar_chat_context(user_text):
     """Calendar/reality context is enrichment only; any failure must never break ordinary chat."""
     try:
         return "\n\n".join(x for x in (
             _daxia_reality_context_text(user_text=user_text),
+            _xiaoxia_calendar_chat_timing_guard_text(),
             _xiaoxia_calendar_recent_context_text(),
             _xiaoxia_daily_mainline_for_chat_text(),
             _xiaoxia_calendar_relevant_cache_text(user_text),
