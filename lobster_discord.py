@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.36"
+LOBSTER_VERSION = "1.10.37"
 
 
 def _normalize_generation_level(level):
@@ -689,7 +689,7 @@ XIAOXIA_GOOGLE_CALENDAR_SCOPE = (
 ).strip()
 
 
-# 📅 v1.10.36：Weekly Review 排程可由 Zeabur ENV 調整。
+# 📅 v1.10.37：Weekly Review 排程可由 Zeabur ENV 調整。
 # weekday 採 Python 慣例：Mon=0 ... Sun=6。預設 Sun 01:15（台灣時間）。
 XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY = _env_int(
     "XIAOXIA_CALENDAR_WEEKLY_REVIEW_WEEKDAY", 6, 0, 6
@@ -888,6 +888,11 @@ async def _xiaoxia_calendar_create_event(
         "end": {
             "dateTime": end_dt.isoformat(),
             "timeZone": "Asia/Taipei",
+        },
+        # 📵 v1.10.37：小俠是虛擬生活 Calendar；程式建立的活動預設不通知。
+        # useDefault=False 且沒有 overrides = 此 event 不使用 Calendar 預設提醒。
+        "reminders": {
+            "useDefault": False,
         },
     }
     if location:
@@ -1546,6 +1551,74 @@ def _xiaoxia_calendar_planner_preview_rows(created, limit=12):
     return lines, len(rows)
 
 
+
+async def _xiaoxia_calendar_mute_window(days=14):
+    """
+    v1.10.37:
+    Make existing events in Xiaoxia's dedicated Calendar silent without deleting/replanning them.
+    This preserves title/time/location/description and only patches reminders.useDefault=False.
+    """
+    now_dt = datetime.now(TZ_TPE)
+    end_dt = now_dt + timedelta(days=max(1, int(days or 14)))
+    events = await _xiaoxia_calendar_list_events(
+        now_dt.replace(hour=0, minute=0, second=0, microsecond=0),
+        end_dt,
+        max_results=250,
+    )
+
+    muted = []
+    failed = []
+    already_silent = []
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = str(ev.get("id") or "").strip()
+        if not event_id:
+            continue
+
+        reminders = ev.get("reminders") or {}
+        # Google may omit overrides entirely. useDefault=False is the key signal.
+        if reminders.get("useDefault") is False and not (reminders.get("overrides") or []):
+            already_silent.append(event_id)
+            continue
+
+        try:
+            await _xiaoxia_calendar_update_event(
+                event_id,
+                {
+                    "reminders": {
+                        "useDefault": False,
+                    }
+                },
+            )
+            muted.append({
+                "id": event_id,
+                "title": _clean_text_compact(ev.get("summary") or "未命名行程"),
+                "start": (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date") or "",
+            })
+        except Exception as exc:
+            failed.append({
+                "id": event_id,
+                "title": _clean_text_compact(ev.get("summary") or "未命名行程"),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    # Keep cache aligned after reminder-only patches.
+    await _xiaoxia_calendar_refresh_cache(
+        reason=f"mute_{max(1, int(days or 14))}d",
+        regenerate_today=False,
+    )
+
+    return {
+        "days": max(1, int(days or 14)),
+        "found": len(events),
+        "muted": muted,
+        "already_silent": already_silent,
+        "failed": failed,
+    }
+
+
 async def _handle_xiaoxia_calendar_message_direct(message):
     """
     v1.10.32 MVP commands:
@@ -1580,6 +1653,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
             "• `/小俠月曆 狀態`\n"
             "• `/小俠月曆 測試` → Zeabur 端執行讀取/新增/修改/刪除並自動清理\n"
             "• `/小俠月曆 更新` → 同步14天快取＋近3天摘要＋今日主線\n"
+            "• `/小俠月曆 靜音14天` → 既有14天活動保留不動，只關閉提醒\n"
             "• `/小俠月曆 規劃14天` → 以現有生活活動庫排未來兩週\n"
             "• `/小俠月曆 review` → Review 下一週並補齊兩週滾動視窗\n"
             f"• 自動 Review：{_xiaoxia_calendar_weekly_review_schedule_text()}（台灣時間，可由 Zeabur ENV 調整）\n"
@@ -1615,12 +1689,39 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                 f"14天快取事件：{cache.get('event_count', 0)} 筆\n"
                 f"近3天摘要：{'✅' if context else '尚未建立'}\n"
                 f"今日主線：{'✅' if mainline and mainline.get('date') == datetime.now(TZ_TPE).strftime('%Y-%m-%d') else '尚未建立'}\n"
-                f"Weekly Review 排程：`{_xiaoxia_calendar_weekly_review_schedule_text()}`（台灣時間）"
+                f"Weekly Review 排程：`{_xiaoxia_calendar_weekly_review_schedule_text()}`（台灣時間）\n"
+                "📵 新建立活動提醒：`關閉`"
             )
         except Exception as exc:
             await message.channel.send(
                 "📅 **小俠月曆連線狀態：❌ 失敗**\n"
                 f"`{type(exc).__name__}: {str(exc)[:1300]}`"
+            )
+        return True
+
+    if raw in {"靜音14天", "關閉提醒14天", "mute14", "silent14"}:
+        msg = await message.channel.send(
+            "📵 小俠正在把未來14天既有行程設成不通知；不會刪除、不會重排時間……"
+        )
+        try:
+            result = await _xiaoxia_calendar_mute_window(days=14)
+            failed = result.get("failed") or []
+            muted = result.get("muted") or []
+            already = result.get("already_silent") or []
+            suffix = ""
+            if failed:
+                suffix = f"\n⚠️ 另有 {len(failed)} 筆設定失敗，可再重試一次。"
+            await msg.edit(content=(
+                "✅ **小俠月曆未來14天已靜音**\n"
+                f"找到活動：{result.get('found', 0)} 筆\n"
+                f"本次關閉提醒：{len(muted)} 筆\n"
+                f"原本就不通知：{len(already)} 筆\n"
+                "活動內容、日期、時間、地點都保留不變。"
+                + suffix
+            ))
+        except Exception as exc:
+            await msg.edit(
+                content=f"❌ 月曆靜音失敗：`{type(exc).__name__}: {str(exc)[:1500]}`"
             )
         return True
 
