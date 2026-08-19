@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.40"
+LOBSTER_VERSION = "1.10.41"
 
 
 def _normalize_generation_level(level):
@@ -683,7 +683,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.40_body_identity_ssot")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.41_calendar_daily_limits")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -726,6 +726,16 @@ XIAOXIA_CALENDAR_EXECUTOR_GRACE_HOURS = _env_int(
 XIAOXIA_CALENDAR_EXECUTOR_RUNNING_STALE_MINUTES = _env_int(
     "XIAOXIA_CALENDAR_EXECUTOR_RUNNING_STALE_MINUTES", 90, 15, 720
 )
+
+# 📅 v1.10.41：Calendar Planner 每日「小俠自主」活動數量可由 Zeabur ENV 控制。
+# 預設：週間 1 次／日、週末 1 次／日；未來想改回 2 次只改 ENV，不用再改 code。
+XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT = _env_int(
+    "XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT", 1, 0, 6
+)
+XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT = _env_int(
+    "XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT", 1, 0, 6
+)
+
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -1759,7 +1769,11 @@ async def _xiaoxia_calendar_plan_14_days(start_date=None):
         existing = existing_by_date.setdefault(key, [])
         week_key = f"{d.isocalendar().year}-W{d.isocalendar().week:02d}"
         used = used_by_week.setdefault(week_key, set())
-        target = 2 if d.weekday() < 5 else random.choice([0,1])
+        target = (
+            XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT
+            if d.weekday() < 5
+            else XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT
+        )
 
         existing_auto = 0
         for ev in existing:
@@ -1816,6 +1830,60 @@ async def _xiaoxia_calendar_plan_14_days(start_date=None):
     })
     _xiaoxia_calendar_planner_state_save(st)
     return {"created": created, "refreshed": refreshed}
+
+async def _xiaoxia_calendar_replan_14_days_from_tomorrow():
+    """
+    v1.10.41：從明天開始真正重排未來 14 天的小俠自主 Calendar 行程。
+    只刪「來源：小俠自主」且未鎖定的活動；其他來源與「鎖定：是」全部保留。
+    """
+    start_date = datetime.now(TZ_TPE).date() + timedelta(days=1)
+    start_dt = datetime.combine(start_date, time.min, tzinfo=TZ_TPE)
+    end_dt = start_dt + timedelta(days=14)
+
+    events = await _xiaoxia_calendar_list_events(start_dt, end_dt, max_results=250)
+    deleted, preserved_locked, failed = [], [], []
+
+    for ev in events:
+        meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+        if meta.get("來源") != "小俠自主":
+            continue
+
+        row = {
+            "event_id": str(ev.get("id") or ""),
+            "date": (_xiaoxia_calendar_event_date(ev) or start_date).isoformat(),
+            "title": _clean_text_compact(ev.get("summary") or "未命名活動"),
+        }
+
+        if meta.get("鎖定") == "是":
+            preserved_locked.append(row)
+            continue
+
+        if not row["event_id"]:
+            failed.append({**row, "error": "missing_event_id"})
+            continue
+
+        try:
+            await _xiaoxia_calendar_delete_event(row["event_id"])
+            deleted.append(row)
+        except Exception as exc:
+            failed.append({**row, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+
+    # 先刷新刪除後的 Calendar 現況，再重新規劃。
+    await _xiaoxia_calendar_refresh_cache(
+        reason="planner_replan_after_delete",
+        regenerate_today=False,
+    )
+    planned = await _xiaoxia_calendar_plan_14_days(start_date=start_date)
+
+    return {
+        "window_start": start_date.isoformat(),
+        "window_end": (start_date + timedelta(days=13)).isoformat(),
+        "deleted": deleted,
+        "preserved_locked": preserved_locked,
+        "failed": failed,
+        "created": planned.get("created") or [],
+        "refreshed": planned.get("refreshed") or {},
+    }
 
 async def _xiaoxia_calendar_review_next_week():
     await _xiaoxia_calendar_refresh_cache(reason="weekly_review_preflight", regenerate_today=False)
@@ -2013,7 +2081,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
         exec_state = _xiaoxia_calendar_executor_state_load()
         exec_text = "開啟" if exec_state.get("enabled", True) else "關閉"
         await message.channel.send(
-            "📅 **小俠月曆 v1.10.38**\n"
+            "📅 **小俠月曆 v1.10.41**\n"
             f"OAuth 環境變數：{configured_text}\n"
             f"Calendar ID：`{status['calendar_id']}`\n"
             f"Calendar 自動執行：**{exec_text}**（活動到時會自動做事、生成照片、寫 episode）\n\n"
@@ -2025,7 +2093,9 @@ async def _handle_xiaoxia_calendar_message_direct(message):
             "• `/小俠月曆 測試` → Zeabur 端執行讀取/新增/修改/刪除並自動清理\n"
             "• `/小俠月曆 更新` → 同步14天快取＋近3天摘要＋今日主線\n"
             "• `/小俠月曆 靜音14天` → 既有14天活動保留不動，只關閉提醒\n"
-            "• `/小俠月曆 規劃14天` → 以現有生活活動庫排未來兩週\n"
+            "• `/小俠月曆 規劃14天` → 依目前 ENV 目標補齊未來兩週，不刪既有行程\n"
+            "• `/小俠月曆 重排14天` → 從明天起移除未鎖定的「小俠自主」行程後重新排 14 天\n"
+            f"  ↳ 週間每日 `{XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT}` 次｜週末每日 `{XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT}` 次\n"
             "• `/小俠月曆 review` → Review 下一週並補齊兩週滾動視窗\n"
             f"• 自動 Review：{_xiaoxia_calendar_weekly_review_schedule_text()}（台灣時間，可由 Zeabur ENV 調整）\n"
             "• `/小俠月曆 未來14天`\n"
@@ -2062,6 +2132,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                 f"近3天摘要：{'✅' if context else '尚未建立'}\n"
                 f"今日主線：{'✅' if mainline and mainline.get('date') == datetime.now(TZ_TPE).strftime('%Y-%m-%d') else '尚未建立'}\n"
                 f"Weekly Review 排程：`{_xiaoxia_calendar_weekly_review_schedule_text()}`（台灣時間）\n"
+                f"Planner 週間每日：`{XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT}` 次｜週末每日：`{XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT}` 次\n"
                 f"Calendar 自動執行：`{'開啟' if exec_state.get('enabled', True) else '關閉'}`\n"
                 f"自動執行輪詢：每 {XIAOXIA_CALENDAR_EXECUTOR_POLL_MINUTES} 分鐘\n"
                 f"最近檢查：`{exec_state.get('last_checked_at') or '尚無'}`\n"
@@ -2163,11 +2234,47 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                     "以下時間皆為 **台灣時間 UTC+8**，並依時間由早到晚排序：\n"
                     + (preview or "沒有需要新增的活動。")
                     + more
-                    + "\n\n既有 Calendar 行程保留不動；週末只排 0～1 個自主活動。"
+                    + (
+                        f"\n\n既有 Calendar 行程保留不動；目前 ENV 目標："
+                        f"週間每日 {XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT} 次、"
+                        f"週末每日 {XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT} 次。"
+                    )
                 )
             )
         except Exception as exc:
             await msg.edit(content=f"❌ 兩週 Planner 失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+
+    if raw in {"重排14天", "重新規劃14天", "重新排14天", "replan14", "replan"}:
+        msg = await message.channel.send(
+            "🔄 小俠正在從 **明天開始** 重排未來 14 天；只移除未鎖定的「小俠自主」行程，其他 Calendar 行程都保留……"
+        )
+        try:
+            result = await _xiaoxia_calendar_replan_14_days_from_tomorrow()
+            created = result.get("created") or []
+            deleted = result.get("deleted") or []
+            locked = result.get("preserved_locked") or []
+            failed = result.get("failed") or []
+            preview_lines, total_rows = _xiaoxia_calendar_planner_preview_rows(created, limit=12)
+            preview = "\n".join(preview_lines)
+            more = f"\n…另有 {total_rows - 12} 筆" if total_rows > 12 else ""
+            fail_text = f"\n⚠️ 刪除失敗：{len(failed)} 筆，可再重試一次。" if failed else ""
+            await msg.edit(content=(
+                "✅ **小俠月曆重排14天完成**\n"
+                f"範圍：`{result.get('window_start')}` ～ `{result.get('window_end')}`\n"
+                f"移除舊自主行程：{len(deleted)} 筆\n"
+                f"保留鎖定自主行程：{len(locked)} 筆\n"
+                f"重新建立：{len(created)} 筆\n"
+                f"目前目標：週間每日 **{XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT}** 次｜"
+                f"週末每日 **{XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT}** 次\n"
+                "以下為新建立行程（台灣時間）：\n"
+                + (preview or "沒有需要新增的活動。")
+                + more
+                + fail_text
+                + "\n\n大俠手動建立、其他來源、以及 `鎖定：是` 的行程都沒有被刪除。"
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ Calendar 重排失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
 
     if raw in {"review", "檢查", "週檢查", "review下週"}:
@@ -2250,7 +2357,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
         label = "下週"
     else:
         await message.channel.send(
-            "我現在支援：`/小俠月曆 狀態`、`開`、`關`、`立即檢查`、`更新`、`靜音14天`、`規劃14天`、`review`、`未來14天`、`本週`、`下週`、`測試`。"
+            "我現在支援：`/小俠月曆 狀態`、`開`、`關`、`立即檢查`、`更新`、`靜音14天`、`規劃14天`、`重排14天`、`review`、`未來14天`、`本週`、`下週`、`測試`。"
         )
         return True
 
