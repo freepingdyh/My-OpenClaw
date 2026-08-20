@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.41"
+LOBSTER_VERSION = "1.10.42"
 
 
 def _normalize_generation_level(level):
@@ -683,7 +683,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.41_calendar_daily_limits")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.42_calendar_event_timer")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -741,6 +741,16 @@ _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
     "expires_at": 0.0,
 }
+
+# 📅 v1.10.42：Calendar Executor 改為事件驅動，不再每 5 分鐘輪詢 Google Calendar。
+# - Zeabur 啟動：同步一次並建立下一筆 timer。
+# - 每日 01:00：既有 daily refresh 同步後喚醒 timer。
+# - /小俠月曆 更新：同步後立即重建 timer。
+# - 程式內 create/update/delete：直接更新本地 cache 並喚醒 timer。
+# - 大俠直接在 Google Calendar 網頁/App 修改：由大俠輸入 /小俠月曆 更新通知 Zeabur。
+_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT = asyncio.Event()
+_XIAOXIA_CALENDAR_EXECUTOR_WAKE_REASON = "startup"
+
 
 WARDROBE_DATA_PATH = os.path.join(MEMORY_DIR, "xiaoxia_wardrobe.json")
 WARDROBE_DIR = os.path.join(MEMORY_DIR, "wardrobe")
@@ -933,23 +943,31 @@ async def _xiaoxia_calendar_create_event(
     }
     if location:
         body["location"] = str(location).strip()
-    return await _xiaoxia_calendar_request("POST", _xiaoxia_calendar_event_url(), json_body=body)
+    created = await _xiaoxia_calendar_request("POST", _xiaoxia_calendar_event_url(), json_body=body)
+    if isinstance(created, dict) and created.get("id"):
+        _xiaoxia_calendar_cache_apply_event(created, reason="calendar_create")
+    return created
 
 
 async def _xiaoxia_calendar_update_event(event_id, patch):
     if not event_id:
         raise ValueError("event_id is required")
-    return await _xiaoxia_calendar_request(
+    updated = await _xiaoxia_calendar_request(
         "PATCH",
         _xiaoxia_calendar_event_url(event_id),
         json_body=dict(patch or {}),
     )
+    if isinstance(updated, dict) and updated.get("id"):
+        _xiaoxia_calendar_cache_apply_event(updated, reason="calendar_update")
+    return updated
 
 
 async def _xiaoxia_calendar_delete_event(event_id):
     if not event_id:
         raise ValueError("event_id is required")
-    return await _xiaoxia_calendar_request("DELETE", _xiaoxia_calendar_event_url(event_id))
+    result = await _xiaoxia_calendar_request("DELETE", _xiaoxia_calendar_event_url(event_id))
+    _xiaoxia_calendar_cache_apply_event(delete_event_id=event_id, reason="calendar_delete")
+    return result
 
 
 def _xiaoxia_calendar_event_start_text(event):
@@ -1059,6 +1077,97 @@ def _xiaoxia_calendar_parse_event_dt(raw):
         return datetime.combine(d, time.min, tzinfo=TZ_TPE)
     except Exception:
         return None
+
+def _xiaoxia_calendar_executor_wake(reason="calendar_changed"):
+    global _XIAOXIA_CALENDAR_EXECUTOR_WAKE_REASON
+    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_REASON = str(reason or "calendar_changed")
+    try:
+        _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.set()
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_CALENDAR_TIMER_WAKE_FAILED] {type(exc).__name__}: {exc}")
+
+
+def _xiaoxia_calendar_cache_apply_event(event=None, *, delete_event_id=None, reason="calendar_mutation"):
+    """
+    v1.10.42：程式自己 CRUD Calendar 後，直接同步本地 14 天 cache，
+    不必再 GET Google Calendar，也能立刻重排 executor timer。
+    """
+    cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+    if not isinstance(cache, dict):
+        cache = {}
+    rows = [x for x in (cache.get("events") or []) if isinstance(x, dict)]
+
+    delete_id = str(delete_event_id or "").strip()
+    if delete_id:
+        rows = [x for x in rows if str(x.get("id") or "").strip() != delete_id]
+
+    if isinstance(event, dict) and str(event.get("id") or "").strip():
+        normalized = _xiaoxia_calendar_normalize_event(event)
+        event_id = str(normalized.get("id") or "").strip()
+        replaced = False
+        for idx, row in enumerate(rows):
+            if str(row.get("id") or "").strip() == event_id:
+                rows[idx] = normalized
+                replaced = True
+                break
+        if not replaced:
+            rows.append(normalized)
+
+    rows.sort(key=lambda row: _xiaoxia_calendar_parse_event_dt(row.get("start")) or datetime.max.replace(tzinfo=TZ_TPE))
+    cache.update({
+        "updated_at": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason,
+        "event_count": len(rows),
+        "events": rows,
+    })
+    _xiaoxia_calendar_save(XIAOXIA_CALENDAR_CACHE_PATH, cache)
+    _xiaoxia_calendar_executor_wake(reason)
+
+
+def _xiaoxia_calendar_cached_event_to_api_shape(event):
+    """把 cache 的扁平 start/end 轉回 executor 原本使用的 Google event 形狀。"""
+    event = dict(event or {})
+    start_raw = str(event.get("start") or "").strip()
+    end_raw = str(event.get("end") or "").strip()
+    return {
+        "id": str(event.get("id") or ""),
+        "summary": event.get("summary") or "未命名行程",
+        "description": event.get("description") or "",
+        "location": event.get("location") or "",
+        "start": ({"dateTime": start_raw} if "T" in start_raw else {"date": start_raw}),
+        "end": ({"dateTime": end_raw} if "T" in end_raw else {"date": end_raw}),
+        "updated": event.get("updated") or "",
+    }
+
+
+def _xiaoxia_calendar_next_cached_executable_event(now_dt=None):
+    """只看 Zeabur 已同步 cache；不向 Google Calendar 發 request。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
+    candidates = []
+    for row in (cache.get("events") or []) if isinstance(cache, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        start_dt = _xiaoxia_calendar_parse_event_dt(row.get("start"))
+        if start_dt is None or "T" not in str(row.get("start") or ""):
+            continue
+        api_event = _xiaoxia_calendar_cached_event_to_api_shape(row)
+        meta = _xiaoxia_calendar_parse_description_metadata(api_event.get("description") or "")
+        status = str(meta.get("執行狀態") or "pending").strip().lower()
+        if status in {"done", "completed", "sent", "skipped", "ignored"}:
+            continue
+        title = _clean_text_compact(api_event.get("summary") or "")
+        if title.startswith("🧪 Xiaoxia Zeabur Calendar Test"):
+            continue
+        end_dt = _xiaoxia_calendar_parse_event_dt(row.get("end")) or (start_dt + timedelta(hours=2))
+        if now_dt > end_dt + timedelta(hours=XIAOXIA_CALENDAR_EXECUTOR_GRACE_HOURS):
+            continue
+        candidates.append((start_dt, api_event))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+    return candidates[0][1]
+
 
 def _xiaoxia_calendar_event_date(event):
     dt = _xiaoxia_calendar_parse_event_dt((event or {}).get("start"))
@@ -1269,6 +1378,7 @@ async def _xiaoxia_calendar_refresh_cache(*, reason="manual", regenerate_today=T
         today_events = [x for x in events if _xiaoxia_calendar_event_date(x) == now_dt.date()]
         await _xiaoxia_generate_today_mainline(today_events, now_dt)
     print(f"📅 [XIAOXIA_CALENDAR_CACHE_REFRESHED] reason={reason} events={len(events)}")
+    _xiaoxia_calendar_executor_wake(f"cache_refresh:{reason}")
     return {"cache": cache, "context": ctx, "daily_mainline": _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH)}
 
 def _xiaoxia_calendar_mentions_non_near_term(user_text):
@@ -1717,11 +1827,101 @@ async def _xiaoxia_calendar_executor_tick(force=False):
 
 
 async def _xiaoxia_calendar_executor_scheduler():
-    print("📅 [XIAOXIA_CALENDAR_EXECUTOR] background loop started")
+    """
+    v1.10.42：事件驅動 Calendar executor。
+    不再固定每 5 分鐘 GET Google Calendar；只在已知事件時間醒來，
+    或由 startup / 01:00 refresh / /小俠月曆 更新 / 程式內 CRUD 喚醒重排。
+    """
+    print("📅 [XIAOXIA_CALENDAR_EXECUTOR] event-driven timer started; 5-minute polling disabled")
+
+    # Zeabur 每次重新部署/重啟，記憶體 timer 都會消失，所以啟動時同步一次是必要的。
+    try:
+        if _xiaoxia_calendar_config_status().get("configured"):
+            await _xiaoxia_calendar_refresh_cache(reason="executor_startup", regenerate_today=True)
+            print("📅 [XIAOXIA_CALENDAR_TIMER_STARTUP_SYNC] completed")
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_CALENDAR_TIMER_STARTUP_SYNC_FAILED] {type(exc).__name__}: {exc}")
+
+    # startup refresh 會 set wake；這裡清掉，避免立刻空轉一圈。
+    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+
     while True:
         try:
-            result = await _xiaoxia_calendar_executor_tick(force=False)
-            print(f"📅 [XIAOXIA_CALENDAR_EXECUTOR_TICK] {result}")
+            state = _xiaoxia_calendar_executor_state_load()
+            if not state.get("enabled", True):
+                print("📅 [XIAOXIA_CALENDAR_TIMER_IDLE] executor disabled; waiting for explicit wake")
+                await _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait()
+                _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                continue
+
+            now_dt = datetime.now(TZ_TPE)
+            next_event = _xiaoxia_calendar_next_cached_executable_event(now_dt=now_dt)
+            if not next_event:
+                print("📅 [XIAOXIA_CALENDAR_TIMER_IDLE] no scheduled executable event; waiting for calendar change")
+                await _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait()
+                reason = _XIAOXIA_CALENDAR_EXECUTOR_WAKE_REASON
+                _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                print(f"📅 [XIAOXIA_CALENDAR_TIMER_REBUILD] reason={reason}")
+                continue
+
+            raw_start = str(((next_event.get("start") or {}).get("dateTime") or "")).strip()
+            start_dt = _xiaoxia_calendar_parse_event_dt(raw_start)
+            if start_dt is None:
+                _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                await asyncio.sleep(1)
+                continue
+
+            wait_seconds = max(0.0, (start_dt - now_dt).total_seconds())
+            event_id = str(next_event.get("id") or "")
+            title = _clean_text_compact(next_event.get("summary") or "未命名行程")
+
+            if wait_seconds > 0:
+                print(
+                    f"📅 [XIAOXIA_CALENDAR_TIMER_ARMED] event_id={event_id} "
+                    f"start={start_dt.strftime('%Y-%m-%d %H:%M:%S')} wait={int(wait_seconds)}s title={title}"
+                )
+                try:
+                    await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=wait_seconds)
+                    reason = _XIAOXIA_CALENDAR_EXECUTOR_WAKE_REASON
+                    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                    print(f"📅 [XIAOXIA_CALENDAR_TIMER_REBUILD] reason={reason}")
+                    continue
+                except asyncio.TimeoutError:
+                    pass
+
+            # 到時才執行；這一步不需要先重新 GET Calendar。
+            if int(LOVE_GENERATION_ACTIVE_COUNT or 0) > 0 or _love_generation_task_running():
+                print(f"💗 [XIAOXIA_CALENDAR_TIMER_DEFERRED_FOR_LOVE] event_id={event_id} title={title}")
+                try:
+                    await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=60)
+                    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            channel = _get_xiaoxia_autonomy_channel_for_auto()
+            if channel is None:
+                print(f"⚠️ [XIAOXIA_CALENDAR_TIMER_CHANNEL_MISSING] event_id={event_id} title={title}")
+                try:
+                    await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=300)
+                    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            result = await _xiaoxia_calendar_execute_due_event(next_event, channel=channel)
+            print(f"📅 [XIAOXIA_CALENDAR_TIMER_EXECUTED] {result}")
+            if not result.get("success"):
+                # 失敗才使用本地 5 分鐘 retry；不讀 Google Calendar。
+                try:
+                    await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=300)
+                    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+                except asyncio.TimeoutError:
+                    pass
+
+        except asyncio.CancelledError:
+            print("📅 [XIAOXIA_CALENDAR_EXECUTOR] cancelled")
+            raise
         except Exception as exc:
             state = _xiaoxia_calendar_executor_state_load()
             state.update({
@@ -1732,8 +1932,12 @@ async def _xiaoxia_calendar_executor_scheduler():
                 "current_started_at": "",
             })
             _xiaoxia_calendar_executor_state_save(state)
-            print(f"⚠️ [XIAOXIA_CALENDAR_EXECUTOR_ERROR] {type(exc).__name__}: {exc}")
-        await asyncio.sleep(max(60, int(XIAOXIA_CALENDAR_EXECUTOR_POLL_MINUTES or 5) * 60))
+            print(f"⚠️ [XIAOXIA_CALENDAR_TIMER_ERROR] {type(exc).__name__}: {exc}")
+            try:
+                await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=60)
+                _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
+            except asyncio.TimeoutError:
+                pass
 
 
 async def _xiaoxia_calendar_plan_14_days(start_date=None):
@@ -2134,7 +2338,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
                 f"Weekly Review 排程：`{_xiaoxia_calendar_weekly_review_schedule_text()}`（台灣時間）\n"
                 f"Planner 週間每日：`{XIAOXIA_CALENDAR_WEEKDAY_DAILY_ACTIVITY_LIMIT}` 次｜週末每日：`{XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT}` 次\n"
                 f"Calendar 自動執行：`{'開啟' if exec_state.get('enabled', True) else '關閉'}`\n"
-                f"自動執行輪詢：每 {XIAOXIA_CALENDAR_EXECUTOR_POLL_MINUTES} 分鐘\n"
+                "自動執行：`事件驅動 timer（不輪詢）`\n"
                 f"最近檢查：`{exec_state.get('last_checked_at') or '尚無'}`\n"
                 f"最近結果：`{exec_state.get('last_result') or '尚無'}`\n"
                 f"最近執行：`{exec_state.get('last_triggered_at') or '尚無'}`｜{exec_state.get('last_triggered_title') or '尚無'}\n"
@@ -17667,8 +17871,6 @@ def _seedream_error_is_retryable(value):
 
 async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=None, trace_context=None, input_image_urls_override=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
-    if isinstance(trace_context, dict):
-        trace_context.update(_backfill_figure10_reference_fields(trace_context))
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -17681,10 +17883,6 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Non
     else:
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
-        figure10_reference = (trace_context or {}).get("reference_item_path") if isinstance(trace_context, dict) else None
-        if figure10_reference:
-            image_urls.append(await _seedream_upload_single_file(figure10_reference))
-            image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     if isinstance(trace_context, dict) and trace_context.get("cosplay_scene_only"):
         final_prompt = str(custom_prompt or "").strip()
     elif str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
@@ -17954,8 +18152,6 @@ def _seedream_diary_prompt(custom_prompt, visual_checklist=None):
 
 async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None, trace_context=None, input_image_urls_override=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做交換日記 image-to-image。"""
-    if isinstance(trace_context, dict):
-        trace_context.update(_backfill_figure10_reference_fields(trace_context))
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -17968,10 +18164,6 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None,
     else:
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
-        figure10_reference = (trace_context or {}).get("reference_item_path") if isinstance(trace_context, dict) else None
-        if figure10_reference:
-            image_urls.append(await _seedream_upload_single_file(figure10_reference))
-            image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     has_reference = bool((trace_context or {}).get("figure10_present") or (trace_context or {}).get("reference_item_path") or (trace_context or {}).get("reference_item_url")) if isinstance(trace_context, dict) else False
     diary_prompt_result = _seedream_diary_prompt(
         custom_prompt,
@@ -20932,10 +21124,6 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     if enable_safety_checker is None:
         enable_safety_checker = SEEDREAM_ENABLE_SAFETY_CHECKER
-    if isinstance(trace_context, dict):
-        trace_context.update(_backfill_figure10_reference_fields(trace_context))
-        if not reference_image_path:
-            reference_image_path = trace_context.get("reference_item_path") or trace_context.get("cosplay_clothing_ref_local_path") or trace_context.get("nano_clothing_ref_local_path")
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -22229,7 +22417,6 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
 
 
 async def _generate_photo_from_context(context, msg=None):
-    context = _backfill_figure10_reference_fields(context)
     source_context_for_presentation = dict(context or {})
     # v1.8.11：Title + Scene 是生圖語意契約；authoritative_scene 是唯一審圖 Scene。
     # scene_text / scene_summary 只可作 UI、索引、摘要或 fallback，不得覆蓋 authoritative_scene。
@@ -23731,125 +23918,6 @@ def _context_db_type(context):
     if _is_autonomy_context(context):
         return "autonomy_photo"
     return "photo"
-
-def _photo_db_type_for_storage(context):
-    mode = str((context or {}).get("source_mode") or (context or {}).get("type") or "").strip().lower()
-    if mode == "diary":
-        return "diary"
-    return _context_db_type(context)
-
-
-def _backfill_figure10_reference_fields(context):
-    """補齊 Figure 10 / Banana / 衣櫃參考圖資訊，避免支線漏掉原衣服。"""
-    updated = dict(context or {})
-    mode = str(updated.get("source_mode") or updated.get("type") or "").strip().lower()
-
-    ref_path = str(updated.get("reference_item_path") or "").strip()
-    ref_url = str(updated.get("reference_item_url") or "").strip()
-
-    if not ref_path:
-        for key in ("nano_clothing_ref_local_path", "cosplay_clothing_ref_local_path"):
-            candidate = str(updated.get(key) or "").strip()
-            if candidate:
-                ref_path = candidate
-                updated["reference_item_path"] = candidate
-                break
-    if not ref_url:
-        for key in ("nano_clothing_ref_local_url", "cosplay_clothing_ref_local_url"):
-            candidate = str(updated.get(key) or "").strip()
-            if candidate:
-                ref_url = candidate
-                updated["reference_item_url"] = candidate
-                break
-
-    wardrobe_id = str(updated.get("wardrobe_id") or "").strip().upper()
-    if wardrobe_id and not (ref_path or ref_url):
-        item = _find_wardrobe_item(wardrobe_id)
-        if item:
-            resolved_path, resolved_url = _wardrobe_reference_for_generation(item)
-            if resolved_path and not ref_path:
-                ref_path = resolved_path
-                updated["reference_item_path"] = resolved_path
-            if resolved_url and not ref_url:
-                ref_url = resolved_url
-                updated["reference_item_url"] = resolved_url
-            if item.get("name") and not updated.get("wardrobe_name"):
-                updated["wardrobe_name"] = item.get("name")
-
-    if mode == "cosplay":
-        if ref_path and not updated.get("cosplay_clothing_ref_local_path"):
-            updated["cosplay_clothing_ref_local_path"] = ref_path
-        if ref_url and not updated.get("cosplay_clothing_ref_local_url"):
-            updated["cosplay_clothing_ref_local_url"] = ref_url
-    else:
-        if ref_path and not updated.get("nano_clothing_ref_local_path"):
-            updated["nano_clothing_ref_local_path"] = ref_path
-        if ref_url and not updated.get("nano_clothing_ref_local_url"):
-            updated["nano_clothing_ref_local_url"] = ref_url
-
-    updated["figure10_present"] = bool(updated.get("figure10_present") or ref_path or ref_url)
-    return updated
-
-
-def _find_photo_generation_context(message_id=None, old_url=None, diary_date=None):
-    candidate = None
-    if message_id is not None:
-        candidate = photo_generation_contexts.get(message_id)
-        if candidate is None:
-            candidate = photo_generation_contexts.get(str(message_id))
-    if candidate is None:
-        old_url = str(old_url or "").strip()
-        for row in load_memory():
-            if not isinstance(row, dict):
-                continue
-            same_url = bool(old_url) and old_url in {
-                str(row.get("local_url", "")),
-                str(row.get("image_url", "")),
-            }
-            same_diary = bool(diary_date) and row.get("type") == "diary" and diary_date in str(row.get("topic", ""))
-            if same_url or same_diary:
-                candidate = row
-                break
-    if not isinstance(candidate, dict):
-        return None
-    restored = _backfill_figure10_reference_fields(candidate)
-    if message_id is not None:
-        restored["message_id"] = message_id
-    return restored
-
-
-def _prepare_reaction_variation_context(source_context, *, is_reroll=False):
-    context = _backfill_figure10_reference_fields(source_context)
-    context.pop("__trace_context", None)
-    context["trace_action"] = "photo_reroll_reaction" if is_reroll else "photo_more_reaction"
-    context["user_input"] = "Reaction reroll from previous photo" if is_reroll else "Reaction more from previous photo"
-    if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
-        context, root_prompt = _love_refresh_prompt_context(context)
-    else:
-        root_prompt = _photo_context_root_scene_prompt(context)
-    context["root_prompt_base"] = root_prompt
-    if is_reroll:
-        context["prompt_base"] = (
-            root_prompt
-            + "\nREROLL: Keep the same core story, activity, people boundary, outfit, time of day, and mood. Recompose freely, but do not change the subject or invent a new scene."
-        )
-    else:
-        context["prompt_base"] = (
-            root_prompt
-            + "\nCONTINUATION: Keep the same story, scene, activity, people boundary, and outfit. Create one fresh natural variation in pose, expression, camera angle, and composition only."
-        )
-    return context
-
-
-async def _generate_reaction_variation_from_context(source_context, *, is_reroll=False, msg=None):
-    context = _prepare_reaction_variation_context(source_context, is_reroll=is_reroll)
-    if context.get("v5_refine_mode") and (
-        context.get("v5_background_generated_url")
-        or context.get("v5_background_local_url")
-        or context.get("v5_background_local_path")
-    ):
-        return await (_reroll_with_existing_v5_background(context) if is_reroll else _more_with_existing_v5_background(context))
-    return await _generate_photo_from_context(context, msg=msg)
 
 
 def _autonomy_context_matches_today(today, context):
@@ -27810,7 +27878,7 @@ async def on_ready():
             print(f"⚠️ 小俠專用 Calendar 尚缺環境變數：{', '.join(_cal_status.get('missing') or [])}")
     except Exception as exc:
         print(f"⚠️ 小俠專用 Calendar 狀態讀取失敗：{type(exc).__name__}: {exc}")
-    print("📅 小俠月曆 01:00 refresh / weekly review / auto executor 皆由 main() 獨立背景 scheduler 管理。")
+    print("📅 小俠月曆 01:00 refresh / weekly review / event-driven executor 皆由 main() 獨立背景 scheduler 管理。")
     
     # # 🌟 1. 關鍵補丁：同步斜線指令至 Discord 伺服器
     # try:
@@ -29517,64 +29585,6 @@ async def on_raw_reaction_add(payload):
             old_image_url = source_embed.image.url if source_embed.image else None
             is_diary = "交換日記" in str(source_embed.title or "")
             diary_date = _extract_diary_date_from_title(source_embed.title) if is_diary else None
-
-            original_context = _find_photo_generation_context(
-                message_id=getattr(msg, "id", None),
-                old_url=old_image_url,
-                diary_date=diary_date,
-            )
-            if original_context:
-                try:
-                    new_context = await _generate_reaction_variation_from_context(original_context, is_reroll=is_reroll, msg=temp_msg)
-                    old_url = original_context.get("local_url") or original_context.get("image_url") or old_image_url
-                    db_type = _photo_db_type_for_storage(new_context)
-                    payload = _photo_db_payload(new_context, type_override=db_type)
-                    _set_current_outfit_state(_build_outfit_state_from_context(new_context))
-                    _log_wardrobe_usage_from_context(new_context, purpose=("photo_reroll_reaction" if is_reroll else "photo_more_reaction"))
-
-                    if is_reroll:
-                        if str(new_context.get("source_mode") or new_context.get("type") or "").lower() == "diary" and diary_date:
-                            replaced, html_old_url = replace_completed_diary_image(
-                                diary_date,
-                                new_context.get("local_url") or new_context.get("image_url"),
-                                description=new_context.get("authoritative_scene") or new_context.get("composition") or "",
-                                old_url_hint=old_url,
-                            )
-                            if not replaced:
-                                _replace_photo_db_record(old_url, payload, diary_date=diary_date)
-                            if html_old_url:
-                                _safe_delete_vault_image(html_old_url)
-                        else:
-                            _replace_photo_db_record(old_url, payload, diary_date=diary_date if is_diary else None)
-                        if _is_autonomy_context(original_context) or _is_autonomy_context(new_context):
-                            _sync_autonomy_today_after_photo_replace(original_context, new_context)
-                        _safe_delete_vault_image(old_url)
-                        new_context["message_id"] = msg.id
-                        photo_generation_contexts[msg.id] = new_context
-                        await _edit_photo_message_with_file(msg, new_context, view=PhotoResultView(new_context), title_prefix="📸 骰子取代")
-                        await temp_msg.edit(content="✅ 重擲完成：新照片已取代原照片，並保留原本衣服 / Figure 10 參考。")
-                        await asyncio.sleep(3)
-                        await temp_msg.delete()
-                        return
-
-                    db = load_memory()
-                    db.insert(0, payload)
-                    save_memory(db)
-                    view = PhotoResultView(new_context)
-                    file, filename = _photo_discord_file(new_context)
-                    embed = _build_result_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
-                    if file:
-                        new_msg = await channel.send(embed=embed, file=file, view=view)
-                    else:
-                        new_msg = await channel.send(embed=embed, view=view)
-                    new_context["message_id"] = new_msg.id
-                    photo_generation_contexts[new_msg.id] = new_context
-                    view.context = new_context
-                    await temp_msg.delete()
-                    return
-                except Exception as modern_exc:
-                    print(f"⚠️ [REACTION_CONTEXT_REGEN_FAILED] {type(modern_exc).__name__}: {modern_exc}")
-                    traceback.print_exc()
 
             if is_diary:
                 scenario_tw = "小俠在家中度過一個自然安靜的生活片刻。"
@@ -32834,7 +32844,7 @@ async def main():
         _xiaoxia_calendar_executor_scheduler(),
         name="xiaoxia_calendar_executor_scheduler",
     )
-    print("📅 [LOBSTER_MAIN] Calendar auto executor task created independently")
+    print("📅 [LOBSTER_MAIN] Calendar event-driven executor task created independently (5-minute polling disabled)")
 
     try:
         await asyncio.gather(
