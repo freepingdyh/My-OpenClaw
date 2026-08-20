@@ -17667,6 +17667,8 @@ def _seedream_error_is_retryable(value):
 
 async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=None, trace_context=None, input_image_urls_override=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做 image-to-image。"""
+    if isinstance(trace_context, dict):
+        trace_context.update(_backfill_figure10_reference_fields(trace_context))
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -17679,6 +17681,10 @@ async def generate_seedream_v45_cosplay(custom_prompt, enable_safety_checker=Non
     else:
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
+        figure10_reference = (trace_context or {}).get("reference_item_path") if isinstance(trace_context, dict) else None
+        if figure10_reference:
+            image_urls.append(await _seedream_upload_single_file(figure10_reference))
+            image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     if isinstance(trace_context, dict) and trace_context.get("cosplay_scene_only"):
         final_prompt = str(custom_prompt or "").strip()
     elif str(custom_prompt or "").lstrip().startswith("FIGURE ROLE MAP"):
@@ -17948,6 +17954,8 @@ def _seedream_diary_prompt(custom_prompt, visual_checklist=None):
 
 async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None, trace_context=None, input_image_urls_override=None):
     """呼叫 fal-ai/bytedance/seedream/v4.5/edit，用 9 張 Zeabur 參考底稿做交換日記 image-to-image。"""
+    if isinstance(trace_context, dict):
+        trace_context.update(_backfill_figure10_reference_fields(trace_context))
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -17960,6 +17968,10 @@ async def generate_seedream_v45_diary(custom_prompt, enable_safety_checker=None,
     else:
         selected_figures = (trace_context or {}).get("seedream_identity_selected_figures") if isinstance(trace_context, dict) else None
         image_urls = await _seedream_upload_reference_images(selected_figure_indexes=selected_figures)
+        figure10_reference = (trace_context or {}).get("reference_item_path") if isinstance(trace_context, dict) else None
+        if figure10_reference:
+            image_urls.append(await _seedream_upload_single_file(figure10_reference))
+            image_urls = image_urls[-10:] if len(image_urls) > 10 else image_urls
     has_reference = bool((trace_context or {}).get("figure10_present") or (trace_context or {}).get("reference_item_path") or (trace_context or {}).get("reference_item_url")) if isinstance(trace_context, dict) else False
     diary_prompt_result = _seedream_diary_prompt(
         custom_prompt,
@@ -20920,6 +20932,10 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
     """Seedream v4.5 統一 /photo：無參考圖=情境照；有參考圖=換裝/飾品融合。"""
     if enable_safety_checker is None:
         enable_safety_checker = SEEDREAM_ENABLE_SAFETY_CHECKER
+    if isinstance(trace_context, dict):
+        trace_context.update(_backfill_figure10_reference_fields(trace_context))
+        if not reference_image_path:
+            reference_image_path = trace_context.get("reference_item_path") or trace_context.get("cosplay_clothing_ref_local_path") or trace_context.get("nano_clothing_ref_local_path")
     fal_client = _get_fal_client()
     model_id = _context_seedream_model_id(trace_context=trace_context)
     model_label = _seedream_model_label_from_id(model_id)
@@ -22213,6 +22229,7 @@ async def _edit_photo_message_with_file(message, context, view=None, title_prefi
 
 
 async def _generate_photo_from_context(context, msg=None):
+    context = _backfill_figure10_reference_fields(context)
     source_context_for_presentation = dict(context or {})
     # v1.8.11：Title + Scene 是生圖語意契約；authoritative_scene 是唯一審圖 Scene。
     # scene_text / scene_summary 只可作 UI、索引、摘要或 fallback，不得覆蓋 authoritative_scene。
@@ -23714,6 +23731,125 @@ def _context_db_type(context):
     if _is_autonomy_context(context):
         return "autonomy_photo"
     return "photo"
+
+def _photo_db_type_for_storage(context):
+    mode = str((context or {}).get("source_mode") or (context or {}).get("type") or "").strip().lower()
+    if mode == "diary":
+        return "diary"
+    return _context_db_type(context)
+
+
+def _backfill_figure10_reference_fields(context):
+    """補齊 Figure 10 / Banana / 衣櫃參考圖資訊，避免支線漏掉原衣服。"""
+    updated = dict(context or {})
+    mode = str(updated.get("source_mode") or updated.get("type") or "").strip().lower()
+
+    ref_path = str(updated.get("reference_item_path") or "").strip()
+    ref_url = str(updated.get("reference_item_url") or "").strip()
+
+    if not ref_path:
+        for key in ("nano_clothing_ref_local_path", "cosplay_clothing_ref_local_path"):
+            candidate = str(updated.get(key) or "").strip()
+            if candidate:
+                ref_path = candidate
+                updated["reference_item_path"] = candidate
+                break
+    if not ref_url:
+        for key in ("nano_clothing_ref_local_url", "cosplay_clothing_ref_local_url"):
+            candidate = str(updated.get(key) or "").strip()
+            if candidate:
+                ref_url = candidate
+                updated["reference_item_url"] = candidate
+                break
+
+    wardrobe_id = str(updated.get("wardrobe_id") or "").strip().upper()
+    if wardrobe_id and not (ref_path or ref_url):
+        item = _find_wardrobe_item(wardrobe_id)
+        if item:
+            resolved_path, resolved_url = _wardrobe_reference_for_generation(item)
+            if resolved_path and not ref_path:
+                ref_path = resolved_path
+                updated["reference_item_path"] = resolved_path
+            if resolved_url and not ref_url:
+                ref_url = resolved_url
+                updated["reference_item_url"] = resolved_url
+            if item.get("name") and not updated.get("wardrobe_name"):
+                updated["wardrobe_name"] = item.get("name")
+
+    if mode == "cosplay":
+        if ref_path and not updated.get("cosplay_clothing_ref_local_path"):
+            updated["cosplay_clothing_ref_local_path"] = ref_path
+        if ref_url and not updated.get("cosplay_clothing_ref_local_url"):
+            updated["cosplay_clothing_ref_local_url"] = ref_url
+    else:
+        if ref_path and not updated.get("nano_clothing_ref_local_path"):
+            updated["nano_clothing_ref_local_path"] = ref_path
+        if ref_url and not updated.get("nano_clothing_ref_local_url"):
+            updated["nano_clothing_ref_local_url"] = ref_url
+
+    updated["figure10_present"] = bool(updated.get("figure10_present") or ref_path or ref_url)
+    return updated
+
+
+def _find_photo_generation_context(message_id=None, old_url=None, diary_date=None):
+    candidate = None
+    if message_id is not None:
+        candidate = photo_generation_contexts.get(message_id)
+        if candidate is None:
+            candidate = photo_generation_contexts.get(str(message_id))
+    if candidate is None:
+        old_url = str(old_url or "").strip()
+        for row in load_memory():
+            if not isinstance(row, dict):
+                continue
+            same_url = bool(old_url) and old_url in {
+                str(row.get("local_url", "")),
+                str(row.get("image_url", "")),
+            }
+            same_diary = bool(diary_date) and row.get("type") == "diary" and diary_date in str(row.get("topic", ""))
+            if same_url or same_diary:
+                candidate = row
+                break
+    if not isinstance(candidate, dict):
+        return None
+    restored = _backfill_figure10_reference_fields(candidate)
+    if message_id is not None:
+        restored["message_id"] = message_id
+    return restored
+
+
+def _prepare_reaction_variation_context(source_context, *, is_reroll=False):
+    context = _backfill_figure10_reference_fields(source_context)
+    context.pop("__trace_context", None)
+    context["trace_action"] = "photo_reroll_reaction" if is_reroll else "photo_more_reaction"
+    context["user_input"] = "Reaction reroll from previous photo" if is_reroll else "Reaction more from previous photo"
+    if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
+        context, root_prompt = _love_refresh_prompt_context(context)
+    else:
+        root_prompt = _photo_context_root_scene_prompt(context)
+    context["root_prompt_base"] = root_prompt
+    if is_reroll:
+        context["prompt_base"] = (
+            root_prompt
+            + "\nREROLL: Keep the same core story, activity, people boundary, outfit, time of day, and mood. Recompose freely, but do not change the subject or invent a new scene."
+        )
+    else:
+        context["prompt_base"] = (
+            root_prompt
+            + "\nCONTINUATION: Keep the same story, scene, activity, people boundary, and outfit. Create one fresh natural variation in pose, expression, camera angle, and composition only."
+        )
+    return context
+
+
+async def _generate_reaction_variation_from_context(source_context, *, is_reroll=False, msg=None):
+    context = _prepare_reaction_variation_context(source_context, is_reroll=is_reroll)
+    if context.get("v5_refine_mode") and (
+        context.get("v5_background_generated_url")
+        or context.get("v5_background_local_url")
+        or context.get("v5_background_local_path")
+    ):
+        return await (_reroll_with_existing_v5_background(context) if is_reroll else _more_with_existing_v5_background(context))
+    return await _generate_photo_from_context(context, msg=msg)
 
 
 def _autonomy_context_matches_today(today, context):
@@ -29381,6 +29517,64 @@ async def on_raw_reaction_add(payload):
             old_image_url = source_embed.image.url if source_embed.image else None
             is_diary = "交換日記" in str(source_embed.title or "")
             diary_date = _extract_diary_date_from_title(source_embed.title) if is_diary else None
+
+            original_context = _find_photo_generation_context(
+                message_id=getattr(msg, "id", None),
+                old_url=old_image_url,
+                diary_date=diary_date,
+            )
+            if original_context:
+                try:
+                    new_context = await _generate_reaction_variation_from_context(original_context, is_reroll=is_reroll, msg=temp_msg)
+                    old_url = original_context.get("local_url") or original_context.get("image_url") or old_image_url
+                    db_type = _photo_db_type_for_storage(new_context)
+                    payload = _photo_db_payload(new_context, type_override=db_type)
+                    _set_current_outfit_state(_build_outfit_state_from_context(new_context))
+                    _log_wardrobe_usage_from_context(new_context, purpose=("photo_reroll_reaction" if is_reroll else "photo_more_reaction"))
+
+                    if is_reroll:
+                        if str(new_context.get("source_mode") or new_context.get("type") or "").lower() == "diary" and diary_date:
+                            replaced, html_old_url = replace_completed_diary_image(
+                                diary_date,
+                                new_context.get("local_url") or new_context.get("image_url"),
+                                description=new_context.get("authoritative_scene") or new_context.get("composition") or "",
+                                old_url_hint=old_url,
+                            )
+                            if not replaced:
+                                _replace_photo_db_record(old_url, payload, diary_date=diary_date)
+                            if html_old_url:
+                                _safe_delete_vault_image(html_old_url)
+                        else:
+                            _replace_photo_db_record(old_url, payload, diary_date=diary_date if is_diary else None)
+                        if _is_autonomy_context(original_context) or _is_autonomy_context(new_context):
+                            _sync_autonomy_today_after_photo_replace(original_context, new_context)
+                        _safe_delete_vault_image(old_url)
+                        new_context["message_id"] = msg.id
+                        photo_generation_contexts[msg.id] = new_context
+                        await _edit_photo_message_with_file(msg, new_context, view=PhotoResultView(new_context), title_prefix="📸 骰子取代")
+                        await temp_msg.edit(content="✅ 重擲完成：新照片已取代原照片，並保留原本衣服 / Figure 10 參考。")
+                        await asyncio.sleep(3)
+                        await temp_msg.delete()
+                        return
+
+                    db = load_memory()
+                    db.insert(0, payload)
+                    save_memory(db)
+                    view = PhotoResultView(new_context)
+                    file, filename = _photo_discord_file(new_context)
+                    embed = _build_result_embed(new_context, title_prefix="📸 More", attachment_filename=filename if file else None)
+                    if file:
+                        new_msg = await channel.send(embed=embed, file=file, view=view)
+                    else:
+                        new_msg = await channel.send(embed=embed, view=view)
+                    new_context["message_id"] = new_msg.id
+                    photo_generation_contexts[new_msg.id] = new_context
+                    view.context = new_context
+                    await temp_msg.delete()
+                    return
+                except Exception as modern_exc:
+                    print(f"⚠️ [REACTION_CONTEXT_REGEN_FAILED] {type(modern_exc).__name__}: {modern_exc}")
+                    traceback.print_exc()
 
             if is_diary:
                 scenario_tw = "小俠在家中度過一個自然安靜的生活片刻。"
