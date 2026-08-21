@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.42"
+LOBSTER_VERSION = "1.10.43"
 
 
 def _normalize_generation_level(level):
@@ -683,7 +683,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.42_calendar_event_timer")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.43_calendar_event_timer_fix")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1154,7 +1154,10 @@ def _xiaoxia_calendar_next_cached_executable_event(now_dt=None):
         api_event = _xiaoxia_calendar_cached_event_to_api_shape(row)
         meta = _xiaoxia_calendar_parse_description_metadata(api_event.get("description") or "")
         status = str(meta.get("執行狀態") or "pending").strip().lower()
-        if status in {"done", "completed", "sent", "skipped", "ignored"}:
+        # v1.10.43：failed 也必須視為本次執行的終止狀態。
+        # 舊版未排除 failed，會讓同一失敗活動永遠佔住「下一筆」，
+        # 並每 5 分鐘重試，造成後續 Calendar 活動（例如 09:30）永遠輪不到。
+        if status in {"done", "completed", "sent", "skipped", "ignored", "failed"}:
             continue
         title = _clean_text_compact(api_event.get("summary") or "")
         if title.startswith("🧪 Xiaoxia Zeabur Calendar Test"):
@@ -1167,6 +1170,38 @@ def _xiaoxia_calendar_next_cached_executable_event(now_dt=None):
         return None
     candidates.sort(key=lambda pair: pair[0])
     return candidates[0][1]
+
+
+def _xiaoxia_calendar_timer_preview(now_dt=None):
+    """只讀本地 cache，回報目前下一筆真正會掛 timer 的 Calendar 活動；不讀 Google。"""
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    event = _xiaoxia_calendar_next_cached_executable_event(now_dt=now_dt)
+    if not event:
+        return {"armed": False, "event_id": "", "title": "", "start": "", "wait_seconds": None}
+    raw_start = str(((event.get("start") or {}).get("dateTime") or "")).strip()
+    start_dt = _xiaoxia_calendar_parse_event_dt(raw_start)
+    if start_dt is None:
+        return {"armed": False, "event_id": str(event.get("id") or ""), "title": _clean_text_compact(event.get("summary") or "未命名行程"), "start": raw_start, "wait_seconds": None}
+    return {
+        "armed": True,
+        "event_id": str(event.get("id") or ""),
+        "title": _clean_text_compact(event.get("summary") or "未命名行程"),
+        "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "wait_seconds": max(0, int((start_dt - now_dt).total_seconds())),
+    }
+
+
+def _xiaoxia_calendar_log_timer_preview(reason="preview"):
+    preview = _xiaoxia_calendar_timer_preview()
+    if preview.get("armed"):
+        print(
+            f"📅 [XIAOXIA_CALENDAR_TIMER_CONFIRMED] reason={reason} "
+            f"event_id={preview.get('event_id')} start={preview.get('start')} "
+            f"wait={preview.get('wait_seconds')}s title={preview.get('title')}"
+        )
+    else:
+        print(f"📅 [XIAOXIA_CALENDAR_TIMER_NONE] reason={reason} no executable cached event")
+    return preview
 
 
 def _xiaoxia_calendar_event_date(event):
@@ -1379,7 +1414,13 @@ async def _xiaoxia_calendar_refresh_cache(*, reason="manual", regenerate_today=T
         await _xiaoxia_generate_today_mainline(today_events, now_dt)
     print(f"📅 [XIAOXIA_CALENDAR_CACHE_REFRESHED] reason={reason} events={len(events)}")
     _xiaoxia_calendar_executor_wake(f"cache_refresh:{reason}")
-    return {"cache": cache, "context": ctx, "daily_mainline": _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH)}
+    timer_preview = _xiaoxia_calendar_log_timer_preview(reason=f"cache_refresh:{reason}")
+    return {
+        "cache": cache,
+        "context": ctx,
+        "daily_mainline": _xiaoxia_calendar_load(XIAOXIA_DAILY_MAINLINE_PATH),
+        "timer_preview": timer_preview,
+    }
 
 def _xiaoxia_calendar_mentions_non_near_term(user_text):
     t = str(user_text or "")
@@ -1632,7 +1673,8 @@ def _xiaoxia_calendar_event_due_for_execution(event, now_dt=None):
         return False
     meta = _xiaoxia_calendar_parse_description_metadata(event.get("description") or "")
     status = str(meta.get("執行狀態") or "pending").strip().lower()
-    if status in {"done", "completed", "sent", "skipped", "ignored"}:
+    # v1.10.43：failed 不自動重試；要重跑由大俠明確修改/更新狀態或立即指定。
+    if status in {"done", "completed", "sent", "skipped", "ignored", "failed"}:
         return False
     if status == "running":
         marker_dt = _parse_memory_date(meta.get("最後執行時間"))
@@ -1828,11 +1870,11 @@ async def _xiaoxia_calendar_executor_tick(force=False):
 
 async def _xiaoxia_calendar_executor_scheduler():
     """
-    v1.10.42：事件驅動 Calendar executor。
+    v1.10.43：事件驅動 Calendar executor；failed 不再阻塞後續活動。
     不再固定每 5 分鐘 GET Google Calendar；只在已知事件時間醒來，
     或由 startup / 01:00 refresh / /小俠月曆 更新 / 程式內 CRUD 喚醒重排。
     """
-    print("📅 [XIAOXIA_CALENDAR_EXECUTOR] event-driven timer started; 5-minute polling disabled")
+    print("📅 [XIAOXIA_CALENDAR_EXECUTOR] event-driven timer started; polling/retry disabled")
 
     # Zeabur 每次重新部署/重啟，記憶體 timer 都會消失，所以啟動時同步一次是必要的。
     try:
@@ -1911,13 +1953,13 @@ async def _xiaoxia_calendar_executor_scheduler():
 
             result = await _xiaoxia_calendar_execute_due_event(next_event, channel=channel)
             print(f"📅 [XIAOXIA_CALENDAR_TIMER_EXECUTED] {result}")
+            # v1.10.43：失敗即標記 failed 並移往下一筆，不再 5 分鐘重試同一活動。
+            # _xiaoxia_calendar_execute_due_event() 會 refresh cache；下一輪直接依新 cache 掛下一筆 timer。
             if not result.get("success"):
-                # 失敗才使用本地 5 分鐘 retry；不讀 Google Calendar。
-                try:
-                    await asyncio.wait_for(_XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.wait(), timeout=300)
-                    _XIAOXIA_CALENDAR_EXECUTOR_WAKE_EVENT.clear()
-                except asyncio.TimeoutError:
-                    pass
+                print(
+                    f"⚠️ [XIAOXIA_CALENDAR_TIMER_FAILED_TERMINAL] "
+                    f"event_id={event_id} title={title}; moving to next cached event without polling/retry"
+                )
 
         except asyncio.CancelledError:
             print("📅 [XIAOXIA_CALENDAR_EXECUTOR] cancelled")
@@ -2502,11 +2544,17 @@ async def _handle_xiaoxia_calendar_message_direct(message):
             result = await _xiaoxia_calendar_refresh_cache(reason="discord_manual_refresh", regenerate_today=True)
             cache = result.get("cache") or {}
             daily = result.get("daily_mainline") or {}
+            timer_preview = result.get("timer_preview") or _xiaoxia_calendar_timer_preview()
+            if timer_preview.get("armed"):
+                timer_line = f"下一筆 timer：**{timer_preview.get('start')}｜{timer_preview.get('title')}**"
+            else:
+                timer_line = "下一筆 timer：目前沒有可自動執行的活動"
             await wait_msg.edit(content=(
                 "✅ **小俠月曆已更新**\n"
                 f"未來14天事件：{cache.get('event_count', 0)} 筆\n"
                 f"快取時間：`{cache.get('updated_at')}`\n"
-                f"今日主線活動：{len(daily.get('activities') or [])} 筆"
+                f"今日主線活動：{len(daily.get('activities') or [])} 筆\n"
+                f"{timer_line}"
             ))
         except Exception as exc:
             await wait_msg.edit(content=f"❌ 小俠月曆更新失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
@@ -30394,7 +30442,8 @@ async def xiaoxia_autonomy_auto_task():
         save_xiaoxia_autonomy_state(state)
 
     if control.get("paused") and not due:
-        print(f"🌱 [AUTONOMY_AUTO_PAUSED] reason={control.get('reason')} pause_until={control.get('pause_until')}")
+        # v1.10.43：manual_off 時沒有手動指定到時活動就安靜返回，
+        # 不再每 10 分鐘洗 AUTONOMY_AUTO_PAUSED log。
         return
     if not due:
         return
@@ -32844,7 +32893,7 @@ async def main():
         _xiaoxia_calendar_executor_scheduler(),
         name="xiaoxia_calendar_executor_scheduler",
     )
-    print("📅 [LOBSTER_MAIN] Calendar event-driven executor task created independently (5-minute polling disabled)")
+    print("📅 [LOBSTER_MAIN] Calendar event-driven executor task created independently (polling/retry disabled)")
 
     try:
         await asyncio.gather(
