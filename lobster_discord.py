@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.01"
+LOBSTER_VERSION = "1.11.03"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.02_sport_targets_pk")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.03_sport_targets_shared_wardrobe_pool")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1810,6 +1810,8 @@ async def _xiaoxia_calendar_execute_due_event(event, channel=None):
     fake_message.channel = channel
     fake_message.author = getattr(girlfriend_bot, "user", None)
     fake_message.content = command_text
+    fake_message.calendar_event_id = event_id
+    fake_message.calendar_triggered = True
 
     ok = await handle_xiaoxia_autonomy_command(fake_message, command_text)
 
@@ -3795,6 +3797,75 @@ def _compact_wardrobe_brief(item, semantic_cache=None):
     }
 
 
+SHARED_WARDROBE_POOL_PURPOSES = {"calendar", "love_intent", "diary"}
+
+
+def _shared_wardrobe_usage_rows():
+    """Calendar / 小俠愛意 / 交換日記共用一次性衣服池。
+
+    只採計成功出圖後寫入 wardrobe_usage_log 的紀錄；
+    計畫、Calendar 尚未執行的事件不算已穿過。
+    """
+    rows = []
+    for row in load_wardrobe_usage_log() or []:
+        if not isinstance(row, dict):
+            continue
+        wid = str(row.get("wardrobe_id") or "").strip().upper()
+        if not wid:
+            continue
+        purpose = str(row.get("purpose") or "").strip().lower()
+        is_calendar = purpose == "calendar" or bool(row.get("calendar_triggered"))
+        if purpose in SHARED_WARDROBE_POOL_PURPOSES or is_calendar:
+            rows.append(row)
+    return rows
+
+
+def _shared_wardrobe_used_ids(*, target_date=None, module="", allow_same_day_calendar_for_diary=False):
+    """回傳共享池不可再選的 W IDs。交換日記唯一例外：可重用同日 Calendar 已穿的衣服。"""
+    target_date = str(target_date or _today_str_tpe()).strip()[:10]
+    module = str(module or "").strip().lower()
+    blocked = set()
+    for row in _shared_wardrobe_usage_rows():
+        wid = str(row.get("wardrobe_id") or "").strip().upper()
+        if not wid:
+            continue
+        row_date = str(row.get("date") or "").strip()[:10]
+        purpose = str(row.get("purpose") or "").strip().lower()
+        is_calendar = purpose == "calendar" or bool(row.get("calendar_triggered"))
+        if module == "diary" and allow_same_day_calendar_for_diary and is_calendar and row_date == target_date:
+            continue
+        blocked.add(wid)
+    return blocked
+
+
+def _shared_wardrobe_same_day_calendar_ids(target_date=None):
+    target_date = str(target_date or _today_str_tpe()).strip()[:10]
+    ids = []
+    for row in _shared_wardrobe_usage_rows():
+        purpose = str(row.get("purpose") or "").strip().lower()
+        is_calendar = purpose == "calendar" or bool(row.get("calendar_triggered"))
+        if not is_calendar or str(row.get("date") or "").strip()[:10] != target_date:
+            continue
+        wid = str(row.get("wardrobe_id") or "").strip().upper()
+        if wid and wid not in ids:
+            ids.append(wid)
+    return ids
+
+
+def _shared_wardrobe_item_allowed(item, *, module, target_date=None):
+    if not isinstance(item, dict):
+        return False
+    wid = str(item.get("id") or "").strip().upper()
+    if not wid:
+        return False
+    blocked = _shared_wardrobe_used_ids(
+        target_date=target_date,
+        module=module,
+        allow_same_day_calendar_for_diary=(str(module or "").lower() == "diary"),
+    )
+    return wid not in blocked
+
+
 def _recent_wardrobe_usage(limit=50):
     entries = load_wardrobe_usage_log()
     if not isinstance(entries, list):
@@ -3981,7 +4052,7 @@ def _fallback_free_wardrobe_pick(scene_text, items, hard_exclude_ids=None, soft_
     return random.choice(pool_soft)
 
 
-async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
+async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo", target_date=None):
     items = load_wardrobe()
     usable = []
     for item in items:
@@ -3993,7 +4064,15 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
 
     recent_entries = _filtered_recent_wardrobe_usage_for_rotation(_recent_wardrobe_usage(50))
     recent_3day_ids, last_10_ids_set, last_10_ids_ordered = _wardrobe_recent_usage_sets(recent_entries)
-    candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in recent_3day_ids] or usable
+    purpose_key = str(purpose or "").strip().lower()
+    if purpose_key.startswith("diary"):
+        shared_blocked = _shared_wardrobe_used_ids(target_date=target_date, module="diary", allow_same_day_calendar_for_diary=True)
+        candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in shared_blocked]
+        if not candidate_items:
+            print(f"👗 [SHARED_WARDROBE_POOL_EXHAUSTED] module=diary date={target_date or _today_str_tpe()} -> generated outfit")
+            return None
+    else:
+        candidate_items = [it for it in usable if str(it.get("id") or "").strip().upper() not in recent_3day_ids] or usable
 
     semantic_cache = _load_or_refresh_wardrobe_semantic_cache(usable)
     catalog = [_compact_wardrobe_brief(item, semantic_cache) for item in candidate_items]
@@ -4029,7 +4108,7 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo"):
         data = _extract_json_object(getattr(resp, 'text', '') or '')
         wid = str((data or {}).get("wardrobe_id") or "").strip().upper()
         if wid:
-            picked = _find_wardrobe_item(wid)
+            picked = next((it for it in candidate_items if str(it.get("id") or "").strip().upper() == wid), None)
             if picked and _wardrobe_reference_for_generation(picked)[0]:
                 if wid not in recent_3day_ids:
                     return picked
@@ -5221,7 +5300,7 @@ def _autonomy_use_specified_wardrobe(activity, wardrobe_item):
     }
 
 
-async def _autonomy_choose_wardrobe(activity, visual_mode):
+async def _autonomy_choose_wardrobe(activity, visual_mode, shared_pool_mode=""):
     """v1.5.57_R12：Wardrobe First。
 
     先以硬規則排除明顯不合理服裝；只要仍有可穿且有有效參考圖的候選，就一定從衣櫃選一件。
@@ -5253,6 +5332,9 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
     public_social = category in public_categories or any(k in low for k in ["咖啡", "餐廳", "聚會", "姊妹", "姐妹", "閨蜜", "逛街", "展覽", "美術館", "博物館", "圖書館", "校園", "醫院", "教室", "工作", "旅行", "夜景", "老街", "市集", "cafe", "restaurant", "gallery", "museum", "library", "campus", "hospital", "shopping"])
     legacy_min_score = _autonomy_min_suitable_score(activity, visual_mode, private_home=private_home, public_social=public_social, sport=sport, swim=swim)
 
+    shared_pool_mode = str(shared_pool_mode or "").strip().lower()
+    shared_blocked_ids = _shared_wardrobe_used_ids(module="calendar") if shared_pool_mode == "calendar" else set()
+
     eligible = []
     excluded = []
     for item in items:
@@ -5268,6 +5350,9 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
         ]).lower()
         wid = str(item.get("id") or "").strip().upper()
         hard_reason = ""
+        if shared_pool_mode == "calendar" and wid in shared_blocked_ids:
+            excluded.append({"id": item.get("id"), "reason": "Calendar/愛意/交換日記共享池已穿過"})
+            continue
 
         # 只保留真正的場合硬衝突；「不夠完美」不再是淘汰理由。
         if swim and main != "泳裝" and not any(k in text_blob for k in ["泳裝", "比基尼", "泳衣"]):
@@ -5330,7 +5415,7 @@ async def _autonomy_choose_wardrobe(activity, visual_mode):
     if not eligible:
         reason = _autonomy_normalize_generated_fallback_reason(
             activity,
-            "衣櫃在排除場合硬衝突與失效參考圖後沒有任何可用服裝，所以這次才改由小俠自由生成穿搭。",
+            ("共享衣服池與場合硬規則篩選後沒有任何未穿過且可用服裝，所以這次改由小俠自由生成新衣。" if shared_pool_mode == "calendar" else "衣櫃在排除場合硬衝突與失效參考圖後沒有任何可用服裝，所以這次才改由小俠自由生成穿搭。"),
         )
         meta["fallback_used"] = True
         meta["selection_mode"] = "generated_fallback"
@@ -6145,10 +6230,13 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
     activity = _autonomy_enrich_activity(activity)
     thread_context = _autonomy_thread_context_for_activity(activity)
     episode_plan = await _autonomy_generate_episode_plan(activity, thread_context=thread_context)
+    calendar_triggered = bool(getattr(message, "calendar_event_id", ""))
     if specified_wardrobe_item:
         wardrobe_item, wardrobe_reason, wardrobe_selection = _autonomy_use_specified_wardrobe(activity, specified_wardrobe_item)
     else:
-        wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(activity, visual_mode)
+        wardrobe_item, wardrobe_reason, wardrobe_selection = await _autonomy_choose_wardrobe(
+            activity, visual_mode, shared_pool_mode=("calendar" if calendar_triggered else "")
+        )
     wardrobe_item, wardrobe_reason, wardrobe_selection, reference_item_path, reference_item_url, wardrobe_id, wardrobe_name = _autonomy_prepare_wardrobe_context(activity, wardrobe_item, wardrobe_reason, wardrobe_selection)
 
     policy_info = _autonomy_people_policy_info(activity)
@@ -6249,7 +6337,7 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         if wardrobe_item:
             _log_wardrobe_usage(
                 wardrobe_item,
-                purpose="autonomy_reward" if visual_mode == "reward_eye_candy" else "autonomy_daily",
+                purpose="calendar" if calendar_triggered else ("autonomy_reward" if visual_mode == "reward_eye_candy" else "autonomy_daily"),
                 scene_text=activity.get("photo_prompt_seed") or activity.get("title") or "",
                 extra={
                     "source_mode": "xiaoxia_autonomy",
@@ -6257,6 +6345,8 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
                     "visual_mode": visual_mode,
                     "activity_id": activity.get("id"),
                     "activity_category": activity.get("category"),
+                    "calendar_triggered": calendar_triggered,
+                    "calendar_event_id": str(getattr(message, "calendar_event_id", "") or ""),
                 },
             )
 
@@ -8030,7 +8120,11 @@ def _love_pick_wardrobe(scene_text):
     private_home = any(k in scene_text for k in ("家", "居家", "房間", "臥室", "客廳", "沙發", "床邊", "書房", "料理", "廚房", "陽台"))
     candidates = []
     recent_ids = _love_recent_wardrobe_ids(limit=12)
+    shared_blocked_ids = _shared_wardrobe_used_ids(module="love_intent")
     for item in load_wardrobe():
+        wid = str(item.get("id") or "").strip().upper() if isinstance(item, dict) else ""
+        if wid in shared_blocked_ids:
+            continue
         if not isinstance(item, dict):
             continue
         main = str(item.get("main_category") or "").strip()
@@ -8046,7 +8140,7 @@ def _love_pick_wardrobe(scene_text):
             score = 0
         candidates.append((score, item))
     if not candidates:
-        return None, "衣櫃今天沒有特別合適的選項，這次改由小俠自由搭配。", {"selection_mode": "generated_fallback", "used_wardrobe": False}
+        return None, "共享衣服池沒有合適且未穿過的衣櫃選項，這次改由小俠自由生成新衣。", {"selection_mode": "generated_fallback", "used_wardrobe": False, "shared_pool_exhausted": True}
     candidates.sort(key=lambda x: x[0], reverse=True)
     best_score, best_item = candidates[0]
     reason = f"這套衣服最適合現在這個愛意瞬間，場景相容度分數 {best_score:.1f}。"
@@ -19585,7 +19679,7 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
             str(selection.get("scene") or ""), str(selection.get("action") or ""),
             str(selection.get("mood") or ""), str(selection.get("outfit") or ""),
         ])
-        item=await _choose_wardrobe_item_for_free_mode(scene_text, purpose=purpose)
+        item=await _choose_wardrobe_item_for_free_mode(scene_text, purpose=purpose, target_date=target_date)
         selection_source="diary_pref_free" if pref_mode=="free" else "diary_auto_semantic"
         reason="大俠指定衣櫃自由，由小俠依本篇場景挑選。" if pref_mode=="free" else "依今日日記、照片決策與場景語意自動挑選衣櫃。"
         if item:
@@ -19593,7 +19687,12 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
             if not suitable:
                 print(f"👗 [DIARY_WARDROBE_HARD_REJECTED] id={item.get('id')} reason={fit_reason}")
                 # 僅硬衝突才拒絕；再選一次時不允許沿用這個 item。
-                alternatives = [x for x in load_wardrobe() if str(x.get("id") or "").strip().upper() != str(item.get("id") or "").strip().upper() and _wardrobe_reference_for_generation(x)[0]]
+                alternatives = [
+                    x for x in load_wardrobe()
+                    if str(x.get("id") or "").strip().upper() != str(item.get("id") or "").strip().upper()
+                    and _wardrobe_reference_for_generation(x)[0]
+                    and _shared_wardrobe_item_allowed(x, module="diary", target_date=target_date)
+                ]
                 item = None
                 fit_reason2 = ""
                 # 從其餘可用衣櫃中找第一件通過硬規則者；不再因主觀「不夠完美」退回自創。
@@ -19610,6 +19709,11 @@ async def _build_diary_wardrobe_selection(entry_content, chat_context, due_promi
                     return None
             reason = f"{reason} 硬規則檢查：{fit_reason}".strip()
 
+    if item and not _shared_wardrobe_item_allowed(item, module="diary", target_date=target_date):
+        print(f"👗 [DIARY_SHARED_POOL_BLOCKED] id={item.get('id')} date={target_date}")
+        item = None
+        selection_source = "generated_fallback_shared_pool"
+        reason = "此衣已在共享池過去使用過，交換日記改為自由生成新衣。"
     if not item:
         return None
     reference_path,reference_url=_wardrobe_reference_for_generation(item)
