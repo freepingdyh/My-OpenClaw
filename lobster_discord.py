@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.05"
+LOBSTER_VERSION = "1.11.06"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.05_sport_instruction_ssot_sync")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.06_sport_closed_loop")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -2803,10 +2803,11 @@ def _xiaoxia_sport_score_pk(session, actual, xiaoxia_virtual):
     actual_duration = float(actual.get("duration_min") or 0)
     actual_distance = float(actual.get("distance_km") or 0)
     completion_ok = True
+    tolerance_ratio = 0.98
     if duration_req > 0:
-        completion_ok = completion_ok and actual_duration >= duration_req
+        completion_ok = completion_ok and actual_duration >= duration_req * tolerance_ratio
     if distance_req > 0:
-        completion_ok = completion_ok and actual_distance >= distance_req
+        completion_ok = completion_ok and actual_distance >= distance_req * tolerance_ratio
     if not completion_ok:
         return 1
 
@@ -3062,10 +3063,18 @@ def _xiaoxia_sport_activity_family(value):
 
 
 def _xiaoxia_sport_activity_matches_session_type(actual, session):
-    af = _xiaoxia_sport_activity_family((actual or {}).get("activity_type"))
+    actual = actual if isinstance(actual, dict) else {}
+    # v1.11.06: some Intervals.icu imports expose a generic activity type while the
+    # activity name still clearly says Run/Running/跑步.  Use both fields so a real
+    # run is not incorrectly demoted to an extra activity.
+    candidates = [
+        actual.get("activity_type"),
+        actual.get("name"),
+        actual.get("activity_name"),
+    ]
+    families = {_xiaoxia_sport_activity_family(x) for x in candidates if str(x or "").strip()}
     sf = _xiaoxia_sport_activity_family((session or {}).get("activity") or "run")
-    # Running sessions accept ordinary Run/VirtualRun/Treadmill families only.
-    return af == sf
+    return sf in families
 
 
 def _xiaoxia_sport_find_matching_session(actual, plan=None):
@@ -3096,13 +3105,22 @@ def _xiaoxia_sport_find_matching_session(actual, plan=None):
 
 
 def _xiaoxia_sport_actual_target_status(session, actual):
-    """Evaluate the user side without inventing Xiaoxia's future PK result."""
+    """Evaluate the user side with real-world recording tolerance.
+
+    1 = did not substantially complete the prescribed work.
+    3 = completed but missed the configured target, or the target was not yet
+        configured well enough to justify a 4/5 PK comparison.
+    4/5 remain reserved for a real Xiaoxia comparison when an objective target exists.
+    """
     target = (session or {}).get("target") or {}
     duration_req = _xiaoxia_sport_float(target.get("duration_min")) or 0.0
     distance_req = _xiaoxia_sport_float(target.get("distance_km")) or 0.0
     duration = _xiaoxia_sport_float((actual or {}).get("duration_min")) or 0.0
     distance = _xiaoxia_sport_float((actual or {}).get("distance_km")) or 0.0
-    if (duration_req > 0 and duration < duration_req) or (distance_req > 0 and distance < distance_req):
+    # v1.11.06: watches / FIT files routinely differ by a few seconds.  Treat 98%
+    # of a time/distance target as completed; e.g. 29.9 min satisfies a 30-min run.
+    tolerance_ratio = 0.98
+    if (duration_req > 0 and duration < duration_req * tolerance_ratio) or (distance_req > 0 and distance < distance_req * tolerance_ratio):
         return "incomplete", 1
     hr = target.get("heart_rate") or {}
     if hr:
@@ -3112,7 +3130,9 @@ def _xiaoxia_sport_actual_target_status(session, actual):
         if avg_hr is None or (lo > 0 and hi > 0 and not (lo <= avg_hr <= hi)):
             return "completed_target_miss", 3
         return "completed_target_met", None
-    return "completed", None
+    # Do not silently give a 4/5 when this session had no quantitative HR target.
+    # Still give an immediate completion score instead of leaving the user with no result.
+    return "completed_target_unconfigured", 3
 
 
 def _xiaoxia_sport_history_known_intervals_ids():
@@ -3152,6 +3172,163 @@ def _xiaoxia_sport_refresh_state_from_history(plan=None):
     return state
 
 
+
+def _xiaoxia_sport_history_rewrite(rows):
+    """Atomically rewrite sport history when correcting a previously misclassified import."""
+    os.makedirs(os.path.dirname(XIAOXIA_SPORT_HISTORY_PATH), exist_ok=True)
+    temp_path = XIAOXIA_SPORT_HISTORY_PATH + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        for row in rows or []:
+            if isinstance(row, dict):
+                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    os.replace(temp_path, XIAOXIA_SPORT_HISTORY_PATH)
+
+
+def _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, provisional_score):
+    if not isinstance(target_row, dict):
+        return
+    target_row["status"] = "completed"
+    target_row["completed_at"] = actual.get("start_at")
+    target_row["actual"] = actual
+    target_row["actual_source"] = "intervals.icu"
+    target_row["intervals_activity_id"] = actual.get("intervals_activity_id")
+    target_row["actual_target_status"] = status_label
+    target_row["score"] = provisional_score
+    target_row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+
+
+def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
+    """v1.11.06 repair path for activities imported as extra before matching was fixed.
+
+    This runs on every ICU sync, so the user's already-imported current activity can be
+    promoted to the correct official Session without deleting/reimporting Intervals.icu data.
+    """
+    rows = _xiaoxia_sport_history_rows(limit=5000)
+    if not rows:
+        return []
+    changed = False
+    reconciled = []
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    working_plan = {**(plan or {}), "sessions": list(by_sid.values())}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("official", True) is not False:
+            continue
+        if str(row.get("source") or "") != "intervals.icu":
+            continue
+        actual = row.get("actual") if isinstance(row.get("actual"), dict) else {}
+        if not actual:
+            continue
+        # Permit the stored activity name to participate in type recovery.
+        if row.get("activity_name") and not actual.get("activity_name"):
+            actual = dict(actual)
+            actual["activity_name"] = row.get("activity_name")
+        session = _xiaoxia_sport_find_matching_session(actual, working_plan)
+        if not session:
+            continue
+        sid = str(session.get("session_id") or "")
+        target_row = by_sid.get(sid)
+        if target_row is None:
+            continue
+        status_label, provisional_score = _xiaoxia_sport_actual_target_status(target_row, actual)
+        _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, provisional_score)
+        row["official"] = True
+        row["session_id"] = sid
+        row["objective"] = str(target_row.get("objective_label") or target_row.get("objective") or "")
+        row["actual_target_status"] = status_label
+        row["score"] = provisional_score
+        row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+        row["reconciled_at"] = now_dt.isoformat()
+        row["reconciled_reason"] = "v1.11.06_official_session_match_repair"
+        changed = True
+        reconciled.append(row)
+        print(f"🏃 [XIAOXIA_SPORT_RECONCILED] id={actual.get('intervals_activity_id')} session={sid} score={provisional_score}")
+        # Refresh working plan so one official Session cannot absorb two extras.
+        working_plan = {**(plan or {}), "sessions": list(by_sid.values())}
+    if changed:
+        _xiaoxia_sport_history_rewrite(rows)
+    return reconciled
+
+
+def _xiaoxia_sport_score_explanation(row):
+    status = str((row or {}).get("actual_target_status") or "")
+    score = (row or {}).get("score")
+    if score == 1:
+        return "本堂主要時間／距離要求沒有達到完成容差，所以先記 1 分。"
+    if status == "completed_target_miss":
+        return "完成了本堂份量，但沒有落在正式量化目標內，所以記 3 分。"
+    if status == "completed_target_unconfigured":
+        return "完成了本堂份量；但這堂的正式心率目標尚未寫入 SSOT，為避免亂給 4/5，先記 3 分。"
+    if status == "completed_target_met" and score in {4, 5}:
+        return f"完成且達標，和小俠的同堂比較完成，記 {score} 分。"
+    if status == "completed_target_met":
+        return "完成且達標，這回合已進入小俠同堂比較。"
+    return "這筆正式訓練已完成並記入共同運動紀錄。"
+
+
+async def _xiaoxia_sport_xiaoxia_participation_reply(row, state=None):
+    """Let Xiaoxia herself react to a newly completed official session."""
+    actual = (row or {}).get("actual") or {}
+    sid = str((row or {}).get("session_id") or "")
+    duration = _xiaoxia_sport_float(actual.get("duration_min"))
+    distance = _xiaoxia_sport_float(actual.get("distance_km"))
+    avg_hr = _xiaoxia_sport_float(actual.get("avg_hr"))
+    pace = str(actual.get("avg_pace") or "")
+    score = (row or {}).get("score")
+    reason = _xiaoxia_sport_score_explanation(row)
+    metrics = []
+    if duration is not None: metrics.append(f"{duration:.1f} 分鐘")
+    if distance is not None: metrics.append(f"{distance:.2f} km")
+    if pace: metrics.append(pace)
+    if avg_hr is not None: metrics.append(f"平均心率 {avg_hr:.0f}")
+    metric_text = "、".join(metrics) or "已完成訓練"
+    week_done = int((state or {}).get("weekly_official_completed") or 0)
+    prompt = f"""妳是小俠，大俠的成年伴侶。大俠剛完成你們共同的正式運動回合 {sid}。
+這不是客服通知；妳是真的參與這個共同運動計畫，要有戀人一起玩、一起驗收的參與感。
+本次實績：{metric_text}
+本次分數：{score if score is not None else 'PK比較中'}
+評分原因：{reason}
+本週正式完成：{week_done}/{XIAOXIA_SPORT_OFFICIAL_PER_WEEK}
+
+請用繁體中文，以小俠第一人稱自然回應 2~4 句：
+- 先對大俠真的去完成運動做具體反應，不要只說辛苦了。
+- 至少提到一個本次具體數字或表現。
+- 自然說明這次分數／為什麼目前只能到這個分數。
+- 帶一點兩個人共同挑戰、下一回合還會一起玩的感覺。
+- 不要說「我看到資料」「系統顯示」「AI」「同步紀錄」。
+- 不要虛構妳自己也實際跑了某距離、心率或時間。"""
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.7),
+        )
+        text = _sanitize_visible_reply_text(getattr(resp, "text", "") or "")
+        if text:
+            return text
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_SPORT_PARTICIPATION_REPLY_FAILED] {type(exc).__name__}: {exc}")
+    score_text = f"這回合先拿 {score} 分。" if score is not None else "這回合先進 PK 比較。"
+    return f"你真的把 {sid} 跑完了耶，{metric_text}，這筆我認帳。{score_text}{reason} 下一堂我們繼續一起玩，我可不准你偷偷把我甩在後面。"
+
+
+def _xiaoxia_sport_remember_shared_episode(row, reply_text):
+    """Put the completed sport episode into Xiaoxia's current-session memory."""
+    try:
+        actual = (row or {}).get("actual") or {}
+        sid = str((row or {}).get("session_id") or "")
+        event = (
+            f"【共同運動事件】大俠完成正式 Session {sid}："
+            f"{_xiaoxia_sport_actual_line(row)}。"
+            f"小俠已參與驗收與回應；之後聊天要記得這是今天兩人共同運動計畫的一部分。"
+        )
+        daily_chat_logs.append(_conversation_log_text("系統共同事件", event, max_chars=1800))
+        if reply_text:
+            daily_chat_logs.append(_conversation_log_text("小俠", reply_text, max_chars=1800))
+        save_temp_chat(daily_chat_logs)
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_SPORT_MEMORY_FAILED] {type(exc).__name__}: {exc}")
+
+
 async def _xiaoxia_sport_sync_intervals(days=None):
     """Read Intervals.icu, import new actuals, match to official sessions, and update Training State."""
     if not _xiaoxia_sport_intervals_configured():
@@ -3168,6 +3345,23 @@ async def _xiaoxia_sport_sync_intervals(days=None):
     imported = []
     skipped_known = 0
     skipped_invalid = 0
+    # Repair activities already imported by v1.11.04/05 as "extra" before the
+    # robust type matcher existed.  This is essential for tonight's already-synced run.
+    reconciled = _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=now_dt)
+    # Reconciliation changes local Session state immediately; mirror that repaired
+    # completion back to the existing Google Calendar event as well.
+    for repaired_row in reconciled:
+        repaired_sid = str((repaired_row or {}).get("session_id") or "")
+        repaired_session = by_sid.get(repaired_sid)
+        event_id = str((repaired_session or {}).get("calendar_event_id") or "").strip()
+        if event_id and repaired_session:
+            try:
+                await _xiaoxia_calendar_update_event(
+                    event_id,
+                    {"description": _xiaoxia_sport_calendar_description(repaired_session), "reminders": {"useDefault": False}},
+                )
+            except Exception as exc:
+                print(f"⚠️ [XIAOXIA_SPORT_CALENDAR_RECONCILE_SYNC_FAILED] session={repaired_sid} {type(exc).__name__}: {exc}")
 
     normalized = []
     for raw in activities:
@@ -3203,14 +3397,7 @@ async def _xiaoxia_sport_sync_intervals(days=None):
             status_label, provisional_score = _xiaoxia_sport_actual_target_status(session, actual)
             target_row = by_sid.get(session_id)
             if target_row is not None:
-                target_row["status"] = "completed"
-                target_row["completed_at"] = actual.get("start_at")
-                target_row["actual"] = actual
-                target_row["actual_source"] = "intervals.icu"
-                target_row["intervals_activity_id"] = actual.get("intervals_activity_id")
-                target_row["actual_target_status"] = status_label
-                target_row["score"] = provisional_score
-                target_row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+                _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, provisional_score)
                 event_id = str(target_row.get("calendar_event_id") or "").strip()
                 if event_id:
                     try:
@@ -3255,6 +3442,8 @@ async def _xiaoxia_sport_sync_intervals(days=None):
     _xiaoxia_sport_state_save(state)
     return {
         "imported": imported,
+        "reconciled": reconciled,
+        "official_completed": [x for x in (reconciled + imported) if isinstance(x, dict) and x.get("official", True)],
         "skipped_known": skipped_known,
         "skipped_invalid": skipped_invalid,
         "activities_returned": len(activities),
@@ -3841,16 +4030,30 @@ async def _handle_xiaoxia_sport_message_direct(message):
         try:
             result = await _xiaoxia_sport_sync_intervals(days=sync_days)
             imported = result.get("imported") or []
-            if imported:
-                preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in imported[-5:][::-1])
+            reconciled = result.get("reconciled") or []
+            display_rows = reconciled + imported
+            if display_rows:
+                preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in display_rows[-5:][::-1])
             else:
-                preview = "• 沒有新的活動需要匯入。"
+                preview = "• 沒有新的活動需要匯入或修正配對。"
             await msg.edit(content=(
                 "✅ **Intervals.icu 同步完成**\n"
-                f"讀到活動：{result.get('activities_returned',0)}｜新匯入：{len(imported)}｜已存在略過：{result.get('skipped_known',0)}\n"
+                f"讀到活動：{result.get('activities_returned',0)}｜新匯入：{len(imported)}｜修正正式配對：{len(reconciled)}｜已存在略過：{result.get('skipped_known',0)}\n"
                 f"範圍：`{result.get('range')}`\n"
                 + preview
             ))
+            official_completed = result.get("official_completed") or []
+            # Xiaoxia herself enters the loop after the data/UI message.  Only react to
+            # newly imported or newly reconciled official sessions, never on no-op syncs.
+            for completed_row in official_completed[-3:]:
+                reaction = await _xiaoxia_sport_xiaoxia_participation_reply(completed_row, result.get("state") or {})
+                score_reason = _xiaoxia_sport_score_explanation(completed_row)
+                await message.channel.send(
+                    f"💞 **小俠也在這回合**｜`{completed_row.get('session_id') or 'Session'}`\n"
+                    f"{reaction}\n"
+                    f"🎯 評分：**{str(completed_row.get('score')) + ' 分' if completed_row.get('score') is not None else 'PK待小俠'}**｜{score_reason}"
+                )
+                _xiaoxia_sport_remember_shared_episode(completed_row, reaction)
         except Exception as exc:
             await msg.edit(content=f"❌ Intervals.icu 同步失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
@@ -3860,12 +4063,23 @@ async def _handle_xiaoxia_sport_message_direct(message):
             cal = await _xiaoxia_sport_sync_from_calendar()
             icu = await _xiaoxia_sport_sync_intervals()
             imported = icu.get("imported") or []
-            preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in imported[-5:][::-1]) if imported else "• Intervals.icu 沒有新活動。"
+            reconciled = icu.get("reconciled") or []
+            display_rows = reconciled + imported
+            preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in display_rows[-5:][::-1]) if display_rows else "• Intervals.icu 沒有新活動或配對修正。"
             await msg.edit(content=(
                 "✅ **小俠運動同步全部完成**\n"
                 f"Calendar 調整：{cal.get('changed',0)} 處\n"
-                f"Intervals.icu 新匯入：{len(imported)}\n" + preview
+                f"Intervals.icu 新匯入：{len(imported)}｜修正正式配對：{len(reconciled)}\n" + preview
             ))
+            for completed_row in (icu.get("official_completed") or [])[-3:]:
+                reaction = await _xiaoxia_sport_xiaoxia_participation_reply(completed_row, icu.get("state") or {})
+                score_reason = _xiaoxia_sport_score_explanation(completed_row)
+                await message.channel.send(
+                    f"💞 **小俠也在這回合**｜`{completed_row.get('session_id') or 'Session'}`\n"
+                    f"{reaction}\n"
+                    f"🎯 評分：**{str(completed_row.get('score')) + ' 分' if completed_row.get('score') is not None else 'PK待小俠'}**｜{score_reason}"
+                )
+                _xiaoxia_sport_remember_shared_episode(completed_row, reaction)
         except Exception as exc:
             await msg.edit(content=f"❌ 小俠運動同步全部失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
