@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.08"
+LOBSTER_VERSION = "1.11.09"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.08_sport_hr_profile_pk")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.09_sport_calendar_hr_meta_fix")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1658,6 +1658,9 @@ _XIAOXIA_CALENDAR_DESCRIPTION_META_KEYS = [
     "執行狀態", "執行器", "活動ID", "照片ID", "EpisodeID",
     "最後執行時間", "執行訊息ID", "執行頻道", "執行錯誤",
     "PlanID", "SessionID", "階段", "運動項目", "訓練目標", "目標時間",
+    # v1.11.09：運動 Calendar 的結構化欄位也必須列入白名單；
+    # 否則 _xiaoxia_sport_calendar_description() 雖產生資料，compose 時仍會被靜默丟棄。
+    "跑步時間", "目標心率", "PK配對窗",
     "評分指標", "優先級", "彈性", "運動狀態", "正式訓練", "PlannerNote",
 ]
 
