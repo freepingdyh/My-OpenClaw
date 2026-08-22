@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.07"
+LOBSTER_VERSION = "1.11.08"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.07_sport_datetime_fix")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.08_sport_hr_profile_pk")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -2767,17 +2767,184 @@ def _xiaoxia_sport_apply_instruction_ssot(session):
         pass
     return changed
 
+def _xiaoxia_sport_hr_profile_from_state():
+    try:
+        state = _xiaoxia_sport_state_load()
+    except Exception:
+        return {}
+    profile = state.get("hr_profile") if isinstance(state, dict) else None
+    return profile if isinstance(profile, dict) else {}
+
+
 def _xiaoxia_sport_hr_target_for_objective(objective):
+    """Heart-rate SSOT: explicit ENV first, then Intervals.icu-derived HR profile."""
     obj = str(objective or "").strip().lower()
     if obj == "steady_run":
         lo, hi, ideal = XIAOXIA_SPORT_STEADY_HR_MIN, XIAOXIA_SPORT_STEADY_HR_MAX, XIAOXIA_SPORT_STEADY_HR_IDEAL
+        profile_key = "steady_run"
     else:
         lo, hi, ideal = XIAOXIA_SPORT_EASY_HR_MIN, XIAOXIA_SPORT_EASY_HR_MAX, XIAOXIA_SPORT_EASY_HR_IDEAL
-    if lo <= 0 or hi <= 0 or hi < lo:
+        profile_key = "easy_run"
+    if lo > 0 and hi > 0 and hi >= lo:
+        if ideal <= 0 or ideal < lo or ideal > hi:
+            ideal = int(round((lo + hi) / 2))
+        return {"min_bpm": lo, "max_bpm": hi, "ideal_bpm": ideal, "source": "env"}
+
+    profile = _xiaoxia_sport_hr_profile_from_state()
+    row = profile.get(profile_key) if isinstance(profile, dict) else None
+    if isinstance(row, dict):
+        plo = _xiaoxia_sport_float(row.get("min_bpm")) or 0
+        phi = _xiaoxia_sport_float(row.get("max_bpm")) or 0
+        pideal = _xiaoxia_sport_float(row.get("ideal_bpm")) or 0
+        if plo > 0 and phi >= plo:
+            if pideal <= 0 or not (plo <= pideal <= phi):
+                pideal = round((plo + phi) / 2)
+            return {
+                "min_bpm": int(round(plo)),
+                "max_bpm": int(round(phi)),
+                "ideal_bpm": int(round(pideal)),
+                "source": str(profile.get("source") or "intervals.icu"),
+            }
+    return None
+
+
+def _xiaoxia_sport_build_hr_profile_from_detail(detail, activity_id=""):
+    """Build stable training targets from Intervals.icu personal physiology fields.
+
+    Prefer LTHR because it is individualized.  The Phase-1 bands are deliberately
+    conservative: easy 82-88% LTHR, steady 89-94% LTHR.  If LTHR is unavailable,
+    fall back to athlete_max_hr with conventional aerobic percentages.
+    """
+    if not isinstance(detail, dict):
         return None
-    if ideal <= 0 or ideal < lo or ideal > hi:
-        ideal = int(round((lo + hi) / 2))
-    return {"min_bpm": lo, "max_bpm": hi, "ideal_bpm": ideal}
+    lthr = _xiaoxia_sport_float(detail.get("lthr"))
+    max_hr = _xiaoxia_sport_float(detail.get("athlete_max_hr"))
+    if max_hr is None:
+        max_hr = _xiaoxia_sport_float(detail.get("max_heartrate"))
+    profile = None
+    if lthr and 100 <= lthr <= 230:
+        easy = {
+            "min_bpm": int(round(lthr * 0.82)),
+            "max_bpm": int(round(lthr * 0.88)),
+            "ideal_bpm": int(round(lthr * 0.85)),
+        }
+        steady = {
+            "min_bpm": int(round(lthr * 0.89)),
+            "max_bpm": int(round(lthr * 0.94)),
+            "ideal_bpm": int(round(lthr * 0.915)),
+        }
+        source = "intervals.icu_lthr"
+    elif max_hr and 130 <= max_hr <= 240:
+        easy = {
+            "min_bpm": int(round(max_hr * 0.70)),
+            "max_bpm": int(round(max_hr * 0.80)),
+            "ideal_bpm": int(round(max_hr * 0.75)),
+        }
+        steady = {
+            "min_bpm": int(round(max_hr * 0.80)),
+            "max_bpm": int(round(max_hr * 0.87)),
+            "ideal_bpm": int(round(max_hr * 0.835)),
+        }
+        source = "intervals.icu_max_hr"
+    else:
+        return None
+    for row in (easy, steady):
+        if row["max_bpm"] < row["min_bpm"]:
+            row["max_bpm"] = row["min_bpm"]
+        row["ideal_bpm"] = max(row["min_bpm"], min(row["max_bpm"], row["ideal_bpm"]))
+    profile = {
+        "source": source,
+        "source_activity_id": str(activity_id or detail.get("id") or ""),
+        "lthr": round(lthr, 1) if lthr else None,
+        "athlete_max_hr": round(max_hr, 1) if max_hr else None,
+        "easy_run": easy,
+        "steady_run": steady,
+        "updated_at": datetime.now(TZ_TPE).isoformat(),
+        "method": "Phase1 conservative bands; LTHR preferred, athlete_max_hr fallback",
+    }
+    zones = detail.get("icu_hr_zones")
+    if isinstance(zones, list):
+        profile["icu_hr_zones_raw"] = zones[:12]
+    return profile
+
+
+def _xiaoxia_sport_virtual_benchmark_for_session(session):
+    """Deterministic Xiaoxia game benchmark; it is a virtual target line, not a claimed real workout."""
+    target = (session or {}).get("target") or {}
+    hr = target.get("heart_rate") or {}
+    lo = _xiaoxia_sport_float(hr.get("min_bpm")) or 0
+    hi = _xiaoxia_sport_float(hr.get("max_bpm")) or 0
+    ideal = _xiaoxia_sport_float(hr.get("ideal_bpm")) or 0
+    if lo <= 0 or hi < lo:
+        return {
+            "age_adjusted_to_daxia": True,
+            "status": "pending_hr_target",
+            "kind": "virtual_game_benchmark",
+        }
+    if ideal <= 0 or not (lo <= ideal <= hi):
+        ideal = (lo + hi) / 2.0
+    sid = str((session or {}).get("session_id") or (session or {}).get("plan_id") or "xiaoxia")
+    digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()
+    gap = 2 + (int(digest[:2], 16) % 3)  # 2..4 bpm from ideal
+    direction = -1 if int(digest[2:4], 16) % 2 else 1
+    virtual = max(lo, min(hi, ideal + direction * gap))
+    return {
+        "age_adjusted_to_daxia": True,
+        "status": "ready",
+        "kind": "virtual_game_benchmark",
+        "virtual_avg_hr": int(round(virtual)),
+        "ideal_bpm": int(round(ideal)),
+        "note": "小俠 PK 的虛擬基準線；只用於遊戲比較，不宣稱小俠實際完成生理運動。",
+    }
+
+
+def _xiaoxia_sport_apply_benchmark(session):
+    if not isinstance(session, dict):
+        return False
+    new_row = _xiaoxia_sport_virtual_benchmark_for_session(session)
+    changed = session.get("xiaoxia_benchmark") != new_row
+    session["xiaoxia_benchmark"] = new_row
+    return changed
+
+
+def _xiaoxia_sport_apply_hr_profile_to_plan(plan, now_dt=None):
+    """Backfill HR targets and Xiaoxia benchmarks into all unfinished official sessions."""
+    if not isinstance(plan, dict):
+        return []
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    changed = []
+    for session in plan.get("sessions") or []:
+        if not isinstance(session, dict) or not session.get("official", True):
+            continue
+        if str(session.get("status") or "planned").lower() in {"done", "completed"}:
+            continue
+        objective = str(session.get("objective") or "easy_run").strip().lower()
+        hr_target = _xiaoxia_sport_hr_target_for_objective(objective)
+        if not hr_target:
+            continue
+        target = session.get("target") if isinstance(session.get("target"), dict) else {}
+        current = target.get("heart_rate") if isinstance(target.get("heart_rate"), dict) else None
+        session_changed = False
+        if not current:
+            target["heart_rate"] = dict(hr_target)
+            target["heart_rate_source"] = str(hr_target.get("source") or "intervals.icu")
+            target["comparison"] = {
+                "metric": "avg_hr",
+                "ideal": hr_target.get("ideal_bpm"),
+            }
+            session["target"] = target
+            session_changed = True
+        if _xiaoxia_sport_apply_benchmark(session):
+            session_changed = True
+        if _xiaoxia_sport_apply_instruction_ssot(session):
+            session_changed = True
+        if session_changed:
+            session["hr_target_backfilled_at"] = now_dt.isoformat()
+            changed.append(session)
+    if changed:
+        plan["updated_at"] = now_dt.isoformat()
+        plan["hr_profile_backfill_at"] = now_dt.isoformat()
+    return changed
 
 def _xiaoxia_sport_match_window(session):
     dt = _xiaoxia_sport_session_start_dt(session)
@@ -3049,6 +3216,42 @@ async def _xiaoxia_sport_intervals_detail(activity_id):
     return payload if isinstance(payload, dict) else None
 
 
+async def _xiaoxia_sport_sync_hr_profile_from_activities(activities, detail_cache=None):
+    """Refresh HR Profile from the newest Intervals.icu activity carrying personal physiology fields."""
+    detail_cache = detail_cache if isinstance(detail_cache, dict) else {}
+    rows = [x for x in (activities or []) if isinstance(x, dict) and str(x.get("id") or "").strip()]
+    rows.sort(key=lambda x: str(x.get("start_date_local") or x.get("start_date") or ""), reverse=True)
+    for raw in rows[:8]:
+        aid = str(raw.get("id") or "").strip()
+        detail = detail_cache.get(aid)
+        if detail is None:
+            try:
+                detail = await _xiaoxia_sport_intervals_detail(aid)
+                detail_cache[aid] = detail
+            except Exception as exc:
+                print(f"⚠️ [XIAOXIA_SPORT_HR_PROFILE_DETAIL_FAILED] id={aid} {type(exc).__name__}: {exc}")
+                continue
+        profile = _xiaoxia_sport_build_hr_profile_from_detail(detail or raw, aid)
+        if not profile:
+            continue
+        state = _xiaoxia_sport_state_load()
+        previous = state.get("hr_profile") if isinstance(state.get("hr_profile"), dict) else {}
+        # Ignore timestamp when deciding whether physiology/targets actually changed.
+        prev_cmp = {k: v for k, v in previous.items() if k != "updated_at"}
+        new_cmp = {k: v for k, v in profile.items() if k != "updated_at"}
+        changed = prev_cmp != new_cmp
+        state["hr_profile"] = profile
+        state["hr_profile_last_sync_at"] = datetime.now(TZ_TPE).isoformat()
+        _xiaoxia_sport_state_save(state)
+        print(
+            f"❤️ [XIAOXIA_SPORT_HR_PROFILE] source={profile.get('source')} "
+            f"lthr={profile.get('lthr')} max_hr={profile.get('athlete_max_hr')} "
+            f"easy={profile.get('easy_run')} steady={profile.get('steady_run')} changed={changed}"
+        )
+        return profile, changed, detail_cache
+    return None, False, detail_cache
+
+
 def _xiaoxia_sport_activity_family(value):
     t = str(value or "").strip().lower().replace("_", "").replace(" ", "")
     if any(k in t for k in ("run", "running", "jog", "treadmill")) or any(k in t for k in ("跑步", "慢跑")):
@@ -3155,7 +3358,14 @@ def _xiaoxia_sport_actual_target_status(session, actual):
         hi = _xiaoxia_sport_float(hr.get("max_bpm")) or 0.0
         if avg_hr is None or (lo > 0 and hi > 0 and not (lo <= avg_hr <= hi)):
             return "completed_target_miss", 3
-        return "completed_target_met", None
+        benchmark = (session or {}).get("xiaoxia_benchmark") or {}
+        virtual_hr = _xiaoxia_sport_float(benchmark.get("virtual_avg_hr"))
+        final_score = _xiaoxia_sport_score_pk(
+            session,
+            actual,
+            {"avg_hr": virtual_hr} if virtual_hr is not None else {},
+        )
+        return "completed_target_met", final_score if final_score in {4, 5} else None
     # Do not silently give a 4/5 when this session had no quantitative HR target.
     # Still give an immediate completion score instead of leaving the user with no result.
     return "completed_target_unconfigured", 3
@@ -3366,6 +3576,22 @@ async def _xiaoxia_sport_sync_intervals(days=None):
     activities = await _xiaoxia_sport_intervals_activities(oldest, newest)
     known = _xiaoxia_sport_history_known_intervals_ids()
     plan = _xiaoxia_sport_plan_load()
+    detail_cache = {}
+    hr_profile, hr_profile_changed, detail_cache = await _xiaoxia_sport_sync_hr_profile_from_activities(activities, detail_cache)
+    hr_backfilled = _xiaoxia_sport_apply_hr_profile_to_plan(plan, now_dt=now_dt) if hr_profile else []
+    # Persist and mirror newly-known targets before processing today's actuals.
+    if hr_backfilled:
+        _xiaoxia_sport_plan_save(plan)
+        for session_row in hr_backfilled:
+            event_id = str(session_row.get("calendar_event_id") or "").strip()
+            if event_id:
+                try:
+                    await _xiaoxia_calendar_update_event(
+                        event_id,
+                        {"description": _xiaoxia_sport_calendar_description(session_row), "reminders": {"useDefault": False}},
+                    )
+                except Exception as exc:
+                    print(f"⚠️ [XIAOXIA_SPORT_HR_TARGET_CALENDAR_FAILED] session={session_row.get('session_id')} {type(exc).__name__}: {exc}")
     sessions = [dict(x) for x in (plan.get("sessions") or []) if isinstance(x, dict)]
     by_sid = {str(x.get("session_id") or ""): x for x in sessions}
     imported = []
@@ -3399,7 +3625,10 @@ async def _xiaoxia_sport_sync_intervals(days=None):
             continue
         # Detail endpoint carries HRSS/intensity/LTHR and is still read-only.
         try:
-            detail = await _xiaoxia_sport_intervals_detail(aid)
+            detail = detail_cache.get(aid)
+            if detail is None:
+                detail = await _xiaoxia_sport_intervals_detail(aid)
+                detail_cache[aid] = detail
         except Exception as exc:
             print(f"⚠️ [XIAOXIA_SPORT_ICU_DETAIL_FAILED] id={aid} {type(exc).__name__}: {exc}")
             detail = None
@@ -3470,6 +3699,9 @@ async def _xiaoxia_sport_sync_intervals(days=None):
         "imported": imported,
         "reconciled": reconciled,
         "official_completed": [x for x in (reconciled + imported) if isinstance(x, dict) and x.get("official", True)],
+        "hr_profile": hr_profile,
+        "hr_profile_changed": hr_profile_changed,
+        "hr_backfilled": hr_backfilled,
         "skipped_known": skipped_known,
         "skipped_invalid": skipped_invalid,
         "activities_returned": len(activities),
@@ -3859,6 +4091,7 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             "adjustment_reason": None,
         }
         _xiaoxia_sport_apply_instruction_ssot(session)
+        _xiaoxia_sport_apply_benchmark(session)
         mw_start, mw_end = _xiaoxia_sport_match_window(session)
         session["match_window_start"] = mw_start.isoformat() if mw_start else ""
         session["match_window_end"] = mw_end.isoformat() if mw_end else ""
@@ -4021,6 +4254,12 @@ async def _handle_xiaoxia_sport_message_direct(message):
             + f"\nTraining State：`next={state.get('next_session_id') or '—'}`"
             + f"\nIntervals.icu：`{'✅ 已設定' if _xiaoxia_sport_intervals_configured() else '❌ 缺 INTERVALS_ICU_API_KEY'}`"
             + f"\nICU 最近同步：`{state.get('last_intervals_sync_at') or '尚未同步'}`｜最近匯入：`{state.get('last_intervals_sync_imported', 0)}`"
+            + (lambda hp: (
+                f"\nHR Profile：`{hp.get('source') or '—'}`｜LTHR `{hp.get('lthr') or '—'}`｜MaxHR `{hp.get('athlete_max_hr') or '—'}`"
+                f"\nEasy：`{(hp.get('easy_run') or {}).get('min_bpm','—')}~{(hp.get('easy_run') or {}).get('max_bpm','—')} bpm`｜理想 `{(hp.get('easy_run') or {}).get('ideal_bpm','—')}`"
+                f"\nSteady：`{(hp.get('steady_run') or {}).get('min_bpm','—')}~{(hp.get('steady_run') or {}).get('max_bpm','—')} bpm`｜理想 `{(hp.get('steady_run') or {}).get('ideal_bpm','—')}`"
+            ) if hp else "\nHR Profile：`尚未建立`"
+            )(state.get("hr_profile") if isinstance(state.get("hr_profile"), dict) else {})
             + f"\nActivities：`{XIAOXIA_SPORT_ACTIVITIES}`"
         )
         return True
@@ -4065,6 +4304,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
             await msg.edit(content=(
                 "✅ **Intervals.icu 同步完成**\n"
                 f"讀到活動：{result.get('activities_returned',0)}｜新匯入：{len(imported)}｜修正正式配對：{len(reconciled)}｜已存在略過：{result.get('skipped_known',0)}\n"
+                f"HR Profile：{'✅ 已更新' if result.get('hr_profile_changed') else ('✅ 已確認' if result.get('hr_profile') else '⚠️ 尚未取得')}｜未完成課表回填：{len(result.get('hr_backfilled') or [])} 堂\n"
                 f"範圍：`{result.get('range')}`\n"
                 + preview
             ))
@@ -4095,7 +4335,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
             await msg.edit(content=(
                 "✅ **小俠運動同步全部完成**\n"
                 f"Calendar 調整：{cal.get('changed',0)} 處\n"
-                f"Intervals.icu 新匯入：{len(imported)}｜修正正式配對：{len(reconciled)}\n" + preview
+                f"Intervals.icu 新匯入：{len(imported)}｜修正正式配對：{len(reconciled)}｜HR課表回填：{len(icu.get('hr_backfilled') or [])}\n" + preview
             ))
             for completed_row in (icu.get("official_completed") or [])[-3:]:
                 reaction = await _xiaoxia_sport_xiaoxia_participation_reply(completed_row, icu.get("state") or {})
