@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.03"
+LOBSTER_VERSION = "1.11.04"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.03_sport_targets_shared_wardrobe_pool")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.04_intervals_icu_sync")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -765,6 +765,14 @@ XIAOXIA_SPORT_OFFICIAL_PER_WEEK = _env_int("XIAOXIA_SPORT_OFFICIAL_PER_WEEK", 3,
 XIAOXIA_SPORT_PLAN_WINDOW_DAYS = _env_int("XIAOXIA_SPORT_PLAN_WINDOW_DAYS", 14, 7, 28)
 # Privacy-safe planning constraints: store only scheduling semantics, never personal reasons/locations.
 XIAOXIA_SPORT_LIFE_CONSTRAINTS = (os.environ.get("XIAOXIA_SPORT_LIFE_CONSTRAINTS") or "").strip()
+
+# 🏃 v1.11.04：Intervals.icu read-only actual-activity sync.
+# Zeabur 只需既有 INTERVALS_ICU_API_KEY；Athlete ID 依先前 smoke test 預設 0=self。
+INTERVALS_ICU_API_KEY = (os.environ.get("INTERVALS_ICU_API_KEY") or "").strip()
+INTERVALS_ICU_ATHLETE_ID = (os.environ.get("INTERVALS_ICU_ATHLETE_ID") or "0").strip() or "0"
+INTERVALS_ICU_BASE_URL = (os.environ.get("INTERVALS_ICU_BASE_URL") or "https://intervals.icu/api/v1").rstrip("/")
+INTERVALS_ICU_SYNC_LOOKBACK_DAYS = _env_int("INTERVALS_ICU_SYNC_LOOKBACK_DAYS", 14, 1, 90)
+INTERVALS_ICU_TIMEOUT_SECONDS = _env_int("INTERVALS_ICU_TIMEOUT_SECONDS", 30, 5, 120)
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -2846,6 +2854,382 @@ def _xiaoxia_sport_history_rows(days=None, limit=500):
         print(f"⚠️ [XIAOXIA_SPORT_HISTORY_READ_FAILED] {type(exc).__name__}: {exc}")
     return rows[-max(1, int(limit or 500)):]
 
+def _xiaoxia_sport_history_append(row):
+    """Append one immutable actual-activity record as JSONL."""
+    if not isinstance(row, dict):
+        return False
+    os.makedirs(os.path.dirname(XIAOXIA_SPORT_HISTORY_PATH), exist_ok=True)
+    with open(XIAOXIA_SPORT_HISTORY_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    return True
+
+
+def _xiaoxia_sport_first_present(data, *keys):
+    data = data if isinstance(data, dict) else {}
+    for key in keys:
+        if key in data and data.get(key) is not None:
+            return data.get(key)
+    return None
+
+
+def _xiaoxia_sport_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _xiaoxia_sport_intervals_configured():
+    return bool(INTERVALS_ICU_API_KEY)
+
+
+def _xiaoxia_sport_parse_intervals_start(activity):
+    """Prefer start_date_local. A naive local timestamp is explicitly Asia/Taipei."""
+    raw = str(_xiaoxia_sport_first_present(activity, "start_date_local", "start_date") or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_TPE)
+        return dt.astimezone(TZ_TPE)
+    except Exception:
+        return None
+
+
+def _xiaoxia_sport_pace_text_from_kmh(kmh):
+    speed = _xiaoxia_sport_float(kmh)
+    if speed is None or speed <= 0:
+        return ""
+    sec = 3600.0 / speed
+    mm = int(sec // 60)
+    ss = int(round(sec % 60))
+    if ss >= 60:
+        mm += 1; ss = 0
+    return f"{mm}:{ss:02d}/km"
+
+
+def _xiaoxia_sport_normalize_intervals_activity(activity):
+    activity = activity if isinstance(activity, dict) else {}
+    start_dt = _xiaoxia_sport_parse_intervals_start(activity)
+    distance = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "distance", "icu_distance"))
+    if distance is not None and distance > 100:
+        distance /= 1000.0
+    elapsed = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "elapsed_time", "duration"))
+    moving = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "moving_time"))
+    avg_speed = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "average_speed", "avg_speed"))
+    max_speed = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "max_speed", "maximum_speed"))
+    avg_speed_kmh = avg_speed * 3.6 if avg_speed is not None else None
+    max_speed_kmh = max_speed * 3.6 if max_speed is not None else None
+    cadence = _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "average_cadence", "avg_cadence", "cadence"))
+    # Some running sources expose one-leg cadence (~87). For display/analysis use total step cadence when clearly half-scale.
+    cadence_spm = cadence * 2.0 if cadence is not None and 40 <= cadence < 120 else cadence
+    duration_seconds = moving if moving and moving > 0 else elapsed
+    return {
+        "intervals_activity_id": str(_xiaoxia_sport_first_present(activity, "id") or ""),
+        "name": str(_xiaoxia_sport_first_present(activity, "name") or ""),
+        "activity_type": str(_xiaoxia_sport_first_present(activity, "type", "sport") or ""),
+        "start_at": start_dt.isoformat() if start_dt else "",
+        "date": start_dt.date().isoformat() if start_dt else "",
+        "duration_min": round(duration_seconds / 60.0, 2) if duration_seconds is not None else None,
+        "elapsed_min": round(elapsed / 60.0, 2) if elapsed is not None else None,
+        "moving_min": round(moving / 60.0, 2) if moving is not None else None,
+        "distance_km": round(distance, 3) if distance is not None else None,
+        "avg_hr": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "average_heartrate", "avg_hr", "average_hr")),
+        "max_hr": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "max_heartrate", "max_hr")),
+        "avg_speed_kmh": round(avg_speed_kmh, 3) if avg_speed_kmh is not None else None,
+        "max_speed_kmh": round(max_speed_kmh, 3) if max_speed_kmh is not None else None,
+        "avg_pace": _xiaoxia_sport_pace_text_from_kmh(avg_speed_kmh),
+        "cadence_spm": round(cadence_spm, 1) if cadence_spm is not None else None,
+        "raw_cadence": cadence,
+        "elevation_gain_m": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "total_elevation_gain", "elevation_gain", "icu_elevation_gain")),
+        "training_load": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "icu_training_load", "training_load", "icu_load", "tss")),
+        "hr_load": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "hr_load")),
+        "hr_load_type": _xiaoxia_sport_first_present(activity, "hr_load_type"),
+        "intensity": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "icu_intensity")),
+        "lthr": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "lthr")),
+        "athlete_max_hr": _xiaoxia_sport_float(_xiaoxia_sport_first_present(activity, "athlete_max_hr")),
+        "lap_count": _xiaoxia_sport_first_present(activity, "icu_lap_count"),
+        "source": _xiaoxia_sport_first_present(activity, "source"),
+        "device": _xiaoxia_sport_first_present(activity, "device_name"),
+        "file_type": _xiaoxia_sport_first_present(activity, "file_type", "filename", "file_name"),
+    }
+
+
+async def _xiaoxia_sport_intervals_get(path, params=None):
+    if not INTERVALS_ICU_API_KEY:
+        raise RuntimeError("INTERVALS_ICU_API_KEY_MISSING")
+    url = f"{INTERVALS_ICU_BASE_URL}/{str(path or '').lstrip('/')}"
+    timeout = aiohttp.ClientTimeout(total=INTERVALS_ICU_TIMEOUT_SECONDS)
+    headers = {"Accept": "application/json", "User-Agent": f"xiaoxia-sport/{LOBSTER_VERSION}"}
+    auth = aiohttp.BasicAuth("API_KEY", INTERVALS_ICU_API_KEY)
+    async with aiohttp.ClientSession(timeout=timeout, auth=auth, headers=headers) as session:
+        async with session.get(url, params=params or {}) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                safe = text.replace(INTERVALS_ICU_API_KEY, "***REDACTED***")
+                raise RuntimeError(f"INTERVALS_ICU_HTTP_{resp.status}: {safe[:800]}")
+            try:
+                return json.loads(text)
+            except Exception:
+                raise RuntimeError(f"INTERVALS_ICU_BAD_JSON: {text[:500]}")
+
+
+async def _xiaoxia_sport_intervals_activities(oldest, newest):
+    payload = await _xiaoxia_sport_intervals_get(
+        f"athlete/{INTERVALS_ICU_ATHLETE_ID}/activities",
+        params={"oldest": oldest, "newest": newest},
+    )
+    if not isinstance(payload, list):
+        raise RuntimeError(f"INTERVALS_ICU_ACTIVITIES_BAD_TYPE:{type(payload).__name__}")
+    return payload
+
+
+async def _xiaoxia_sport_intervals_detail(activity_id):
+    aid = str(activity_id or "").strip()
+    if not aid:
+        return None
+    payload = await _xiaoxia_sport_intervals_get(f"activity/{aid}", params={"intervals": "true"})
+    return payload if isinstance(payload, dict) else None
+
+
+def _xiaoxia_sport_activity_family(value):
+    t = str(value or "").strip().lower().replace("_", "").replace(" ", "")
+    if any(k in t for k in ("run", "running", "jog", "treadmill")) or any(k in t for k in ("跑步", "慢跑")):
+        return "run"
+    if any(k in t for k in ("strength", "weight", "gym", "resistance")) or any(k in t for k in ("肌力", "重量", "健身")):
+        return "strength"
+    if any(k in t for k in ("walk", "walking", "hike", "hiking")) or any(k in t for k in ("步行", "健走", "健行")):
+        return "walk"
+    if any(k in t for k in ("ride", "cycling", "bike")) or "單車" in t or "騎車" in t:
+        return "ride"
+    return t or "other"
+
+
+def _xiaoxia_sport_activity_matches_session_type(actual, session):
+    af = _xiaoxia_sport_activity_family((actual or {}).get("activity_type"))
+    sf = _xiaoxia_sport_activity_family((session or {}).get("activity") or "run")
+    # Running sessions accept ordinary Run/VirtualRun/Treadmill families only.
+    return af == sf
+
+
+def _xiaoxia_sport_find_matching_session(actual, plan=None):
+    plan = plan if isinstance(plan, dict) else _xiaoxia_sport_plan_load()
+    start_dt = _parse_memory_date((actual or {}).get("start_at"))
+    if not start_dt:
+        return None
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=TZ_TPE)
+    start_dt = start_dt.astimezone(TZ_TPE)
+    candidates = []
+    for session in _xiaoxia_sport_official_sessions(plan):
+        status = str(session.get("status") or "planned").lower()
+        if status in {"done", "completed"}:
+            continue
+        if not _xiaoxia_sport_activity_matches_session_type(actual, session):
+            continue
+        ws, we = _xiaoxia_sport_match_window(session)
+        if not ws or not we or not (ws <= start_dt <= we):
+            continue
+        anchor = _xiaoxia_sport_session_start_dt(session)
+        gap = abs((start_dt - anchor).total_seconds()) if anchor else 10**12
+        candidates.append((gap, session))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+    return candidates[0][1]
+
+
+def _xiaoxia_sport_actual_target_status(session, actual):
+    """Evaluate the user side without inventing Xiaoxia's future PK result."""
+    target = (session or {}).get("target") or {}
+    duration_req = _xiaoxia_sport_float(target.get("duration_min")) or 0.0
+    distance_req = _xiaoxia_sport_float(target.get("distance_km")) or 0.0
+    duration = _xiaoxia_sport_float((actual or {}).get("duration_min")) or 0.0
+    distance = _xiaoxia_sport_float((actual or {}).get("distance_km")) or 0.0
+    if (duration_req > 0 and duration < duration_req) or (distance_req > 0 and distance < distance_req):
+        return "incomplete", 1
+    hr = target.get("heart_rate") or {}
+    if hr:
+        avg_hr = _xiaoxia_sport_float((actual or {}).get("avg_hr"))
+        lo = _xiaoxia_sport_float(hr.get("min_bpm")) or 0.0
+        hi = _xiaoxia_sport_float(hr.get("max_bpm")) or 0.0
+        if avg_hr is None or (lo > 0 and hi > 0 and not (lo <= avg_hr <= hi)):
+            return "completed_target_miss", 3
+        return "completed_target_met", None
+    return "completed", None
+
+
+def _xiaoxia_sport_history_known_intervals_ids():
+    return {
+        str(row.get("intervals_activity_id") or (row.get("actual") or {}).get("intervals_activity_id") or "").strip()
+        for row in _xiaoxia_sport_history_rows(limit=2000)
+        if isinstance(row, dict)
+    } - {""}
+
+
+def _xiaoxia_sport_refresh_state_from_history(plan=None):
+    plan = plan if isinstance(plan, dict) else _xiaoxia_sport_plan_load()
+    state = _xiaoxia_sport_state_load()
+    history = _xiaoxia_sport_history_rows(limit=2000)
+    now_dt = datetime.now(TZ_TPE)
+    monday = now_dt.date() - timedelta(days=now_dt.weekday())
+    sunday = monday + timedelta(days=6)
+    official_week = []
+    extra_week = []
+    for row in history:
+        dt = _parse_memory_date(row.get("completed_at") or row.get("date") or (row.get("actual") or {}).get("start_at"))
+        if not dt or not (monday <= dt.date() <= sunday):
+            continue
+        (official_week if row.get("official", True) else extra_week).append(row)
+    completed_sessions = [x for x in _xiaoxia_sport_official_sessions(plan) if str(x.get("status") or "").lower() in {"done", "completed"}]
+    if completed_sessions:
+        latest = max(completed_sessions, key=lambda x: _xiaoxia_sport_session_start_dt(x) or datetime.min.replace(tzinfo=TZ_TPE))
+        state["last_completed_session_id"] = str(latest.get("session_id") or "")
+        state["last_training_at"] = str((latest.get("actual") or {}).get("start_at") or latest.get("completed_at") or "")
+    nxt = _xiaoxia_sport_next_session(plan, now_dt=now_dt)
+    state["next_session_id"] = str((nxt or {}).get("session_id") or "")
+    state["weekly_official_completed"] = len(official_week)
+    state["weekly_extra_completed"] = len(extra_week)
+    # current_session_index means number of completed official sessions in the current plan.
+    state["current_session_index"] = len(completed_sessions)
+    _xiaoxia_sport_state_save(state)
+    return state
+
+
+async def _xiaoxia_sport_sync_intervals(days=None):
+    """Read Intervals.icu, import new actuals, match to official sessions, and update Training State."""
+    if not _xiaoxia_sport_intervals_configured():
+        raise RuntimeError("INTERVALS_ICU_API_KEY_MISSING")
+    days = max(1, min(90, int(days or INTERVALS_ICU_SYNC_LOOKBACK_DAYS)))
+    now_dt = datetime.now(TZ_TPE)
+    oldest = (now_dt.date() - timedelta(days=days)).isoformat()
+    newest = (now_dt.date() + timedelta(days=1)).isoformat()
+    activities = await _xiaoxia_sport_intervals_activities(oldest, newest)
+    known = _xiaoxia_sport_history_known_intervals_ids()
+    plan = _xiaoxia_sport_plan_load()
+    sessions = [dict(x) for x in (plan.get("sessions") or []) if isinstance(x, dict)]
+    by_sid = {str(x.get("session_id") or ""): x for x in sessions}
+    imported = []
+    skipped_known = 0
+    skipped_invalid = 0
+
+    normalized = []
+    for raw in activities:
+        if not isinstance(raw, dict):
+            continue
+        aid = str(raw.get("id") or "").strip()
+        if not aid or aid in known:
+            if aid in known: skipped_known += 1
+            continue
+        # Detail endpoint carries HRSS/intensity/LTHR and is still read-only.
+        try:
+            detail = await _xiaoxia_sport_intervals_detail(aid)
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_SPORT_ICU_DETAIL_FAILED] id={aid} {type(exc).__name__}: {exc}")
+            detail = None
+        actual = _xiaoxia_sport_normalize_intervals_activity(detail or raw)
+        if not actual.get("start_at") or not actual.get("intervals_activity_id"):
+            skipped_invalid += 1
+            continue
+        normalized.append(actual)
+
+    normalized.sort(key=lambda x: x.get("start_at") or "")
+    for actual in normalized:
+        session = _xiaoxia_sport_find_matching_session(actual, {**plan, "sessions": list(by_sid.values())})
+        official = bool(session)
+        status_label = "extra"
+        provisional_score = None
+        session_id = ""
+        objective = ""
+        if session:
+            session_id = str(session.get("session_id") or "")
+            objective = str(session.get("objective_label") or session.get("objective") or "")
+            status_label, provisional_score = _xiaoxia_sport_actual_target_status(session, actual)
+            target_row = by_sid.get(session_id)
+            if target_row is not None:
+                target_row["status"] = "completed"
+                target_row["completed_at"] = actual.get("start_at")
+                target_row["actual"] = actual
+                target_row["actual_source"] = "intervals.icu"
+                target_row["intervals_activity_id"] = actual.get("intervals_activity_id")
+                target_row["actual_target_status"] = status_label
+                target_row["score"] = provisional_score
+                target_row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+                event_id = str(target_row.get("calendar_event_id") or "").strip()
+                if event_id:
+                    try:
+                        await _xiaoxia_calendar_update_event(
+                            event_id,
+                            {"description": _xiaoxia_sport_calendar_description(target_row), "reminders": {"useDefault": False}},
+                        )
+                    except Exception as exc:
+                        print(f"⚠️ [XIAOXIA_SPORT_CALENDAR_COMPLETE_SYNC_FAILED] session={session_id} {type(exc).__name__}: {exc}")
+        history_row = {
+            "kind": "sport_actual",
+            "source": "intervals.icu",
+            "intervals_activity_id": actual.get("intervals_activity_id"),
+            "completed_at": actual.get("start_at"),
+            "date": actual.get("date"),
+            "activity": _xiaoxia_sport_activity_family(actual.get("activity_type")),
+            "activity_name": actual.get("name"),
+            "official": official,
+            "session_id": session_id,
+            "objective": objective,
+            "actual": actual,
+            "actual_target_status": status_label,
+            "score": provisional_score,
+            "pk_status": ("final" if provisional_score in {1, 3} else ("pending_xiaoxia" if official else "not_applicable")),
+            "synced_at": now_dt.isoformat(),
+        }
+        _xiaoxia_sport_history_append(history_row)
+        known.add(str(actual.get("intervals_activity_id") or ""))
+        imported.append(history_row)
+        print(f"🏃 [XIAOXIA_SPORT_ICU_IMPORTED] id={actual.get('intervals_activity_id')} official={official} session={session_id or '-'} duration={actual.get('duration_min')} distance={actual.get('distance_km')} avg_hr={actual.get('avg_hr')}")
+
+    if sessions:
+        plan["sessions"] = list(by_sid.values())
+        plan["updated_at"] = now_dt.isoformat()
+        plan["actual_sync_at"] = now_dt.isoformat()
+        plan["actual_sync_source"] = "intervals.icu"
+        _xiaoxia_sport_plan_save(plan)
+    state = _xiaoxia_sport_refresh_state_from_history(plan)
+    state["last_intervals_sync_at"] = now_dt.isoformat()
+    state["last_intervals_sync_imported"] = len(imported)
+    state["last_intervals_sync_range"] = f"{oldest}..{newest}"
+    _xiaoxia_sport_state_save(state)
+    return {
+        "imported": imported,
+        "skipped_known": skipped_known,
+        "skipped_invalid": skipped_invalid,
+        "activities_returned": len(activities),
+        "range": f"{oldest}..{newest}",
+        "plan": plan,
+        "state": state,
+    }
+
+
+def _xiaoxia_sport_actual_line(row):
+    actual = (row or {}).get("actual") or {}
+    dt = _parse_memory_date(actual.get("start_at") or row.get("completed_at"))
+    when = dt.strftime("%m/%d %H:%M") if dt else str(actual.get("date") or row.get("date") or "?")
+    bits = [when, "正式" if row.get("official", True) else "額外"]
+    duration = actual.get("duration_min")
+    distance = actual.get("distance_km")
+    pace = actual.get("avg_pace")
+    avg_hr = actual.get("avg_hr")
+    cadence = actual.get("cadence_spm")
+    if duration not in (None, ""): bits.append(f"{float(duration):.1f} 分")
+    if distance not in (None, ""): bits.append(f"{float(distance):.2f} km")
+    if pace: bits.append(str(pace))
+    if avg_hr not in (None, ""): bits.append(f"均心 {float(avg_hr):.0f}")
+    if cadence not in (None, ""): bits.append(f"步頻 {float(cadence):.0f}")
+    score = row.get("score")
+    if score not in (None, "") and row.get("official", True): bits.append(f"{score} 分")
+    elif row.get("official", True) and row.get("pk_status") == "pending_xiaoxia": bits.append("PK待小俠")
+    return "｜".join(bits)
+
+
 def _xiaoxia_sport_goal_label():
     raw = str(XIAOXIA_SPORT_GOAL or "habit_rebuild").strip()
     labels = {
@@ -3340,7 +3724,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
         return True
     raw = re.sub(r"^/小俠運動(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
     if raw in {"", "help", "幫助", "說明"}:
-        await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`、`紀錄`、`紀錄 30天`、`狀態`")
+        await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`（Calendar）、`同步`（Intervals.icu）、`同步全部`、`紀錄`、`紀錄 30天`、`狀態`")
         return True
     if raw in {"狀態", "status"}:
         plan = _xiaoxia_sport_plan_load()
@@ -3349,6 +3733,8 @@ async def _handle_xiaoxia_sport_message_direct(message):
             _xiaoxia_sport_summary_text()
             + f"\n\nPlan window：`{plan.get('plan_window_start') or '—'} ~ {plan.get('plan_window_end') or '—'}`"
             + f"\nTraining State：`next={state.get('next_session_id') or '—'}`"
+            + f"\nIntervals.icu：`{'✅ 已設定' if _xiaoxia_sport_intervals_configured() else '❌ 缺 INTERVALS_ICU_API_KEY'}`"
+            + f"\nICU 最近同步：`{state.get('last_intervals_sync_at') or '尚未同步'}`｜最近匯入：`{state.get('last_intervals_sync_imported', 0)}`"
             + f"\nActivities：`{XIAOXIA_SPORT_ACTIVITIES}`"
         )
         return True
@@ -3377,7 +3763,42 @@ async def _handle_xiaoxia_sport_message_direct(message):
         except Exception as exc:
             await msg.edit(content=f"❌ 小俠運動重排失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
         return True
-    if raw in {"更新", "同步", "refresh"}:
+    if raw in {"同步", "同步icu", "icu", "intervals", "intervals.icu"} or raw.startswith("同步 "):
+        days_match = re.search(r"(\d+)\s*天", raw)
+        sync_days = int(days_match.group(1)) if days_match else INTERVALS_ICU_SYNC_LOOKBACK_DAYS
+        msg = await message.channel.send("⌚ 小俠正在從 Intervals.icu 讀取實際運動，配對正式 Session 並更新 Training State……")
+        try:
+            result = await _xiaoxia_sport_sync_intervals(days=sync_days)
+            imported = result.get("imported") or []
+            if imported:
+                preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in imported[-5:][::-1])
+            else:
+                preview = "• 沒有新的活動需要匯入。"
+            await msg.edit(content=(
+                "✅ **Intervals.icu 同步完成**\n"
+                f"讀到活動：{result.get('activities_returned',0)}｜新匯入：{len(imported)}｜已存在略過：{result.get('skipped_known',0)}\n"
+                f"範圍：`{result.get('range')}`\n"
+                + preview
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ Intervals.icu 同步失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+    if raw in {"同步全部", "全部同步", "syncall"}:
+        msg = await message.channel.send("🔄 小俠正在先同步 Google Calendar，再讀 Intervals.icu 實際運動……")
+        try:
+            cal = await _xiaoxia_sport_sync_from_calendar()
+            icu = await _xiaoxia_sport_sync_intervals()
+            imported = icu.get("imported") or []
+            preview = "\n".join("• " + _xiaoxia_sport_actual_line(row) for row in imported[-5:][::-1]) if imported else "• Intervals.icu 沒有新活動。"
+            await msg.edit(content=(
+                "✅ **小俠運動同步全部完成**\n"
+                f"Calendar 調整：{cal.get('changed',0)} 處\n"
+                f"Intervals.icu 新匯入：{len(imported)}\n" + preview
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ 小俠運動同步全部失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+    if raw in {"更新", "refresh", "更新月曆", "calendar"}:
         msg = await message.channel.send("🔄 小俠正在同步你手動調整過的 Google Calendar 運動事件……")
         try:
             result = await _xiaoxia_sport_sync_from_calendar()
@@ -3407,10 +3828,12 @@ async def _handle_xiaoxia_sport_message_direct(message):
             score_text = f"｜{score} 分" if score not in (None, "") and row.get("official", True) else ""
             kind = "正式" if row.get("official", True) else "額外"
             actual = row.get("actual") or {}
-            lines.append(f"• {date_text}｜{kind}｜{row.get('activity') or '運動'} {actual.get('duration_min') or ''} 分{score_text}")
+            detail = _xiaoxia_sport_actual_line(row)
+            session_note = f"｜{row.get('session_id')}" if row.get("session_id") else ""
+            lines.append(f"• {detail}{session_note}")
         await message.channel.send("\n".join(lines))
         return True
-    await message.channel.send("我現在支援：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`、`紀錄`、`紀錄 30天`、`狀態`。")
+    await message.channel.send("我現在支援：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`（Calendar）、`同步`（Intervals.icu）、`同步 30天`、`同步全部`、`紀錄`、`紀錄 30天`、`狀態`。")
     return True
 
 # ==========================================
