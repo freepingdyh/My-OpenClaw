@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.10.44"
+LOBSTER_VERSION = "1.11.01"
 
 
 def _normalize_generation_level(level):
@@ -632,6 +632,10 @@ XIAOXIA_CALENDAR_CONTEXT_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_conte
 XIAOXIA_DAILY_MAINLINE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_daily_mainline.json") # 📅 v1.10.33：今日活動主線
 XIAOXIA_CALENDAR_PLANNER_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_planner_state.json") # 📅 v1.10.34：兩週 Planner 狀態
 XIAOXIA_CALENDAR_EXECUTOR_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_calendar_executor_state.json") # 📅 v1.10.38：Calendar 自動執行開關 / trace
+# 🏃 v1.11.00：大俠 × 小俠運動系統
+XIAOXIA_SPORT_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_sport_state.json")
+XIAOXIA_SPORT_PLAN_PATH = os.path.join(MEMORY_DIR, "xiaoxia_sport_plan.json")
+XIAOXIA_SPORT_HISTORY_PATH = os.path.join(MEMORY_DIR, "xiaoxia_sport_history.jsonl")
 PROMISE_BOARD_PATH = os.path.join(MEMORY_DIR, "promise_board.json") # 🤝 v1.5.00：大俠手動承諾 / 小俠單方面承諾
 XIAOXIA_PROMISE_DAILY_REPORT_STATE_PATH = os.path.join(MEMORY_DIR, "xiaoxia_promise_daily_report_state.json")
 LIFE_EVENTS_PATH = os.path.join(MEMORY_DIR, "life_events.json") # 🧭 v52：重大事件狀態機
@@ -683,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.10.44_calendar_dedicated_timer")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.01_sport_privacy_safe")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -736,6 +740,21 @@ XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT = _env_int(
     "XIAOXIA_CALENDAR_WEEKEND_DAILY_ACTIVITY_LIMIT", 1, 0, 6
 )
 
+
+# 🏃 v1.11.00：大俠 × 小俠運動 Planner。
+XIAOXIA_SPORT_PRIMARY_DAYS = (os.environ.get("XIAOXIA_SPORT_PRIMARY_DAYS") or "MON,WED,SAT").strip()
+XIAOXIA_SPORT_BACKUP_DAYS = (os.environ.get("XIAOXIA_SPORT_BACKUP_DAYS") or "TUE,THU,SUN").strip()
+XIAOXIA_SPORT_BLOCKED_DAYS = (os.environ.get("XIAOXIA_SPORT_BLOCKED_DAYS") or "FRI").strip()
+XIAOXIA_SPORT_LIMITED_DAYS = (os.environ.get("XIAOXIA_SPORT_LIMITED_DAYS") or "THU,SUN").strip()
+XIAOXIA_SPORT_GOAL = (os.environ.get("XIAOXIA_SPORT_GOAL") or "habit_rebuild").strip()
+XIAOXIA_SPORT_ACTIVITIES = (os.environ.get("XIAOXIA_SPORT_ACTIVITIES") or "run,strength,mobility").strip()
+XIAOXIA_SPORT_SESSION_MIN_MINUTES = _env_int("XIAOXIA_SPORT_SESSION_MIN_MINUTES", 30, 10, 180)
+XIAOXIA_SPORT_SESSION_MAX_MINUTES = _env_int("XIAOXIA_SPORT_SESSION_MAX_MINUTES", 50, 15, 240)
+XIAOXIA_SPORT_SESSION_LATEST_END = (os.environ.get("XIAOXIA_SPORT_SESSION_LATEST_END") or "21:00").strip()
+XIAOXIA_SPORT_OFFICIAL_PER_WEEK = _env_int("XIAOXIA_SPORT_OFFICIAL_PER_WEEK", 3, 1, 7)
+XIAOXIA_SPORT_PLAN_WINDOW_DAYS = _env_int("XIAOXIA_SPORT_PLAN_WINDOW_DAYS", 14, 7, 28)
+# Privacy-safe planning constraints: store only scheduling semantics, never personal reasons/locations.
+XIAOXIA_SPORT_LIFE_CONSTRAINTS = (os.environ.get("XIAOXIA_SPORT_LIFE_CONSTRAINTS") or "").strip()
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -1175,6 +1194,8 @@ def _xiaoxia_calendar_next_cached_executable_event(now_dt=None):
             continue
         api_event = _xiaoxia_calendar_cached_event_to_api_shape(row)
         meta = _xiaoxia_calendar_parse_description_metadata(api_event.get("description") or "")
+        if str(meta.get("來源") or "").strip() == "小俠運動":
+            continue
         status = str(meta.get("執行狀態") or "pending").strip().lower()
         # v1.10.43：failed 也必須視為本次執行的終止狀態。
         # 舊版未排除 failed，會讓同一失敗活動永遠佔住「下一筆」，
@@ -1618,6 +1639,8 @@ _XIAOXIA_CALENDAR_DESCRIPTION_META_KEYS = [
     "同行", "來源", "鎖定", "類型",
     "執行狀態", "執行器", "活動ID", "照片ID", "EpisodeID",
     "最後執行時間", "執行訊息ID", "執行頻道", "執行錯誤",
+    "PlanID", "SessionID", "階段", "運動項目", "訓練目標", "目標時間",
+    "評分指標", "優先級", "彈性", "運動狀態", "正式訓練", "PlannerNote",
 ]
 
 
@@ -2651,6 +2674,572 @@ async def _handle_xiaoxia_calendar_message_direct(message):
     )
     return True
 
+
+# ==========================================
+# 🏃 v1.11.00：大俠 × 小俠運動系統 MVP
+# ==========================================
+_XIAOXIA_SPORT_DAY_MAP = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
+_XIAOXIA_SPORT_DAY_ZH = {0: "一", 1: "二", 2: "三", 3: "四", 4: "五", 5: "六", 6: "日"}
+
+def _xiaoxia_sport_csv_tokens(raw):
+    return [x.strip().upper() for x in re.split(r"[,，;；\s]+", str(raw or "")) if x.strip()]
+
+def _xiaoxia_sport_day_numbers(raw):
+    return [_XIAOXIA_SPORT_DAY_MAP[x] for x in _xiaoxia_sport_csv_tokens(raw) if x in _XIAOXIA_SPORT_DAY_MAP]
+
+def _xiaoxia_sport_activity_tokens():
+    return [x.strip().lower() for x in re.split(r"[,，;；\s]+", XIAOXIA_SPORT_ACTIVITIES) if x.strip()]
+
+def _xiaoxia_sport_default_state():
+    return {
+        "phase": XIAOXIA_SPORT_GOAL or "habit_rebuild",
+        "phase_started_at": datetime.now(TZ_TPE).date().isoformat(),
+        "training_goal": XIAOXIA_SPORT_GOAL or "habit_rebuild",
+        "current_session_index": 0,
+        "last_completed_session_id": "",
+        "next_session_id": "",
+        "weekly_official_target": XIAOXIA_SPORT_OFFICIAL_PER_WEEK,
+        "weekly_official_completed": 0,
+        "weekly_extra_completed": 0,
+        "last_training_at": "",
+        "updated_at": datetime.now(TZ_TPE).isoformat(),
+    }
+
+def _xiaoxia_sport_state_load():
+    d = _load_json_file_or_default(XIAOXIA_SPORT_STATE_PATH, {})
+    if not isinstance(d, dict) or not d:
+        d = _xiaoxia_sport_default_state()
+        _xiaoxia_calendar_save(XIAOXIA_SPORT_STATE_PATH, d)
+    return d
+
+def _xiaoxia_sport_state_save(data):
+    payload = dict(data or {})
+    payload["updated_at"] = datetime.now(TZ_TPE).isoformat()
+    _xiaoxia_calendar_save(XIAOXIA_SPORT_STATE_PATH, payload)
+
+def _xiaoxia_sport_plan_load():
+    d = _load_json_file_or_default(XIAOXIA_SPORT_PLAN_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+def _xiaoxia_sport_plan_save(data):
+    _xiaoxia_calendar_save(XIAOXIA_SPORT_PLAN_PATH, data if isinstance(data, dict) else {})
+
+def _xiaoxia_sport_history_rows(days=None, limit=500):
+    rows = []
+    if not os.path.exists(XIAOXIA_SPORT_HISTORY_PATH):
+        return rows
+    cutoff = datetime.now(TZ_TPE) - timedelta(days=max(1, int(days))) if days else None
+    try:
+        with open(XIAOXIA_SPORT_HISTORY_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if cutoff:
+                    dt = _parse_memory_date(row.get("completed_at") or row.get("date") or row.get("start"))
+                    if dt and dt < cutoff:
+                        continue
+                rows.append(row)
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_SPORT_HISTORY_READ_FAILED] {type(exc).__name__}: {exc}")
+    return rows[-max(1, int(limit or 500)):]
+
+def _xiaoxia_sport_goal_label():
+    raw = str(XIAOXIA_SPORT_GOAL or "habit_rebuild").strip()
+    labels = {
+        "habit_rebuild": "養成穩定運動習慣",
+        "base": "建立有氧基礎",
+        "performance": "提升跑步表現",
+    }
+    return labels.get(raw.lower(), raw)
+
+def _xiaoxia_sport_session_start_dt(row):
+    raw = str((row or {}).get("scheduled_at") or (row or {}).get("start") or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_TPE)
+        return dt.astimezone(TZ_TPE)
+    except Exception:
+        return None
+
+def _xiaoxia_sport_official_sessions(plan=None):
+    plan = plan if isinstance(plan, dict) else _xiaoxia_sport_plan_load()
+    rows = [x for x in (plan.get("sessions") or []) if isinstance(x, dict) and x.get("official", True)]
+    rows.sort(key=lambda x: _xiaoxia_sport_session_start_dt(x) or datetime.max.replace(tzinfo=TZ_TPE))
+    return rows
+
+def _xiaoxia_sport_next_session(plan=None, now_dt=None):
+    now_dt = now_dt or datetime.now(TZ_TPE)
+    for row in _xiaoxia_sport_official_sessions(plan):
+        status = str(row.get("status") or "planned").lower()
+        if status not in {"planned", "pending", "deferred"}:
+            continue
+        dt = _xiaoxia_sport_session_start_dt(row)
+        if dt and dt >= now_dt - timedelta(hours=2):
+            return row
+    return None
+
+def _xiaoxia_sport_calendar_description(session):
+    target = session.get("target") or {}
+    metrics = target.get("metrics") or session.get("evaluation_metrics") or []
+    if isinstance(metrics, str):
+        metrics = [metrics]
+    meta = {
+        "來源": "小俠運動",
+        "鎖定": "否",
+        "類型": "大俠運動",
+        "PlanID": session.get("plan_id"),
+        "SessionID": session.get("session_id"),
+        "階段": XIAOXIA_SPORT_GOAL,
+        "運動項目": session.get("activity") or "run",
+        "訓練目標": session.get("objective_label") or session.get("objective") or "",
+        "目標時間": f"{target.get('duration_min') or session.get('duration_min') or ''} 分鐘",
+        "評分指標": "、".join(str(x) for x in metrics if x),
+        "優先級": "high",
+        "彈性": "movable",
+        "運動狀態": session.get("status") or "planned",
+        "正式訓練": "是" if session.get("official", True) else "否",
+        "PlannerNote": session.get("planner_note") or "",
+    }
+    body_lines = []
+    if session.get("instruction"):
+        body_lines.append(str(session.get("instruction")))
+    if session.get("strength_finisher"):
+        body_lines.append(f"跑後肌力：{session.get('strength_finisher')}")
+    body_lines.append("正式排定的運動事件優先於一般小俠自主活動；可由大俠手動拖曳時間，之後用 /小俠運動 更新同步。")
+    if (_xiaoxia_sport_session_start_dt(session) or datetime.now(TZ_TPE)).weekday() == 5:
+        body_lines.append("週六遇雨可改室內跑步機；場地改變不改 SessionID，也不算替代課。")
+    return _xiaoxia_calendar_compose_description(meta, "\n".join(body_lines))
+
+def _xiaoxia_sport_event_is_flexible_xiaoxia(event):
+    meta = _xiaoxia_calendar_parse_description_metadata((event or {}).get("description") or "")
+    return str(meta.get("來源") or "").strip() == "小俠自主" and str(meta.get("鎖定") or "否").strip() != "是"
+
+def _xiaoxia_sport_conflicts(start_dt, end_dt, events, ignore_event_id=""):
+    out = []
+    for ev in events or []:
+        if str((ev or {}).get("id") or "") == str(ignore_event_id or ""):
+            continue
+        start_obj = ev.get("start") or {}
+        end_obj = ev.get("end") or {}
+        sraw = (start_obj.get("dateTime") or start_obj.get("date") or "") if isinstance(start_obj, dict) else start_obj
+        eraw = (end_obj.get("dateTime") or end_obj.get("date") or "") if isinstance(end_obj, dict) else end_obj
+        s = _xiaoxia_calendar_parse_event_dt(sraw)
+        e = _xiaoxia_calendar_parse_event_dt(eraw)
+        if not s:
+            continue
+        e = e or (s + timedelta(hours=1))
+        if start_dt < e and end_dt > s:
+            out.append(ev)
+    return out
+
+async def _xiaoxia_sport_move_flexible_xiaoxia_event(event, blocked_start, blocked_end, all_events):
+    if not _xiaoxia_sport_event_is_flexible_xiaoxia(event):
+        return False
+    s = _xiaoxia_calendar_parse_event_dt((event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date") or "")
+    e = _xiaoxia_calendar_parse_event_dt((event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date") or "")
+    if not s:
+        return False
+    duration = max(timedelta(minutes=30), (e - s) if e else timedelta(minutes=90))
+    candidate_hours = [10, 13, 15, 17, 18, 19] if s.weekday() >= 5 else [17, 18, 19, 15]
+    for hour in candidate_hours:
+        ns = datetime.combine(s.date(), time(hour, 0), tzinfo=TZ_TPE)
+        ne = ns + duration
+        if ns < datetime.now(TZ_TPE) - timedelta(minutes=5):
+            continue
+        if ns < blocked_end and ne > blocked_start:
+            continue
+        if _xiaoxia_sport_conflicts(ns, ne, all_events, ignore_event_id=event.get("id")):
+            continue
+        patch = {
+            "start": {"dateTime": ns.isoformat(), "timeZone": "Asia/Taipei"},
+            "end": {"dateTime": ne.isoformat(), "timeZone": "Asia/Taipei"},
+        }
+        await _xiaoxia_calendar_update_event(str(event.get("id") or ""), patch)
+        print(f"🏃 [XIAOXIA_SPORT_PRIORITY_MOVED_XIAOXIA] event_id={event.get('id')} from={s.isoformat()} to={ns.isoformat()}")
+        return True
+    return False
+
+async def _xiaoxia_sport_resolve_calendar_slot(start_dt, end_dt, all_events):
+    conflicts = _xiaoxia_sport_conflicts(start_dt, end_dt, all_events)
+    hard = [ev for ev in conflicts if not _xiaoxia_sport_event_is_flexible_xiaoxia(ev)]
+    if hard:
+        for offset in [30, -30, 60, -60, 90, -90, 120]:
+            ns = start_dt + timedelta(minutes=offset)
+            ne = end_dt + timedelta(minutes=offset)
+            if ns.date() != start_dt.date() or ne.time() > time(20, 30):
+                continue
+            if not _xiaoxia_sport_conflicts(ns, ne, all_events):
+                return ns, ne, []
+        return None, None, []
+    moved = []
+    for ev in conflicts:
+        if await _xiaoxia_sport_move_flexible_xiaoxia_event(ev, start_dt, end_dt, all_events):
+            moved.append(str(ev.get("id") or ""))
+    return start_dt, end_dt, moved
+
+def _xiaoxia_sport_planner_prompt(window_start, window_end, existing_events):
+    primary = ",".join(_xiaoxia_sport_csv_tokens(XIAOXIA_SPORT_PRIMARY_DAYS))
+    backup = ",".join(_xiaoxia_sport_csv_tokens(XIAOXIA_SPORT_BACKUP_DAYS))
+    activities = ",".join(_xiaoxia_sport_activity_tokens())
+    event_lines = []
+    for ev in existing_events[:80]:
+        title = _clean_text_compact(ev.get("summary") or "未命名")
+        st = _xiaoxia_calendar_parse_event_dt((ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date") or "")
+        en = _xiaoxia_calendar_parse_event_dt((ev.get("end") or {}).get("dateTime") or (ev.get("end") or {}).get("date") or "")
+        if st:
+            event_lines.append(f"- {st.strftime('%Y-%m-%d %H:%M')}~{en.strftime('%H:%M') if en else '?'} | {title}")
+    calendar_text = "\n".join(event_lines) if event_lines else "- 無"
+    return f"""你是大俠的運動訓練 Planner。請為未來 {XIAOXIA_SPORT_PLAN_WINDOW_DAYS} 天安排正式訓練。
+
+目前階段/目標：{_xiaoxia_sport_goal_label()} ({XIAOXIA_SPORT_GOAL})
+每週正式訓練目標：{XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 次；只有這些正式排定課才會和小俠玩分數。額外運動不列入正式 PK，但會留紀錄。
+主要運動日：{primary}
+備用運動日：{backup}
+允許運動項目：{activities}
+每次總時間：{XIAOXIA_SPORT_SESSION_MIN_MINUTES}~{XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘
+排程限制：主要日={XIAOXIA_SPORT_PRIMARY_DAYS}；備用日={XIAOXIA_SPORT_BACKUP_DAYS}；不可排={XIAOXIA_SPORT_BLOCKED_DAYS}；受限日={XIAOXIA_SPORT_LIMITED_DAYS}；最晚結束={XIAOXIA_SPORT_SESSION_LATEST_END}；其他限制={XIAOXIA_SPORT_LIFE_CONSTRAINTS or "無"}
+規劃期間：{window_start.isoformat()} ~ {window_end.isoformat()}
+
+Phase 1 規則：
+1. 目前已兩個多月沒有穩定運動，以養成習慣為優先，不追 PB。
+2. 跑步課以 easy_run / run_walk / steady_run 為主；暫不安排 interval/tempo。
+3. 評分指標必須跟該堂目標一致：easy 以心率/完成時間/距離為主；未來 performance 才偏 pace/split。
+4. 若 activities 含 strength，可在 1~2 堂正式跑步後加 8~12 分鐘簡單肌力，其中一堂優先週六；目前不要另外產生 strength-only 短課，除非 activities 明確包含 gym 或 strength_short。
+5. 週六天雨可改跑步機，但不要因此把週六固定成跑步機日。
+6. 正式運動事件優先於一般小俠自主活動；其他手動/鎖定 Calendar 事件不要移動。
+7. 晚上 21:00 前需留洗澡與生活緩衝。
+8. 每 7 天區塊盡量安排 {XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 堂，先主要日、再備用日。
+
+目前 Calendar：
+{calendar_text}
+
+只輸出 JSON，不要 markdown：
+{{
+  "planner_note": "一句話說明兩週安排策略",
+  "sessions": [
+    {{
+      "date": "YYYY-MM-DD",
+      "start_time": "HH:MM",
+      "activity": "run",
+      "objective": "easy_run|run_walk|steady_run",
+      "objective_label": "中文名稱",
+      "duration_min": 30,
+      "instruction": "簡短可執行內容",
+      "evaluation_metrics": ["heart_rate","duration","distance"],
+      "strength_finisher": "沒有就空字串，有則簡述",
+      "planner_note": "為何放這天"
+    }}
+  ]
+}}
+"""
+
+async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
+    now_dt = datetime.now(TZ_TPE)
+    window_start = window_start or now_dt.date()
+    window_end = window_start + timedelta(days=XIAOXIA_SPORT_PLAN_WINDOW_DAYS - 1)
+    start_dt = datetime.combine(window_start, time.min, tzinfo=TZ_TPE)
+    end_dt = datetime.combine(window_end + timedelta(days=1), time.min, tzinfo=TZ_TPE)
+    events = await _xiaoxia_calendar_list_events(start_dt, end_dt, max_results=250)
+
+    deleted = []
+    if replace_future:
+        for ev in list(events):
+            meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+            if str(meta.get("來源") or "") != "小俠運動":
+                continue
+            sport_status = str(meta.get("運動狀態") or "planned").lower()
+            st = _xiaoxia_calendar_parse_event_dt((ev.get("start") or {}).get("dateTime") or "")
+            if st and st >= now_dt and sport_status in {"planned", "pending", "deferred"}:
+                await _xiaoxia_calendar_delete_event(str(ev.get("id") or ""))
+                deleted.append(str(ev.get("id") or ""))
+        events = await _xiaoxia_calendar_list_events(start_dt, end_dt, max_results=250)
+
+    prompt = _xiaoxia_sport_planner_prompt(window_start, window_end, events)
+    response = await gemini_client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.25),
+    )
+    payload = _extract_json_object(getattr(response, "text", "") or "")
+    proposed = payload.get("sessions") if isinstance(payload, dict) else []
+    if not isinstance(proposed, list):
+        raise RuntimeError("XIAOXIA_SPORT_PLANNER_BAD_SESSIONS")
+
+    allowed_days = set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_PRIMARY_DAYS)) | set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_BACKUP_DAYS))
+    # 一般「規劃14天」只補缺額，不重複建立已存在的正式運動；真正洗牌請用「重排14天」。
+    expected_count = max(1, math.ceil(XIAOXIA_SPORT_PLAN_WINDOW_DAYS / 7) * XIAOXIA_SPORT_OFFICIAL_PER_WEEK)
+    existing_active_count = 0
+    if not replace_future:
+        for ev in events:
+            meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+            if str(meta.get("來源") or "") != "小俠運動":
+                continue
+            st = _xiaoxia_calendar_parse_event_dt((ev.get("start") or {}).get("dateTime") or "")
+            sport_status = str(meta.get("運動狀態") or "planned").lower()
+            if st and st >= now_dt and sport_status in {"planned", "pending", "deferred"}:
+                existing_active_count += 1
+    needed_count = expected_count if replace_future else max(0, expected_count - existing_active_count)
+    sessions = []
+    seq_base = int(_xiaoxia_sport_state_load().get("current_session_index") or 0)
+    for item in proposed[: max(6, XIAOXIA_SPORT_OFFICIAL_PER_WEEK * 2) + 4]:
+        if len(sessions) >= needed_count:
+            break
+        if not isinstance(item, dict):
+            continue
+        try:
+            d = datetime.strptime(str(item.get("date") or ""), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if d < window_start or d > window_end or d.weekday() not in allowed_days:
+            continue
+        try:
+            hh, mm = [int(x) for x in str(item.get("start_time") or "18:30").split(":")[:2]]
+        except Exception:
+            hh, mm = 18, 30
+        duration = int(item.get("duration_min") or XIAOXIA_SPORT_SESSION_MIN_MINUTES)
+        duration = max(XIAOXIA_SPORT_SESSION_MIN_MINUTES, min(XIAOXIA_SPORT_SESSION_MAX_MINUTES, duration))
+        start = datetime.combine(d, time(max(0, min(23, hh)), max(0, min(59, mm))), tzinfo=TZ_TPE)
+        end = start + timedelta(minutes=duration)
+        start, end, moved = await _xiaoxia_sport_resolve_calendar_slot(start, end, events)
+        if not start:
+            continue
+        session_id = f"HR-{seq_base + len(sessions) + 1:03d}"
+        plan_id = f"SPORT-{d.strftime('%Y%m%d')}-{len(sessions)+1:02d}"
+        metrics = item.get("evaluation_metrics") or ["heart_rate", "duration", "distance"]
+        if not isinstance(metrics, list):
+            metrics = [str(metrics)]
+        session = {
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "date": d.isoformat(),
+            "scheduled_at": start.isoformat(),
+            "official": True,
+            "activity": str(item.get("activity") or "run").lower(),
+            "objective": str(item.get("objective") or "easy_run"),
+            "objective_label": _clean_text_compact(item.get("objective_label") or "輕鬆跑"),
+            "target": {"duration_min": duration, "metrics": metrics},
+            "instruction": _clean_text_compact(item.get("instruction") or "依當日目標完成，不追配速。"),
+            "strength_finisher": _clean_text_compact(item.get("strength_finisher") or ""),
+            "planner_note": _clean_text_compact(item.get("planner_note") or payload.get("planner_note") or ""),
+            "status": "planned",
+            "calendar_event_id": "",
+            "calendar_moved_xiaoxia_event_ids": moved,
+            "original_date": d.isoformat(),
+            "adjustment_reason": None,
+        }
+        title = f"🏃 大俠運動｜{session['objective_label']} {duration} 分"
+        if session.get("strength_finisher"):
+            title += "＋肌力"
+        ev = await _xiaoxia_calendar_create_event(title, start, end, description=_xiaoxia_sport_calendar_description(session))
+        session["calendar_event_id"] = str(ev.get("id") or "")
+        sessions.append(session)
+        events.append(ev)
+
+    old_plan = _xiaoxia_sport_plan_load()
+    old_sessions = [x for x in (old_plan.get("sessions") or []) if isinstance(x, dict)]
+    keep = []
+    for row in old_sessions:
+        dt = _xiaoxia_sport_session_start_dt(row)
+        if str(row.get("status") or "").lower() in {"done", "completed"} or (dt and dt < now_dt):
+            keep.append(row)
+        elif not replace_future:
+            keep.append(row)
+    combined = keep + sessions
+    combined.sort(key=lambda x: _xiaoxia_sport_session_start_dt(x) or datetime.max.replace(tzinfo=TZ_TPE))
+    plan = {
+        "plan_window_start": window_start.isoformat(),
+        "plan_window_end": window_end.isoformat(),
+        "planner_note": _clean_text_compact(payload.get("planner_note") or ""),
+        "sessions": combined,
+        "updated_at": datetime.now(TZ_TPE).isoformat(),
+    }
+    _xiaoxia_sport_plan_save(plan)
+    state = _xiaoxia_sport_state_load()
+    state["weekly_official_target"] = XIAOXIA_SPORT_OFFICIAL_PER_WEEK
+    state["current_session_index"] = max(int(state.get("current_session_index") or 0), seq_base + len(sessions))
+    nxt = _xiaoxia_sport_next_session(plan, now_dt=now_dt)
+    state["next_session_id"] = str((nxt or {}).get("session_id") or "")
+    _xiaoxia_sport_state_save(state)
+    await _xiaoxia_calendar_refresh_cache(reason="sport_plan_14d", regenerate_today=True)
+    return {"created": sessions, "deleted": deleted, "plan": plan}
+
+async def _xiaoxia_sport_sync_from_calendar():
+    plan = _xiaoxia_sport_plan_load()
+    sessions = [x for x in (plan.get("sessions") or []) if isinstance(x, dict)]
+    now_dt = datetime.now(TZ_TPE)
+    events = await _xiaoxia_calendar_list_events(now_dt - timedelta(days=30), now_dt + timedelta(days=max(14, XIAOXIA_SPORT_PLAN_WINDOW_DAYS + 2)), max_results=250)
+    by_event = {str(ev.get("id") or ""): ev for ev in events}
+    by_session = {}
+    for ev in events:
+        meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+        sid = str(meta.get("SessionID") or "").strip()
+        if sid and str(meta.get("來源") or "") == "小俠運動":
+            by_session[sid] = ev
+    changed = 0
+    for row in sessions:
+        ev = by_event.get(str(row.get("calendar_event_id") or "")) or by_session.get(str(row.get("session_id") or ""))
+        if not ev:
+            continue
+        st = _xiaoxia_calendar_parse_event_dt((ev.get("start") or {}).get("dateTime") or "")
+        meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+        if st and row.get("scheduled_at") != st.isoformat():
+            row["scheduled_at"] = st.isoformat()
+            row["date"] = st.date().isoformat()
+            row["adjustment_reason"] = "manual_calendar_change"
+            changed += 1
+        sport_status = str(meta.get("運動狀態") or row.get("status") or "planned").lower()
+        if sport_status != str(row.get("status") or "planned").lower():
+            row["status"] = sport_status
+            changed += 1
+        row["calendar_event_id"] = str(ev.get("id") or row.get("calendar_event_id") or "")
+    if changed:
+        plan["sessions"] = sessions
+        plan["updated_at"] = datetime.now(TZ_TPE).isoformat()
+        _xiaoxia_sport_plan_save(plan)
+    await _xiaoxia_calendar_refresh_cache(reason="sport_manual_sync", regenerate_today=True)
+    return {"changed": changed, "plan": plan, "calendar_events": len(events)}
+
+def _xiaoxia_sport_week_sessions(plan=None, ref_date=None):
+    ref_date = ref_date or datetime.now(TZ_TPE).date()
+    monday = ref_date - timedelta(days=ref_date.weekday())
+    sunday = monday + timedelta(days=6)
+    out = []
+    for row in _xiaoxia_sport_official_sessions(plan):
+        dt = _xiaoxia_sport_session_start_dt(row)
+        if dt and monday <= dt.date() <= sunday:
+            out.append(row)
+    return out
+
+def _xiaoxia_sport_summary_text():
+    plan = _xiaoxia_sport_plan_load()
+    week = _xiaoxia_sport_week_sessions(plan)
+    completed = [x for x in week if str(x.get("status") or "").lower() in {"done", "completed"}]
+    history_week = _xiaoxia_sport_history_rows(days=8, limit=100)
+    extra = [x for x in history_week if x.get("official") is False]
+    nxt = _xiaoxia_sport_next_session(plan)
+    pzh = "、".join(f"週{_XIAOXIA_SPORT_DAY_ZH[d]}" for d in _xiaoxia_sport_day_numbers(XIAOXIA_SPORT_PRIMARY_DAYS)) or "—"
+    bzh = "、".join(f"週{_XIAOXIA_SPORT_DAY_ZH[d]}" for d in _xiaoxia_sport_day_numbers(XIAOXIA_SPORT_BACKUP_DAYS)) or "—"
+    lines = [
+        "🏃 **大俠 × 小俠運動**",
+        f"目前階段：**{_xiaoxia_sport_goal_label()}**",
+        f"主要運動日：{pzh}",
+        f"備用運動日：{bzh}",
+        f"正式訓練：本週 **{len(completed)} / {XIAOXIA_SPORT_OFFICIAL_PER_WEEK}**｜額外運動：{len(extra)} 次",
+        f"單次時間：{XIAOXIA_SPORT_SESSION_MIN_MINUTES}～{XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘",
+    ]
+    if nxt:
+        dt = _xiaoxia_sport_session_start_dt(nxt)
+        when = f"{dt.strftime('%m/%d')}（週{_XIAOXIA_SPORT_DAY_ZH[dt.weekday()]}） {dt.strftime('%H:%M')}"
+        lines.append(f"下一堂：**{when}｜{nxt.get('objective_label') or nxt.get('objective')} {((nxt.get('target') or {}).get('duration_min') or '')} 分**")
+        lines.append(f"目標：{nxt.get('instruction') or '依當日目標完成'}")
+    else:
+        lines.append("下一堂：目前尚未排定，可用 `/小俠運動 規劃14天`。")
+    return "\n".join(lines)
+
+def _xiaoxia_sport_sessions_text(rows, title):
+    if not rows:
+        return f"🏃 **{title}**\n目前沒有正式訓練。"
+    lines = [f"🏃 **{title}**"]
+    for row in rows[:20]:
+        dt = _xiaoxia_sport_session_start_dt(row)
+        status = str(row.get("status") or "planned").lower()
+        icon = "✅" if status in {"done", "completed"} else ("↪️" if status == "deferred" else "🕒")
+        when = dt.strftime("%m/%d %H:%M") if dt else row.get("date") or "?"
+        dur = (row.get("target") or {}).get("duration_min") or ""
+        lines.append(f"{icon} {when}｜{row.get('objective_label') or row.get('objective')} {dur} 分｜`{row.get('session_id') or ''}`")
+    return "\n".join(lines)
+
+async def _handle_xiaoxia_sport_message_direct(message):
+    content = str(getattr(message, "content", "") or "").strip()
+    if not re.match(r"^/小俠運動(?:\s+|$)", content, flags=re.IGNORECASE):
+        return False
+    if not _is_girlfriend_xiaoxia_channel(message.channel):
+        await message.channel.send("大俠，`/小俠運動` 目前只在女友小俠頻道使用。")
+        return True
+    raw = re.sub(r"^/小俠運動(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    if raw in {"", "help", "幫助", "說明"}:
+        await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`、`紀錄`、`紀錄 30天`、`狀態`")
+        return True
+    if raw in {"狀態", "status"}:
+        plan = _xiaoxia_sport_plan_load()
+        state = _xiaoxia_sport_state_load()
+        await message.channel.send(
+            _xiaoxia_sport_summary_text()
+            + f"\n\nPlan window：`{plan.get('plan_window_start') or '—'} ~ {plan.get('plan_window_end') or '—'}`"
+            + f"\nTraining State：`next={state.get('next_session_id') or '—'}`"
+            + f"\nActivities：`{XIAOXIA_SPORT_ACTIVITIES}`"
+        )
+        return True
+    if raw in {"今天", "today"}:
+        today = datetime.now(TZ_TPE).date()
+        rows = [x for x in _xiaoxia_sport_official_sessions() if (_xiaoxia_sport_session_start_dt(x) and _xiaoxia_sport_session_start_dt(x).date() == today)]
+        await message.channel.send(_xiaoxia_sport_sessions_text(rows, "小俠運動｜今天"))
+        return True
+    if raw in {"本週", "這週", "week"}:
+        await message.channel.send(_xiaoxia_sport_sessions_text(_xiaoxia_sport_week_sessions(), "小俠運動｜本週"))
+        return True
+    if raw in {"規劃14天", "規劃兩週", "plan14", "planner"}:
+        msg = await message.channel.send("🏃 小俠正在依 Training State、生活限制與 Google Calendar 規劃未來兩週正式訓練……")
+        try:
+            result = await _xiaoxia_sport_generate_plan(replace_future=False)
+            created = result.get("created") or []
+            await msg.edit(content=f"✅ **小俠運動兩週 Planner 完成**\n新增正式訓練：{len(created)} 堂\n" + _xiaoxia_sport_sessions_text(created, "新排課表") + "\n\n正式排定課才和小俠玩分數；額外運動只留紀錄供未來課表參考。")
+        except Exception as exc:
+            await msg.edit(content=f"❌ 小俠運動 Planner 失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+    if raw in {"重排14天", "重新規劃14天", "replan14", "replan"}:
+        msg = await message.channel.send("🔄 小俠正在重排未來兩週尚未完成的正式運動；歷史紀錄不會刪除……")
+        try:
+            result = await _xiaoxia_sport_generate_plan(replace_future=True)
+            await msg.edit(content=f"✅ **小俠運動兩週重排完成**\n移除未來舊運動事件：{len(result.get('deleted') or [])} 筆\n新增正式訓練：{len(result.get('created') or [])} 堂\n" + _xiaoxia_sport_sessions_text(result.get("created") or [], "新排課表"))
+        except Exception as exc:
+            await msg.edit(content=f"❌ 小俠運動重排失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+    if raw in {"更新", "同步", "refresh"}:
+        msg = await message.channel.send("🔄 小俠正在同步你手動調整過的 Google Calendar 運動事件……")
+        try:
+            result = await _xiaoxia_sport_sync_from_calendar()
+            nxt = _xiaoxia_sport_next_session(result.get("plan") or {})
+            next_text = "—"
+            if nxt:
+                dt = _xiaoxia_sport_session_start_dt(nxt)
+                next_text = f"{dt.strftime('%m/%d %H:%M')}｜{nxt.get('objective_label') or nxt.get('objective')}"
+            await msg.edit(content=f"✅ **小俠運動已更新**\n同步調整：{result.get('changed',0)} 處\n下一堂：**{next_text}**")
+        except Exception as exc:
+            await msg.edit(content=f"❌ 小俠運動更新失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
+    if raw.startswith("紀錄") or raw.startswith("history"):
+        m = re.search(r"(\d+)\s*天", raw)
+        days = int(m.group(1)) if m else (30 if re.search(r"\b30\b", raw) else None)
+        rows = _xiaoxia_sport_history_rows(days=days, limit=100)
+        if not rows:
+            await message.channel.send("🏃 **小俠運動紀錄**\n目前還沒有 history 紀錄；第一筆實際運動匯入後就會開始累積。")
+            return True
+        official = [x for x in rows if x.get("official", True)]
+        extra = [x for x in rows if x.get("official") is False]
+        lines = [f"🏃 **小俠運動紀錄{'｜'+str(days)+'天' if days else ''}**", f"正式訓練：{len(official)}｜額外運動：{len(extra)}"]
+        for row in rows[-8:][::-1]:
+            dt = _parse_memory_date(row.get("completed_at") or row.get("date"))
+            date_text = dt.strftime("%m/%d") if dt else str(row.get("date") or "?")[:10]
+            score = row.get("score")
+            score_text = f"｜{score} 分" if score not in (None, "") and row.get("official", True) else ""
+            kind = "正式" if row.get("official", True) else "額外"
+            actual = row.get("actual") or {}
+            lines.append(f"• {date_text}｜{kind}｜{row.get('activity') or '運動'} {actual.get('duration_min') or ''} 分{score_text}")
+        await message.channel.send("\n".join(lines))
+        return True
+    await message.channel.send("我現在支援：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`、`紀錄`、`紀錄 30天`、`狀態`。")
+    return True
 
 # ==========================================
 # 🧭 v1.4.82：Generation Trace Framework
@@ -29084,6 +29673,22 @@ async def on_message(message):
         # 👗 /衣櫃 在手機/部分頻道偶爾不會進 discord.py command parser；先用保險通道直接處理。
         if await _handle_wardrobe_message_direct(message):
             return
+
+        # 🏃 /小俠運動：Training State / 兩週 Planner / Calendar UI。
+        try:
+            if await _handle_xiaoxia_sport_message_direct(message):
+                return
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_SPORT_DIRECT_HANDLER_FAILED_OPEN] {type(exc).__name__}: {exc}")
+            if message.content.startswith("/小俠運動"):
+                try:
+                    await message.channel.send(
+                        f"⚠️ 小俠運動暫時發生錯誤，但女友 Bot 仍會繼續運作："
+                        f"`{type(exc).__name__}: {str(exc)[:900]}`"
+                    )
+                except Exception:
+                    pass
+                return
 
         # 📅 /小俠月曆：Calendar 是可選增強；Calendar 例外不得阻斷其他指令。
         try:
