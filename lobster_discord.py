@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.06"
+LOBSTER_VERSION = "1.11.07"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.06_sport_closed_loop")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.07_sport_datetime_fix")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -2902,7 +2902,7 @@ def _xiaoxia_sport_history_rows(days=None, limit=500):
                 if not isinstance(row, dict):
                     continue
                 if cutoff:
-                    dt = _parse_memory_date(row.get("completed_at") or row.get("date") or row.get("start"))
+                    dt = _xiaoxia_sport_parse_dt(row.get("completed_at") or row.get("start") or row.get("date"))
                     if dt and dt < cutoff:
                         continue
                 rows.append(row)
@@ -3077,9 +3077,35 @@ def _xiaoxia_sport_activity_matches_session_type(actual, session):
     return sf in families
 
 
+def _xiaoxia_sport_parse_dt(value):
+    """Parse sport timestamps, including ISO-8601 values with T / timezone offsets.
+
+    Sport actuals are stored with datetime.isoformat(), e.g. 2026-08-22T19:xx:xx+08:00.
+    The generic memory parser intentionally supports only legacy date formats, so sport
+    matching/state/display must not use it for ISO timestamps.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_TPE)
+        return dt.astimezone(TZ_TPE)
+    except Exception:
+        pass
+    # Legacy fallback for old history rows.
+    dt = _parse_memory_date(raw)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ_TPE)
+    return dt.astimezone(TZ_TPE)
+
+
 def _xiaoxia_sport_find_matching_session(actual, plan=None):
     plan = plan if isinstance(plan, dict) else _xiaoxia_sport_plan_load()
-    start_dt = _parse_memory_date((actual or {}).get("start_at"))
+    start_dt = _xiaoxia_sport_parse_dt((actual or {}).get("start_at"))
     if not start_dt:
         return None
     if start_dt.tzinfo is None:
@@ -3153,7 +3179,7 @@ def _xiaoxia_sport_refresh_state_from_history(plan=None):
     official_week = []
     extra_week = []
     for row in history:
-        dt = _parse_memory_date(row.get("completed_at") or row.get("date") or (row.get("actual") or {}).get("start_at"))
+        dt = _xiaoxia_sport_parse_dt(row.get("completed_at") or (row.get("actual") or {}).get("start_at") or row.get("date"))
         if not dt or not (monday <= dt.date() <= sunday):
             continue
         (official_week if row.get("official", True) else extra_week).append(row)
@@ -3455,7 +3481,7 @@ async def _xiaoxia_sport_sync_intervals(days=None):
 
 def _xiaoxia_sport_actual_line(row):
     actual = (row or {}).get("actual") or {}
-    dt = _parse_memory_date(actual.get("start_at") or row.get("completed_at"))
+    dt = _xiaoxia_sport_parse_dt(actual.get("start_at") or row.get("completed_at"))
     when = dt.strftime("%m/%d %H:%M") if dt else str(actual.get("date") or row.get("date") or "?")
     bits = [when, "正式" if row.get("official", True) else "額外"]
     duration = actual.get("duration_min")
@@ -4107,7 +4133,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
         extra = [x for x in rows if x.get("official") is False]
         lines = [f"🏃 **小俠運動紀錄{'｜'+str(days)+'天' if days else ''}**", f"正式訓練：{len(official)}｜額外運動：{len(extra)}"]
         for row in rows[-8:][::-1]:
-            dt = _parse_memory_date(row.get("completed_at") or row.get("date"))
+            dt = _xiaoxia_sport_parse_dt(row.get("completed_at") or row.get("date"))
             date_text = dt.strftime("%m/%d") if dt else str(row.get("date") or "?")[:10]
             score = row.get("score")
             score_text = f"｜{score} 分" if score not in (None, "") and row.get("official", True) else ""
