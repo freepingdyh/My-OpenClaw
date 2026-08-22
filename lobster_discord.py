@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.01_sport_privacy_safe")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.02_sport_targets_pk")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -751,6 +751,16 @@ XIAOXIA_SPORT_ACTIVITIES = (os.environ.get("XIAOXIA_SPORT_ACTIVITIES") or "run,s
 XIAOXIA_SPORT_SESSION_MIN_MINUTES = _env_int("XIAOXIA_SPORT_SESSION_MIN_MINUTES", 30, 10, 180)
 XIAOXIA_SPORT_SESSION_MAX_MINUTES = _env_int("XIAOXIA_SPORT_SESSION_MAX_MINUTES", 50, 15, 240)
 XIAOXIA_SPORT_SESSION_LATEST_END = (os.environ.get("XIAOXIA_SPORT_SESSION_LATEST_END") or "21:00").strip()
+XIAOXIA_SPORT_WEEKDAY_START_TIME = (os.environ.get("XIAOXIA_SPORT_WEEKDAY_START_TIME") or "18:00").strip()
+XIAOXIA_SPORT_SATURDAY_START_TIME = (os.environ.get("XIAOXIA_SPORT_SATURDAY_START_TIME") or "16:00").strip()
+XIAOXIA_SPORT_MATCH_WINDOW_HOURS = _env_int("XIAOXIA_SPORT_MATCH_WINDOW_HOURS", 6, 1, 12)
+# 個人化心率目標：由 Intervals.icu zones 或確認過的個人設定提供；0 代表尚未設定。
+XIAOXIA_SPORT_EASY_HR_MIN = _env_int("XIAOXIA_SPORT_EASY_HR_MIN", 0, 0, 260)
+XIAOXIA_SPORT_EASY_HR_MAX = _env_int("XIAOXIA_SPORT_EASY_HR_MAX", 0, 0, 260)
+XIAOXIA_SPORT_EASY_HR_IDEAL = _env_int("XIAOXIA_SPORT_EASY_HR_IDEAL", 0, 0, 260)
+XIAOXIA_SPORT_STEADY_HR_MIN = _env_int("XIAOXIA_SPORT_STEADY_HR_MIN", 0, 0, 260)
+XIAOXIA_SPORT_STEADY_HR_MAX = _env_int("XIAOXIA_SPORT_STEADY_HR_MAX", 0, 0, 260)
+XIAOXIA_SPORT_STEADY_HR_IDEAL = _env_int("XIAOXIA_SPORT_STEADY_HR_IDEAL", 0, 0, 260)
 XIAOXIA_SPORT_OFFICIAL_PER_WEEK = _env_int("XIAOXIA_SPORT_OFFICIAL_PER_WEEK", 3, 1, 7)
 XIAOXIA_SPORT_PLAN_WINDOW_DAYS = _env_int("XIAOXIA_SPORT_PLAN_WINDOW_DAYS", 14, 7, 28)
 # Privacy-safe planning constraints: store only scheduling semantics, never personal reasons/locations.
@@ -2690,6 +2700,90 @@ def _xiaoxia_sport_day_numbers(raw):
 def _xiaoxia_sport_activity_tokens():
     return [x.strip().lower() for x in re.split(r"[,，;；\s]+", XIAOXIA_SPORT_ACTIVITIES) if x.strip()]
 
+def _xiaoxia_sport_parse_hhmm(raw, fallback=(18, 0)):
+    try:
+        hh, mm = [int(x) for x in str(raw or "").split(":")[:2]]
+        return max(0, min(23, hh)), max(0, min(59, mm))
+    except Exception:
+        return fallback
+
+def _xiaoxia_sport_default_start_time_for_date(d):
+    raw = XIAOXIA_SPORT_SATURDAY_START_TIME if d.weekday() == 5 else XIAOXIA_SPORT_WEEKDAY_START_TIME
+    hh, mm = _xiaoxia_sport_parse_hhmm(raw, (16, 0) if d.weekday() == 5 else (18, 0))
+    return time(hh, mm)
+
+def _xiaoxia_sport_hr_target_for_objective(objective):
+    obj = str(objective or "").strip().lower()
+    if obj == "steady_run":
+        lo, hi, ideal = XIAOXIA_SPORT_STEADY_HR_MIN, XIAOXIA_SPORT_STEADY_HR_MAX, XIAOXIA_SPORT_STEADY_HR_IDEAL
+    else:
+        lo, hi, ideal = XIAOXIA_SPORT_EASY_HR_MIN, XIAOXIA_SPORT_EASY_HR_MAX, XIAOXIA_SPORT_EASY_HR_IDEAL
+    if lo <= 0 or hi <= 0 or hi < lo:
+        return None
+    if ideal <= 0 or ideal < lo or ideal > hi:
+        ideal = int(round((lo + hi) / 2))
+    return {"min_bpm": lo, "max_bpm": hi, "ideal_bpm": ideal}
+
+def _xiaoxia_sport_match_window(session):
+    dt = _xiaoxia_sport_session_start_dt(session)
+    if not dt:
+        return None, None
+    delta = timedelta(hours=XIAOXIA_SPORT_MATCH_WINDOW_HOURS)
+    return dt - delta, dt + delta
+
+def _xiaoxia_sport_score_pk(session, actual, xiaoxia_virtual):
+    """
+    1/3/4/5 分只代表正式 PK 結果，不是一般完成度星等。
+    - 1: 有跑，但未完成要求時間/距離。
+    - 3: 完成要求時間/距離，但未達該堂目標。
+    - 4: 完成且達標，但比小俠更偏離 ideal。
+    - 5: 完成且達標，且比小俠更接近 ideal 或平手。
+    無活動回傳 None（未出賽，不給 0 分）。
+    """
+    if not isinstance(actual, dict) or not actual:
+        return None
+    target = (session or {}).get("target") or {}
+    duration_req = float(target.get("duration_min") or 0)
+    distance_req = float(target.get("distance_km") or 0)
+    actual_duration = float(actual.get("duration_min") or 0)
+    actual_distance = float(actual.get("distance_km") or 0)
+    completion_ok = True
+    if duration_req > 0:
+        completion_ok = completion_ok and actual_duration >= duration_req
+    if distance_req > 0:
+        completion_ok = completion_ok and actual_distance >= distance_req
+    if not completion_ok:
+        return 1
+
+    hr = target.get("heart_rate") or {}
+    if hr:
+        avg_hr = actual.get("avg_hr")
+        if avg_hr in (None, ""):
+            return 3
+        avg_hr = float(avg_hr)
+        lo = float(hr.get("min_bpm") or 0)
+        hi = float(hr.get("max_bpm") or 0)
+        if lo > 0 and hi > 0 and not (lo <= avg_hr <= hi):
+            return 3
+        ideal = float(hr.get("ideal_bpm") or ((lo + hi) / 2 if lo and hi else avg_hr))
+        xia_hr = (xiaoxia_virtual or {}).get("avg_hr")
+        if xia_hr in (None, ""):
+            return None
+        daxia_gap = abs(avg_hr - ideal)
+        xia_gap = abs(float(xia_hr) - ideal)
+        return 5 if daxia_gap <= xia_gap else 4
+
+    # 未來 performance 課可在 target.comparison 中指定 pace/distance 等 ideal。
+    comp = target.get("comparison") or {}
+    metric = str(comp.get("metric") or "").strip()
+    ideal = comp.get("ideal")
+    if metric and ideal not in (None, ""):
+        av = actual.get(metric)
+        xv = (xiaoxia_virtual or {}).get(metric)
+        if av not in (None, "") and xv not in (None, ""):
+            return 5 if abs(float(av) - float(ideal)) <= abs(float(xv) - float(ideal)) else 4
+    return 3
+
 def _xiaoxia_sport_default_state():
     return {
         "phase": XIAOXIA_SPORT_GOAL or "habit_rebuild",
@@ -2793,6 +2887,11 @@ def _xiaoxia_sport_calendar_description(session):
     metrics = target.get("metrics") or session.get("evaluation_metrics") or []
     if isinstance(metrics, str):
         metrics = [metrics]
+    hr = target.get("heart_rate") or {}
+    mw_start, mw_end = _xiaoxia_sport_match_window(session)
+    hr_text = "待設定"
+    if hr:
+        hr_text = f"{hr.get('min_bpm')}~{hr.get('max_bpm')} bpm；理想 {hr.get('ideal_bpm')} bpm"
     meta = {
         "來源": "小俠運動",
         "鎖定": "否",
@@ -2802,8 +2901,10 @@ def _xiaoxia_sport_calendar_description(session):
         "階段": XIAOXIA_SPORT_GOAL,
         "運動項目": session.get("activity") or "run",
         "訓練目標": session.get("objective_label") or session.get("objective") or "",
-        "目標時間": f"{target.get('duration_min') or session.get('duration_min') or ''} 分鐘",
+        "跑步時間": f"{target.get('duration_min') or session.get('duration_min') or ''} 分鐘",
+        "目標心率": hr_text,
         "評分指標": "、".join(str(x) for x in metrics if x),
+        "PK配對窗": f"±{XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時",
         "優先級": "high",
         "彈性": "movable",
         "運動狀態": session.get("status") or "planned",
@@ -2811,10 +2912,16 @@ def _xiaoxia_sport_calendar_description(session):
         "PlannerNote": session.get("planner_note") or "",
     }
     body_lines = []
+    if mw_start and mw_end:
+        body_lines.append(f"本堂實際活動配對時間：{mw_start.strftime('%m/%d %H:%M')} ~ {mw_end.strftime('%m/%d %H:%M')}；活動開始時間落在此窗內可視為本 Session 候選。")
     if session.get("instruction"):
         body_lines.append(str(session.get("instruction")))
     if session.get("strength_finisher"):
-        body_lines.append(f"跑後肌力：{session.get('strength_finisher')}")
+        sm = int(session.get("strength_minutes") or 0)
+        body_lines.append(f"跑後肌力：{session.get('strength_finisher')}" + (f"（約 {sm} 分鐘）" if sm else "") + "；肌力只留紀錄，不列入本堂 1/3/4/5 分。")
+    if not hr:
+        body_lines.append("⚠️ 本堂心率數值尚未設定：請由 Intervals.icu zone 或 XIAOXIA_SPORT_*_HR_* 環境變數提供；程式不自行猜 bpm。")
+    body_lines.append("PK 分數：有跑但未完成要求=1；完成時間/距離但未達標=3；完成且達標後，再比較大俠與小俠誰更接近 ideal，較遠=4、較近或平手=5。")
     body_lines.append("正式排定的運動事件優先於一般小俠自主活動；可由大俠手動拖曳時間，之後用 /小俠運動 更新同步。")
     if (_xiaoxia_sport_session_start_dt(session) or datetime.now(TZ_TPE)).weekday() == 5:
         body_lines.append("週六遇雨可改室內跑步機；場地改變不改 SessionID，也不算替代課。")
@@ -2899,26 +3006,37 @@ def _xiaoxia_sport_planner_prompt(window_start, window_end, existing_events):
         if st:
             event_lines.append(f"- {st.strftime('%Y-%m-%d %H:%M')}~{en.strftime('%H:%M') if en else '?'} | {title}")
     calendar_text = "\n".join(event_lines) if event_lines else "- 無"
+    easy_hr = _xiaoxia_sport_hr_target_for_objective("easy_run")
+    steady_hr = _xiaoxia_sport_hr_target_for_objective("steady_run")
     return f"""你是大俠的運動訓練 Planner。請為未來 {XIAOXIA_SPORT_PLAN_WINDOW_DAYS} 天安排正式訓練。
 
 目前階段/目標：{_xiaoxia_sport_goal_label()} ({XIAOXIA_SPORT_GOAL})
-每週正式訓練目標：{XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 次；只有這些正式排定課才會和小俠玩分數。額外運動不列入正式 PK，但會留紀錄。
+每週正式訓練目標：{XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 次；只有正式排定課才和小俠玩 1/3/4/5 分 PK。額外運動只留紀錄供未來課表參考。
 主要運動日：{primary}
 備用運動日：{backup}
 允許運動項目：{activities}
-每次總時間：{XIAOXIA_SPORT_SESSION_MIN_MINUTES}~{XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘
+每次總時段：{XIAOXIA_SPORT_SESSION_MIN_MINUTES}~{XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘（包含跑後肌力）。
+預設開始時間：週間={XIAOXIA_SPORT_WEEKDAY_START_TIME}；週六={XIAOXIA_SPORT_SATURDAY_START_TIME}。
 排程限制：主要日={XIAOXIA_SPORT_PRIMARY_DAYS}；備用日={XIAOXIA_SPORT_BACKUP_DAYS}；不可排={XIAOXIA_SPORT_BLOCKED_DAYS}；受限日={XIAOXIA_SPORT_LIMITED_DAYS}；最晚結束={XIAOXIA_SPORT_SESSION_LATEST_END}；其他限制={XIAOXIA_SPORT_LIFE_CONSTRAINTS or "無"}
 規劃期間：{window_start.isoformat()} ~ {window_end.isoformat()}
 
+量化心率 SSOT：
+- easy_run: {json.dumps(easy_hr, ensure_ascii=False) if easy_hr else "尚未設定；不可自行猜 bpm，程式會標記待設定"}
+- steady_run: {json.dumps(steady_hr, ensure_ascii=False) if steady_hr else "尚未設定；不可自行猜 bpm，程式會標記待設定"}
+
 Phase 1 規則：
-1. 目前已兩個多月沒有穩定運動，以養成習慣為優先，不追 PB。
-2. 跑步課以 easy_run / run_walk / steady_run 為主；暫不安排 interval/tempo。
-3. 評分指標必須跟該堂目標一致：easy 以心率/完成時間/距離為主；未來 performance 才偏 pace/split。
-4. 若 activities 含 strength，可在 1~2 堂正式跑步後加 8~12 分鐘簡單肌力，其中一堂優先週六；目前不要另外產生 strength-only 短課，除非 activities 明確包含 gym 或 strength_short。
-5. 週六天雨可改跑步機，但不要因此把週六固定成跑步機日。
-6. 正式運動事件優先於一般小俠自主活動；其他手動/鎖定 Calendar 事件不要移動。
-7. 晚上 21:00 前需留洗澡與生活緩衝。
-8. 每 7 天區塊盡量安排 {XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 堂，先主要日、再備用日。
+1. 目前以重新養成穩定運動習慣為優先，不追 PB。
+2. 不得安排 run_walk / 跑走交替。只使用 easy_run 與少量 steady_run；暫不安排 interval/tempo。
+3. 前兩週不要把上限當常態：跑步本體通常 30~45 分鐘，逐步增加；50 分鐘留給日後狀態穩定再用。
+4. easy_run 的主要達標指標是「完成要求時間 + 平均心率位於個人目標區間」；distance / pace 只記錄，不作本堂達標門檻。
+5. steady_run 亦須有量化目標；本階段以心率 + 時間為主，不要求拼速度。
+6. 若 activities 含 strength，可在每週 1~2 堂正式跑步後加 8~12 分鐘簡單肌力，其中一堂優先週六。肌力不列入 1/3/4/5 分評分。總時段仍不得超過 {XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘。
+7. strength_finisher 有內容時，必須同時給 strength_minutes；跑步 duration_min + strength_minutes 必須 <= {XIAOXIA_SPORT_SESSION_MAX_MINUTES}。
+8. 週六遇雨可改室內跑步機，但不要把週六固定成跑步機日。
+9. 正式運動事件優先於一般小俠自主活動；其他手動/鎖定 Calendar 事件不要移動。
+10. 表定時間只是 anchor；之後實際活動以表定時間前後各 {XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時作 Session 配對窗。
+11. 每 7 天區塊盡量安排 {XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 堂，先主要日、再備用日。
+12. start_time 原則直接使用上述預設時間；只有 Calendar 衝突時才改動。
 
 目前 Calendar：
 {calendar_text}
@@ -2931,12 +3049,13 @@ Phase 1 規則：
       "date": "YYYY-MM-DD",
       "start_time": "HH:MM",
       "activity": "run",
-      "objective": "easy_run|run_walk|steady_run",
-      "objective_label": "中文名稱",
-      "duration_min": 30,
-      "instruction": "簡短可執行內容",
-      "evaluation_metrics": ["heart_rate","duration","distance"],
+      "objective": "easy_run|steady_run",
+      "objective_label": "輕鬆跑或穩定跑",
+      "duration_min": 35,
+      "instruction": "簡短可執行內容；不要自行發明 bpm",
+      "evaluation_metrics": ["heart_rate","duration"],
       "strength_finisher": "沒有就空字串，有則簡述",
+      "strength_minutes": 0,
       "planner_note": "為何放這天"
     }}
   ]
@@ -3002,22 +3121,58 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             continue
         if d < window_start or d > window_end or d.weekday() not in allowed_days:
             continue
-        try:
-            hh, mm = [int(x) for x in str(item.get("start_time") or "18:30").split(":")[:2]]
-        except Exception:
-            hh, mm = 18, 30
-        duration = int(item.get("duration_min") or XIAOXIA_SPORT_SESSION_MIN_MINUTES)
-        duration = max(XIAOXIA_SPORT_SESSION_MIN_MINUTES, min(XIAOXIA_SPORT_SESSION_MAX_MINUTES, duration))
-        start = datetime.combine(d, time(max(0, min(23, hh)), max(0, min(59, mm))), tzinfo=TZ_TPE)
-        end = start + timedelta(minutes=duration)
+        # 表定時間使用固定 anchor：週間 18:00、週六 16:00（可由 ENV 改）；
+        # 大俠之後仍可手動拖曳 Calendar，再用 /小俠運動 更新同步。
+        anchor_time = _xiaoxia_sport_default_start_time_for_date(d)
+        hh, mm = anchor_time.hour, anchor_time.minute
+
+        objective = str(item.get("objective") or "easy_run").strip().lower()
+        if objective not in {"easy_run", "steady_run"}:
+            objective = "easy_run"
+
+        run_duration = int(item.get("duration_min") or XIAOXIA_SPORT_SESSION_MIN_MINUTES)
+        habit_cap = min(XIAOXIA_SPORT_SESSION_MAX_MINUTES, 45) if str(XIAOXIA_SPORT_GOAL).lower() == "habit_rebuild" else XIAOXIA_SPORT_SESSION_MAX_MINUTES
+        run_duration = max(XIAOXIA_SPORT_SESSION_MIN_MINUTES, min(habit_cap, run_duration))
+
+        strength_finisher = _clean_text_compact(item.get("strength_finisher") or "")
+        strength_minutes = int(item.get("strength_minutes") or 0) if strength_finisher else 0
+        if "strength" not in _xiaoxia_sport_activity_tokens():
+            strength_finisher, strength_minutes = "", 0
+        elif d.weekday() == 5 and not strength_finisher:
+            # 週六是 Phase 1 的固定肌力附加日；只是 accessory，不參與 PK 評分。
+            strength_finisher = "簡單核心與下肢肌力，保留餘裕、不做到力竭"
+            strength_minutes = 8
+        if strength_minutes:
+            strength_minutes = max(8, min(12, strength_minutes))
+            max_run_with_strength = XIAOXIA_SPORT_SESSION_MAX_MINUTES - strength_minutes
+            if max_run_with_strength >= XIAOXIA_SPORT_SESSION_MIN_MINUTES:
+                run_duration = min(run_duration, max_run_with_strength)
+            else:
+                strength_finisher, strength_minutes = "", 0
+
+        total_duration = run_duration + strength_minutes
+        start = datetime.combine(d, time(hh, mm), tzinfo=TZ_TPE)
+        end = start + timedelta(minutes=total_duration)
         start, end, moved = await _xiaoxia_sport_resolve_calendar_slot(start, end, events)
         if not start:
             continue
         session_id = f"HR-{seq_base + len(sessions) + 1:03d}"
         plan_id = f"SPORT-{d.strftime('%Y%m%d')}-{len(sessions)+1:02d}"
-        metrics = item.get("evaluation_metrics") or ["heart_rate", "duration", "distance"]
+        metrics = item.get("evaluation_metrics") or ["heart_rate", "duration"]
         if not isinstance(metrics, list):
             metrics = [str(metrics)]
+        # Phase 1 的 easy/steady 只用心率 + 時間判斷達標；distance/pace 仍可記錄但不列入門檻。
+        metrics = [str(x) for x in metrics if str(x) in {"heart_rate", "duration"}] or ["heart_rate", "duration"]
+        hr_target = _xiaoxia_sport_hr_target_for_objective(objective)
+        target = {
+            "duration_min": run_duration,
+            "metrics": metrics,
+            "heart_rate": hr_target,
+            "comparison": {
+                "metric": "avg_hr" if hr_target else "",
+                "ideal": (hr_target or {}).get("ideal_bpm") if hr_target else None,
+            },
+        }
         session = {
             "plan_id": plan_id,
             "session_id": session_id,
@@ -3025,11 +3180,20 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             "scheduled_at": start.isoformat(),
             "official": True,
             "activity": str(item.get("activity") or "run").lower(),
-            "objective": str(item.get("objective") or "easy_run"),
-            "objective_label": _clean_text_compact(item.get("objective_label") or "輕鬆跑"),
-            "target": {"duration_min": duration, "metrics": metrics},
-            "instruction": _clean_text_compact(item.get("instruction") or "依當日目標完成，不追配速。"),
-            "strength_finisher": _clean_text_compact(item.get("strength_finisher") or ""),
+            "objective": objective,
+            "objective_label": "穩定跑" if objective == "steady_run" else "輕鬆跑",
+            "target": target,
+            "instruction": _clean_text_compact(item.get("instruction") or "依當日量化目標完成，不追配速。"),
+            "strength_finisher": strength_finisher,
+            "strength_minutes": strength_minutes,
+            "total_duration_min": total_duration,
+            "match_window_hours": XIAOXIA_SPORT_MATCH_WINDOW_HOURS,
+            "xiaoxia_benchmark": {
+                "age_adjusted_to_daxia": True,
+                "population_percentile_band": "P25-P50",
+                "representative": "band_mean",
+                "status": "pending_benchmark_source",
+            },
             "planner_note": _clean_text_compact(item.get("planner_note") or payload.get("planner_note") or ""),
             "status": "planned",
             "calendar_event_id": "",
@@ -3037,7 +3201,10 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             "original_date": d.isoformat(),
             "adjustment_reason": None,
         }
-        title = f"🏃 大俠運動｜{session['objective_label']} {duration} 分"
+        mw_start, mw_end = _xiaoxia_sport_match_window(session)
+        session["match_window_start"] = mw_start.isoformat() if mw_start else ""
+        session["match_window_end"] = mw_end.isoformat() if mw_end else ""
+        title = f"🏃 大俠運動｜{session['objective_label']} {run_duration} 分"
         if session.get("strength_finisher"):
             title += "＋肌力"
         ev = await _xiaoxia_calendar_create_event(title, start, end, description=_xiaoxia_sport_calendar_description(session))
@@ -3096,6 +3263,9 @@ async def _xiaoxia_sport_sync_from_calendar():
             row["scheduled_at"] = st.isoformat()
             row["date"] = st.date().isoformat()
             row["adjustment_reason"] = "manual_calendar_change"
+            mw_start, mw_end = _xiaoxia_sport_match_window(row)
+            row["match_window_start"] = mw_start.isoformat() if mw_start else ""
+            row["match_window_end"] = mw_end.isoformat() if mw_end else ""
             changed += 1
         sport_status = str(meta.get("運動狀態") or row.get("status") or "planned").lower()
         if sport_status != str(row.get("status") or "planned").lower():
