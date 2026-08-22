@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.04"
+LOBSTER_VERSION = "1.11.05"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.04_intervals_icu_sync")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.05_sport_instruction_ssot_sync")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -2722,6 +2722,51 @@ def _xiaoxia_sport_default_start_time_for_date(d):
     hh, mm = _xiaoxia_sport_parse_hhmm(raw, (16, 0) if d.weekday() == 5 else (18, 0))
     return time(hh, mm)
 
+def _xiaoxia_sport_canonical_instruction(session):
+    """v1.11.05: all instruction minutes derive from target.duration_min SSOT."""
+    row = session if isinstance(session, dict) else {}
+    target = row.get("target") if isinstance(row.get("target"), dict) else {}
+    try:
+        run_minutes = int(target.get("duration_min") or row.get("duration_min") or XIAOXIA_SPORT_SESSION_MIN_MINUTES)
+    except Exception:
+        run_minutes = int(XIAOXIA_SPORT_SESSION_MIN_MINUTES)
+    run_minutes = max(1, run_minutes)
+    warmup = 5 if run_minutes >= 15 else max(1, min(3, run_minutes // 4))
+    main_minutes = max(0, run_minutes - warmup)
+    objective = str(row.get("objective") or "easy_run").strip().lower()
+    objective_label = "穩定跑" if objective == "steady_run" else "輕鬆跑"
+    parts = [f"熱身 {warmup} 分鐘 + {objective_label} {main_minutes} 分鐘（跑步合計 {run_minutes} 分鐘）"]
+    if objective == "easy_run":
+        parts.append("不追配速，以本堂心率目標與完成時間為主")
+    else:
+        parts.append("維持穩定、可控制的強度，以本堂心率目標與完成時間為主")
+    strength = _clean_text_compact(row.get("strength_finisher") or "")
+    try:
+        strength_minutes = int(row.get("strength_minutes") or 0) if strength else 0
+    except Exception:
+        strength_minutes = 0
+    if strength and strength_minutes > 0:
+        parts.append(f"跑後再做 {strength_minutes} 分鐘肌力；總時段 {run_minutes + strength_minutes} 分鐘")
+    return "；".join(parts) + "。"
+
+def _xiaoxia_sport_apply_instruction_ssot(session):
+    if not isinstance(session, dict):
+        return False
+    canonical = _xiaoxia_sport_canonical_instruction(session)
+    changed = str(session.get("instruction") or "").strip() != canonical
+    session["instruction"] = canonical
+    target = session.get("target") if isinstance(session.get("target"), dict) else {}
+    try:
+        run_minutes = int(target.get("duration_min") or session.get("duration_min") or 0)
+        strength_minutes = int(session.get("strength_minutes") or 0) if session.get("strength_finisher") else 0
+        expected_total = run_minutes + strength_minutes if run_minutes > 0 else session.get("total_duration_min")
+        if expected_total and session.get("total_duration_min") != expected_total:
+            session["total_duration_min"] = expected_total
+            changed = True
+    except Exception:
+        pass
+    return changed
+
 def _xiaoxia_sport_hr_target_for_objective(objective):
     obj = str(objective or "").strip().lower()
     if obj == "steady_run":
@@ -2823,7 +2868,17 @@ def _xiaoxia_sport_state_save(data):
 
 def _xiaoxia_sport_plan_load():
     d = _load_json_file_or_default(XIAOXIA_SPORT_PLAN_PATH, {})
-    return d if isinstance(d, dict) else {}
+    if not isinstance(d, dict):
+        return {}
+    changed = False
+    for row in (d.get("sessions") or []):
+        if isinstance(row, dict) and _xiaoxia_sport_apply_instruction_ssot(row):
+            changed = True
+    if changed:
+        d["instruction_ssot_repaired_at"] = datetime.now(TZ_TPE).isoformat()
+        _xiaoxia_calendar_save(XIAOXIA_SPORT_PLAN_PATH, d)
+        print("🏃 [XIAOXIA_SPORT_INSTRUCTION_SSOT_REPAIRED]")
+    return d
 
 def _xiaoxia_sport_plan_save(data):
     _xiaoxia_calendar_save(XIAOXIA_SPORT_PLAN_PATH, data if isinstance(data, dict) else {})
@@ -3423,6 +3478,7 @@ Phase 1 規則：
 10. 表定時間只是 anchor；之後實際活動以表定時間前後各 {XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時作 Session 配對窗。
 11. 每 7 天區塊盡量安排 {XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 堂，先主要日、再備用日。
 12. start_time 原則直接使用上述預設時間；只有 Calendar 衝突時才改動。
+13. instruction 不得寫熱身幾分鐘、主跑幾分鐘、總跑步幾分鐘等任何時間算術；所有分鐘數由程式依 duration_min 單一真相來源產生。
 
 目前 Calendar：
 {calendar_text}
@@ -3438,7 +3494,7 @@ Phase 1 規則：
       "objective": "easy_run|steady_run",
       "objective_label": "輕鬆跑或穩定跑",
       "duration_min": 35,
-      "instruction": "簡短可執行內容；不要自行發明 bpm",
+      "instruction": "只描述質性執行方式，不得自行寫任何分鐘數；分鐘數由程式依 duration_min SSOT 組合",
       "evaluation_metrics": ["heart_rate","duration"],
       "strength_finisher": "沒有就空字串，有則簡述",
       "strength_minutes": 0,
@@ -3569,7 +3625,7 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             "objective": objective,
             "objective_label": "穩定跑" if objective == "steady_run" else "輕鬆跑",
             "target": target,
-            "instruction": _clean_text_compact(item.get("instruction") or "依當日量化目標完成，不追配速。"),
+            "instruction": "",  # v1.11.05: derived below from target.duration_min SSOT.
             "strength_finisher": strength_finisher,
             "strength_minutes": strength_minutes,
             "total_duration_min": total_duration,
@@ -3587,6 +3643,7 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             "original_date": d.isoformat(),
             "adjustment_reason": None,
         }
+        _xiaoxia_sport_apply_instruction_ssot(session)
         mw_start, mw_end = _xiaoxia_sport_match_window(session)
         session["match_window_start"] = mw_start.isoformat() if mw_start else ""
         session["match_window_end"] = mw_end.isoformat() if mw_end else ""
@@ -3658,6 +3715,20 @@ async def _xiaoxia_sport_sync_from_calendar():
             row["status"] = sport_status
             changed += 1
         row["calendar_event_id"] = str(ev.get("id") or row.get("calendar_event_id") or "")
+        if _xiaoxia_sport_apply_instruction_ssot(row):
+            changed += 1
+        canonical_description = _xiaoxia_sport_calendar_description(row)
+        if str(ev.get("description") or "").strip() != canonical_description.strip():
+            try:
+                patched = await _xiaoxia_calendar_update_event(
+                    str(ev.get("id") or ""),
+                    {"description": canonical_description, "reminders": {"useDefault": False}},
+                )
+                if patched:
+                    changed += 1
+                    print(f"🏃 [XIAOXIA_SPORT_CALENDAR_INSTRUCTION_REPAIRED] session={row.get('session_id')}")
+            except Exception as exc:
+                print(f"⚠️ [XIAOXIA_SPORT_CALENDAR_INSTRUCTION_REPAIR_FAILED] session={row.get('session_id')} {type(exc).__name__}: {exc}")
     if changed:
         plan["sessions"] = sessions
         plan["updated_at"] = datetime.now(TZ_TPE).isoformat()
