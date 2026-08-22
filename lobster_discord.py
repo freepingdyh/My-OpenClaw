@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.09"
+LOBSTER_VERSION = "1.11.10"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.09_sport_calendar_hr_meta_fix")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.10_sport_hr_zone80_pk")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -1660,7 +1660,7 @@ _XIAOXIA_CALENDAR_DESCRIPTION_META_KEYS = [
     "PlanID", "SessionID", "階段", "運動項目", "訓練目標", "目標時間",
     # v1.11.09：運動 Calendar 的結構化欄位也必須列入白名單；
     # 否則 _xiaoxia_sport_calendar_description() 雖產生資料，compose 時仍會被靜默丟棄。
-    "跑步時間", "目標心率", "PK配對窗",
+    "跑步時間", "目標心率", "心率達標規則", "PK配對窗",
     "評分指標", "優先級", "彈性", "運動狀態", "正式訓練", "PlannerNote",
 ]
 
@@ -2896,6 +2896,7 @@ def _xiaoxia_sport_virtual_benchmark_for_session(session):
         "status": "ready",
         "kind": "virtual_game_benchmark",
         "virtual_avg_hr": int(round(virtual)),
+        "virtual_ideal_gap_bpm": round(abs(float(virtual) - float(ideal)), 3),
         "ideal_bpm": int(round(ideal)),
         "note": "小俠 PK 的虛擬基準線；只用於遊戲比較，不宣稱小俠實際完成生理運動。",
     }
@@ -2932,7 +2933,7 @@ def _xiaoxia_sport_apply_hr_profile_to_plan(plan, now_dt=None):
             target["heart_rate"] = dict(hr_target)
             target["heart_rate_source"] = str(hr_target.get("source") or "intervals.icu")
             target["comparison"] = {
-                "metric": "avg_hr",
+                "metric": "hr_zone80_ideal_mae",
                 "ideal": hr_target.get("ideal_bpm"),
             }
             session["target"] = target
@@ -2960,9 +2961,9 @@ def _xiaoxia_sport_score_pk(session, actual, xiaoxia_virtual):
     """
     1/3/4/5 分只代表正式 PK 結果，不是一般完成度星等。
     - 1: 有跑，但未完成要求時間/距離。
-    - 3: 完成要求時間/距離，但未達該堂目標。
-    - 4: 完成且達標，但比小俠更偏離 ideal。
-    - 5: 完成且達標，且比小俠更接近 ideal 或平手。
+    - 3: 完成要求時間/距離，但有效心率時間落在目標區間未達 80%。
+    - 4: 心率區間覆蓋達 80%，但區間內對 ideal 的平均絕對偏差比小俠大。
+    - 5: 心率區間覆蓋達 80%，且區間內對 ideal 的平均絕對偏差比小俠小或平手。
     無活動回傳 None（未出賽，不給 0 分）。
     """
     if not isinstance(actual, dict) or not actual:
@@ -2983,20 +2984,20 @@ def _xiaoxia_sport_score_pk(session, actual, xiaoxia_virtual):
 
     hr = target.get("heart_rate") or {}
     if hr:
-        avg_hr = actual.get("avg_hr")
-        if avg_hr in (None, ""):
+        analysis = actual.get("hr_target_analysis") if isinstance(actual.get("hr_target_analysis"), dict) else {}
+        if not analysis or analysis.get("pass") is not True:
             return 3
-        avg_hr = float(avg_hr)
-        lo = float(hr.get("min_bpm") or 0)
-        hi = float(hr.get("max_bpm") or 0)
-        if lo > 0 and hi > 0 and not (lo <= avg_hr <= hi):
+        daxia_gap = _xiaoxia_sport_float(analysis.get("in_range_ideal_mae_bpm"))
+        if daxia_gap is None:
             return 3
-        ideal = float(hr.get("ideal_bpm") or ((lo + hi) / 2 if lo and hi else avg_hr))
-        xia_hr = (xiaoxia_virtual or {}).get("avg_hr")
-        if xia_hr in (None, ""):
+        xia_gap = _xiaoxia_sport_float((xiaoxia_virtual or {}).get("ideal_gap_bpm"))
+        if xia_gap is None:
+            xia_hr = _xiaoxia_sport_float((xiaoxia_virtual or {}).get("avg_hr"))
+            ideal = _xiaoxia_sport_float(hr.get("ideal_bpm")) or 0.0
+            if xia_hr is not None and ideal > 0:
+                xia_gap = abs(xia_hr - ideal)
+        if xia_gap is None:
             return None
-        daxia_gap = abs(avg_hr - ideal)
-        xia_gap = abs(float(xia_hr) - ideal)
         return 5 if daxia_gap <= xia_gap else 4
 
     # 未來 performance 課可在 target.comparison 中指定 pace/distance 等 ideal。
@@ -3219,6 +3220,132 @@ async def _xiaoxia_sport_intervals_detail(activity_id):
     return payload if isinstance(payload, dict) else None
 
 
+async def _xiaoxia_sport_intervals_streams(activity_id):
+    """Read Intervals.icu time-series streams for objective HR-zone scoring."""
+    aid = str(activity_id or "").strip()
+    if not aid:
+        return None
+    return await _xiaoxia_sport_intervals_get(f"activity/{aid}/streams.json")
+
+
+def _xiaoxia_sport_normalize_streams(payload):
+    """Normalize dict/list stream payloads into {stream_name: values}."""
+    out = {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(value, list):
+                out[str(key)] = value
+            elif isinstance(value, dict) and isinstance(value.get("data"), list):
+                out[str(key)] = value.get("data")
+    elif isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("type") or item.get("name") or item.get("stream_type")
+            data = item.get("data")
+            if name and isinstance(data, list):
+                out[str(name)] = data
+    return out
+
+
+def _xiaoxia_sport_stream_by_alias(streams, aliases):
+    lower_map = {str(k).lower(): k for k in (streams or {}).keys()}
+    for alias in aliases:
+        real = lower_map.get(str(alias).lower())
+        if real is not None:
+            return streams.get(real)
+    return None
+
+
+def _xiaoxia_sport_hr_target_analysis(stream_payload, hr_target):
+    """Time-weighted HR target coverage + ideal deviation.
+
+    Pass rule: >=80% of valid HR time inside [min_bpm, max_bpm].
+    The remaining <=20% naturally accommodates warm-up, cool-down and short excursions.
+    PK closeness uses only in-zone HR samples so the deliberately allowed warm-up/cool-down
+    does not distort the ideal comparison.
+    """
+    hr_target = hr_target if isinstance(hr_target, dict) else {}
+    lo = _xiaoxia_sport_float(hr_target.get("min_bpm")) or 0.0
+    hi = _xiaoxia_sport_float(hr_target.get("max_bpm")) or 0.0
+    ideal = _xiaoxia_sport_float(hr_target.get("ideal_bpm")) or ((lo + hi) / 2.0 if lo and hi else 0.0)
+    if lo <= 0 or hi < lo:
+        return None
+    streams = _xiaoxia_sport_normalize_streams(stream_payload)
+    hrs = _xiaoxia_sport_stream_by_alias(streams, ("heartrate", "heart_rate", "hr"))
+    times = _xiaoxia_sport_stream_by_alias(streams, ("time", "elapsed_time", "seconds"))
+    if not isinstance(hrs, list) or not hrs:
+        return None
+
+    rows = []
+    for idx, raw_hr in enumerate(hrs):
+        hr = _xiaoxia_sport_float(raw_hr)
+        if hr is None or hr <= 0:
+            continue
+        t = None
+        if isinstance(times, list) and idx < len(times):
+            t = _xiaoxia_sport_float(times[idx])
+        rows.append((idx, hr, t))
+    if not rows:
+        return None
+
+    # Prefer time weighting. If no usable time stream exists, equal sample weighting is
+    # an appropriate approximation because wearable streams are normally regular cadence.
+    weights = []
+    usable_times = [r[2] for r in rows if r[2] is not None]
+    use_time = len(usable_times) >= max(2, int(len(rows) * 0.8))
+    if use_time:
+        for pos, (_, _, t) in enumerate(rows):
+            if t is None:
+                weights.append(0.0)
+                continue
+            next_t = None
+            for j in range(pos + 1, len(rows)):
+                if rows[j][2] is not None:
+                    next_t = rows[j][2]
+                    break
+            if next_t is not None and next_t > t:
+                weights.append(float(next_t - t))
+            elif pos > 0 and rows[pos - 1][2] is not None and t > rows[pos - 1][2]:
+                weights.append(float(t - rows[pos - 1][2]))
+            else:
+                weights.append(1.0)
+    else:
+        weights = [1.0] * len(rows)
+
+    valid_weight = sum(max(0.0, w) for w in weights)
+    if valid_weight <= 0:
+        return None
+    in_rows = [(hr, max(0.0, w)) for (_, hr, _), w in zip(rows, weights) if lo <= hr <= hi]
+    in_weight = sum(w for _, w in in_rows)
+    ratio = in_weight / valid_weight
+    in_sample_count = len(in_rows)
+    if in_weight > 0:
+        in_mean = sum(hr * w for hr, w in in_rows) / in_weight
+        ideal_mae = sum(abs(hr - ideal) * w for hr, w in in_rows) / in_weight
+    else:
+        in_mean = None
+        ideal_mae = None
+    all_mean = sum(r[1] * max(0.0, w) for r, w in zip(rows, weights)) / valid_weight
+    return {
+        "method": "time_weighted_stream" if use_time else "sample_weighted_stream",
+        "target_min_bpm": round(lo, 1),
+        "target_max_bpm": round(hi, 1),
+        "ideal_bpm": round(ideal, 1),
+        "pass_ratio_required": 0.80,
+        "in_range_ratio": round(ratio, 4),
+        "in_range_percent": round(ratio * 100.0, 1),
+        "pass": bool(ratio >= 0.80),
+        "valid_hr_samples": len(rows),
+        "in_range_samples": in_sample_count,
+        "valid_hr_seconds": round(valid_weight, 1) if use_time else None,
+        "in_range_seconds": round(in_weight, 1) if use_time else None,
+        "all_stream_mean_hr": round(all_mean, 2),
+        "in_range_mean_hr": round(in_mean, 2) if in_mean is not None else None,
+        "in_range_ideal_mae_bpm": round(ideal_mae, 3) if ideal_mae is not None else None,
+    }
+
+
 async def _xiaoxia_sport_sync_hr_profile_from_activities(activities, detail_cache=None):
     """Refresh HR Profile from the newest Intervals.icu activity carrying personal physiology fields."""
     detail_cache = detail_cache if isinstance(detail_cache, dict) else {}
@@ -3356,17 +3483,18 @@ def _xiaoxia_sport_actual_target_status(session, actual):
         return "incomplete", 1
     hr = target.get("heart_rate") or {}
     if hr:
-        avg_hr = _xiaoxia_sport_float((actual or {}).get("avg_hr"))
-        lo = _xiaoxia_sport_float(hr.get("min_bpm")) or 0.0
-        hi = _xiaoxia_sport_float(hr.get("max_bpm")) or 0.0
-        if avg_hr is None or (lo > 0 and hi > 0 and not (lo <= avg_hr <= hi)):
+        analysis = (actual or {}).get("hr_target_analysis") if isinstance((actual or {}).get("hr_target_analysis"), dict) else {}
+        if not analysis:
+            return "completed_hr_stream_unavailable", 3
+        if analysis.get("pass") is not True:
             return "completed_target_miss", 3
         benchmark = (session or {}).get("xiaoxia_benchmark") or {}
         virtual_hr = _xiaoxia_sport_float(benchmark.get("virtual_avg_hr"))
+        virtual_gap = _xiaoxia_sport_float(benchmark.get("virtual_ideal_gap_bpm"))
         final_score = _xiaoxia_sport_score_pk(
             session,
             actual,
-            {"avg_hr": virtual_hr} if virtual_hr is not None else {},
+            {"avg_hr": virtual_hr, "ideal_gap_bpm": virtual_gap},
         )
         return "completed_target_met", final_score if final_score in {4, 5} else None
     # Do not silently give a 4/5 when this session had no quantitative HR target.
@@ -3433,7 +3561,7 @@ def _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, pro
     target_row["intervals_activity_id"] = actual.get("intervals_activity_id")
     target_row["actual_target_status"] = status_label
     target_row["score"] = provisional_score
-    target_row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+    target_row["pk_status"] = "final" if provisional_score in {1, 3, 4, 5} else "pending_xiaoxia"
 
 
 def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
@@ -3475,7 +3603,7 @@ def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
         row["objective"] = str(target_row.get("objective_label") or target_row.get("objective") or "")
         row["actual_target_status"] = status_label
         row["score"] = provisional_score
-        row["pk_status"] = "final" if provisional_score in {1, 3} else "pending_xiaoxia"
+        row["pk_status"] = "final" if provisional_score in {1, 3, 4, 5} else "pending_xiaoxia"
         row["reconciled_at"] = now_dt.isoformat()
         row["reconciled_reason"] = "v1.11.06_official_session_match_repair"
         changed = True
@@ -3493,12 +3621,24 @@ def _xiaoxia_sport_score_explanation(row):
     score = (row or {}).get("score")
     if score == 1:
         return "本堂主要時間／距離要求沒有達到完成容差，所以先記 1 分。"
+    actual = (row or {}).get("actual") if isinstance((row or {}).get("actual"), dict) else {}
+    analysis = actual.get("hr_target_analysis") if isinstance(actual.get("hr_target_analysis"), dict) else {}
+    if status == "completed_hr_stream_unavailable":
+        return "完成了本堂份量，但沒有可用的心率時間序列可驗證 80% 規則，所以保守記 3 分。"
     if status == "completed_target_miss":
-        return "完成了本堂份量，但沒有落在正式量化目標內，所以記 3 分。"
+        pct = _xiaoxia_sport_float(analysis.get("in_range_percent"))
+        return (f"完成了本堂份量，但目標心率區間覆蓋率只有 {pct:.1f}%（需至少 80%），所以記 3 分。" if pct is not None else "完成了本堂份量，但心率區間覆蓋未達 80%，所以記 3 分。")
     if status == "completed_target_unconfigured":
         return "完成了本堂份量；但這堂的正式心率目標尚未寫入 SSOT，為避免亂給 4/5，先記 3 分。"
     if status == "completed_target_met" and score in {4, 5}:
-        return f"完成且達標，和小俠的同堂比較完成，記 {score} 分。"
+        pct = _xiaoxia_sport_float(analysis.get("in_range_percent"))
+        mae = _xiaoxia_sport_float(analysis.get("in_range_ideal_mae_bpm"))
+        detail = ""
+        if pct is not None:
+            detail += f"心率區間覆蓋 {pct:.1f}%"
+        if mae is not None:
+            detail += ("，" if detail else "") + f"區間內平均離 ideal {mae:.1f} bpm"
+        return f"完成且達標{('（' + detail + '）') if detail else ''}，和小俠比較 ideal 偏差後記 {score} 分。"
     if status == "completed_target_met":
         return "完成且達標，這回合已進入小俠同堂比較。"
     return "這筆正式訓練已完成並記入共同運動紀錄。"
@@ -3519,6 +3659,11 @@ async def _xiaoxia_sport_xiaoxia_participation_reply(row, state=None):
     if distance is not None: metrics.append(f"{distance:.2f} km")
     if pace: metrics.append(pace)
     if avg_hr is not None: metrics.append(f"平均心率 {avg_hr:.0f}")
+    hr_analysis = actual.get("hr_target_analysis") if isinstance(actual.get("hr_target_analysis"), dict) else {}
+    zone_pct = _xiaoxia_sport_float(hr_analysis.get("in_range_percent"))
+    ideal_mae = _xiaoxia_sport_float(hr_analysis.get("in_range_ideal_mae_bpm"))
+    if zone_pct is not None: metrics.append(f"目標心率區間覆蓋 {zone_pct:.1f}%")
+    if ideal_mae is not None: metrics.append(f"區間內平均離理想值 {ideal_mae:.1f} bpm")
     metric_text = "、".join(metrics) or "已完成訓練"
     week_done = int((state or {}).get("weekly_official_completed") or 0)
     prompt = f"""妳是小俠，大俠的成年伴侶。大俠剛完成你們共同的正式運動回合 {sid}。
@@ -3652,8 +3797,20 @@ async def _xiaoxia_sport_sync_intervals(days=None):
         if session:
             session_id = str(session.get("session_id") or "")
             objective = str(session.get("objective_label") or session.get("objective") or "")
-            status_label, provisional_score = _xiaoxia_sport_actual_target_status(session, actual)
             target_row = by_sid.get(session_id)
+            hr_target = ((target_row or session).get("target") or {}).get("heart_rate") or {}
+            if hr_target:
+                try:
+                    streams_payload = await _xiaoxia_sport_intervals_streams(actual.get("intervals_activity_id"))
+                    analysis = _xiaoxia_sport_hr_target_analysis(streams_payload, hr_target)
+                    if analysis:
+                        actual["hr_target_analysis"] = analysis
+                        print(f"❤️ [XIAOXIA_SPORT_HR_ZONE80] id={actual.get('intervals_activity_id')} session={session_id} in_range={analysis.get('in_range_percent')}% pass={analysis.get('pass')} mae={analysis.get('in_range_ideal_mae_bpm')}")
+                    else:
+                        print(f"⚠️ [XIAOXIA_SPORT_HR_STREAM_ANALYSIS_EMPTY] id={actual.get('intervals_activity_id')} session={session_id}")
+                except Exception as exc:
+                    print(f"⚠️ [XIAOXIA_SPORT_HR_STREAM_FAILED] id={actual.get('intervals_activity_id')} session={session_id} {type(exc).__name__}: {exc}")
+            status_label, provisional_score = _xiaoxia_sport_actual_target_status(target_row or session, actual)
             if target_row is not None:
                 _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, provisional_score)
                 event_id = str(target_row.get("calendar_event_id") or "").strip()
@@ -3679,7 +3836,7 @@ async def _xiaoxia_sport_sync_intervals(days=None):
             "actual": actual,
             "actual_target_status": status_label,
             "score": provisional_score,
-            "pk_status": ("final" if provisional_score in {1, 3} else ("pending_xiaoxia" if official else "not_applicable")),
+            "pk_status": ("final" if provisional_score in {1, 3, 4, 5} else ("pending_xiaoxia" if official else "not_applicable")),
             "synced_at": now_dt.isoformat(),
         }
         _xiaoxia_sport_history_append(history_row)
@@ -3729,6 +3886,11 @@ def _xiaoxia_sport_actual_line(row):
     if pace: bits.append(str(pace))
     if avg_hr not in (None, ""): bits.append(f"均心 {float(avg_hr):.0f}")
     if cadence not in (None, ""): bits.append(f"步頻 {float(cadence):.0f}")
+    hr_analysis = actual.get("hr_target_analysis") if isinstance(actual.get("hr_target_analysis"), dict) else {}
+    zone_pct = _xiaoxia_sport_float(hr_analysis.get("in_range_percent"))
+    ideal_mae = _xiaoxia_sport_float(hr_analysis.get("in_range_ideal_mae_bpm"))
+    if zone_pct is not None: bits.append(f"HR區間 {zone_pct:.1f}%")
+    if ideal_mae is not None: bits.append(f"離ideal {ideal_mae:.1f} bpm")
     score = row.get("score")
     if score not in (None, "") and row.get("official", True): bits.append(f"{score} 分")
     elif row.get("official", True) and row.get("pk_status") == "pending_xiaoxia": bits.append("PK待小俠")
@@ -3794,6 +3956,7 @@ def _xiaoxia_sport_calendar_description(session):
         "訓練目標": session.get("objective_label") or session.get("objective") or "",
         "跑步時間": f"{target.get('duration_min') or session.get('duration_min') or ''} 分鐘",
         "目標心率": hr_text,
+        "心率達標規則": "有效心率時間至少 80% 落在目標區間",
         "評分指標": "、".join(str(x) for x in metrics if x),
         "PK配對窗": f"±{XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時",
         "優先級": "high",
@@ -3812,7 +3975,8 @@ def _xiaoxia_sport_calendar_description(session):
         body_lines.append(f"跑後肌力：{session.get('strength_finisher')}" + (f"（約 {sm} 分鐘）" if sm else "") + "；肌力只留紀錄，不列入本堂 1/3/4/5 分。")
     if not hr:
         body_lines.append("⚠️ 本堂心率數值尚未設定：請由 Intervals.icu zone 或 XIAOXIA_SPORT_*_HR_* 環境變數提供；程式不自行猜 bpm。")
-    body_lines.append("PK 分數：有跑但未完成要求=1；完成時間/距離但未達標=3；完成且達標後，再比較大俠與小俠誰更接近 ideal，較遠=4、較近或平手=5。")
+    body_lines.append("心率達標：以 Intervals.icu 心率時間序列計算；有效心率時間至少 80% 落在目標區間即 Pass，保留約 20% 給熱身、緩停與短暫飄出。")
+    body_lines.append("PK 分數：有跑但未完成要求=1；完成時間/距離但心率區間覆蓋未達 80%=3；達到 80% 後，比較目標區間內各心率點距 ideal 的平均絕對偏差，較遠=4、較近或平手=5。")
     body_lines.append("正式排定的運動事件優先於一般小俠自主活動；可由大俠手動拖曳時間，之後用 /小俠運動 更新同步。")
     if (_xiaoxia_sport_session_start_dt(session) or datetime.now(TZ_TPE)).weekday() == 5:
         body_lines.append("週六遇雨可改室內跑步機；場地改變不改 SessionID，也不算替代課。")
