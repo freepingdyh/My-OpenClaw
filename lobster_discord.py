@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.12"
+LOBSTER_VERSION = "1.11.13"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.12_privacy_scrub_force")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.13_privacy_scrub_raw")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -4102,9 +4102,9 @@ async def _xiaoxia_privacy_freeze_apply_once():
         try:
             events = await _xiaoxia_calendar_list_events(now_dt - timedelta(days=60), now_dt + timedelta(days=120), max_results=500)
             for ev in events:
-                meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
-                if str(meta.get("來源") or "").strip() != "小俠運動":
-                    continue
+                # v1.11.13: do not pre-filter with metadata parser.
+                # Old Calendar descriptions can contain spacing/format variants that the parser misses.
+                # The raw scrubber itself safely verifies the 「來源：小俠運動」 marker.
                 new_desc, changed = _xiaoxia_sport_strip_pk_from_calendar_description(ev.get("description") or "")
                 if not changed:
                     continue
