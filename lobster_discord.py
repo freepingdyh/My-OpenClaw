@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.10"
+LOBSTER_VERSION = "1.11.11"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.10_sport_hr_zone80_pk")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.11_calendar_privacy_freeze")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -773,6 +773,13 @@ INTERVALS_ICU_ATHLETE_ID = (os.environ.get("INTERVALS_ICU_ATHLETE_ID") or "0").s
 INTERVALS_ICU_BASE_URL = (os.environ.get("INTERVALS_ICU_BASE_URL") or "https://intervals.icu/api/v1").rstrip("/")
 INTERVALS_ICU_SYNC_LOOKBACK_DAYS = _env_int("INTERVALS_ICU_SYNC_LOOKBACK_DAYS", 14, 1, 90)
 INTERVALS_ICU_TIMEOUT_SECONDS = _env_int("INTERVALS_ICU_TIMEOUT_SECONDS", 30, 5, 120)
+
+# 🔒 v1.11.11：Calendar 隱私凍結模式。
+# 預設凍結「小俠自主」與「小俠運動」的新增/更新；既有 Calendar 保留。
+# 運動 PK 分數與 PK 字樣會從本地運動資料與既有 Calendar 描述清除。
+XIAOXIA_AUTONOMY_CALENDAR_FROZEN = _env_bool("XIAOXIA_AUTONOMY_CALENDAR_FROZEN", True)
+XIAOXIA_SPORT_CALENDAR_FROZEN = _env_bool("XIAOXIA_SPORT_CALENDAR_FROZEN", True)
+XIAOXIA_SPORT_PK_HIDDEN = _env_bool("XIAOXIA_SPORT_PK_HIDDEN", True)
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -1706,6 +1713,10 @@ def _xiaoxia_calendar_event_machine_status(event):
 
 
 async def _xiaoxia_calendar_mark_event_status(event, status, extras=None):
+    meta_now = _xiaoxia_calendar_parse_description_metadata((event or {}).get("description") or "")
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN and str(meta_now.get("來源") or "").strip() == "小俠自主":
+        print(f"🔒 [XIAOXIA_AUTONOMY_STATUS_FROZEN] event_id={(event or {}).get('id')} status={status}")
+        return event or {}
     event_id = str((event or {}).get("id") or "").strip()
     if not event_id:
         return event or {}
@@ -1738,6 +1749,8 @@ def _xiaoxia_calendar_event_due_for_execution(event, now_dt=None):
     if now_dt > end_dt + timedelta(hours=XIAOXIA_CALENDAR_EXECUTOR_GRACE_HOURS):
         return False
     meta = _xiaoxia_calendar_parse_description_metadata(event.get("description") or "")
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN and str(meta.get("來源") or "").strip() == "小俠自主":
+        return False
     status = str(meta.get("執行狀態") or "pending").strip().lower()
     # v1.10.43：failed 不自動重試；要重跑由大俠明確修改/更新狀態或立即指定。
     if status in {"done", "completed", "sent", "skipped", "ignored", "failed"}:
@@ -2039,6 +2052,9 @@ async def _xiaoxia_calendar_executor_scheduler():
 
 
 async def _xiaoxia_calendar_plan_14_days(start_date=None):
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_AUTONOMY_PLANNER_FROZEN] skip creating new autonomy Calendar events")
+        return {"created": [], "refreshed": None, "frozen": True}
     await _xiaoxia_calendar_refresh_cache(reason="planner_preflight", regenerate_today=False)
     cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
     existing_by_date = {}
@@ -2134,6 +2150,9 @@ async def _xiaoxia_calendar_plan_14_days(start_date=None):
     return {"created": created, "refreshed": refreshed}
 
 async def _xiaoxia_calendar_replan_14_days_from_tomorrow():
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_AUTONOMY_REPLAN_FROZEN] keep existing autonomy Calendar events unchanged")
+        return {"deleted": [], "preserved_locked": [], "failed": [], "created": [], "frozen": True}
     """
     v1.10.41：從明天開始真正重排未來 14 天的小俠自主 Calendar 行程。
     只刪「來源：小俠自主」且未鎖定的活動；其他來源與「鎖定：是」全部保留。
@@ -2188,6 +2207,9 @@ async def _xiaoxia_calendar_replan_14_days_from_tomorrow():
     }
 
 async def _xiaoxia_calendar_review_next_week():
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_AUTONOMY_WEEKLY_REVIEW_FROZEN]")
+        return {"reviewed": [], "locked": [], "planner_created": [], "frozen": True}
     await _xiaoxia_calendar_refresh_cache(reason="weekly_review_preflight", regenerate_today=False)
     cache = _xiaoxia_calendar_load(XIAOXIA_CALENDAR_CACHE_PATH)
     now_date = datetime.now(TZ_TPE).date()
@@ -3714,7 +3736,15 @@ def _xiaoxia_sport_remember_shared_episode(row, reply_text):
 
 
 async def _xiaoxia_sport_sync_intervals(days=None):
-    """Read Intervals.icu, import new actuals, match to official sessions, and update Training State."""
+    """Privacy freeze keeps the existing sport state/history unchanged."""
+    if XIAOXIA_SPORT_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_SPORT_INTERVALS_SYNC_FROZEN] keep sport state/history unchanged")
+        return {
+            "imported": [], "reconciled": [], "skipped_known": 0, "skipped_invalid": 0,
+            "activities_returned": 0, "range": "frozen", "plan": _xiaoxia_sport_plan_load(),
+            "state": _xiaoxia_sport_state_load(), "hr_profile_updated": False,
+            "future_hr_backfilled": 0, "frozen": True,
+        }
     if not _xiaoxia_sport_intervals_configured():
         raise RuntimeError("INTERVALS_ICU_API_KEY_MISSING")
     days = max(1, min(90, int(days or INTERVALS_ICU_SYNC_LOOKBACK_DAYS)))
@@ -3891,9 +3921,9 @@ def _xiaoxia_sport_actual_line(row):
     ideal_mae = _xiaoxia_sport_float(hr_analysis.get("in_range_ideal_mae_bpm"))
     if zone_pct is not None: bits.append(f"HR區間 {zone_pct:.1f}%")
     if ideal_mae is not None: bits.append(f"離ideal {ideal_mae:.1f} bpm")
-    score = row.get("score")
+    score = None if XIAOXIA_SPORT_PK_HIDDEN else row.get("score")
     if score not in (None, "") and row.get("official", True): bits.append(f"{score} 分")
-    elif row.get("official", True) and row.get("pk_status") == "pending_xiaoxia": bits.append("PK待小俠")
+    elif (not XIAOXIA_SPORT_PK_HIDDEN) and row.get("official", True) and row.get("pk_status") == "pending_xiaoxia": bits.append("PK待小俠")
     return "｜".join(bits)
 
 
@@ -3958,7 +3988,7 @@ def _xiaoxia_sport_calendar_description(session):
         "目標心率": hr_text,
         "心率達標規則": "有效心率時間至少 80% 落在目標區間",
         "評分指標": "、".join(str(x) for x in metrics if x),
-        "PK配對窗": f"±{XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時",
+        "PK配對窗": "" if XIAOXIA_SPORT_PK_HIDDEN else f"±{XIAOXIA_SPORT_MATCH_WINDOW_HOURS} 小時",
         "優先級": "high",
         "彈性": "movable",
         "運動狀態": session.get("status") or "planned",
@@ -3976,11 +4006,103 @@ def _xiaoxia_sport_calendar_description(session):
     if not hr:
         body_lines.append("⚠️ 本堂心率數值尚未設定：請由 Intervals.icu zone 或 XIAOXIA_SPORT_*_HR_* 環境變數提供；程式不自行猜 bpm。")
     body_lines.append("心率達標：以 Intervals.icu 心率時間序列計算；有效心率時間至少 80% 落在目標區間即 Pass，保留約 20% 給熱身、緩停與短暫飄出。")
-    body_lines.append("PK 分數：有跑但未完成要求=1；完成時間/距離但心率區間覆蓋未達 80%=3；達到 80% 後，比較目標區間內各心率點距 ideal 的平均絕對偏差，較遠=4、較近或平手=5。")
+    if not XIAOXIA_SPORT_PK_HIDDEN:
+        body_lines.append("PK 分數：有跑但未完成要求=1；完成時間/距離但心率區間覆蓋未達 80%=3；達到 80% 後，比較目標區間內各心率點距 ideal 的平均絕對偏差，較遠=4、較近或平手=5。")
     body_lines.append("正式排定的運動事件優先於一般小俠自主活動；可由大俠手動拖曳時間，之後用 /小俠運動 更新同步。")
     if (_xiaoxia_sport_session_start_dt(session) or datetime.now(TZ_TPE)).weekday() == 5:
         body_lines.append("週六遇雨可改室內跑步機；場地改變不改 SessionID，也不算替代課。")
     return _xiaoxia_calendar_compose_description(meta, "\n".join(body_lines))
+
+def _xiaoxia_sport_scrub_pk_local_data():
+    """Remove PK-only fields while preserving training and health data."""
+    changed_plan = 0
+    plan = _xiaoxia_sport_plan_load()
+    sessions = plan.get("sessions") or []
+    for row in sessions:
+        if not isinstance(row, dict):
+            continue
+        for key in ("score", "pk_status", "xiaoxia_virtual", "xiaoxia_benchmark", "pk_result", "pk_score"):
+            if key in row:
+                row.pop(key, None); changed_plan += 1
+        actual = row.get("actual")
+        if isinstance(actual, dict):
+            for key in ("score", "pk_status", "xiaoxia_virtual", "pk_result", "pk_score"):
+                if key in actual:
+                    actual.pop(key, None); changed_plan += 1
+    if changed_plan:
+        plan["sessions"] = sessions
+        plan["updated_at"] = datetime.now(TZ_TPE).isoformat()
+        _xiaoxia_sport_plan_save(plan)
+
+    rows = _xiaoxia_sport_history_rows(limit=100000)
+    changed_history = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("score", "pk_status", "xiaoxia_virtual", "xiaoxia_benchmark", "pk_result", "pk_score", "score_reason"):
+            if key in row:
+                row.pop(key, None); changed_history += 1
+        actual = row.get("actual")
+        if isinstance(actual, dict):
+            for key in ("score", "pk_status", "xiaoxia_virtual", "pk_result", "pk_score"):
+                if key in actual:
+                    actual.pop(key, None); changed_history += 1
+    if changed_history:
+        os.makedirs(os.path.dirname(XIAOXIA_SPORT_HISTORY_PATH), exist_ok=True)
+        temp_path = XIAOXIA_SPORT_HISTORY_PATH + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(temp_path, XIAOXIA_SPORT_HISTORY_PATH)
+    return {"plan_fields_removed": changed_plan, "history_fields_removed": changed_history}
+
+
+def _xiaoxia_sport_strip_pk_from_calendar_description(description):
+    meta = _xiaoxia_calendar_parse_description_metadata(description or "")
+    if str(meta.get("來源") or "").strip() != "小俠運動":
+        return str(description or ""), False
+    body = str(meta.get("body") or "")
+    for key in ("PK配對窗", "PK分數", "PK 分數"):
+        meta.pop(key, None)
+    kept = []
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("PK 分數：") or s.startswith("PK分數：") or "PK待小俠" in s:
+            continue
+        kept.append(line)
+    new_desc = _xiaoxia_calendar_compose_description(meta, "\n".join(kept).strip())
+    return new_desc, new_desc.strip() != str(description or "").strip()
+
+
+async def _xiaoxia_privacy_freeze_apply_once():
+    """Preserve existing events, scrub sport PK text, then freeze further writes."""
+    local = _xiaoxia_sport_scrub_pk_local_data() if XIAOXIA_SPORT_PK_HIDDEN else {"plan_fields_removed": 0, "history_fields_removed": 0}
+    calendar_changed = 0
+    if XIAOXIA_SPORT_PK_HIDDEN and _xiaoxia_calendar_config_status().get("configured"):
+        now_dt = datetime.now(TZ_TPE)
+        try:
+            events = await _xiaoxia_calendar_list_events(now_dt - timedelta(days=60), now_dt + timedelta(days=120), max_results=500)
+            for ev in events:
+                meta = _xiaoxia_calendar_parse_description_metadata(ev.get("description") or "")
+                if str(meta.get("來源") or "").strip() != "小俠運動":
+                    continue
+                new_desc, changed = _xiaoxia_sport_strip_pk_from_calendar_description(ev.get("description") or "")
+                if not changed:
+                    continue
+                event_id = str(ev.get("id") or "").strip()
+                if not event_id:
+                    continue
+                await _xiaoxia_calendar_update_event(event_id, {"description": new_desc, "reminders": {"useDefault": False}})
+                calendar_changed += 1
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_PRIVACY_FREEZE_CALENDAR_SCRUB_FAILED] {type(exc).__name__}: {exc}")
+    print(
+        f"🔒 [XIAOXIA_PRIVACY_FREEZE_APPLIED] autonomy_frozen={XIAOXIA_AUTONOMY_CALENDAR_FROZEN} "
+        f"sport_frozen={XIAOXIA_SPORT_CALENDAR_FROZEN} pk_hidden={XIAOXIA_SPORT_PK_HIDDEN} "
+        f"calendar_scrubbed={calendar_changed} local={local}"
+    )
+    return {"calendar_scrubbed": calendar_changed, **local}
+
 
 def _xiaoxia_sport_event_is_flexible_xiaoxia(event):
     meta = _xiaoxia_calendar_parse_description_metadata((event or {}).get("description") or "")
@@ -4119,6 +4241,9 @@ Phase 1 規則：
 """
 
 async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
+    if XIAOXIA_SPORT_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_SPORT_PLANNER_FROZEN] keep existing sport Calendar events unchanged")
+        return {"created": [], "deleted": [], "plan": _xiaoxia_sport_plan_load(), "frozen": True}
     now_dt = datetime.now(TZ_TPE)
     window_start = window_start or now_dt.date()
     window_end = window_start + timedelta(days=XIAOXIA_SPORT_PLAN_WINDOW_DAYS - 1)
@@ -4299,6 +4424,9 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
     return {"created": sessions, "deleted": deleted, "plan": plan}
 
 async def _xiaoxia_sport_sync_from_calendar():
+    if XIAOXIA_SPORT_CALENDAR_FROZEN:
+        print("🔒 [XIAOXIA_SPORT_CALENDAR_SYNC_FROZEN]")
+        return {"changed": 0, "plan": _xiaoxia_sport_plan_load(), "frozen": True}
     plan = _xiaoxia_sport_plan_load()
     sessions = [x for x in (plan.get("sessions") or []) if isinstance(x, dict)]
     now_dt = datetime.now(TZ_TPE)
@@ -4372,7 +4500,7 @@ def _xiaoxia_sport_summary_text():
     pzh = "、".join(f"週{_XIAOXIA_SPORT_DAY_ZH[d]}" for d in _xiaoxia_sport_day_numbers(XIAOXIA_SPORT_PRIMARY_DAYS)) or "—"
     bzh = "、".join(f"週{_XIAOXIA_SPORT_DAY_ZH[d]}" for d in _xiaoxia_sport_day_numbers(XIAOXIA_SPORT_BACKUP_DAYS)) or "—"
     lines = [
-        "🏃 **大俠 × 小俠運動**",
+        "🏃 **大俠運動｜測試保留**" if XIAOXIA_SPORT_CALENDAR_FROZEN else "🏃 **大俠 × 小俠運動**",
         f"目前階段：**{_xiaoxia_sport_goal_label()}**",
         f"主要運動日：{pzh}",
         f"備用運動日：{bzh}",
@@ -4385,7 +4513,9 @@ def _xiaoxia_sport_summary_text():
         lines.append(f"下一堂：**{when}｜{nxt.get('objective_label') or nxt.get('objective')} {((nxt.get('target') or {}).get('duration_min') or '')} 分**")
         lines.append(f"目標：{nxt.get('instruction') or '依當日目標完成'}")
     else:
-        lines.append("下一堂：目前尚未排定，可用 `/小俠運動 規劃14天`。")
+        lines.append("下一堂：目前尚未排定。" if XIAOXIA_SPORT_CALENDAR_FROZEN else "下一堂：目前尚未排定，可用 `/小俠運動 規劃14天`。")
+    if XIAOXIA_SPORT_CALENDAR_FROZEN:
+        lines.append("狀態：🔒 測試凍結；保留既有內容，不再更新或新增運動。")
     return "\n".join(lines)
 
 def _xiaoxia_sport_sessions_text(rows, title):
@@ -4409,6 +4539,16 @@ async def _handle_xiaoxia_sport_message_direct(message):
         await message.channel.send("大俠，`/小俠運動` 目前只在女友小俠頻道使用。")
         return True
     raw = re.sub(r"^/小俠運動(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    if XIAOXIA_SPORT_CALENDAR_FROZEN:
+        mutating = (
+            raw in {"規劃14天", "規劃兩週", "plan14", "planner", "重排14天", "重新規劃14天", "replan14", "replan",
+                    "同步", "同步icu", "icu", "intervals", "intervals.icu", "同步全部", "全部同步", "syncall",
+                    "更新", "refresh", "更新月曆", "calendar"}
+            or raw.startswith("同步 ")
+        )
+        if mutating:
+            await message.channel.send("🔒 **小俠運動目前為測試凍結狀態**：既有課表保留，不再更新、同步或新增運動。")
+            return True
     if raw in {"", "help", "幫助", "說明"}:
         await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`（Calendar）、`同步`（Intervals.icu）、`同步全部`、`紀錄`、`紀錄 30天`、`狀態`")
         return True
@@ -4542,7 +4682,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
         for row in rows[-8:][::-1]:
             dt = _xiaoxia_sport_parse_dt(row.get("completed_at") or row.get("date"))
             date_text = dt.strftime("%m/%d") if dt else str(row.get("date") or "?")[:10]
-            score = row.get("score")
+            score = None if XIAOXIA_SPORT_PK_HIDDEN else row.get("score")
             score_text = f"｜{score} 分" if score not in (None, "") and row.get("official", True) else ""
             kind = "正式" if row.get("official", True) else "額外"
             actual = row.get("actual") or {}
@@ -29968,7 +30108,9 @@ async def on_ready():
         xiaoxia_promise_daily_report_task.start()
         print("🌙 每日 23:50 小俠承諾盤點已啟動（#唐分糕）。")
 
-    if not xiaoxia_autonomy_auto_task.is_running():
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        print("🔒 小俠自主自動排程已凍結；保留既有 Calendar，不新增/更新自主活動。")
+    elif not xiaoxia_autonomy_auto_task.is_running():
         xiaoxia_autonomy_auto_task.start()
         print(f"🌱 小俠自主排程任務已啟動：daily_limit={XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT}, min_gap={XIAOXIA_AUTONOMY_MIN_INTERVAL_HOURS}h, window={XIAOXIA_AUTONOMY_ACTIVE_START_HOUR}:00-{XIAOXIA_AUTONOMY_ACTIVE_END_HOUR}:00, channel={XIAOXIA_AUTONOMY_CHANNEL_NAME}；即使 daily_limit=0，也會處理大俠指定活動 slots。若 `/小俠月曆` 自動執行開啟，舊式隨機 auto slots 會讓位給 Calendar。")
     # v1.10.27：Persistent View 讓 Zeabur 重啟後，既有「好，開始吧／今天先不要」仍可按。
@@ -34909,23 +35051,37 @@ async def main():
     config = uvicorn.Config(api_app, host="0.0.0.0", port=8080, log_level="warning")
     server = uvicorn.Server(config)
 
+    if XIAOXIA_AUTONOMY_CALENDAR_FROZEN or XIAOXIA_SPORT_CALENDAR_FROZEN or XIAOXIA_SPORT_PK_HIDDEN:
+        try:
+            await _xiaoxia_privacy_freeze_apply_once()
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_PRIVACY_FREEZE_STARTUP_FAILED] {type(exc).__name__}: {exc}")
+
     calendar_scheduler_task = asyncio.create_task(
         _xiaoxia_calendar_daily_refresh_scheduler(),
         name="xiaoxia_calendar_daily_refresh_scheduler",
     )
     print("📅 [LOBSTER_MAIN] Calendar scheduler task created independently")
 
-    calendar_weekly_planner_task = asyncio.create_task(
-        _xiaoxia_calendar_weekly_planner_scheduler(),
-        name="xiaoxia_calendar_weekly_planner_scheduler",
-    )
-    print("📅 [LOBSTER_MAIN] Weekly Calendar Planner scheduler task created independently")
+    calendar_weekly_planner_task = None
+    if not XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        calendar_weekly_planner_task = asyncio.create_task(
+            _xiaoxia_calendar_weekly_planner_scheduler(),
+            name="xiaoxia_calendar_weekly_planner_scheduler",
+        )
+        print("📅 [LOBSTER_MAIN] Weekly Calendar Planner scheduler task created independently")
+    else:
+        print("🔒 [LOBSTER_MAIN] Weekly autonomy Calendar Planner frozen")
 
-    calendar_executor_task = asyncio.create_task(
-        _xiaoxia_calendar_executor_scheduler(),
-        name="xiaoxia_calendar_executor_scheduler",
-    )
-    print("📅 [LOBSTER_MAIN] Calendar dedicated next-event executor created independently (Google polling disabled)")
+    calendar_executor_task = None
+    if not XIAOXIA_AUTONOMY_CALENDAR_FROZEN:
+        calendar_executor_task = asyncio.create_task(
+            _xiaoxia_calendar_executor_scheduler(),
+            name="xiaoxia_calendar_executor_scheduler",
+        )
+        print("📅 [LOBSTER_MAIN] Calendar dedicated next-event executor created independently (Google polling disabled)")
+    else:
+        print("🔒 [LOBSTER_MAIN] Autonomy Calendar executor frozen")
 
     try:
         await asyncio.gather(
@@ -34936,22 +35092,24 @@ async def main():
     finally:
         if not calendar_scheduler_task.done():
             calendar_scheduler_task.cancel()
-        if not calendar_weekly_planner_task.done():
+        if calendar_weekly_planner_task is not None and not calendar_weekly_planner_task.done():
             calendar_weekly_planner_task.cancel()
-        if not calendar_executor_task.done():
+        if calendar_executor_task is not None and not calendar_executor_task.done():
             calendar_executor_task.cancel()
         try:
             await calendar_scheduler_task
         except asyncio.CancelledError:
             pass
-        try:
-            await calendar_weekly_planner_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await calendar_executor_task
-        except asyncio.CancelledError:
-            pass
+        if calendar_weekly_planner_task is not None:
+            try:
+                await calendar_weekly_planner_task
+            except asyncio.CancelledError:
+                pass
+        if calendar_executor_task is not None:
+            try:
+                await calendar_executor_task
+            except asyncio.CancelledError:
+                pass
         print("🛑 [LOBSTER_MAIN_EXIT]")
 
 if __name__ == "__main__":
