@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.13"
+LOBSTER_VERSION = "1.11.14"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.13_privacy_scrub_raw")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.14_privacy_scrub_direct")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -4057,70 +4057,130 @@ def _xiaoxia_sport_scrub_pk_local_data():
     return {"plan_fields_removed": changed_plan, "history_fields_removed": changed_history}
 
 
-def _xiaoxia_sport_strip_pk_from_calendar_description(description):
-    """Remove PK-only text directly from the raw Calendar description.
+def _xiaoxia_sport_calendar_event_looks_like_sport(event):
+    """Broad, privacy-first sport-event detector for one-off scrub operations."""
+    event = event if isinstance(event, dict) else {}
+    summary = str(event.get("summary") or "")
+    desc = str(event.get("description") or "")
+    hay = f"{summary}\n{desc}"
+    markers = (
+        "大俠運動", "小俠運動", "SessionID", "PlanID", "habit_rebuild",
+        "PK配對窗", "PK 分數", "PK分數", "PK待小俠",
+    )
+    return any(m in hay for m in markers)
 
-    v1.11.12 deliberately does not depend on metadata parsing/recomposition here;
-    old descriptions may have formatting variants, so line-level scrubbing is safer.
-    """
+
+def _xiaoxia_sport_strip_pk_from_calendar_description(description):
+    """Remove every PK/game-score trace from a known sport Calendar description."""
     original = str(description or "")
     if not original.strip():
         return original, False
-    lines = original.replace("\r\n", "\n").split("\n")
-    # Only touch sport events. Accept both the canonical source line and old variants.
-    sport_marker = any(
-        re.match(r"^\s*來源\s*[:：]\s*小俠運動\s*$", line)
-        for line in lines
-    )
-    if not sport_marker:
-        return original, False
-
     kept = []
-    for line in lines:
+    for line in original.replace("\r\n", "\n").split("\n"):
         s = line.strip()
-        # Metadata lines.
-        if re.match(r"^PK\s*配對窗\s*[:：]", s, flags=re.IGNORECASE):
+        if re.search(r"\bPK\b", s, flags=re.IGNORECASE) or "PK待小俠" in s or "PK 待小俠" in s:
             continue
-        if re.match(r"^PK\s*分數\s*[:：]", s, flags=re.IGNORECASE):
+        if re.search(r"1\s*/\s*3\s*/\s*4\s*/\s*5\s*分", s):
             continue
-        # Legacy status fragments/standalone lines.
-        if "PK待小俠" in s or "PK 待小俠" in s:
+        if ("較遠=4" in s and "較近" in s and "=5" in s):
             continue
+        if "肌力只留紀錄" in s and ("1/3/4/5" in s or "分" in s):
+            s = re.sub(r"[；;，,]?\s*肌力只留紀錄.*$", "", s).strip()
+            if not s:
+                continue
+            line = s
         kept.append(line)
-
     new_desc = "\n".join(kept)
     new_desc = re.sub(r"\n{3,}", "\n\n", new_desc).strip()
     return new_desc, new_desc != original.strip()
 
 
+async def _xiaoxia_sport_fetch_calendar_event(event_id):
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        return None
+    try:
+        data = await _xiaoxia_calendar_request("GET", _xiaoxia_calendar_event_url(event_id))
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        print(f"⚠️ [XIAOXIA_PRIVACY_SCRUB_EVENT_FETCH_FAILED] id={event_id} {type(exc).__name__}: {exc}")
+        return None
+
+
 async def _xiaoxia_privacy_freeze_apply_once():
-    """Preserve existing events, scrub sport PK text, then freeze further writes."""
-    local = _xiaoxia_sport_scrub_pk_local_data() if XIAOXIA_SPORT_PK_HIDDEN else {"plan_fields_removed": 0, "history_fields_removed": 0}
+    """Force-scrub existing sport Calendar PK text, then keep calendar systems frozen."""
+    local = _xiaoxia_sport_scrub_pk_local_data()
     calendar_changed = 0
-    if XIAOXIA_SPORT_PK_HIDDEN and _xiaoxia_calendar_config_status().get("configured"):
+    scanned = 0
+    candidates = 0
+    failed = 0
+    seen_ids = set()
+
+    if _xiaoxia_calendar_config_status().get("configured"):
+        # Route A: exact Calendar event IDs stored in Sport Plan.
+        plan = _xiaoxia_sport_plan_load()
+        direct_ids = []
+        for row in (plan.get("sessions") or []):
+            if not isinstance(row, dict):
+                continue
+            eid = str(row.get("calendar_event_id") or "").strip()
+            if eid and eid not in direct_ids:
+                direct_ids.append(eid)
+        for event_id in direct_ids:
+            ev = await _xiaoxia_sport_fetch_calendar_event(event_id)
+            if not ev:
+                failed += 1
+                continue
+            scanned += 1
+            seen_ids.add(event_id)
+            candidates += 1
+            new_desc, changed = _xiaoxia_sport_strip_pk_from_calendar_description(ev.get("description") or "")
+            if not changed:
+                continue
+            try:
+                await _xiaoxia_calendar_update_event(event_id, {"description": new_desc, "reminders": {"useDefault": False}})
+                calendar_changed += 1
+            except Exception as exc:
+                failed += 1
+                print(f"⚠️ [XIAOXIA_PRIVACY_SCRUB_DIRECT_PATCH_FAILED] id={event_id} {type(exc).__name__}: {exc}")
+
+        # Route B: broad scan catches legacy/orphan events not present in current plan.
         now_dt = datetime.now(TZ_TPE)
         try:
-            events = await _xiaoxia_calendar_list_events(now_dt - timedelta(days=60), now_dt + timedelta(days=120), max_results=500)
+            events = await _xiaoxia_calendar_list_events(now_dt - timedelta(days=180), now_dt + timedelta(days=365), max_results=2500)
             for ev in events:
-                # v1.11.13: do not pre-filter with metadata parser.
-                # Old Calendar descriptions can contain spacing/format variants that the parser misses.
-                # The raw scrubber itself safely verifies the 「來源：小俠運動」 marker.
+                event_id = str(ev.get("id") or "").strip()
+                if not event_id or event_id in seen_ids:
+                    continue
+                scanned += 1
+                if not _xiaoxia_sport_calendar_event_looks_like_sport(ev):
+                    continue
+                candidates += 1
                 new_desc, changed = _xiaoxia_sport_strip_pk_from_calendar_description(ev.get("description") or "")
                 if not changed:
                     continue
-                event_id = str(ev.get("id") or "").strip()
-                if not event_id:
-                    continue
-                await _xiaoxia_calendar_update_event(event_id, {"description": new_desc, "reminders": {"useDefault": False}})
-                calendar_changed += 1
+                try:
+                    await _xiaoxia_calendar_update_event(event_id, {"description": new_desc, "reminders": {"useDefault": False}})
+                    calendar_changed += 1
+                except Exception as exc:
+                    failed += 1
+                    print(f"⚠️ [XIAOXIA_PRIVACY_SCRUB_SCAN_PATCH_FAILED] id={event_id} {type(exc).__name__}: {exc}")
         except Exception as exc:
-            print(f"⚠️ [XIAOXIA_PRIVACY_FREEZE_CALENDAR_SCRUB_FAILED] {type(exc).__name__}: {exc}")
+            failed += 1
+            print(f"⚠️ [XIAOXIA_PRIVACY_FREEZE_CALENDAR_SCAN_FAILED] {type(exc).__name__}: {exc}")
+
     print(
         f"🔒 [XIAOXIA_PRIVACY_FREEZE_APPLIED] autonomy_frozen={XIAOXIA_AUTONOMY_CALENDAR_FROZEN} "
         f"sport_frozen={XIAOXIA_SPORT_CALENDAR_FROZEN} pk_hidden={XIAOXIA_SPORT_PK_HIDDEN} "
-        f"calendar_scrubbed={calendar_changed} local={local}"
+        f"scanned={scanned} candidates={candidates} calendar_scrubbed={calendar_changed} failed={failed} local={local}"
     )
-    return {"calendar_scrubbed": calendar_changed, **local}
+    return {
+        "calendar_scrubbed": calendar_changed,
+        "calendar_scanned": scanned,
+        "calendar_candidates": candidates,
+        "calendar_failed": failed,
+        **local,
+    }
 
 
 def _xiaoxia_sport_event_is_flexible_xiaoxia(event):
@@ -4564,7 +4624,8 @@ async def _handle_xiaoxia_sport_message_direct(message):
             result = await _xiaoxia_privacy_freeze_apply_once()
             await msg.edit(content=(
                 "✅ **PK 痕跡清理完成**\n"
-                f"Calendar 已清理：{result.get('calendar_scrubbed', 0)} 筆\n"
+                f"Calendar 掃描：{result.get('calendar_scanned', 0)} 筆｜運動候選：{result.get('calendar_candidates', 0)} 筆\n"
+                f"Calendar 已清理：{result.get('calendar_scrubbed', 0)} 筆｜失敗：{result.get('calendar_failed', 0)} 筆\n"
                 f"本地 Plan 欄位移除：{result.get('plan_fields_removed', 0)}\n"
                 f"本地 History 欄位移除：{result.get('history_fields_removed', 0)}"
             ))
