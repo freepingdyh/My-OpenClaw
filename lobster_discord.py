@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.11"
+LOBSTER_VERSION = "1.11.12"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.11_calendar_privacy_freeze")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.12_privacy_scrub_force")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -4058,20 +4058,39 @@ def _xiaoxia_sport_scrub_pk_local_data():
 
 
 def _xiaoxia_sport_strip_pk_from_calendar_description(description):
-    meta = _xiaoxia_calendar_parse_description_metadata(description or "")
-    if str(meta.get("來源") or "").strip() != "小俠運動":
-        return str(description or ""), False
-    body = str(meta.get("body") or "")
-    for key in ("PK配對窗", "PK分數", "PK 分數"):
-        meta.pop(key, None)
+    """Remove PK-only text directly from the raw Calendar description.
+
+    v1.11.12 deliberately does not depend on metadata parsing/recomposition here;
+    old descriptions may have formatting variants, so line-level scrubbing is safer.
+    """
+    original = str(description or "")
+    if not original.strip():
+        return original, False
+    lines = original.replace("\r\n", "\n").split("\n")
+    # Only touch sport events. Accept both the canonical source line and old variants.
+    sport_marker = any(
+        re.match(r"^\s*來源\s*[:：]\s*小俠運動\s*$", line)
+        for line in lines
+    )
+    if not sport_marker:
+        return original, False
+
     kept = []
-    for line in body.splitlines():
+    for line in lines:
         s = line.strip()
-        if s.startswith("PK 分數：") or s.startswith("PK分數：") or "PK待小俠" in s:
+        # Metadata lines.
+        if re.match(r"^PK\s*配對窗\s*[:：]", s, flags=re.IGNORECASE):
+            continue
+        if re.match(r"^PK\s*分數\s*[:：]", s, flags=re.IGNORECASE):
+            continue
+        # Legacy status fragments/standalone lines.
+        if "PK待小俠" in s or "PK 待小俠" in s:
             continue
         kept.append(line)
-    new_desc = _xiaoxia_calendar_compose_description(meta, "\n".join(kept).strip())
-    return new_desc, new_desc.strip() != str(description or "").strip()
+
+    new_desc = "\n".join(kept)
+    new_desc = re.sub(r"\n{3,}", "\n\n", new_desc).strip()
+    return new_desc, new_desc != original.strip()
 
 
 async def _xiaoxia_privacy_freeze_apply_once():
@@ -4539,6 +4558,19 @@ async def _handle_xiaoxia_sport_message_direct(message):
         await message.channel.send("大俠，`/小俠運動` 目前只在女友小俠頻道使用。")
         return True
     raw = re.sub(r"^/小俠運動(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
+    if raw in {"清理PK", "清除PK", "隱藏PK", "privacy", "scrubpk"}:
+        msg = await message.channel.send("🧹 正在清除既有小俠運動 Calendar 的 PK 痕跡……")
+        try:
+            result = await _xiaoxia_privacy_freeze_apply_once()
+            await msg.edit(content=(
+                "✅ **PK 痕跡清理完成**\n"
+                f"Calendar 已清理：{result.get('calendar_scrubbed', 0)} 筆\n"
+                f"本地 Plan 欄位移除：{result.get('plan_fields_removed', 0)}\n"
+                f"本地 History 欄位移除：{result.get('history_fields_removed', 0)}"
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ PK 清理失敗：`{type(exc).__name__}: {str(exc)[:1200]}`")
+        return True
     if XIAOXIA_SPORT_CALENDAR_FROZEN:
         mutating = (
             raw in {"規劃14天", "規劃兩週", "plan14", "planner", "重排14天", "重新規劃14天", "replan14", "replan",
@@ -4550,7 +4582,7 @@ async def _handle_xiaoxia_sport_message_direct(message):
             await message.channel.send("🔒 **小俠運動目前為測試凍結狀態**：既有課表保留，不再更新、同步或新增運動。")
             return True
     if raw in {"", "help", "幫助", "說明"}:
-        await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`規劃14天`、`重排14天`、`更新`（Calendar）、`同步`（Intervals.icu）、`同步全部`、`紀錄`、`紀錄 30天`、`狀態`")
+        await message.channel.send(_xiaoxia_sport_summary_text() + "\n\n可用：`/小俠運動 今天`、`本週`、`紀錄`、`紀錄 30天`、`狀態`、`清理PK`")
         return True
     if raw in {"狀態", "status"}:
         plan = _xiaoxia_sport_plan_load()
