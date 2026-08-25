@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.14"
+LOBSTER_VERSION = "1.11.15"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.14_privacy_scrub_direct")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.15_calendar_account_migration")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -774,12 +774,11 @@ INTERVALS_ICU_BASE_URL = (os.environ.get("INTERVALS_ICU_BASE_URL") or "https://i
 INTERVALS_ICU_SYNC_LOOKBACK_DAYS = _env_int("INTERVALS_ICU_SYNC_LOOKBACK_DAYS", 14, 1, 90)
 INTERVALS_ICU_TIMEOUT_SECONDS = _env_int("INTERVALS_ICU_TIMEOUT_SECONDS", 30, 5, 120)
 
-# 🔒 v1.11.11：Calendar 隱私凍結模式。
-# 預設凍結「小俠自主」與「小俠運動」的新增/更新；既有 Calendar 保留。
-# 運動 PK 分數與 PK 字樣會從本地運動資料與既有 Calendar 描述清除。
-XIAOXIA_AUTONOMY_CALENDAR_FROZEN = _env_bool("XIAOXIA_AUTONOMY_CALENDAR_FROZEN", True)
-XIAOXIA_SPORT_CALENDAR_FROZEN = _env_bool("XIAOXIA_SPORT_CALENDAR_FROZEN", True)
-XIAOXIA_SPORT_PK_HIDDEN = _env_bool("XIAOXIA_SPORT_PK_HIDDEN", True)
+# 📅 v1.11.15：新 Google 帳號遷移後恢復正常運作。
+# 如 Zeabur ENV 明確設為 true 仍可再次凍結；預設恢復小俠自主 / 小俠運動 / PK。
+XIAOXIA_AUTONOMY_CALENDAR_FROZEN = _env_bool("XIAOXIA_AUTONOMY_CALENDAR_FROZEN", False)
+XIAOXIA_SPORT_CALENDAR_FROZEN = _env_bool("XIAOXIA_SPORT_CALENDAR_FROZEN", False)
+XIAOXIA_SPORT_PK_HIDDEN = _env_bool("XIAOXIA_SPORT_PK_HIDDEN", False)
 
 _XIAOXIA_CALENDAR_TOKEN_CACHE = {
     "access_token": "",
@@ -2376,6 +2375,86 @@ async def _xiaoxia_calendar_mute_window(days=14):
     }
 
 
+
+def _xiaoxia_calendar_account_migration_local_reset():
+    """Reset only Calendar-account bindings/caches; preserve Xiaoxia memories, sport history and HR profile."""
+    global _XIAOXIA_CALENDAR_TOKEN_CACHE, _XIAOXIA_CALENDAR_TIMER_TASK
+    now_dt = datetime.now(TZ_TPE)
+
+    # New OAuth account must never inherit an in-memory access token from the old account.
+    _XIAOXIA_CALENDAR_TOKEN_CACHE = {"access_token": "", "expires_at": 0.0}
+    if _XIAOXIA_CALENDAR_TIMER_TASK is not None and not _XIAOXIA_CALENDAR_TIMER_TASK.done():
+        _XIAOXIA_CALENDAR_TIMER_TASK.cancel()
+    _XIAOXIA_CALENDAR_TIMER_TASK = None
+
+    # Calendar-derived caches/state are account-specific; start them clean.
+    for path in (
+        XIAOXIA_CALENDAR_CACHE_PATH,
+        XIAOXIA_CALENDAR_CONTEXT_PATH,
+        XIAOXIA_DAILY_MAINLINE_PATH,
+        XIAOXIA_CALENDAR_PLANNER_STATE_PATH,
+    ):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as exc:
+            print(f"⚠️ [XIAOXIA_CALENDAR_ACCOUNT_RESET_REMOVE_FAILED] path={path} {type(exc).__name__}: {exc}")
+
+    # Keep executor OFF until CRUD test + fresh planning are finished on the new account.
+    exec_state = _xiaoxia_calendar_executor_state_load()
+    exec_state.update({
+        "enabled": False,
+        "updated_at": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_by": "calendar_account_migration",
+        "last_result": "awaiting_new_account_rebuild",
+        "current_event_id": "",
+        "current_started_at": "",
+        "last_checked_at": "",
+        "last_triggered_at": "",
+        "last_triggered_title": "",
+    })
+    _xiaoxia_calendar_executor_state_save(exec_state)
+
+    # Old future sport Calendar event IDs belong to the previous Google account.
+    # Preserve completed/past sessions and all actual/history/HR data; drop only future planned bindings.
+    plan = _xiaoxia_sport_plan_load()
+    old_sessions = [x for x in (plan.get("sessions") or []) if isinstance(x, dict)]
+    kept, removed_future = [], []
+    for row in old_sessions:
+        dt = _xiaoxia_sport_session_start_dt(row)
+        status = str(row.get("status") or "planned").lower()
+        is_completed = status in {"done", "completed"}
+        is_past = bool(dt and dt < now_dt)
+        if is_completed or is_past:
+            # Historical event IDs are harmless but account-specific; remove binding only.
+            row = dict(row)
+            row["calendar_event_id"] = ""
+            row["calendar_moved_xiaoxia_event_ids"] = []
+            kept.append(row)
+        else:
+            removed_future.append(str(row.get("session_id") or ""))
+
+    plan["sessions"] = kept
+    plan["plan_window_start"] = ""
+    plan["plan_window_end"] = ""
+    plan["planner_note"] = ""
+    plan["updated_at"] = now_dt.isoformat()
+    plan["calendar_account_reset_at"] = now_dt.isoformat()
+    _xiaoxia_sport_plan_save(plan)
+
+    state = _xiaoxia_sport_state_load()
+    state["next_session_id"] = ""
+    state["last_calendar_account_reset_at"] = now_dt.isoformat()
+    # Keep hr_profile, training history and Intervals.icu state intact.
+    _xiaoxia_sport_state_save(state)
+
+    return {
+        "future_sport_sessions_removed": len(removed_future),
+        "historical_sport_sessions_kept": len(kept),
+        "executor_enabled": False,
+    }
+
+
 async def _handle_xiaoxia_calendar_message_direct(message):
     """
     v1.10.32 MVP commands:
@@ -2399,6 +2478,44 @@ async def _handle_xiaoxia_calendar_message_direct(message):
 
     raw = re.sub(r"^/小俠月曆(?:\s+|$)", "", content, flags=re.IGNORECASE).strip()
     status = _xiaoxia_calendar_config_status()
+
+    if raw in {"換帳號重設", "新帳號重設", "帳號遷移", "resetaccount", "migrateaccount"}:
+        if not status["configured"]:
+            await message.channel.send(
+                "❌ 新 Google Calendar OAuth 尚未完整。請先更新 Zeabur 的 "
+                "`XIAOXIA_GOOGLE_CLIENT_ID`、`XIAOXIA_GOOGLE_CLIENT_SECRET`、`XIAOXIA_GOOGLE_REFRESH_TOKEN`，"
+                "並將 `XIAOXIA_GOOGLE_CALENDAR_ID=primary`。"
+            )
+            return True
+        msg = await message.channel.send(
+            "🔐 正在把本地 Calendar 綁定切換到新的 Google 帳號；會保留小俠記憶、運動 history、HR Profile，"
+            "只清除舊帳號的 Calendar cache / future event bindings……"
+        )
+        try:
+            reset = _xiaoxia_calendar_account_migration_local_reset()
+            # Verify the new credentials against the new account immediately, but do not create long-lived events yet.
+            events = await _xiaoxia_calendar_list_events(
+                datetime.now(TZ_TPE),
+                datetime.now(TZ_TPE) + timedelta(days=1),
+                max_results=6,
+            )
+            refreshed = await _xiaoxia_calendar_refresh_cache(reason="new_account_migration", regenerate_today=True)
+            await msg.edit(content=(
+                "✅ **小俠 Google Calendar 新帳號綁定完成**\n"
+                f"新帳號未來24小時事件：{len(events)} 筆\n"
+                f"移除舊帳號未來運動 Session 綁定：{reset.get('future_sport_sessions_removed',0)} 筆\n"
+                f"保留歷史運動 Session：{reset.get('historical_sport_sessions_kept',0)} 筆\n"
+                f"新帳號14天快取：{(refreshed.get('cache') or {}).get('event_count',0)} 筆\n"
+                "Calendar 自動執行目前維持 **關閉**，避免尚未重建完成就誤觸發。\n\n"
+                "下一步依序執行：\n"
+                "1. `/小俠月曆 測試`\n"
+                "2. `/小俠月曆 規劃14天`\n"
+                "3. `/小俠運動 規劃14天`\n"
+                "4. 確認 Calendar 後再 `/小俠月曆 開`"
+            ))
+        except Exception as exc:
+            await msg.edit(content=f"❌ 新帳號綁定失敗：`{type(exc).__name__}: {str(exc)[:1500]}`")
+        return True
 
     if raw in {"", "help", "幫助", "說明"}:
         configured_text = "✅ 已設定" if status["configured"] else "❌ 尚缺：" + ", ".join(status["missing"])
@@ -2689,7 +2806,7 @@ async def _handle_xiaoxia_calendar_message_direct(message):
         label = "下週"
     else:
         await message.channel.send(
-            "我現在支援：`/小俠月曆 狀態`、`開`、`關`、`立即檢查`、`更新`、`靜音14天`、`規劃14天`、`重排14天`、`review`、`未來14天`、`本週`、`下週`、`測試`。"
+            "我現在支援：`/小俠月曆 狀態`、`換帳號重設`、`開`、`關`、`立即檢查`、`更新`、`靜音14天`、`規劃14天`、`重排14天`、`review`、`未來14天`、`本週`、`下週`、`測試`。"
         )
         return True
 
