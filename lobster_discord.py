@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.15"
+LOBSTER_VERSION = "1.11.16"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.15_calendar_account_migration")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.16_sport_primary_days")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -774,7 +774,7 @@ INTERVALS_ICU_BASE_URL = (os.environ.get("INTERVALS_ICU_BASE_URL") or "https://i
 INTERVALS_ICU_SYNC_LOOKBACK_DAYS = _env_int("INTERVALS_ICU_SYNC_LOOKBACK_DAYS", 14, 1, 90)
 INTERVALS_ICU_TIMEOUT_SECONDS = _env_int("INTERVALS_ICU_TIMEOUT_SECONDS", 30, 5, 120)
 
-# 📅 v1.11.15：新 Google 帳號遷移後恢復正常運作。
+# 🏃 v1.11.16：正式運動排程固定優先週一、週三、週六；備用日僅在主要日無法排入時使用。
 # 如 Zeabur ENV 明確設為 true 仍可再次凍結；預設恢復小俠自主 / 小俠運動 / PK。
 XIAOXIA_AUTONOMY_CALENDAR_FROZEN = _env_bool("XIAOXIA_AUTONOMY_CALENDAR_FROZEN", False)
 XIAOXIA_SPORT_CALENDAR_FROZEN = _env_bool("XIAOXIA_SPORT_CALENDAR_FROZEN", False)
@@ -4387,6 +4387,7 @@ def _xiaoxia_sport_planner_prompt(window_start, window_end, existing_events):
 每週正式訓練目標：{XIAOXIA_SPORT_OFFICIAL_PER_WEEK} 次；只有正式排定課才和小俠玩 1/3/4/5 分 PK。額外運動只留紀錄供未來課表參考。
 主要運動日：{primary}
 備用運動日：{backup}
+日期優先規則：正式課必須先使用主要運動日；只要主要運動日仍可排，就禁止改用備用運動日。日期最終由程式 SSOT 校正。
 允許運動項目：{activities}
 每次總時段：{XIAOXIA_SPORT_SESSION_MIN_MINUTES}~{XIAOXIA_SPORT_SESSION_MAX_MINUTES} 分鐘（包含跑後肌力）。
 預設開始時間：週間={XIAOXIA_SPORT_WEEKDAY_START_TIME}；週六={XIAOXIA_SPORT_SATURDAY_START_TIME}。
@@ -4471,7 +4472,23 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
     if not isinstance(proposed, list):
         raise RuntimeError("XIAOXIA_SPORT_PLANNER_BAD_SESSIONS")
 
-    allowed_days = set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_PRIMARY_DAYS)) | set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_BACKUP_DAYS))
+    primary_days = set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_PRIMARY_DAYS))
+    backup_days = set(_xiaoxia_sport_day_numbers(XIAOXIA_SPORT_BACKUP_DAYS))
+    allowed_days = primary_days | backup_days
+    # v1.11.16 SSOT：14 天正式課表先把所有主要運動日（預設週一、三、六）排滿；
+    # 備用日只作主要日真的無法排入時的 fallback，不再讓 Gemini 自行從備用日起跑。
+    preferred_dates = [
+        window_start + timedelta(days=i)
+        for i in range((window_end - window_start).days + 1)
+        if (window_start + timedelta(days=i)).weekday() in primary_days
+    ]
+    backup_dates = [
+        window_start + timedelta(days=i)
+        for i in range((window_end - window_start).days + 1)
+        if (window_start + timedelta(days=i)).weekday() in backup_days
+    ]
+    date_pool = preferred_dates + backup_dates
+    date_cursor = 0
     # 一般「規劃14天」只補缺額，不重複建立已存在的正式運動；真正洗牌請用「重排14天」。
     expected_count = max(1, math.ceil(XIAOXIA_SPORT_PLAN_WINDOW_DAYS / 7) * XIAOXIA_SPORT_OFFICIAL_PER_WEEK)
     existing_active_count = 0
@@ -4492,12 +4509,12 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
             break
         if not isinstance(item, dict):
             continue
-        try:
-            d = datetime.strptime(str(item.get("date") or ""), "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if d < window_start or d > window_end or d.weekday() not in allowed_days:
-            continue
+        # 日期由程式 SSOT 決定，不再直接採用模型輸出的 date。
+        # 這可保證正常 14 天規劃的 6 堂課依序落在週一、週三、週六。
+        if date_cursor >= len(date_pool):
+            break
+        d = date_pool[date_cursor]
+        date_cursor += 1
         # 表定時間使用固定 anchor：週間 18:00、週六 16:00（可由 ENV 改）；
         # 大俠之後仍可手動拖曳 Calendar，再用 /小俠運動 更新同步。
         anchor_time = _xiaoxia_sport_default_start_time_for_date(d)
