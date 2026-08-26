@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.16"
+LOBSTER_VERSION = "1.11.17"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.16_sport_primary_days")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.17_sport_sync_repair")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -774,7 +774,7 @@ INTERVALS_ICU_BASE_URL = (os.environ.get("INTERVALS_ICU_BASE_URL") or "https://i
 INTERVALS_ICU_SYNC_LOOKBACK_DAYS = _env_int("INTERVALS_ICU_SYNC_LOOKBACK_DAYS", 14, 1, 90)
 INTERVALS_ICU_TIMEOUT_SECONDS = _env_int("INTERVALS_ICU_TIMEOUT_SECONDS", 30, 5, 120)
 
-# 🏃 v1.11.16：正式運動排程固定優先週一、週三、週六；備用日僅在主要日無法排入時使用。
+# 🏃 v1.11.17：週一/三/六排課 + Intervals rematch/SessionID/duplicate-plan repair。
 # 如 Zeabur ENV 明確設為 true 仍可再次凍結；預設恢復小俠自主 / 小俠運動 / PK。
 XIAOXIA_AUTONOMY_CALENDAR_FROZEN = _env_bool("XIAOXIA_AUTONOMY_CALENDAR_FROZEN", False)
 XIAOXIA_SPORT_CALENDAR_FROZEN = _env_bool("XIAOXIA_SPORT_CALENDAR_FROZEN", False)
@@ -3182,13 +3182,43 @@ def _xiaoxia_sport_plan_load():
     if not isinstance(d, dict):
         return {}
     changed = False
-    for row in (d.get("sessions") or []):
-        if isinstance(row, dict) and _xiaoxia_sport_apply_instruction_ssot(row):
+    rows = [x for x in (d.get("sessions") or []) if isinstance(x, dict)]
+
+    # v1.11.17: repair duplicate SessionIDs left by earlier replans/migrations.
+    # Prefer the completed copy; otherwise keep the later/richer copy.
+    deduped = {}
+    order = []
+    for row in rows:
+        if _xiaoxia_sport_apply_instruction_ssot(row):
             changed = True
+        sid = str(row.get("session_id") or "").strip()
+        key = sid or f"__row_{len(order)}"
+        if key not in deduped:
+            deduped[key] = row
+            order.append(key)
+            continue
+        prev = deduped[key]
+        prev_done = str(prev.get("status") or "").lower() in {"done", "completed"}
+        row_done = str(row.get("status") or "").lower() in {"done", "completed"}
+        if row_done and not prev_done:
+            deduped[key] = row
+        elif row_done == prev_done:
+            prev_rich = sum(bool(prev.get(k)) for k in ("actual", "calendar_event_id", "target", "completed_at"))
+            row_rich = sum(bool(row.get(k)) for k in ("actual", "calendar_event_id", "target", "completed_at"))
+            if row_rich >= prev_rich:
+                deduped[key] = row
+        changed = True
+    repaired_rows = [deduped[k] for k in order]
+    repaired_rows.sort(key=lambda x: _xiaoxia_sport_session_start_dt(x) or datetime.max.replace(tzinfo=TZ_TPE))
+    if repaired_rows != rows:
+        d["sessions"] = repaired_rows
+        changed = True
+
     if changed:
         d["instruction_ssot_repaired_at"] = datetime.now(TZ_TPE).isoformat()
+        d["session_dedupe_repaired_at"] = datetime.now(TZ_TPE).isoformat()
         _xiaoxia_calendar_save(XIAOXIA_SPORT_PLAN_PATH, d)
-        print("🏃 [XIAOXIA_SPORT_INSTRUCTION_SSOT_REPAIRED]")
+        print("🏃 [XIAOXIA_SPORT_PLAN_REPAIRED]")
     return d
 
 def _xiaoxia_sport_plan_save(data):
@@ -3536,9 +3566,6 @@ def _xiaoxia_sport_activity_family(value):
 
 def _xiaoxia_sport_activity_matches_session_type(actual, session):
     actual = actual if isinstance(actual, dict) else {}
-    # v1.11.06: some Intervals.icu imports expose a generic activity type while the
-    # activity name still clearly says Run/Running/跑步.  Use both fields so a real
-    # run is not incorrectly demoted to an extra activity.
     candidates = [
         actual.get("activity_type"),
         actual.get("name"),
@@ -3546,7 +3573,21 @@ def _xiaoxia_sport_activity_matches_session_type(actual, session):
     ]
     families = {_xiaoxia_sport_activity_family(x) for x in candidates if str(x or "").strip()}
     sf = _xiaoxia_sport_activity_family((session or {}).get("activity") or "run")
-    return sf in families
+    if sf in families:
+        return True
+
+    # v1.11.17: Intervals.icu detail payloads can occasionally expose a generic/odd
+    # sport label even though the metrics clearly describe a run.  Recover only when
+    # there is strong running evidence, so an unrelated workout is not force-matched.
+    if sf == "run":
+        distance = _xiaoxia_sport_float(actual.get("distance_km")) or 0.0
+        cadence = _xiaoxia_sport_float(actual.get("cadence_spm")) or 0.0
+        pace = str(actual.get("avg_pace") or "").strip()
+        speed = _xiaoxia_sport_float(actual.get("avg_speed_kmh")) or 0.0
+        run_evidence = sum([distance > 0.5, bool(pace), cadence >= 130, 4.0 <= speed <= 25.0])
+        if run_evidence >= 2 and not ({"ride", "walk", "strength"} & families):
+            return True
+    return False
 
 
 def _xiaoxia_sport_parse_dt(value):
@@ -3703,7 +3744,7 @@ def _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, pro
     target_row["pk_status"] = "final" if provisional_score in {1, 3, 4, 5} else "pending_xiaoxia"
 
 
-def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
+async def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
     """v1.11.06 repair path for activities imported as extra before matching was fixed.
 
     This runs on every ICU sync, so the user's already-imported current activity can be
@@ -3735,6 +3776,16 @@ def _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=None):
         target_row = by_sid.get(sid)
         if target_row is None:
             continue
+        hr_target = ((target_row or {}).get("target") or {}).get("heart_rate") or {}
+        if hr_target and not isinstance(actual.get("hr_target_analysis"), dict):
+            try:
+                streams_payload = await _xiaoxia_sport_intervals_streams(actual.get("intervals_activity_id"))
+                analysis = _xiaoxia_sport_hr_target_analysis(streams_payload, hr_target)
+                if analysis:
+                    actual["hr_target_analysis"] = analysis
+                    print(f"❤️ [XIAOXIA_SPORT_RECONCILE_HR_ZONE80] id={actual.get('intervals_activity_id')} session={sid} in_range={analysis.get('in_range_percent')}% pass={analysis.get('pass')}")
+            except Exception as exc:
+                print(f"⚠️ [XIAOXIA_SPORT_RECONCILE_HR_STREAM_FAILED] id={actual.get('intervals_activity_id')} session={sid} {type(exc).__name__}: {exc}")
         status_label, provisional_score = _xiaoxia_sport_actual_target_status(target_row, actual)
         _xiaoxia_sport_apply_actual_to_session(target_row, actual, status_label, provisional_score)
         row["official"] = True
@@ -3894,7 +3945,7 @@ async def _xiaoxia_sport_sync_intervals(days=None):
     skipped_invalid = 0
     # Repair activities already imported by v1.11.04/05 as "extra" before the
     # robust type matcher existed.  This is essential for tonight's already-synced run.
-    reconciled = _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=now_dt)
+    reconciled = await _xiaoxia_sport_reconcile_existing_extras(plan, by_sid, now_dt=now_dt)
     # Reconciliation changes local Session state immediately; mirror that repaired
     # completion back to the existing Google Calendar event as well.
     for repaired_row in reconciled:
@@ -4437,6 +4488,17 @@ Phase 1 規則：
 }}
 """
 
+def _xiaoxia_sport_max_session_number(rows):
+    nums = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        m = re.fullmatch(r"HR-(\d+)", str(row.get("session_id") or "").strip(), flags=re.IGNORECASE)
+        if m:
+            nums.append(int(m.group(1)))
+    return max(nums) if nums else 0
+
+
 async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
     if XIAOXIA_SPORT_CALENDAR_FROZEN:
         print("🔒 [XIAOXIA_SPORT_PLANNER_FROZEN] keep existing sport Calendar events unchanged")
@@ -4503,7 +4565,19 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
                 existing_active_count += 1
     needed_count = expected_count if replace_future else max(0, expected_count - existing_active_count)
     sessions = []
-    seq_base = int(_xiaoxia_sport_state_load().get("current_session_index") or 0)
+    # v1.11.17: Session numbering is derived from retained/active SessionIDs, not
+    # current_session_index (which means completed-count, not max assigned ID).
+    current_plan_for_seq = _xiaoxia_sport_plan_load()
+    current_rows_for_seq = [x for x in (current_plan_for_seq.get("sessions") or []) if isinstance(x, dict)]
+    if replace_future:
+        seq_rows = []
+        for row in current_rows_for_seq:
+            dt = _xiaoxia_sport_session_start_dt(row)
+            if str(row.get("status") or "").lower() in {"done", "completed"} or (dt and dt < now_dt):
+                seq_rows.append(row)
+    else:
+        seq_rows = current_rows_for_seq
+    seq_base = _xiaoxia_sport_max_session_number(seq_rows)
     for item in proposed[: max(6, XIAOXIA_SPORT_OFFICIAL_PER_WEEK * 2) + 4]:
         if len(sessions) >= needed_count:
             break
@@ -4629,7 +4703,10 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
     _xiaoxia_sport_plan_save(plan)
     state = _xiaoxia_sport_state_load()
     state["weekly_official_target"] = XIAOXIA_SPORT_OFFICIAL_PER_WEEK
-    state["current_session_index"] = max(int(state.get("current_session_index") or 0), seq_base + len(sessions))
+    # current_session_index is completed official count; planning future Sessions must
+    # never advance it. Recompute from the merged plan instead of using the max ID.
+    completed_count = len([x for x in _xiaoxia_sport_official_sessions(plan) if str(x.get("status") or "").lower() in {"done", "completed"}])
+    state["current_session_index"] = completed_count
     nxt = _xiaoxia_sport_next_session(plan, now_dt=now_dt)
     state["next_session_id"] = str((nxt or {}).get("session_id") or "")
     _xiaoxia_sport_state_save(state)
