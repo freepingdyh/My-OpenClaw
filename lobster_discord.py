@@ -11,8 +11,8 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.17.1"
-# v1.11.17.1 HOTFIX — based on stable v1.11.17 only.
+LOBSTER_VERSION = "1.11.17.2"
+# v1.11.17.2 HOTFIX — based on stable v1.11.17 only; Python <3.12 compatible f-string syntax.
 # 1) Universal photo-presentation lineage: More / Dice / Repair / v5 / module descendants keep the original full human-facing narrative.
 # 2) Autonomy episode continuity: first occurrence uses activity seed; later occurrences of the SAME activity continue from stored episode/authoritative_scene.
 
@@ -690,7 +690,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.17.1_lineage_episode_hotfix")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.17.2_lineage_episode_hotfix")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -7345,7 +7345,8 @@ composition={str((result_context or {}).get('composition') or '')}
         ok, reason = _autonomy_share_text_quality(text)
         if ok:
             return text
-        print(f"⚠️ [AUTONOMY_SHARE_TEXT_QUALITY_FALLBACK] reason={reason} chars={len(re.sub(r'\\s+', '', text))}")
+        compact_char_count = len("".join(str(text or "").split()))
+        print(f"⚠️ [AUTONOMY_SHARE_TEXT_QUALITY_FALLBACK] reason={reason} chars={compact_char_count}")
     except Exception as exc:
         print(f"⚠️ [AUTONOMY_SHARE_TEXT_FAILED] {type(exc).__name__}: {exc}")
 
