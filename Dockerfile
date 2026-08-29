@@ -23,7 +23,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# 啟動 OpenClaw Gateway 並在背景執行，隨後啟動小俠主程式
-# & 符號能讓 OpenClaw 在背景跑，不會卡住後面的 python 執行
-# 將原本的 openclaw 改成 npx openclaw
-CMD npx openclaw gateway start & python3 lobster_discord.py
+# v1.12.01：保留 lobster_discord.py v1.11.17.2 原檔不動，
+# 由 migration runtime 掛接第一批模組化 Photo Lineage / Presentation。
+# 回退只需把最後一行改回 python3 lobster_discord.py。
+CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11201.py
