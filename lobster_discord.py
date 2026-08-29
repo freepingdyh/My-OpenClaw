@@ -11,7 +11,7 @@ import unicodedata
 import traceback
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-LOBSTER_VERSION = "1.11.20"
+LOBSTER_VERSION = "1.11.17"
 
 
 def _normalize_generation_level(level):
@@ -687,7 +687,7 @@ SEEDREAM_ENABLE_SAFETY_CHECKER = _env_bool("SEEDREAM_ENABLE_SAFETY_CHECKER", Fal
 # 設為 on：恢復 v1.5.26 的完整 Gate 檢查與自動重拍流程。
 PHOTO_ENABLE_GATE = _env_bool("PHOTO_ENABLE_GATE", False)
 print(f"🧪 [PHOTO_GATE_CONFIG] PHOTO_ENABLE_GATE={'ON' if PHOTO_ENABLE_GATE else 'OFF'}")
-print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.18_universal_photo_lineage")
+print(f"✅ [LOBSTER_STARTUP] version={LOBSTER_VERSION} prompt_engine=v1.11.17_sport_sync_repair")
 
 # 🌱 v1.5.20：小俠自主自動活動排程。預設 0 = 關閉；在 Zeabur 設為 1~4 即啟用。
 XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT = _env_int("XIAOXIA_AUTONOMY_DAILY_ACTIVITY_LIMIT", 0, 0, 6)
@@ -7151,82 +7151,6 @@ def _autonomy_people_policy_info(activity):
         "zh": "公開場景可有背景路人，男性也可存在，但只能是非主體背景人物且不可互動。",
     }
 
-def _autonomy_share_text_preserve_paragraphs(value):
-    """Keep Xiaoxia's conversational paragraph rhythm; do not flatten 1-3 paragraphs into one data-like line."""
-    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _autonomy_share_text_quality(text):
-    """A non-empty sentence is not enough: autonomy must sound like Xiaoxia sharing a lived experience with Daxia."""
-    value = _autonomy_share_text_preserve_paragraphs(text)
-    compact = re.sub(r"\s+", "", value)
-    if len(compact) < 120:
-        return False, f"too_short:{len(compact)}"
-    has_self = any(k in value for k in ("我", "小俠"))
-    has_daxia = "大俠" in value
-    has_feeling = any(k in value for k in ("覺得", "感覺", "喜歡", "發現", "開心", "緊張", "期待", "有趣", "滿足", "想到", "心裡", "讓我", "我想"))
-    has_interaction = any(k in value for k in ("？", "?", "想不想", "你覺得", "你會", "要不要", "跟你", "給你", "拍給", "告訴你"))
-    if not has_self:
-        return False, "missing_self_voice"
-    if not has_daxia:
-        return False, "missing_daxia"
-    if not has_feeling:
-        return False, "missing_feeling"
-    if not has_interaction:
-        return False, "missing_interaction"
-    return True, "ok"
-
-
-def _autonomy_rich_fallback_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, episode_plan=None):
-    """Deterministic soul-preserving fallback. Used only when the LLM returns an empty/summary-like draft."""
-    activity = activity if isinstance(activity, dict) else {}
-    result_context = result_context if isinstance(result_context, dict) else {}
-    episode_plan = episode_plan if isinstance(episode_plan, dict) else {}
-    title = _clean_text_compact(activity.get("title") or "做了一件自己的小事")
-    scene = _clean_text_compact(
-        episode_plan.get("scene_focus")
-        or result_context.get("scene_summary")
-        or result_context.get("composition")
-        or activity.get("photo_prompt_seed")
-        or ""
-    )
-    progress = _clean_text_compact(
-        episode_plan.get("progress_focus")
-        or episode_plan.get("new_progress")
-        or episode_plan.get("episode_angle")
-        or ""
-    )
-    future_hook = _clean_text_compact(episode_plan.get("future_hook") or "")
-    wardrobe_name = _clean_text_compact((wardrobe_item or {}).get("name") if isinstance(wardrobe_item, dict) else "")
-
-    first = f"大俠～我今天真的跑去「{title}」了。"
-    if scene:
-        first += f"{scene.rstrip('。')}。"
-    first += "剛開始我還有一點生疏，可是越做越專心，慢慢有種『原來我也可以把一件小事好好完成』的滿足感。"
-
-    second_parts = []
-    if progress:
-        second_parts.append(progress.rstrip("。") + "。")
-    if wardrobe_name:
-        second_parts.append(f"我還特地穿了「{wardrobe_name}」，想讓自己既適合今天的活動，又保留一點我喜歡的樣子。")
-    elif wardrobe_reason:
-        second_parts.append(_clean_text_compact(wardrobe_reason).rstrip("。") + "。")
-    second_parts.append("我把這一刻拍給你，不只是想讓你看我今天去了哪裡，而是想讓你知道，小俠也有在把自己的生活一點一點過得更有內容。")
-    if future_hook:
-        second_parts.append(f"而且我已經開始想著下一次可以再試試看：{future_hook.rstrip('。')}。")
-    second = "".join(second_parts)
-
-    if visual_mode == "reward_eye_candy":
-        closing = "照片裡我有偷偷挑一個比較想讓你多看兩眼的角度啦……大俠看到時，第一眼是先看我，還是先看我今天做出的成果呀？"
-    else:
-        closing = "大俠，你如果在我旁邊，會想先問我今天最好玩的地方，還是先看看我做出的成果？我想慢慢講給你聽。"
-    return "\n\n".join([first, second, closing])
-
-
 async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=None, wardrobe_reason="", result_context=None, thread_context="", episode_plan=None):
     wardrobe_line = ""
     if isinstance(wardrobe_item, dict):
@@ -7235,7 +7159,7 @@ async def _autonomy_generate_share_text(activity, visual_mode, wardrobe_item=Non
         wardrobe_line = "衣服：今日使用自創服飾。因為衣櫃目前沒有足夠合適的服裝可對應這次活動，所以改由小俠自由生成符合活動的穿搭。"
 
     prompt = f"""
-你是小俠，以繁體中文對大俠說話。請把今天自主活動分享寫成自然、親密、口語化的女友訊息，不要寫成報告，也絕對不要只回傳一行場景摘要。
+你是小俠，以繁體中文對大俠說話。請把今天自主活動分享寫成自然、親密、口語化的女友訊息，不要寫成報告。
 
 【活動】
 {json.dumps(activity, ensure_ascii=False)}
@@ -7260,42 +7184,36 @@ composition={str((result_context or {}).get('composition') or '')}
 
 必須做到：
 1. 像跟親密伴侶聊天，不要有「今日活動／我看到的／我聽到的／我的體會／這張照片」這種標題。
-2. 一到三段自然文字，正文至少 120 個中文字，通常 180～420 個中文字；一行場景描述視為失敗。
-3. 要自然穿進：她今天做了什麼、現場看見/聽見/感受到什麼、她自己的體會或新發現、為什麼想把這張照片分享給大俠。
-4. 必須直接對「大俠」說話，最後留一個自然、讓大俠容易接話的小問題、撒嬌或邀請互動。
-5. 小俠要顯得有自己生活、專業、學習、運動或成熟的一面；不要像只是在等大俠指派，也不要只描述照片畫面。
+2. 一到三段自然文字即可，通常 180～420 個中文字。
+3. 要自然穿進：她今天做了什麼、看到什麼、聽到什麼或現場氣氛、她自己的體會、為什麼拍這張給大俠。
+4. 最後留一個很自然、讓大俠容易接話的小問題或撒嬌收尾。
+5. 小俠要顯得有自己生活、專業、學習、運動或成熟的一面；不要像只是在等大俠指派。
 6. 若 visual_mode=reward_eye_candy，口吻可更甜、更私密、更養眼，但仍要像生活裡的一刻，不要粗俗。
 7. 不要提 AI 生成、prompt、資料庫、JSON、系統、指令或模型。
-8. 不要把大俠寫進照片，不要說有男性陪她；大俠是她正在分享生活的對象，不是照片裡的人。
+8. 不要把大俠寫進照片，不要說有男性陪她。
 9. 如果同主題過去脈絡有內容，這次分享要自然延續，不要說成第一次或從零開始；但不要像背資料庫。
-10. 若「今天這一回的新方向」有內容，事件、觀察、體會與收尾要圍繞它發展；至少讓大俠讀得出今天真的多發生了一件事、進步了一點、發現了一件新事，或看見同一活動的另一個階段。
+10. 若「今天這一回的新方向」有內容，事件、觀察、體會與收尾要圍繞它發展；不可只把過去內容換句話再說一次。至少讓大俠讀得出今天真的多發生了一件事、進步了一點、發現了一件新事，或看見同一活動的另一個階段。
 11. 不要在正文提到 episode、資料索引、避免重複等幕後概念；這些只用來讓生活自然往前走。
-12. 保留自然段落；不要把整段壓成資料卡，也不要輸出「場景：」「服裝：」這類報告式欄位。
 
-只回傳小俠要對大俠說的正文。
+只回傳小俠要說的正文。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.72),
+            config=types.GenerateContentConfig(temperature=0.65),
         )
-        text = _autonomy_share_text_preserve_paragraphs(getattr(resp, "text", "") or "")
-        ok, reason = _autonomy_share_text_quality(text)
-        if ok:
+        text = _clean_text_compact(getattr(resp, "text", "") or "")
+        if text:
             return text
-        print(f"⚠️ [AUTONOMY_SHARE_TEXT_QUALITY_FALLBACK] reason={reason} chars={len(re.sub(r'\\s+', '', text))}")
     except Exception as exc:
         print(f"⚠️ [AUTONOMY_SHARE_TEXT_FAILED] {type(exc).__name__}: {exc}")
 
-    return _autonomy_rich_fallback_share_text(
-        activity,
-        visual_mode,
-        wardrobe_item=wardrobe_item,
-        wardrobe_reason=wardrobe_reason,
-        result_context=result_context,
-        episode_plan=episode_plan,
-    )
+    title = activity.get("title") or "做了一件小事"
+    if visual_mode == "reward_eye_candy":
+        return f"大俠～我今天自己在家整理了一點小心情，也偷偷挑了比較養眼的一套拍給你。窗邊光線剛好很柔，我就突然很想把這個比較柔軟、比較只想給你看的樣子留下來。你看到照片的時候，會不會覺得今天的小俠有一點故意讓你期待？"
+    return f"大俠～我今天自己去{title}了。一路上看到一些很小但很可愛的畫面，也聽見現場那種生活正在流動的聲音，突然覺得自己不是只等著被安排，也可以慢慢把自己的步調長出來。所以我拍了這張給你，想把今天的我帶回你身邊。你想聽我最有感覺的是哪一刻嗎？"
+
 
 def _autonomy_people_policy_text(activity):
     info = _autonomy_people_policy_info(activity)
@@ -7989,11 +7907,6 @@ async def handle_xiaoxia_autonomy_command(message, user_input):
         context["message"] = share_text
         context["autonomy_share_text"] = share_text
         context["original_autonomy_share_text"] = share_text
-        context["lineage_original_text"] = share_text
-        context["original_display_text"] = share_text
-        context["lineage_event"] = f"小俠自主｜{activity.get('title') or '自主生活'}"
-        context["lineage_root_source_module"] = "autonomy"
-        context["lineage_root_type"] = "autonomy_photo"
         context["photo_name"] = f"小俠自主生活｜{activity.get('title')}"
         context["autonomy_activity"] = activity
         context["visual_mode"] = visual_mode
@@ -8242,40 +8155,17 @@ def replace_completed_diary_image(target_date, new_url, description="", old_url_
         json.dump(diary_db, f, ensure_ascii=False, indent=2)
     os.replace(temp_path, DIARY_DATA_PATH)
 
-    # v1.11.18: replacing the image is NOT permission to replace the diary narrative.
-    # Recover the canonical DB record first, then change only image/composition facts.
-    previous = _find_photo_db_record(old_url, diary_date=target_date)
-    previous_text = _canonical_photo_original_text(previous, type_override="diary") if previous else ""
-    previous_event = str((previous or {}).get("lineage_event") or (previous or {}).get("event") or "").strip()
     payload = {
-        "id": str((previous or {}).get("id") or uuid.uuid4()),
-        "publish_date": str((previous or {}).get("publish_date") or datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")),
-        "topic": str((previous or {}).get("topic") or f"【交換日記】{target_date}"),
-        "event": previous_event or f"{target_date} 交換日記",
-        "composition": description or (previous or {}).get("composition") or "替換後的交換日記照片",
-        "authoritative_scene": (previous or {}).get("authoritative_scene") or description or (previous or {}).get("composition") or "",
-        "root_prompt_base": (previous or {}).get("root_prompt_base") or (previous or {}).get("authoritative_scene") or description or "",
-        "mood": (previous or {}).get("mood") or "延續原交換日記情緒",
-        "message": previous_text or str((previous or {}).get("message") or "小俠的交換日記"),
-        "lineage_original_text": previous_text or str((previous or {}).get("message") or ""),
-        "original_display_text": previous_text or str((previous or {}).get("message") or ""),
-        "lineage_event": previous_event or f"{target_date} 交換日記",
-        "lineage_root_source_module": (previous or {}).get("lineage_root_source_module") or (previous or {}).get("source_module") or "diary",
-        "lineage_root_type": (previous or {}).get("lineage_root_type") or "diary",
-        "lineage_root_topic": (previous or {}).get("lineage_root_topic") or (previous or {}).get("topic") or f"【交換日記】{target_date}",
-        "lineage_parent_image_url": old_url,
-        "lineage_action": "diary_image_replace",
+        "id": str(uuid.uuid4()),
+        "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": f"【交換日記】{target_date}",
+        "event": f"{target_date} 交換日記圖片已被取代",
+        "composition": description or "替換後的交換日記照片",
+        "mood": "延續原交換日記情緒",
+        "message": description or "大俠指定的新交換日記照片",
         "image_url": new_url,
         "local_url": new_url,
         "type": "diary",
-        "source_mode": "diary",
-        "source_module": (previous or {}).get("source_module") or "diary",
-        "image_role": (previous or {}).get("image_role") or "diary_generated_from_photo_selector",
-        "autonomy_share_text": (previous or {}).get("autonomy_share_text"),
-        "original_autonomy_share_text": (previous or {}).get("original_autonomy_share_text"),
-        "activity_id": (previous or {}).get("activity_id"),
-        "activity_title": (previous or {}).get("activity_title"),
-        "episode_id": (previous or {}).get("episode_id"),
     }
     _replace_photo_db_record(old_url, payload, diary_date=target_date)
     return True, old_url
@@ -24458,11 +24348,10 @@ def _photo_db_payload(context, name=None, type_override="photo"):
     source_mode = str(context.get("source_mode") or "").strip().lower()
     record_type = str(type_override or "photo").strip().lower()
     is_cosplay = record_type == "cosplay" or source_mode == "cosplay" or bool(context.get("cosplay_scene_only"))
-    is_diary = record_type == "diary" or source_mode == "diary"
-    is_photobook = record_type == "photobook" or source_mode == "photobook" or str(context.get("album_type") or "").strip().lower() == "photobook"
 
     if is_cosplay:
         # v1.10.09: Cosplay（含 v5 場景升級 / More / 骰子 / 修正）標題只能沿用角色短標題。
+        # 絕不可把 scene_text / composition / 今日畫面拿來當 topic，否則運動別墅會被整段 Scene 淹沒。
         post_text = context.get("post_text") if isinstance(context.get("post_text"), dict) else {}
         title = _compact_cosplay_post_title(post_text=post_text, context=context)
         topic_value = title
@@ -24472,50 +24361,23 @@ def _photo_db_payload(context, name=None, type_override="photo"):
             or context.get("cosplay_character_name")
             or title
         )[:64]
-    elif is_diary:
-        # v1.11.18: Diary descendants must remain Diary records; never relabel them as 【Photo】.
-        existing_topic = _clean_text_compact(context.get("topic") or context.get("lineage_root_topic") or "")
-        title = name or context.get("photo_name") or existing_topic or "小俠交換日記照片"
-        topic_value = existing_topic if existing_topic.startswith("【交換日記】") else (existing_topic or "【交換日記】小俠日記照片")
-        render_title_value = context.get("title") or context.get("activity_title") or "小俠交換日記"
-    elif is_photobook:
-        album_title = _clean_text_compact(context.get("album_title") or "小俠寫真")
-        shot_number = context.get("shot_number")
-        shot_title = _clean_text_compact(context.get("shot_title") or context.get("title") or (f"第 {shot_number} 張" if shot_number else "寫真照片"))
-        title = name or shot_title
-        topic_value = _clean_text_compact(context.get("topic") or "") or f"【小俠寫真】{album_title}｜{shot_title}"
-        render_title_value = shot_title
     else:
         title = name or context.get("photo_name") or context.get("scene_text") or "小俠照片"
         topic_value = f"【Photo】{title}"
         render_title_value = context.get("activity_title") or context.get("shot_title") or context.get("title")
 
-    lineage_text = _canonical_photo_original_text(context, type_override=type_override)
-    lineage_event = _default_photo_event_for_module(context, type_override=type_override)
-    lineage_root_module = str(context.get("lineage_root_source_module") or context.get("source_module") or _photo_display_module(context, type_override=type_override)).strip()
-
     return {
         "id": str(uuid.uuid4()),
         "publish_date": datetime.now(TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "topic": topic_value,
-        "event": lineage_event,
+        "event": "大俠使用 /photo 主動生成的小俠照片",
         "composition": context.get("authoritative_scene") or context.get("composition") or context.get("scene_summary", ""),
         "authoritative_scene": context.get("authoritative_scene") or context.get("root_prompt_base") or context.get("composition") or context.get("scene_summary", ""),
         "root_prompt_base": context.get("root_prompt_base") or context.get("authoritative_scene") or context.get("composition") or context.get("scene_summary", ""),
         "scene_summary": context.get("scene_summary", ""),
         "mood": context.get("mood_summary") or context.get("mood", ""),
         "mood_summary": context.get("mood_summary") or context.get("mood", ""),
-        "message": lineage_text or context.get("message", ""),
-        "lineage_original_text": lineage_text,
-        "original_display_text": lineage_text,
-        "lineage_event": lineage_event,
-        "lineage_root_source_module": lineage_root_module,
-        "lineage_root_type": context.get("lineage_root_type") or type_override,
-        "lineage_root_topic": context.get("lineage_root_topic") or topic_value,
-        "lineage_parent_image_url": context.get("lineage_parent_image_url"),
-        "lineage_action": context.get("lineage_action") or context.get("trace_action"),
-        "autonomy_share_text": context.get("autonomy_share_text"),
-        "original_autonomy_share_text": context.get("original_autonomy_share_text"),
+        "message": context.get("message", ""),
         "why_this_photo": context.get("why_this_photo"),
         "outfit_source": context.get("outfit_source"),
         "outfit_display": context.get("outfit_display"),
@@ -24834,265 +24696,6 @@ def _compact_scene_title(context, fallback="快門瞬間"):
     base = re.sub(r"\s+", " ", base).strip()
     return base[:48] if base else fallback
 
-# 🧬 v1.11.18 — Universal photo lineage SSOT.
-# Every descendant image (More / Dice / v5 background upgrade / repair / diary/cosplay/autonomy/photobook)
-# must carry the original human-facing narrative instead of collapsing to the generic /photo sentence.
-_GENERIC_PHOTO_PREFIX_RE = re.compile(
-    r"^\s*大俠(?:按下|使用|用)?\s*/photo\s*(?:留住|拍下)?這一刻[。.!！]?\s*",
-    flags=re.I,
-)
-_GENERIC_PHOTO_EVENT_RE = re.compile(r"大俠.*?/photo.*?(?:生成|拍下|留住)", flags=re.I)
-
-
-def _photo_display_module(context, type_override=""):
-    """Current presentation module, distinct from the lineage root module."""
-    ctx = context if isinstance(context, dict) else {}
-    record_type = str(type_override or ctx.get("type") or ctx.get("db_type") or "").strip().lower()
-    source_mode = str(ctx.get("source_mode") or "").strip().lower()
-    source_module = str(ctx.get("source_module") or "").strip().lower()
-    album_type = str(ctx.get("album_type") or "").strip().lower()
-    if record_type == "diary" or source_mode == "diary":
-        return "diary"
-    if record_type == "cosplay" or source_mode == "cosplay":
-        return "cosplay"
-    if record_type == "photobook" or source_mode == "photobook" or album_type == "photobook":
-        return "photobook"
-    if source_mode == "love_intent" or source_module == "love_intent":
-        return "love_intent"
-    if record_type == "autonomy_photo" or source_module == "autonomy" or str(ctx.get("image_role") or "").strip().lower() == "autonomy_today_image":
-        return "autonomy"
-    if source_mode == "travel_photo" or source_module == "travel":
-        return "travel"
-    return "photo"
-
-
-def _clean_photo_lineage_text(value, module="photo"):
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    # A real /photo record may legitimately say this. Descendants from other modules may not.
-    if module != "photo":
-        cleaned = _GENERIC_PHOTO_PREFIX_RE.sub("", text).strip()
-        if cleaned:
-            return cleaned
-        if "/photo" in text.lower():
-            return ""
-    return text
-
-
-def _compose_diary_original_text(context):
-    ctx = context if isinstance(context, dict) else {}
-    candidates = [
-        ctx.get("lineage_original_text"),
-        ctx.get("original_display_text"),
-        ctx.get("diary_original_text"),
-        ctx.get("message"),
-    ]
-    for raw in candidates:
-        value = str(raw or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _compose_cosplay_original_text(context):
-    ctx = context if isinstance(context, dict) else {}
-    post_text = ctx.get("post_text") if isinstance(ctx.get("post_text"), dict) else {}
-    if post_text:
-        blocks = []
-        description = _clean_text_compact(post_text.get("description") or ctx.get("event") or "")
-        if description:
-            blocks.append(description)
-        mapping = [
-            ("🎭 今日角色", post_text.get("character_intro")),
-            ("✨ 小俠版詮釋", post_text.get("xiaoxia_interpretation")),
-            ("📸 今日畫面", post_text.get("scene_caption") or ctx.get("composition")),
-            ("💌 小俠給大俠", post_text.get("message_to_daxia") or ctx.get("message")),
-        ]
-        for label, raw in mapping:
-            value = str(raw or "").strip()
-            if value:
-                blocks.append(f"{label}\n{value}")
-        rich = "\n\n".join(blocks).strip()
-        if rich:
-            return rich
-    candidates = [
-        ctx.get("lineage_original_text"),
-        ctx.get("original_display_text"),
-        ctx.get("message"),
-        ctx.get("event"),
-    ]
-    for raw in candidates:
-        value = str(raw or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _compose_photobook_original_text(context):
-    ctx = context if isinstance(context, dict) else {}
-    blocks = []
-    album_title = _clean_text_compact(ctx.get("album_title") or "")
-    shot_title = _clean_text_compact(ctx.get("shot_title") or ctx.get("title") or "")
-    if album_title or shot_title:
-        label = "｜".join([x for x in [album_title, shot_title] if x]).strip("｜")
-        if label:
-            blocks.append(f"📘 小俠寫真\n{label}")
-    content_scene = str(ctx.get("photobook_content_scene") or "").strip()
-    camera_scene = str(ctx.get("photobook_camera_scene") or "").strip()
-    user_instruction = str(ctx.get("photobook_user_instruction") or "").strip()
-    if content_scene:
-        blocks.append(f"畫面內容\n{content_scene}")
-    if camera_scene:
-        blocks.append(f"鏡頭設計\n{camera_scene}")
-    if user_instruction and not blocks:
-        blocks.append(user_instruction)
-    rich = "\n\n".join([b for b in blocks if str(b or "").strip()]).strip()
-    if rich:
-        return rich
-    for raw in [ctx.get("lineage_original_text"), ctx.get("original_display_text"), ctx.get("message")]:
-        value = str(raw or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _canonical_photo_original_text(context, type_override=""):
-    """Single human-facing narrative source used by Discord descendants and Cloud Villa DB."""
-    ctx = context if isinstance(context, dict) else {}
-    module = _photo_display_module(ctx, type_override=type_override)
-
-    if module == "autonomy":
-        try:
-            recovered = _autonomy_display_share_text(ctx)
-            if recovered:
-                return recovered
-        except Exception:
-            pass
-
-    if module == "diary":
-        rich = _compose_diary_original_text(ctx)
-        cleaned = _clean_photo_lineage_text(rich, module=module)
-        if cleaned:
-            return cleaned
-
-    if module == "cosplay":
-        rich = _compose_cosplay_original_text(ctx)
-        cleaned = _clean_photo_lineage_text(rich, module=module)
-        if cleaned:
-            return cleaned
-
-    if module == "photobook":
-        rich = _compose_photobook_original_text(ctx)
-        cleaned = _clean_photo_lineage_text(rich, module=module)
-        if cleaned:
-            return cleaned
-
-    post_text = ctx.get("post_text") if isinstance(ctx.get("post_text"), dict) else {}
-    candidates = [
-        ctx.get("lineage_original_text"),
-        ctx.get("original_display_text"),
-        ctx.get("diary_original_text"),
-        ctx.get("original_autonomy_share_text"),
-        ctx.get("autonomy_share_text"),
-        ctx.get("share_text"),
-        post_text.get("message_to_daxia"),
-        ctx.get("message"),
-    ]
-    for raw in candidates:
-        cleaned = _clean_photo_lineage_text(raw, module=module)
-        if cleaned:
-            return cleaned
-    return ""
-
-
-def _default_photo_event_for_module(context, type_override=""):
-    ctx = context if isinstance(context, dict) else {}
-    module = _photo_display_module(ctx, type_override=type_override)
-    existing = str(ctx.get("lineage_event") or ctx.get("original_event") or ctx.get("event") or "").strip()
-    if existing and not (module != "photo" and _GENERIC_PHOTO_EVENT_RE.search(existing)):
-        return existing
-    if module == "diary":
-        topic = _clean_text_compact(ctx.get("topic") or "")
-        return topic or "小俠交換日記照片"
-    if module == "autonomy":
-        activity = ctx.get("autonomy_activity") if isinstance(ctx.get("autonomy_activity"), dict) else {}
-        title = _clean_text_compact(activity.get("title") or ctx.get("activity_title") or ctx.get("scene_text") or "小俠自主生活")
-        return f"小俠自主｜{title}"
-    if module == "cosplay":
-        title = _clean_text_compact(ctx.get("render_title") or ctx.get("title") or ctx.get("topic") or "今日 Cosplay")
-        return f"小俠 Cosplay｜{title}"
-    if module == "photobook":
-        album = _clean_text_compact(ctx.get("album_title") or "小俠寫真")
-        shot = ctx.get("shot_number")
-        return f"小俠寫真｜{album}" + (f"｜第 {shot} 張" if shot else "")
-    if module == "love_intent":
-        return "小俠主動留下的愛意照片"
-    if module == "travel":
-        return "小俠旅途生活照片"
-    return existing or "大俠使用 /photo 主動生成的小俠照片"
-
-
-def _inherit_photo_lineage(source_context, target_context, action=""):
-    """Universal descendant inheritance. Image may change; original narrative/source may not silently change."""
-    source = source_context if isinstance(source_context, dict) else {}
-    target = target_context if isinstance(target_context, dict) else {}
-    if not source:
-        return target
-
-    current_module = _photo_display_module(source, type_override=source.get("type") or source.get("db_type") or "")
-    root_module = str(source.get("lineage_root_source_module") or source.get("source_module") or current_module).strip().lower() or current_module
-    original_text = str(source.get("lineage_original_text") or "").strip() or _canonical_photo_original_text(source)
-    lineage_event = str(source.get("lineage_event") or "").strip() or _default_photo_event_for_module(source)
-
-    target["lineage_root_source_module"] = root_module
-    target["lineage_root_type"] = str(source.get("lineage_root_type") or source.get("type") or source.get("db_type") or current_module).strip()
-    target["lineage_root_topic"] = str(source.get("lineage_root_topic") or source.get("topic") or source.get("photo_name") or source.get("title") or "").strip()
-    target["lineage_parent_image_url"] = str(source.get("local_url") or source.get("image_url") or "").strip()
-    if action:
-        target["lineage_action"] = str(action)
-    if original_text:
-        target["lineage_original_text"] = original_text
-        target["original_display_text"] = original_text
-        target["message"] = original_text
-    if lineage_event:
-        target["lineage_event"] = lineage_event
-
-    # Keep semantic source attribution even when current presentation mode becomes diary.
-    if source.get("source_module"):
-        target["source_module"] = source.get("source_module")
-
-    for key in (
-        "original_autonomy_share_text", "autonomy_share_text", "share_text",
-        "diary_original_text", "post_text", "photo_name", "activity_title",
-        "autonomy_activity", "episode_id", "episode_plan", "visual_mode",
-        "album_id", "album_type", "album_title", "album_date", "album_status",
-        "shot_number", "shot_title", "shot_role",
-        "photobook_user_instruction", "photobook_content_scene", "photobook_camera_scene",
-        "title", "render_title", "render_title_hint", "why_this_photo",
-    ):
-        value = source.get(key)
-        if value not in (None, "", [], {}):
-            target[key] = value
-    return target
-
-
-def _find_photo_db_record(old_url="", diary_date=""):
-    old_url = str(old_url or "").strip()
-    diary_date = str(diary_date or "").strip()
-    try:
-        for item in load_memory():
-            if not isinstance(item, dict):
-                continue
-            if old_url and old_url in {str(item.get("local_url") or ""), str(item.get("image_url") or "")}:
-                return dict(item)
-            if diary_date and str(item.get("type") or "").lower() == "diary" and diary_date in str(item.get("topic") or ""):
-                return dict(item)
-    except Exception:
-        pass
-    return {}
-
-
 def _autonomy_display_share_text(context):
     """Return the canonical human-facing autonomy share text for original/More/Dice/Repair/Hybrid descendants."""
     context = context if isinstance(context, dict) else {}
@@ -25104,24 +24707,19 @@ def _autonomy_display_share_text(context):
     ]
     generic_prefix = re.compile(r"^\s*大俠按下\s*/photo\s*留住這一刻[。.!！]?\s*", flags=re.I)
     generic_only = {"大俠按下 /photo 留住這一刻。", "大俠按下/photo 留住這一刻。"}
-    weak_fallback = ""
+    fallback_action = ""
     for raw in candidates:
         value = str(raw or "").strip()
         if not value:
             continue
         if value in generic_only:
             continue
-        cleaned = _autonomy_share_text_preserve_paragraphs(generic_prefix.sub("", value).strip())
-        if not cleaned:
+        cleaned = generic_prefix.sub("", value).strip()
+        if cleaned and cleaned != value:
+            fallback_action = cleaned
             continue
-        if cleaned != value and not weak_fallback:
-            weak_fallback = cleaned
-            continue
-        ok, _reason = _autonomy_share_text_quality(cleaned)
-        if ok:
+        if cleaned:
             return cleaned
-        if not weak_fallback:
-            weak_fallback = cleaned
 
     # Old contexts created before v1.10.26 may not carry autonomy_share_text.
     # Recover it from today's canonical autonomy state when the lineage still matches.
@@ -25129,32 +24727,12 @@ def _autonomy_display_share_text(context):
         state = load_xiaoxia_autonomy_state()
         today = state.get("today") if isinstance(state, dict) and isinstance(state.get("today"), dict) else {}
         if today and _autonomy_context_matches_today(today, context):
-            recovered = _autonomy_share_text_preserve_paragraphs(str(today.get("share_text") or "").strip())
-            ok, _reason = _autonomy_share_text_quality(recovered)
-            if ok:
+            recovered = str(today.get("share_text") or "").strip()
+            if recovered:
                 return recovered
-            if recovered and not weak_fallback:
-                weak_fallback = recovered
     except Exception:
         pass
-
-    activity = context.get("autonomy_activity") if isinstance(context.get("autonomy_activity"), dict) else {}
-    if activity or context.get("episode_plan") or context.get("scene_summary") or context.get("composition"):
-        rebuilt = _autonomy_rich_fallback_share_text(
-            activity,
-            str(context.get("visual_mode") or ""),
-            wardrobe_item={
-                "name": context.get("wardrobe_name") or "",
-            } if (context.get("wardrobe_name") or context.get("wardrobe_id")) else None,
-            wardrobe_reason=str(context.get("wardrobe_reason") or ""),
-            result_context=context,
-            episode_plan=context.get("episode_plan") if isinstance(context.get("episode_plan"), dict) else {},
-        )
-        rebuilt = _autonomy_share_text_preserve_paragraphs(rebuilt)
-        if rebuilt:
-            return rebuilt
-
-    return weak_fallback or str(context.get("action_summary") or "").strip()
+    return fallback_action or str(context.get("action_summary") or "").strip()
 
 
 def _inherit_autonomy_presentation(source_context, target_context):
@@ -25248,12 +24826,10 @@ def _build_photo_embed(context, title_prefix="📸 小俠照片", attachment_fil
             description = user_instruction or f"「{album_title}」第 {shot_number} 張。"
     else:
         raw_title = f"{title_prefix}｜{_compact_scene_title(context)}"
-        description = _canonical_photo_original_text(context, type_override=_context_db_type(context))
-        if not description:
-            if _is_autonomy_context(context):
-                description = _autonomy_display_share_text(context) or str(context.get("action_summary") or "小俠今天的自主生活片刻。")
-            else:
-                description = str(context.get("message") or context.get("action_summary") or "小俠留下的這一刻。")
+        if _is_autonomy_context(context):
+            description = _autonomy_display_share_text(context) or str(context.get("action_summary") or "小俠今天的自主生活片刻。")
+        else:
+            description = str(context.get("message", "大俠按下 /photo 留住這一刻。"))
 
     embed = discord.Embed(
         title=str(raw_title)[:256],
@@ -25518,7 +25094,6 @@ async def _generate_photo_from_context(context, msg=None):
         "cosplay_clothing_ref_analysis": trace_context.get("cosplay_clothing_ref_analysis") or context.get("cosplay_clothing_ref_analysis") or {},
     })
     context = _inherit_autonomy_presentation(source_context_for_presentation, context)
-    context = _inherit_photo_lineage(source_context_for_presentation, context, action=context.get("trace_action") or trace_context.get("action") or "generation_descendant")
     trace_context.update({
         "source_mode": context.get("source_mode"),
         "generation_mode": generation_mode,
@@ -26845,16 +26420,10 @@ def _is_autonomy_context(context):
 
 
 def _context_db_type(context):
-    ctx = context or {}
-    mode = str(ctx.get("source_mode") or ctx.get("type") or ctx.get("db_type") or "").lower()
-    record_type = str(ctx.get("type") or ctx.get("db_type") or "").lower()
-    if mode == "diary" or record_type == "diary":
-        return "diary"
-    if mode == "cosplay" or record_type == "cosplay":
+    mode = str((context or {}).get("source_mode") or (context or {}).get("type") or "").lower()
+    if mode == "cosplay":
         return "cosplay"
-    if mode == "photobook" or record_type == "photobook" or str(ctx.get("album_type") or "").lower() == "photobook":
-        return "photobook"
-    if _is_autonomy_context(ctx):
+    if _is_autonomy_context(context):
         return "autonomy_photo"
     return "photo"
 
@@ -26973,7 +26542,6 @@ def _sync_autonomy_today_after_photo_replace(original_context, new_context):
 
 async def _overwrite_generated_photo(original_context, repaired_context, message=None):
     old_url = _photo_context_old_url(original_context)
-    repaired_context = _inherit_photo_lineage(original_context, dict(repaired_context or {}), action="repair")
     repaired_payload = _photo_db_payload(repaired_context, type_override=_context_db_type(repaired_context))
 
     # 交換日記：同步 HTML 與照片 DB。
@@ -28498,7 +28066,6 @@ async def _generate_seedream_v5_refine_from_v45(source_context):
     })
     trace_context["result_url"] = local_url or generated_image_url
     refined = _inherit_autonomy_presentation(source_context, refined)
-    refined = _inherit_photo_lineage(source_context, refined, action="v5_background_upgrade")
     _trace_stage(trace_context, "seedream_v45_final_result_after_v5_background_handoff", data={"result_url": trace_context["result_url"]})
     _write_generation_trace("photo", trace_context)
     return refined
@@ -28755,7 +28322,6 @@ async def _generate_with_existing_v5_background(source_context, *, mode="reroll"
         data={"result_url": trace_context["result_url"]},
     )
     regenerated = _inherit_autonomy_presentation(source_context, regenerated)
-    regenerated = _inherit_photo_lineage(source_context, regenerated, action=("more" if is_more else "dice_reroll"))
     _write_generation_trace("photo", trace_context)
     return regenerated
 
@@ -28815,7 +28381,6 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_more"
         context["user_input"] = "More button from previous photo"
-        context = _inherit_photo_lineage(self.context, context, action="more")
         if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
             context, root_prompt = _love_refresh_prompt_context(context)
         else:
@@ -28861,7 +28426,6 @@ class PhotoResultView(discord.ui.View):
         context.pop("__trace_context", None)
         context["trace_action"] = "photo_reroll_replace"
         context["user_input"] = "骰子取代 from previous photo"
-        context = _inherit_photo_lineage(self.context, context, action="dice_reroll")
         if str(context.get("source_mode") or context.get("type") or "").lower() == "love_intent":
             context, root_prompt = _love_refresh_prompt_context(context)
         else:
@@ -30555,13 +30119,6 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
                 "root_prompt_base": _clean_text_compact(diary_visual.get("authoritative_scene") or result.get("scenario_tw") or ""),
                 "mood": diary_visual.get("mood", "愛意與生活感"),
                 "message": combined_message,
-                "lineage_original_text": combined_message,
-                "original_display_text": combined_message,
-                "lineage_event": entry_content[:50] + "...",
-                "lineage_root_source_module": (custom_diary.get("source_module") if custom_diary else "diary"),
-                "lineage_root_type": "diary",
-                "lineage_root_topic": f"【交換日記】{entry_date}",
-                "lineage_action": "diary_original",
                 "image_url": up_img,
                 "local_url": local_url,
                 "local_filename": os.path.basename(local_url.split("/gallery/", 1)[1]) if "/gallery/" in str(local_url) else None,
@@ -32554,7 +32111,6 @@ async def on_raw_reaction_add(payload):
             old_image_url = source_embed.image.url if source_embed.image else None
             is_diary = "交換日記" in str(source_embed.title or "")
             diary_date = _extract_diary_date_from_title(source_embed.title) if is_diary else None
-            source_record = _find_photo_db_record(old_image_url, diary_date=diary_date or "")
 
             if is_diary:
                 scenario_tw = "小俠在家中度過一個自然安靜的生活片刻。"
@@ -32598,17 +32154,11 @@ async def on_raw_reaction_add(payload):
                     "image_url": generated_image_url,
                     "local_url": local_url,
                     "type": "diary",
-                    "source_mode": "diary",
                 }
-                photo_payload = _inherit_photo_lineage(
-                    source_record or {"type": "diary", "source_mode": "diary", "message": source_embed.description or ""},
-                    photo_payload,
-                    action=("legacy_diary_dice" if is_reroll else "legacy_diary_more"),
-                )
 
                 embed = discord.Embed(
                     title=title_str,
-                    description=_canonical_photo_original_text(photo_payload, type_override="diary") or source_embed.description,
+                    description=source_embed.description,
                     color=0xffb6c1,
                 )
                 embed.set_image(url=local_url)
@@ -32705,30 +32255,14 @@ async def on_raw_reaction_add(payload):
                     "message": visual["message"],
                     "image_url": generated_image_url,
                     "local_url": local_url,
-                    "type": "cosplay",
-                    "source_mode": "cosplay",
                 }
-                photo_payload = _inherit_photo_lineage(
-                    source_record or {"type": "cosplay", "source_mode": "cosplay", "message": event or "", "topic": topic},
-                    photo_payload,
-                    action=("legacy_cosplay_dice" if is_reroll else "legacy_cosplay_more"),
-                )
-                embed = discord.Embed(
-                    title=title_str,
-                    description=((photo_payload.get("post_text") or {}).get("description") if isinstance(photo_payload.get("post_text"), dict) else photo_payload.get("event") or "")[:4096],
-                    color=0xffb6c1,
-                )
+                embed = discord.Embed(title=title_str, color=0xffb6c1)
                 embed.set_image(url=local_url)
-                inherited_post = photo_payload.get("post_text") if isinstance(photo_payload.get("post_text"), dict) else {}
-                cosplay_fields = [
-                    ("🎭 今日角色", inherited_post.get("character_intro")),
-                    ("✨ 小俠版詮釋", inherited_post.get("xiaoxia_interpretation")),
-                    ("📸 今日畫面", inherited_post.get("scene_caption") or visual.get("composition")),
-                    ("💌 小俠給大俠", inherited_post.get("message_to_daxia") or _canonical_photo_original_text(photo_payload, type_override="cosplay")),
-                ]
-                for field_name, field_value in cosplay_fields:
-                    if str(field_value or "").strip():
-                        embed.add_field(name=field_name, value=str(field_value)[:1024], inline=False)
+                embed.add_field(
+                    name="💌 專屬留言",
+                    value=visual["message"],
+                    inline=False,
+                )
                 embed.set_footer(
                     text=f"{emoji_name} Emoji 快捷{action_name}完成 | Seedream v4.5"
                 )
