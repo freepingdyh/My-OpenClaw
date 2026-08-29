@@ -1,0 +1,73 @@
+name: Build v1.5.41_R1 downloadable code
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - feature/v1.5.41_R1-female-positive
+    paths:
+      - .github/workflows/apply-v1541-r1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-file:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v1.5.41_R1-female-positive
+          fetch-depth: 1
+
+      - name: Create v1.5.41_R1 complete code
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          src = Path('lobster_discord.py')
+          text = src.read_text(encoding='utf-8')
+          text = re.sub(r'LOBSTER_VERSION = "[^"]+"', 'LOBSTER_VERSION = "1.5.41_R1"', text, count=1)
+          text = re.sub(r'prompt_engine=v[^"\s]+', 'prompt_engine=v1.5.41_R1', text, count=1)
+
+          pattern = r'def _v1540_people_rule\(checklist=None\):.*?\n\ndef _v1540_compact_identity_line\(\):'
+          replacement = '''def _v1540_people_rule(checklist=None):
+    c = checklist if isinstance(checklist, dict) else {}
+    policy = str(c.get("people_policy") or "")
+    if c.get("strict_solo_required") or policy == "private_strict_solo":
+        return "People: Xiaoxia alone. She is the only visible person."
+    if c.get("female_interaction_ok") or policy == "autonomy_female_interaction_ok":
+        return (
+            "People: Xiaoxia is the unmistakable foreground heroine. Nearby people, if any, are female friends. "
+            "Female friends may interact naturally but remain supporting characters and must not outshine or appear more voluptuous than Xiaoxia. "
+            "Background patrons naturally blend into the environment. Xiaoxia remains the visual focus."
+        )
+    if policy == "autonomy_sport_no_male":
+        return "People: Xiaoxia is the unmistakable heroine. Supporting participants, if needed, are women. Xiaoxia remains the visual focus."
+    if c.get("allow_background_bystanders") or policy in {"autonomy_public_background_ok", "public_background_bystanders_allowed"}:
+        return (
+            "People: Xiaoxia is the foreground heroine. Nearby people, if any, are women. "
+            "Background patrons naturally blend into the environment. Xiaoxia remains the visual focus."
+        )
+    return "People: Xiaoxia is the foreground heroine. Nearby people, if any, are women. Background patrons naturally blend into the environment. Xiaoxia remains the visual focus."
+
+
+def _v1540_compact_identity_line():'''
+          updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'Expected one people rule block, found {count}')
+          out = Path('lobster_discord_v1541_R1.py')
+          out.write_text(updated, encoding='utf-8')
+          PY
+          python -m py_compile lobster_discord_v1541_R1.py
+          rm -rf __pycache__
+
+      - name: Upload complete code
+        uses: actions/upload-artifact@v4
+        with:
+          name: lobster_discord_v1541_R1
+          path: lobster_discord_v1541_R1.py
+          if-no-files-found: error
