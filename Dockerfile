@@ -23,6 +23,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.05：延續 v1.12.04 Scene Fidelity Guard，
-# /photo 家族直接鎖定 authoritative_scene semantic contract，繞過舊 pose/minimal 覆寫。
-CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11205.py
+# v1.12.05a：延續 v1.12.05 authoritative_scene direct contract，
+# Discord 一般 /photo 的「場景」直接顯示 authoritative_scene，並輸出 Seedream semantic contract log。
+CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11205a.py
