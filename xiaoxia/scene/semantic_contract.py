@@ -124,6 +124,12 @@ async def _generate_photo_from_context_semantic_contract(context, msg=None):
             f"scene_len={len(authoritative_scene)} "
             f"prompt_len={len(rebuilt_prompt)}"
         )
+        printable_contract = rebuilt_prompt.replace("\n", " ").replace("\r", " ")
+        print(
+            "🎯 [SEEDREAM_CONTRACT] "
+            f"source_mode={source_mode} raw_seedream_mode=title_scene_semantic_contract_direct "
+            f"text={printable_contract[:1800]}"
+        )
 
     return await original(new_context, msg=msg)
 
