@@ -23,6 +23,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.04：延續 v1.12.03 Wardrobe / Outfit core，
-# 新增 Gemini Scene Fidelity Guard；Seedream 與衍生模組仍只讀 authoritative_scene。
-CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11204.py
+# v1.12.05：延續 v1.12.04 Scene Fidelity Guard，
+# /photo 家族直接鎖定 authoritative_scene semantic contract，繞過舊 pose/minimal 覆寫。
+CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11205.py
