@@ -23,7 +23,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.02a：延續 v1.12.01 Photo Lineage / Presentation，
-# 新增 PhotoResultView 外部 routing seam 與私人 API health check。
-# Stable monolith 仍原封不動，可隨時改回 v1.12.01 或 lobster_discord.py。
-CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11202.py
+# v1.12.03：延續 v1.12.02b Photo Actions extraction，
+# 新增 Wardrobe / Outfit core 外移；stable monolith 保留作 rollback/reference。
+CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11203.py
