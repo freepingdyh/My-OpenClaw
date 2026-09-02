@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 
 APP_NAME = "Xiaoxia Calendar"
 CONTACT_EMAIL = "xiaoxia.lobster@gmail.com"
-GOOGLE_SITE_VERIFICATION = "cGr4OaoVa2zqFRI8L86C7WIZv0MzRydkk_8tHsU_0ws"
+GOOGLE_SITE_VERIFICATION = "PcL1nNtPXB0_f44VAjepdQ7imkAo1ZKiHc0kUbOJJwc"
 
 _STYLE = """
 <style>
