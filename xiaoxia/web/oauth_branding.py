@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 
 APP_NAME = "Xiaoxia Calendar"
 CONTACT_EMAIL = "xiaoxia.lobster@gmail.com"
+GOOGLE_SITE_VERIFICATION = "cGr4OaoVa2zqFRI8L86C7WIZv0MzRydkk_8tHsU_0ws"
 
 _STYLE = """
 <style>
@@ -22,7 +23,20 @@ code{background:#f4f4f4;padding:2px 5px;border-radius:4px}
 
 
 def _page(title: str, body: str) -> str:
-    return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{title}</title>{_STYLE}</head><body>{body}</body></html>"""
+    verification_meta = (
+        f"<meta name='google-site-verification' content='{GOOGLE_SITE_VERIFICATION}'>"
+        if GOOGLE_SITE_VERIFICATION
+        else ""
+    )
+    return (
+        "<!doctype html><html lang='en'><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{title}</title>"
+        f"{verification_meta}"
+        f"{_STYLE}"
+        f"</head><body>{body}</body></html>"
+    )
 
 
 HOME_HTML = _page(
@@ -119,4 +133,5 @@ def install_oauth_branding_pages(app):
         "public_routes": ["/", "/privacy", "/terms"],
         "vault_route": "/vault",
         "removed_legacy_root_routes": removed,
+        "google_site_verification": bool(GOOGLE_SITE_VERIFICATION),
     }
