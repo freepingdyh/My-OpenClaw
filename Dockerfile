@@ -23,6 +23,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.05a：延續 v1.12.05 authoritative_scene direct contract，
-# Discord 一般 /photo 的「場景」直接顯示 authoritative_scene，並輸出 Seedream semantic contract log。
-CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11205a.py
+# v1.12.05b：延續 v1.12.05a Scene SSOT observability，
+# 新增 Xiaoxia Calendar 公開 OAuth 品牌首頁、Privacy、Terms；原私人金庫移至 /vault。
+CMD npx openclaw gateway start & python3 xiaoxia_runtime_v11205b.py
