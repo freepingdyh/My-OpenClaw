@@ -2,9 +2,9 @@
 # bullseye-security 套件索引已出現 404，改用 bookworm 避免舊版安全倉庫套件版本失效。
 FROM node:20-bookworm-slim
 
-# 安裝 Python 3、venv、pip 與必要編譯工具
+# 安裝 Python 3、venv、pip、ffmpeg 與必要編譯工具
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv build-essential && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv build-essential ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -28,8 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06g：H3 共用按鈕 + 舊圖 /影片 + structured diagnostics。
-# 若 fal 明確回 type=content_policy_violation 且 loc=body.prompt，
-# 只針對 prompt 做最小化重試：先保留 Sulafat reference audio；若仍被政策擋，再用 minimal silent Turbo。
+# v1.12.06h：H3 預設 10 秒；畫面中的小俠不開口，只做身份優先的細微自然動作。
+# Sulafat 生成 24 歲、年輕、活潑、明亮、帶點磁性的台灣女生「內心旁白」，
+# ffmpeg 將 Sulafat 後製混入 H3 自己生成的場景環境音；Sulafat 失敗才退 H3 原生畫外音。
 # H3 enable_safety_checker 在未設定 ENV 時維持 false。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206g.py
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206h.py
