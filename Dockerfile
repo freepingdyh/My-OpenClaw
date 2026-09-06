@@ -28,7 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06f：H3 共用按鈕 + 舊圖 /影片；保留三層 fallback。
-# 新增 structured error diagnostics，Discord 僅顯示 exception/http/type/loc/msg/model/mode；
-# H3 enable_safety_checker 在未設定 ENV 時預設 false，仍可用 ENV 明確覆寫。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206f.py
+# v1.12.06g：H3 共用按鈕 + 舊圖 /影片 + structured diagnostics。
+# 若 fal 明確回 type=content_policy_violation 且 loc=body.prompt，
+# 只針對 prompt 做最小化重試：先保留 Sulafat reference audio；若仍被政策擋，再用 minimal silent Turbo。
+# H3 enable_safety_checker 在未設定 ENV 時維持 false。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206g.py
