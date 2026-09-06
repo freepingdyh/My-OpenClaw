@@ -1,9 +1,10 @@
-# 使用輕量級的 Node.js 20 映像檔作為基底
-FROM node:20-bullseye-slim
+# 使用較新的 Node.js 20 Debian Bookworm 映像檔作為基底
+# bullseye-security 套件索引已出現 404，改用 bookworm 避免舊版安全倉庫套件版本失效。
+FROM node:20-bookworm-slim
 
 # 安裝 Python 3, pip 以及必要的編譯工具
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip python3-venv build-essential && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -13,8 +14,7 @@ WORKDIR /workspace
 # 優先複製 requirements.txt 以利用 Docker 快取機制
 COPY requirements.txt .
 
-# 安裝 Python 依賴套件 (為了避免污染系統環境，我們設定不使用快取)
-# 移除 --break-system-packages 即可順利安裝
+# 安裝 Python 依賴套件
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # 複製專案內的所有檔案到容器的工作目錄
