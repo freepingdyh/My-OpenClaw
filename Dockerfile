@@ -28,6 +28,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06：延續 v1.12.05b OAuth branding + Scene SSOT observability，
-# 新增所有共用 PhotoResultView 圖片卡的 MiniMax H3 影片生成按鈕。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206.py
+# v1.12.06a：修正 v1.12.02b PhotoResultView 已是 factory/router，
+# H3 必須包在 factory 外層，才能真的出現在 cosplay / photo / diary / calendar 等新結果卡。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206a.py
