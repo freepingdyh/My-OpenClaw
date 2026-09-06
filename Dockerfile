@@ -28,6 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06e：Sulafat/reference-audio 優先；若被擋則 H3 native dialogue；
-# native dialogue 若仍被 fal content checker 擋，最後自動退成無語音 H3 image-to-video，避免整支影片失敗。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206e.py
+# v1.12.06f：H3 共用按鈕 + 舊圖 /影片；保留三層 fallback。
+# 新增 structured error diagnostics，Discord 僅顯示 exception/http/type/loc/msg/model/mode；
+# H3 enable_safety_checker 在未設定 ENV 時預設 false，仍可用 ENV 明確覆寫。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206f.py
