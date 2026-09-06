@@ -28,6 +28,5 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06a：修正 v1.12.02b PhotoResultView 已是 factory/router，
-# H3 必須包在 factory 外層，才能真的出現在 cosplay / photo / diary / calendar 等新結果卡。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206a.py
+# v1.12.06b：延續 H3 共用按鈕，並新增回覆舊圖片後輸入 /影片 的入口。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206b.py
