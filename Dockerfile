@@ -28,6 +28,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06d：Sulafat/reference-audio 仍為優先；若 fal content checker
-# 專門擋 reference_audio_urls，則自動改用 H3 Max Turbo 原生語音重試一次。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206d.py
+# v1.12.06e：Sulafat/reference-audio 優先；若被擋則 H3 native dialogue；
+# native dialogue 若仍被 fal content checker 擋，最後自動退成無語音 H3 image-to-video，避免整支影片失敗。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206e.py
