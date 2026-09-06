@@ -28,6 +28,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06c：延續 H3 共用按鈕與 /影片 舊圖入口，
-# 並在 Sulafat TTS 前清理可能觸發 fal reference-audio content checker 的台詞措辭。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206c.py
+# v1.12.06d：Sulafat/reference-audio 仍為優先；若 fal content checker
+# 專門擋 reference_audio_urls，則自動改用 H3 Max Turbo 原生語音重試一次。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206d.py
