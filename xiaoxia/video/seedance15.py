@@ -41,7 +41,6 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def _config(app: Any) -> Dict[str, Any]:
-    # For a fair H3 PK, inherit H3 duration when possible. Seedance accepts 4-12 s.
     try:
         h3_duration = int(h3._config().get("duration") or 10)
     except Exception:
@@ -65,7 +64,6 @@ def _clean(app: Any, value: Any) -> str:
 
 
 async def _director_plan(app: Any, context: Dict[str, Any]) -> Dict[str, str]:
-    """Use the same upstream Director logic as H3, not H3's provider-specific prompt."""
     existing = context.get("video_compare_plan") or context.get("h3_director_plan")
     if isinstance(existing, dict) and existing.get("hero_action"):
         return dict(existing)
@@ -77,7 +75,6 @@ async def _director_plan(app: Any, context: Dict[str, Any]) -> Dict[str, str]:
             context["video_compare_plan"] = dict(plan)
             return dict(plan)
 
-    # Conservative fallback if the shared Director is unavailable.
     return {
         "video_theme": _clean(app, context.get("title") or context.get("scene_summary") or "小俠自然動起來")[:100],
         "motion_level": "natural",
@@ -91,12 +88,6 @@ async def _director_plan(app: Any, context: Dict[str, Any]) -> Dict[str, str]:
 
 
 def build_seedance_prompt(app: Any, context: Dict[str, Any], plan: Dict[str, str]) -> str:
-    """Translate shared intent into Seedance 1.5 Pro's preferred prompt grammar.
-
-    Fal's Seedance guide recommends: primary action -> dialogue/key sound -> ambient
-    audio -> visual style.  For I2V it specifically says the start frame already
-    defines the scene, so prompts should focus on motion and sound.
-    """
     action = _clean(app, plan.get("hero_action") or "She makes one natural movement.")
     reaction = _clean(app, plan.get("reaction") or "She settles naturally.")
     camera = _clean(app, plan.get("camera") or "mostly stable camera")
@@ -104,7 +95,6 @@ def build_seedance_prompt(app: Any, context: Dict[str, Any], plan: Dict[str, str
     line = _clean(app, plan.get("voiceover") or "")
     audio_mode = str(plan.get("audio_mode") or "voiceover").strip().lower()
 
-    # Do not re-invent facial/body descriptors: the start frame is the authority.
     layers = [
         f"{action}, then {reaction}",
         "preserve the exact person, face, hairstyle, outfit, body proportions, lighting and environment from the start frame",
@@ -235,7 +225,6 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
     try:
         context = dict(getattr(view, "context", {}) or {})
         result = await generate_seedance15_video(app, context)
-        # Preserve the plan on the live view so repeated PK runs can reuse the same intent.
         if isinstance(result.get("director_plan"), dict):
             view.context["video_compare_plan"] = dict(result["director_plan"])
 
@@ -293,14 +282,23 @@ class Seedance15VideoButton(discord.ui.Button):
 
 
 def install_seedance15_video_button(app: Any) -> Dict[str, Any]:
-    """Append Seedance beside the existing H3 button on every shared photo result view."""
-    view_cls = getattr(app, "PhotoResultView", None)
-    if view_cls is None:
+    """Append Seedance to the real stable PhotoResultView class behind the router.
+
+    v1.12.02b replaced app.PhotoResultView with a factory function that instantiates
+    _V11202_STABLE_PHOTO_RESULT_VIEW_CLASS.  Patching the factory function's __init__
+    reports success but never runs during view creation.  Patch the stable class itself.
+    """
+    routed_factory = getattr(app, "PhotoResultView", None)
+    stable_cls = getattr(app, "_V11202_STABLE_PHOTO_RESULT_VIEW_CLASS", None)
+    target_cls = stable_cls or routed_factory
+    if target_cls is None:
         raise RuntimeError("PhotoResultView not found")
-    if getattr(view_cls, "_xiaoxia_seedance15_installed", False):
+    if not isinstance(target_cls, type):
+        raise RuntimeError(f"Seedance PhotoResultView target is not a class: {type(target_cls).__name__}")
+    if getattr(target_cls, "_xiaoxia_seedance15_installed", False):
         return {"module": "xiaoxia.video.seedance15", "patched": False, "reason": "already_installed"}
 
-    original_init = view_cls.__init__
+    original_init = target_cls.__init__
 
     def patched_init(self, context, *args, **kwargs):
         original_init(self, context, *args, **kwargs)
@@ -309,15 +307,19 @@ def install_seedance15_video_button(app: Any) -> Dict[str, Any]:
             for child in self.children
         ):
             self.add_item(Seedance15VideoButton(app, self))
+        labels = [str(getattr(child, "label", "") or "") for child in self.children]
+        print(f"🎞️ [SEEDANCE15_VIEW_READY] target={target_cls.__name__} present={'🎞️ SD 1.5Pro' in labels} labels={labels}")
 
-    view_cls.__init__ = patched_init
-    view_cls._xiaoxia_seedance15_installed = True
+    target_cls.__init__ = patched_init
+    target_cls._xiaoxia_seedance15_installed = True
     app.generate_seedance15_video_from_context = lambda context: generate_seedance15_video(app, context)
 
     cfg = _config(app)
     return {
         "module": "xiaoxia.video.seedance15",
         "patched": True,
+        "target": getattr(target_cls, "__name__", type(target_cls).__name__),
+        "router_detected": bool(stable_cls is not None),
         "model_id": cfg["model_id"],
         "duration": cfg["duration"],
         "resolution": cfg["resolution"],
