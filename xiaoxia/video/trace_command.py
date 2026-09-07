@@ -107,13 +107,24 @@ def _format_trace(trace: Dict[str, Any]) -> str:
     lines.append(f"`voice_mode: {trace.get('voice_mode')}`")
     lines.append(f"`duration: {trace.get('duration_sec')}s | resolution: {trace.get('resolution')}`")
     lines.append(f"`safety_checker: {str(bool(trace.get('safety_checker'))).lower()}`")
+    if trace.get("video_theme"):
+        lines.append(f"`video_theme: {_short(trace.get('video_theme'), 180)}`")
+    if trace.get("motion_level"):
+        lines.append(f"`motion_level: {trace.get('motion_level')}`")
+    plan = trace.get("director_plan") if isinstance(trace.get("director_plan"), dict) else {}
+    if plan:
+        if plan.get("hero_action"):
+            lines.append(f"`hero_action: {_short(plan.get('hero_action'), 180)}`")
+        if plan.get("camera"):
+            lines.append(f"`camera: {_short(plan.get('camera'), 120)}`")
+        if plan.get("voiceover"):
+            lines.append(f"`voiceover: {_short(plan.get('voiceover'), 180)}`")
     if trace.get("voice_text"):
         lines.append(f"`voice_text: {_short(trace.get('voice_text'), 180)}`")
     if local_fp and local_fp.get("sha256"):
         lines.append(f"`local_image_sha256: {local_fp.get('sha256')}`")
 
-    # Show every fal attempt, not only the latest one. This is essential for retry diagnostics.
-    for attempt in attempts[-3:]:
+    for attempt in attempts[-4:]:
         if isinstance(attempt, dict):
             lines.extend(_attempt_lines(attempt))
 
@@ -147,4 +158,5 @@ def install_h3_trace_command(app: Any) -> Dict[str, Any]:
         "command": "/H3紀錄 <trace_id|最近>",
         "jsonl": _paths(app)["jsonl"],
         "attempts_visible": True,
+        "director_plan_visible": True,
     }
