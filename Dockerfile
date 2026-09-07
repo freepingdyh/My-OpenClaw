@@ -28,7 +28,9 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06k：H3 10 秒 voiceover + persistent trace + body.image_url 專用一次重試。
-# 若 fal 明確回 content_policy_violation / body.image_url，下載同一 image_url 的原始 bytes，
-# 重新上傳到 fal 取得 fresh URL；除 image_url 外 payload 完全不變，方便以 trace SHA256 驗證穩定性。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206k.py
+# v1.12.06l：H3 10 秒 voiceover + persistent trace + 三段診斷重試。
+# Attempt 1：原始 URL + 原始 prompt。
+# Attempt 2：若 body.image_url 被擋，下載同一 bytes 後重新上傳到 fal，僅替換 image_url。
+# Attempt 3：若 Attempt 2 轉為 body.prompt 被擋，沿用同一 fresh image_url，只改極簡 motion prompt。
+# /H3紀錄 會列出最多三次 attempt 的 SHA256 / prompt / error loc。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206l.py
