@@ -92,26 +92,43 @@ async def _tts_sulafat_voiceover(app: Any, script: str, cfg: Dict[str, Any]) -> 
     return wav_path
 
 
+def _ambience_hint(app: Any, context: Dict[str, Any]) -> str:
+    """Map the visual scene to a short audio cue without copying scene prose into fal prompt."""
+    scene = _scene(app, context).lower()
+    if any(k in scene for k in ("海", "海邊", "海岸", "海浪", "港", "沙灘", "燈塔", "seaside", "ocean", "beach")):
+        return "soft ocean waves, light coastal wind, and distant seabirds"
+    if any(k in scene for k in ("咖啡", "咖啡廳", "咖啡館", "cafe", "coffee")):
+        return "quiet cafe room tone, faint cups and soft distant activity"
+    if any(k in scene for k in ("舞台", "馬戲", "劇場", "表演", "circus", "stage", "theater", "theatre")):
+        return "subtle indoor venue ambience and soft room tone"
+    if any(k in scene for k in ("街", "市區", "夜市", "street", "city", "downtown")):
+        return "soft distant city ambience with restrained traffic and footsteps"
+    if any(k in scene for k in ("森林", "山", "草原", "公園", "戶外", "forest", "mountain", "park", "outdoor")):
+        return "light natural wind, leaves and distant outdoor ambience"
+    return "quiet natural room tone appropriate to the visible environment"
+
+
 def _ambient_prompt(app: Any, context: Dict[str, Any], *, minimal: bool = False) -> str:
-    scene = _scene(app, context)
+    """Dedicated H3 motion prompt. The still image owns appearance/scene; text directs motion/audio only."""
+    ambience = _ambience_hint(app, context)
     if minimal:
         return (
-            "Animate the same person from the source image with subtle natural motion. "
-            "Keep the same face, hairstyle, clothing, body proportions, camera view and location. "
-            "Her mouth stays relaxed and mostly closed; she is not speaking. "
-            "Use only small realistic movements: blinking, breathing, slight eye movement, tiny head movement, and gentle hair or fabric motion. "
-            "Avoid exaggerated facial expressions, wide mouth movement, strong jaw motion, neck strain, or dramatic acting. "
-            "Generate natural scene ambience only, with no dialogue and no music."
+            "Image 1 is the exact first frame and visual source of truth. "
+            "Keep the same woman, face, hairstyle, outfit, body proportions, pose logic, camera framing and background. "
+            "Animate only subtle natural motion: blinking, breathing, tiny eye shifts, a very small head movement, and gentle hair or fabric movement. "
+            "She is not speaking; keep her mouth relaxed and mostly closed. "
+            "No new people, objects, text, logos, scene changes, dramatic acting, large pose changes, or facial distortion. "
+            f"Audio track: {ambience}. No dialogue and no music."
         )
     return (
-        "Animate the source image as the same Xiaoxia, prioritizing identity preservation over dramatic motion. "
-        "Keep her facial geometry, eyes, nose, jawline, neck, hairstyle, outfit, body proportions, camera framing and environment consistent with the still image. "
-        "She does not speak on camera: keep her mouth relaxed and mostly closed. "
-        "Use restrained realistic motion only: natural breathing, blinking, subtle eye shifts, very small head movement, and gentle hair/fabric movement appropriate to the existing pose. "
-        "No exaggerated smile, no wide mouth opening, no theatrical expression, no pronounced facial or neck muscle tension, and no large pose change. "
-        "Do not add people, text, subtitles, logos, or change the location. "
-        "Generate natural diegetic ambience matching the scene, such as wind, waves, gulls, cafe room tone, street ambience, or quiet indoor sound as appropriate. No dialogue and no music. "
-        f"Scene anchor: {scene}"
+        "Image 1 is the exact first frame and visual source of truth. Do not reinterpret the scene. "
+        "Keep the same woman, facial identity, hairstyle, outfit, body proportions, pose logic, camera framing and background. "
+        "0-3s: natural blinking and breathing only, with a tiny eye shift. "
+        "3-7s: add a very small head movement and gentle hair or fabric motion that follows the existing pose. "
+        "7-10s: settle naturally back toward the original pose with another subtle blink. "
+        "She is not speaking; keep her mouth relaxed and mostly closed throughout. "
+        "Prioritize identity stability over expressive motion. No exaggerated smile, wide mouth opening, strong jaw or neck motion, theatrical expression, large pose change, camera relocation, new people, new objects, text, subtitles, logos or watermarks. "
+        f"Audio track: {ambience}. Keep it subtle and diegetic. No dialogue and no music."
     )
 
 
@@ -173,7 +190,6 @@ async def _mix_voiceover(video_path: str, voice_path: str, duration: int) -> str
     if not ffmpeg:
         raise RuntimeError("FFMPEG_NOT_FOUND")
     out = os.path.splitext(video_path)[0] + "_voiceover.mp4"
-    # Prefer H3's own ambient track at low volume; overlay Sulafat after a short natural lead-in.
     cmd = [
         ffmpeg, "-y", "-i", video_path, "-i", voice_path,
         "-filter_complex",
@@ -183,7 +199,6 @@ async def _mix_voiceover(video_path: str, voice_path: str, duration: int) -> str
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, err = await proc.communicate()
     if proc.returncode != 0:
-        # Some H3 outputs may have no audio stream. In that case keep Sulafat only.
         cmd2 = [
             ffmpeg, "-y", "-i", video_path, "-i", voice_path,
             "-filter_complex", "[1:a]adelay=350|350,volume=1.0[a]",
@@ -239,7 +254,6 @@ async def generate_voiceover_video(app: Any, context: Dict[str, Any]) -> Dict[st
 
         base = await _render_h3(app, context, cfg, _ambient_prompt(app, context))
         mixed = await _mix_voiceover(base["local_path"], voice_path, cfg["duration"])
-        # Publish mixed file in the existing gallery directory.
         final_name = os.path.basename(mixed)
         final_public = f"https://xiaoxia0320.zeabur.app/gallery/{final_name}"
         return {
