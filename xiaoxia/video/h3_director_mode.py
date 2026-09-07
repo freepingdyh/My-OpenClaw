@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06n — shared H3 Director + native H3 off-screen narration.
+"""v1.12.06o — shared H3 Director + stricter off-screen narration / no-lip-sync prompt.
 
 One common video-directing layer for every Xiaoxia image source.
 No module-specific strategy tables and no scene-action database.
@@ -19,6 +19,7 @@ import discord
 from google.genai import types
 
 from xiaoxia.video import h3, diagnostics, legacy_command, trace_store, voiceover_mode
+
 
 _ALLOWED_MOTION = {"quiet", "natural", "dynamic"}
 
@@ -99,7 +100,7 @@ async def build_h3_director_plan(app: Any, context: Dict[str, Any], cfg: Dict[st
 
 先讀懂目前場景，再決定這 10 秒『到底要演什麼』。第一步一定要先產生一句簡短 video_theme，後面的動作、反應、鏡頭、旁白、環境音全部必須服務同一個主題，不能各自發散。
 
-角色關係：小俠是在演給大俠看。旁白是小俠對大俠的內心戲／畫外音，不是主持、介紹、解說畫面，也不要把眼前看得到的內容逐句念出來。
+角色關係：小俠是在演給大俠看。旁白是小俠對大俠的內心戲／畫外音，是完全離畫的 off-screen narration，不是主持、介紹、解說畫面，也不要把眼前看得到的內容逐句念出來。可見人物不是聲音來源。
 
 導演原則：
 1. 每支片只安排一個主要動作（Hero Action）+ 一個自然收尾反應 + 最多一個簡單 Camera Intent。
@@ -107,8 +108,9 @@ async def build_h3_director_plan(app: Any, context: Dict[str, Any], cfg: Dict[st
 3. 大動作必須能從目前場景自然推導，不可憑空新增道具、換場景、換衣服或增加其他人物。
 4. Hero Action 要單純、可在 10 秒內完成，不要同時塞很多事件。
 5. 旁白約 12～30 個中文字，繁體中文，自然像 24 歲台灣女生心裡真的會講的話；可以自然稱呼大俠。少 AI 文案感、少空泛情話。
-6. H3 會自行產生聲音，所以 ambience 只需簡短描述現場該有的聲音。
-7. hero_action / reaction / camera / ambience 請用簡短英文，讓後續直接組成 H3 prompt；video_theme / voiceover 用繁體中文。
+6. 旁白一律視為畫外音／內心旁白：畫面中的小俠不可開口、不做 lip-sync、不可像在對嘴說台詞。
+7. H3 會自行產生聲音，所以 ambience 只需簡短描述現場該有的聲音。
+8. hero_action / reaction / camera / ambience 請用簡短英文，讓後續直接組成 H3 prompt；video_theme / voiceover 用繁體中文。
 
 只輸出 JSON，不要解釋：
 {{
@@ -167,10 +169,12 @@ async def build_h3_director_plan(app: Any, context: Dict[str, Any], cfg: Dict[st
 def build_compact_h3_prompt(plan: Dict[str, str], *, minimal: bool = False) -> str:
     if minimal:
         return (
-            "Use Image 1 as the same woman and the same place. "
-            f"Action: {plan['hero_action']} Then: {plan['reaction']} "
-            "The woman on screen does not speak or lip-sync. "
-            "Off-screen Traditional Chinese voice-over by a young Taiwanese woman, natural, lively, bright and warm: "
+            "Image 1 is the same woman in the same place. "
+            f"Action: {plan['hero_action']} Then: {plan['reaction']}. "
+            "Keep the same face, outfit and framing. "
+            "The visible woman never speaks, never mouths words, and never lip-syncs; keep her lips closed or only slightly parted for natural breathing. "
+            "The narration is completely off-screen, non-diegetic, and is NOT produced by the visible woman. "
+            "Off-screen Traditional Chinese inner narration by a young Taiwanese woman, natural, lively, bright and warm: "
             f'\"{plan["voiceover"]}\". '
             f"Natural ambience: {plan['ambience']}. No subtitles. No music."
         )
@@ -187,10 +191,12 @@ def build_compact_h3_prompt(plan: Dict[str, str], *, minimal: bool = False) -> s
         f"Main action: {plan['hero_action']} {motion_note} "
         f"Reaction: {plan['reaction']} "
         f"Camera: {plan['camera']}. "
-        "Keep the same woman, face, outfit and location; do not add people or text. "
-        "The woman visible on screen does NOT speak and does NOT lip-sync. "
-        "Use native off-screen voice-over narration in Traditional Chinese, spoken by a young Taiwanese woman: lively, bright, warm, natural, slightly magnetic, never announcer-like. "
-        f'Voice-over line: \"{plan["voiceover"]}\". '
+        "Keep the same woman, face, hairstyle, outfit, body proportions and location; do not add people or text. "
+        "The visible woman must remain silent: never speak, never mouth words, never lip-sync, and never behave as the sound source. "
+        "Keep her lips closed or only slightly parted for natural breathing, with restrained jaw and neck motion and no exaggerated talking expression. "
+        "The narration is fully off-screen, non-diegetic inner monologue and is NOT coming from the visible woman. "
+        "Use native off-screen Traditional Chinese narration by a young Taiwanese woman: lively, bright, warm, natural, slightly magnetic, never announcer-like. "
+        f'Voice-over line: "{plan["voiceover"]}". '
         f"Native ambience: {plan['ambience']}. No subtitles. No music."
     )
 
@@ -302,6 +308,7 @@ def install_h3_director_mode(app: Any) -> Dict[str, Any]:
         return {"patched": False, "reason": "already_installed"}
 
     trace_store._ORIGINAL_GENERATE = _generate_h3_native_directed
+
     diagnostics._send_success_to_interaction = _send_success_interaction
     legacy_command._send_video_result = _send_success_ctx
 
