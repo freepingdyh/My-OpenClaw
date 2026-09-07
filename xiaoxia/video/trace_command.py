@@ -38,7 +38,6 @@ def _find_trace(app: Any, trace_id: str) -> Optional[Dict[str, Any]]:
     if data:
         return data
 
-    # Search newest-first from jsonl when a success trace or non-failed stage is requested.
     try:
         with open(paths["jsonl"], "r", encoding="utf-8") as f:
             rows = f.readlines()
@@ -67,21 +66,37 @@ def _short(value: Any, limit: int = 260) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _latest_attempt(trace: Dict[str, Any]) -> Dict[str, Any]:
-    attempts = trace.get("fal_attempts")
-    if isinstance(attempts, list) and attempts:
-        item = attempts[-1]
-        return item if isinstance(item, dict) else {}
-    return {}
+def _attempt_lines(attempt: Dict[str, Any]) -> list[str]:
+    no = attempt.get("attempt")
+    tag = attempt.get("tag") or ""
+    status = attempt.get("status") or ""
+    err = attempt.get("error") if isinstance(attempt.get("error"), dict) else {}
+    image_fp = attempt.get("image_fingerprint") if isinstance(attempt.get("image_fingerprint"), dict) else {}
+
+    lines = [f"**Attempt {no}** `{tag}`"]
+    lines.append(f"`status: {status}`")
+    lines.append(f"`prompt_len: {attempt.get('prompt_len')}`")
+    if attempt.get("prompt_sha256"):
+        lines.append(f"`prompt_sha256: {attempt.get('prompt_sha256')}`")
+    if image_fp:
+        lines.append(f"`image_http: {image_fp.get('http_status')}`")
+        lines.append(f"`image_size: {image_fp.get('size')}`")
+        if image_fp.get("sha256"):
+            lines.append(f"`image_sha256: {image_fp.get('sha256')}`")
+    if err:
+        if err.get("http_status") is not None:
+            lines.append(f"`http: {err.get('http_status')}`")
+        if err.get("type"):
+            lines.append(f"`type: {err.get('type')}`")
+        if err.get("loc"):
+            lines.append(f"`loc: {err.get('loc')}`")
+        if err.get("msg"):
+            lines.append(f"`msg: {_short(err.get('msg'), 160)}`")
+    return lines
 
 
 def _format_trace(trace: Dict[str, Any]) -> str:
-    attempt = _latest_attempt(trace)
-    err = trace.get("last_error") if isinstance(trace.get("last_error"), dict) else {}
-    if not err and isinstance(attempt.get("error"), dict):
-        err = attempt.get("error")
-
-    image_fp = attempt.get("image_fingerprint") if isinstance(attempt.get("image_fingerprint"), dict) else {}
+    attempts = trace.get("fal_attempts") if isinstance(trace.get("fal_attempts"), list) else []
     local_fp = trace.get("source_image_local") if isinstance(trace.get("source_image_local"), dict) else {}
 
     lines = ["🧾 **H3 Trace**"]
@@ -92,29 +107,15 @@ def _format_trace(trace: Dict[str, Any]) -> str:
     lines.append(f"`voice_mode: {trace.get('voice_mode')}`")
     lines.append(f"`duration: {trace.get('duration_sec')}s | resolution: {trace.get('resolution')}`")
     lines.append(f"`safety_checker: {str(bool(trace.get('safety_checker'))).lower()}`")
-    if attempt:
-        lines.append(f"`model: {attempt.get('model_id')}`")
-        lines.append(f"`prompt_len: {attempt.get('prompt_len')}`")
-        if attempt.get("prompt_sha256"):
-            lines.append(f"`prompt_sha256: {attempt.get('prompt_sha256')}`")
-    if image_fp:
-        lines.append(f"`image_url_http: {image_fp.get('http_status')}`")
-        lines.append(f"`image_url_size: {image_fp.get('size')}`")
-        if image_fp.get("sha256"):
-            lines.append(f"`image_url_sha256: {image_fp.get('sha256')}`")
-    if local_fp and local_fp.get("sha256"):
-        lines.append(f"`local_image_sha256: {local_fp.get('sha256')}`")
     if trace.get("voice_text"):
         lines.append(f"`voice_text: {_short(trace.get('voice_text'), 180)}`")
-    if err:
-        if err.get("http_status") is not None:
-            lines.append(f"`http: {err.get('http_status')}`")
-        if err.get("type"):
-            lines.append(f"`type: {err.get('type')}`")
-        if err.get("loc"):
-            lines.append(f"`loc: {err.get('loc')}`")
-        if err.get("msg"):
-            lines.append(f"`msg: {_short(err.get('msg'), 220)}`")
+    if local_fp and local_fp.get("sha256"):
+        lines.append(f"`local_image_sha256: {local_fp.get('sha256')}`")
+
+    # Show every fal attempt, not only the latest one. This is essential for retry diagnostics.
+    for attempt in attempts[-3:]:
+        if isinstance(attempt, dict):
+            lines.extend(_attempt_lines(attempt))
 
     return "\n".join(lines)
 
@@ -145,4 +146,5 @@ def install_h3_trace_command(app: Any) -> Dict[str, Any]:
         "patched": True,
         "command": "/H3紀錄 <trace_id|最近>",
         "jsonl": _paths(app)["jsonl"],
+        "attempts_visible": True,
     }
