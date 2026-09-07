@@ -28,7 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06u：保留 Gemini 3.5 Flash-Lite、H3 adaptive audio、選擇性收藏、
-# 一般聊天自動看片與 Love Intent 顯示清理；修正 Seedance 1.5 Pro 按鈕要掛在
-# PhotoResultView router 背後真正的 stable View class，確保每張新圖片都能看到 PK 按鈕。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206u.py
+# v1.12.06v：保留 Gemini 3.5 Flash-Lite、H3 adaptive audio、選擇性收藏、
+# 一般聊天自動看片、Love Intent 顯示清理與 Seedance 1.5 Pro PK；
+# H3 收藏改為先 ACK 再做 I/O，可重試且不重跑 H3，成功後提供下載按鈕；
+# 舊 H3 Discord 影片可回覆 `/H3收藏` 直接補收藏，不呼叫 fal/H3。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206v.py
