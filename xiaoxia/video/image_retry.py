@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06k — targeted retry for fal H3 body.image_url policy rejections.
+"""v1.12.06l — targeted retry chain for fal H3 policy rejections.
 
 Experimental design:
-- keep model/prompt/duration/resolution/safety/voice settings unchanged;
-- only when fal explicitly returns content_policy_violation at body.image_url;
-- download the exact bytes from the submitted image_url;
-- upload those exact bytes again to fal to obtain a fresh URL;
-- retry exactly once.
+- keep the first request untouched;
+- only when fal explicitly returns content_policy_violation at body.image_url:
+  1) download the exact bytes from the submitted image_url;
+  2) upload those exact bytes again to fal to obtain a fresh URL;
+  3) retry with an otherwise identical payload;
+- if that fresh-URL retry moves the rejection to body.prompt, retry one final time
+  with the SAME fresh image URL and a minimal neutral motion prompt.
 
-This isolates whether the rejection is tied to URL/request-side moderation drift rather
-than changing Xiaoxia's content or prompt. Existing trace_store will record each fal
-attempt and hash the image bytes for comparison.
+This gives us a clean three-step diagnostic chain without regenerating Xiaoxia:
+A) original URL + original prompt
+B) fresh URL, same bytes + original prompt
+C) same fresh URL + minimal prompt (only if B is blocked at body.prompt)
+
+Existing trace_store records every fal attempt and hashes the image bytes, so the
+Discord /H3紀錄 command can compare the attempts rather than relying on guesses.
 """
 from __future__ import annotations
 
@@ -30,11 +36,11 @@ from xiaoxia.video import diagnostics, voiceover_mode
 _ORIGINAL_SUBSCRIBE = None
 
 
-def _is_image_url_policy_error(exc: Exception) -> bool:
+def _is_policy_error_at(exc: Exception, loc: str) -> bool:
     info = diagnostics.extract_h3_error(exc)
     return (
         str(info.get("type") or "").lower() == "content_policy_violation"
-        and str(info.get("loc") or "").lower() == "body.image_url"
+        and str(info.get("loc") or "").lower() == str(loc or "").lower()
     )
 
 
@@ -91,12 +97,24 @@ async def _reupload_same_bytes(app: Any, image_url: str) -> Tuple[str, str, int]
             pass
 
 
+def _minimal_prompt() -> str:
+    return (
+        "Animate the same person from the source image with subtle natural motion. "
+        "Keep the same face, hairstyle, clothing, body proportions, camera view and location. "
+        "Her mouth stays relaxed and mostly closed; she is not speaking. "
+        "Use only small realistic movements: blinking, breathing, slight eye movement, tiny head movement, "
+        "and gentle hair or fabric motion. Avoid exaggerated facial expressions, wide mouth movement, "
+        "strong jaw motion, neck strain, or dramatic acting. Generate natural scene ambience only, "
+        "with no dialogue and no music."
+    )
+
+
 async def _subscribe_with_image_retry(app: Any, model_id: str, arguments: Dict[str, Any], tag: str) -> Dict[str, Any]:
-    # IMPORTANT: first attempt remains byte-for-byte / prompt-for-prompt the existing request.
+    # Attempt 1: the existing request, unchanged.
     try:
         return await _ORIGINAL_SUBSCRIBE(app, model_id, arguments, tag)
-    except Exception as exc:
-        if not _env_bool("H3_IMAGE_URL_RETRY_ENABLED", True) or not _is_image_url_policy_error(exc):
+    except Exception as first_exc:
+        if not _env_bool("H3_IMAGE_URL_RETRY_ENABLED", True) or not _is_policy_error_at(first_exc, "body.image_url"):
             raise
 
         original_url = str((arguments or {}).get("image_url") or "").strip()
@@ -108,10 +126,12 @@ async def _subscribe_with_image_retry(app: Any, model_id: str, arguments: Dict[s
         retry_args["image_url"] = fresh_url
 
         print(
-            "🔁 [H3_IMAGE_URL_POLICY_RETRY] "
+            "🔁 [H3_IMAGE_URL_POLICY_RETRY_2] "
             f"same_bytes_sha256={source_sha256} size={source_size} "
             "payload_unchanged_except=image_url"
         )
+
+        # Attempt 2: exact same bytes at a fresh URL; prompt and all other arguments unchanged.
         try:
             return await _ORIGINAL_SUBSCRIBE(
                 app,
@@ -119,14 +139,39 @@ async def _subscribe_with_image_retry(app: Any, model_id: str, arguments: Dict[s
                 retry_args,
                 "H3_IMAGE_URL_REUPLOAD_RETRY_QUEUE",
             )
-        except Exception as retry_exc:
-            # Preserve the trace id from the second attempt if available; otherwise the first.
-            if not getattr(retry_exc, "h3_trace_id", None):
-                try:
-                    setattr(retry_exc, "h3_trace_id", getattr(exc, "h3_trace_id", None))
-                except Exception:
-                    pass
-            raise
+        except Exception as second_exc:
+            # If the fresh URL passes image checking but fal now explicitly points to body.prompt,
+            # run one final isolated prompt test on the SAME fresh image URL.
+            if not _env_bool("H3_PROMPT_AFTER_IMAGE_RETRY_ENABLED", True) or not _is_policy_error_at(second_exc, "body.prompt"):
+                if not getattr(second_exc, "h3_trace_id", None):
+                    try:
+                        setattr(second_exc, "h3_trace_id", getattr(first_exc, "h3_trace_id", None))
+                    except Exception:
+                        pass
+                raise
+
+            final_args = dict(retry_args)
+            final_args["prompt"] = _minimal_prompt()
+            print(
+                "🔁 [H3_IMAGE_URL_POLICY_RETRY_3] "
+                "second_attempt_loc=body.prompt -> same_fresh_image_url + minimal_prompt"
+            )
+
+            # Attempt 3: same fresh image URL, only prompt is reduced.
+            try:
+                return await _ORIGINAL_SUBSCRIBE(
+                    app,
+                    model_id,
+                    final_args,
+                    "H3_IMAGE_REUPLOAD_MINIMAL_PROMPT_QUEUE",
+                )
+            except Exception as third_exc:
+                if not getattr(third_exc, "h3_trace_id", None):
+                    try:
+                        setattr(third_exc, "h3_trace_id", getattr(second_exc, "h3_trace_id", None) or getattr(first_exc, "h3_trace_id", None))
+                    except Exception:
+                        pass
+                raise
 
 
 def install_h3_image_url_retry(app: Any) -> Dict[str, Any]:
@@ -134,14 +179,17 @@ def install_h3_image_url_retry(app: Any) -> Dict[str, Any]:
     if getattr(voiceover_mode, "_xiaoxia_h3_image_url_retry_installed", False):
         return {"patched": False, "reason": "already_installed"}
 
-    # Install AFTER trace_store so both initial and retry attempts are independently traced.
+    # Install AFTER trace_store so every attempt is independently traced.
     _ORIGINAL_SUBSCRIBE = voiceover_mode._subscribe
     voiceover_mode._subscribe = _subscribe_with_image_retry
     voiceover_mode._xiaoxia_h3_image_url_retry_installed = True
     return {
         "patched": True,
-        "trigger": "type=content_policy_violation + loc=body.image_url",
-        "retry_count": 1,
-        "retry_strategy": "download exact bytes -> fresh fal upload -> identical payload except image_url",
-        "env": "H3_IMAGE_URL_RETRY_ENABLED",
+        "trigger_1": "type=content_policy_violation + loc=body.image_url",
+        "retry_2": "exact same bytes -> fresh fal URL -> identical payload except image_url",
+        "trigger_2": "retry_2 fails at body.prompt",
+        "retry_3": "same fresh image URL -> minimal prompt",
+        "max_attempts": 3,
+        "env_image_retry": "H3_IMAGE_URL_RETRY_ENABLED",
+        "env_prompt_after_image_retry": "H3_PROMPT_AFTER_IMAGE_RETRY_ENABLED",
     }
