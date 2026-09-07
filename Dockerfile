@@ -28,8 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06n：所有小俠圖片模組共用同一個 Gemini H3 Director。
-# Director 先從 authoritative_scene 決定一句 video_theme，再產生單一 Hero Action、Reaction、Camera Intent、旁白與環境音。
-# 不使用模組專屬策略表，也不建立場景動作資料庫；H3 改為原生台灣年輕女聲「畫外旁白」，畫面中的小俠不對嘴。
-# persistent trace 與 body.image_url / body.prompt 診斷重試機制繼續保留。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206n.py
+# v1.12.06o：沿用共用 Gemini H3 Director，強化真正的畫外旁白。
+# H3 prompt 明確要求可見的小俠 never speaks / never mouths words / never lip-syncs，
+# 旁白必須是 off-screen、non-diegetic inner monologue，並抑制明顯 jaw / neck talking motion。
+# video_theme / quiet-natural-dynamic / Hero Action / Reaction / Camera Intent、trace 與 policy retry 全部保留。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206o.py
