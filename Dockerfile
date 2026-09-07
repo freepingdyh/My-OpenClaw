@@ -28,9 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06l：H3 10 秒 voiceover + persistent trace + 三段診斷重試。
-# Attempt 1：原始 URL + 原始 prompt。
-# Attempt 2：若 body.image_url 被擋，下載同一 bytes 後重新上傳到 fal，僅替換 image_url。
-# Attempt 3：若 Attempt 2 轉為 body.prompt 被擋，沿用同一 fresh image_url，只改極簡 motion prompt。
-# /H3紀錄 會列出最多三次 attempt 的 SHA256 / prompt / error loc。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206l.py
+# v1.12.06m：H3 10 秒 voiceover + persistent trace + 三段診斷重試 + 專用影片提示詞。
+# authoritative_scene 只供旁白/環境音分類使用，不再整段直接塞進 fal H3 prompt。
+# H3 prompt 只描述：第一幀身份鎖定、0-3/3-7/7-10 秒細微動作、禁止變臉/換場，以及短環境音指示。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206m.py
