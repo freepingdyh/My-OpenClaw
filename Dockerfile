@@ -28,8 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06h：H3 預設 10 秒；畫面中的小俠不開口，只做身份優先的細微自然動作。
-# Sulafat 生成 24 歲、年輕、活潑、明亮、帶點磁性的台灣女生「內心旁白」，
-# ffmpeg 將 Sulafat 後製混入 H3 自己生成的場景環境音；Sulafat 失敗才退 H3 原生畫外音。
-# H3 enable_safety_checker 在未設定 ENV 時維持 false。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206h.py
+# v1.12.06i：延續 v1.12.06h 的 10 秒 H3 + Sulafat 內心旁白 + 場景環境音。
+# 新增 persistent H3 trace：每次 fal request 都記錄 model、完整 prompt、image URL、
+# prompt/image/audio SHA256、success/failure、error type/loc/msg，並在失敗訊息附 trace_id。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206i.py
