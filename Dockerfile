@@ -28,8 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06o：沿用共用 Gemini H3 Director，強化真正的畫外旁白。
-# H3 prompt 明確要求可見的小俠 never speaks / never mouths words / never lip-syncs，
-# 旁白必須是 off-screen、non-diegetic inner monologue，並抑制明顯 jaw / neck talking motion。
-# video_theme / quiet-natural-dynamic / Hero Action / Reaction / Camera Intent、trace 與 policy retry 全部保留。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206o.py
+# v1.12.06p：H3 生成後先作 Discord 預覽，只有大俠按「收藏到雲端別墅」才正式入庫。
+# 新增小俠放映室，保存原始 source_mode / 原文 / 場景 / Discord jump URL，
+# 可從收藏影片快速追溯到交換日記、原相片或 Discord 原始訊息。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206p.py
