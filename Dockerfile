@@ -28,7 +28,6 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06q：保留 v1.12.06p 的 H3 選擇性收藏與小俠放映室，
-# Gemini 文字/導演預設升級為 3.5 Flash-Lite，TTS 預設升級為 3.1 Flash TTS Preview，
-# 並新增 /看影片，讓小俠能以同一個共用 Gemini capability 理解 Discord 影片附件。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206q.py
+# v1.12.06r：延續 q 的 Gemini 3.5 Flash-Lite / 看片能力與 p 的 H3 收藏放映室；
+# H3 聲音改由共用導演依畫面決定：預設畫外旁白、少數適合時本人自然說話，或純環境音。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206r.py
