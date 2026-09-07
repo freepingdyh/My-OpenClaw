@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06p：H3 生成後先作 Discord 預覽，只有大俠按「收藏到雲端別墅」才正式入庫。
-# 新增小俠放映室，保存原始 source_mode / 原文 / 場景 / Discord jump URL，
-# 可從收藏影片快速追溯到交換日記、原相片或 Discord 原始訊息。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206p.py
+# v1.12.06q：保留 v1.12.06p 的 H3 選擇性收藏與小俠放映室，
+# Gemini 文字/導演預設升級為 3.5 Flash-Lite，TTS 預設升級為 3.1 Flash TTS Preview，
+# 並新增 /看影片，讓小俠能以同一個共用 Gemini capability 理解 Discord 影片附件。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206q.py
