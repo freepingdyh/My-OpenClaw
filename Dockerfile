@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06s：保留 Gemini 3.5 Flash-Lite、H3 adaptive audio 與選擇性收藏，
-# Discord 一般聊天收到影片附件時自動看片/聽聲後再回答；/看影片保留作 fallback。
-# Love Intent 顯示層移除內部英文生成規則，避免 SOLO RULES / OUTFIT LOCK 洩漏到 Discord。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206s.py
+# v1.12.06t：保留 Gemini 3.5 Flash-Lite、H3 adaptive audio、選擇性收藏、
+# 一般聊天自動看片與 Love Intent 顯示清理；另外在每張圖片的 H3 按鈕旁
+# 加入 Seedance 1.5 Pro PK 路徑，使用 Seedance 原生提示詞結構而非硬套 H3 prompt。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206t.py
