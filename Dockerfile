@@ -28,6 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06j：H3 10 秒 voiceover 模式 + persistent trace。
-# 新增 /H3紀錄 <trace_id|最近>，可直接在 Discord 查 image/prompt hash 與 fal error loc。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206j.py
+# v1.12.06k：H3 10 秒 voiceover + persistent trace + body.image_url 專用一次重試。
+# 若 fal 明確回 content_policy_violation / body.image_url，下載同一 image_url 的原始 bytes，
+# 重新上傳到 fal 取得 fresh URL；除 image_url 外 payload 完全不變，方便以 trace SHA256 驗證穩定性。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206k.py
