@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06aa：保留 z 的 provider-agnostic `/video_delete` 與私有影片 archive；
-# `/影片` 新增可選劇情輸入：空白=Gemini 自由導演；有文字=大俠指定劇情意圖；
-# `/影片 <劇情>｜<台詞>` 可另指定想說的話，Gemini 仍負責收斂成適合 10 秒與起始圖的導演方案。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aa.py
+# v1.12.06ab：保留 aa 的 `/影片 <劇情>｜<台詞>` 與 z 的 provider-agnostic `/video_delete`；
+# 使用者明確指定走近、轉身、回眸、坐下、起身等 subject action 時，Director 必須以人物實體動作表達；
+# Camera 只能輔助，不得用 push-in/zoom/pan/reframe 偷換人物位移或動作。authoritative_scene 不重寫。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ab.py
