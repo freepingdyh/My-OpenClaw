@@ -1,4 +1,4 @@
-# 使用較新的 Node.js 20 Debian Bookworm 映像檔作為基底
+# 使用較新的 Node.js 20 Debian Bookworm映像檔作為基底
 # bullseye-security 套件索引已出現 404，改用 bookworm 避免舊版安全倉庫套件版本失效。
 FROM node:20-bookworm-slim
 
@@ -28,8 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06v：保留 Gemini 3.5 Flash-Lite、H3 adaptive audio、選擇性收藏、
-# 一般聊天自動看片、Love Intent 顯示清理與 Seedance 1.5 Pro PK；
-# H3 收藏改為先 ACK 再做 I/O，可重試且不重跑 H3，成功後提供下載按鈕；
-# 舊 H3 Discord 影片可回覆 `/H3收藏` 直接補收藏，不呼叫 fal/H3。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206v.py
+# v1.12.06w：保留 v 的 H3 收藏補救與下載；/影片也掛同一套收藏 UI。
+# Gemini H3 Director 讀取 authoritative scene 原有氣質；若場景本來偏性感、嫵媚、魅惑，
+# 可自行選擇合適的全身姿態/重心/步伐/轉身/腰胯腿部/服裝動態，不寫死特定肢體動作。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206w.py
