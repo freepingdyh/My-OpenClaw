@@ -9,9 +9,12 @@ requested action with a sanitized fallback.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict
 
-from xiaoxia.video import h3, h3_director_mode, voiceover_mode
+from xiaoxia.video import archive, h3, h3_director_mode, voiceover_mode
+
+_ORIGINAL_ARCHIVE = archive.archive_h3_video
 
 
 def build_slim_h3_prompt(plan: Dict[str, str]) -> str:
@@ -110,12 +113,34 @@ async def _generate_h3_native_directed(app: Any, context: Dict[str, Any]) -> Dic
     }
 
 
+async def _archive_h3_video_with_prompt_trace(app: Any, **kwargs) -> Dict[str, Any]:
+    result = kwargs.get("result") if isinstance(kwargs.get("result"), dict) else {}
+    record = await _ORIGINAL_ARCHIVE(app, **kwargs)
+    video_id = str(record.get("video_id") or "")
+    submitted = str(result.get("submitted_prompt") or "")
+    expanded = str(result.get("expanded_prompt") or "")
+    if not video_id or (not submitted and not expanded):
+        return record
+
+    async with archive._STORE_LOCK:
+        records = await asyncio.to_thread(archive._load_records_sync)
+        for item in records:
+            if str(item.get("video_id") or "") == video_id:
+                item["submitted_prompt"] = submitted
+                item["expanded_prompt"] = expanded
+                record = dict(item)
+                break
+        await asyncio.to_thread(archive._write_records_sync, records)
+    return record
+
+
 def install_slim_h3_prompt(app: Any) -> Dict[str, Any]:
     if getattr(h3_director_mode, "_xiaoxia_slim_h3_prompt_installed", False):
         return {"patched": False, "reason": "already_installed"}
 
     h3_director_mode.build_compact_h3_prompt = build_slim_h3_prompt
     h3_director_mode._generate_h3_native_directed = _generate_h3_native_directed
+    archive.archive_h3_video = _archive_h3_video_with_prompt_trace
     if hasattr(app, "h3_generate_native_directed"):
         app.h3_generate_native_directed = _generate_h3_native_directed
     h3_director_mode._xiaoxia_slim_h3_prompt_installed = True
@@ -128,5 +153,6 @@ def install_slim_h3_prompt(app: Any) -> Dict[str, Any]:
         "negative_rule_stack_removed": True,
         "app_side_sanitizing_retry": False,
         "provider_safety_unchanged": True,
+        "submitted_prompt_trace": True,
         "expanded_prompt_trace": True,
     }
