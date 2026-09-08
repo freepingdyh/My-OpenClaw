@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06x：保留 w 的 mood-aware H3 Director 與 /影片收藏 UI；
-# 收藏影片改存私有 archive 目錄，不再暴露 /gallery 直連；Discord 不再提供下載按鈕/裸網址。
-# 小俠放映室透過登入 key 存取受保護 API，並提供二次確認的「刪除影片」功能。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206x.py
+# v1.12.06y：保留 x 的私有 H3 archive、受保護放映室與刪除 API；
+# 新增 Discord `/H3刪除`（alias `/刪除H3`），可回覆已收藏影片或指定 video_id，
+# 二次確認後同時刪除私有 MP4 與 videos.json 收藏紀錄，不呼叫 H3。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206y.py
