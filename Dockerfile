@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06ab：保留 aa 的 `/影片 <劇情>｜<台詞>` 與 z 的 provider-agnostic `/video_delete`；
-# 使用者明確指定走近、轉身、回眸、坐下、起身等 subject action 時，Director 必須以人物實體動作表達；
-# Camera 只能輔助，不得用 push-in/zoom/pan/reframe 偷換人物位移或動作。authoritative_scene 不重寫。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ab.py
+# v1.12.06ac：保留 aa 的 `/影片 <劇情>｜<台詞>` 與 z 的 provider-agnostic `/video_delete`；
+# ac 不再疊 ab 的長條列限制，而是把 Gemini 定位成「忠實導演翻譯器」：理解大俠原意，
+# 僅為 10 秒與起始圖做必要收斂，再輸出簡潔的 Hero Action / Reaction / Camera 給 H3。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ac.py
