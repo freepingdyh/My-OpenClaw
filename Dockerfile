@@ -28,7 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06ad：保留 ac 的忠實 Gemini Director；H3 prompt 改為短而連貫的 Action / Reaction / Camera / audio 描述，
-# 不再把 video_theme、motion 訓話與長串 negative rules 一起塞給 H3；不做 app-side sanitizing retry。
-# fal/provider safety checker 維持原設定；另記錄 submitted_prompt 與 expanded_prompt 供逐層追蹤。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ad.py
+# v1.12.06ae：延續 ad 的忠實 Gemini Director + slim H3 prompt；只調整 source-image transport。
+# H3 不再直接吃 Zeabur/其他外部 image_url：先取得同一張圖片的本地檔或 exact bytes，
+# 透過 fal_client.upload_file 上傳到 fal storage，再把 fal-hosted URL 交給 H3。
+# 不改 Director、prompt、模型、audio 或 provider safety 設定。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ae.py
