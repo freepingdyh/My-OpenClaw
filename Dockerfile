@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06w：保留 v 的 H3 收藏補救與下載；/影片也掛同一套收藏 UI。
-# Gemini H3 Director 讀取 authoritative scene 原有氣質；若場景本來偏性感、嫵媚、魅惑，
-# 可自行選擇合適的全身姿態/重心/步伐/轉身/腰胯腿部/服裝動態，不寫死特定肢體動作。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206w.py
+# v1.12.06x：保留 w 的 mood-aware H3 Director 與 /影片收藏 UI；
+# 收藏影片改存私有 archive 目錄，不再暴露 /gallery 直連；Discord 不再提供下載按鈕/裸網址。
+# 小俠放映室透過登入 key 存取受保護 API，並提供二次確認的「刪除影片」功能。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206x.py
