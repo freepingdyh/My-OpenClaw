@@ -28,7 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06y：保留 x 的私有 H3 archive、受保護放映室與刪除 API；
-# 新增 Discord `/H3刪除`（alias `/刪除H3`），可回覆已收藏影片或指定 video_id，
-# 二次確認後同時刪除私有 MP4 與 videos.json 收藏紀錄，不呼叫 H3。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206y.py
+# v1.12.06z：保留 y 的私有影片 archive 與刪除能力；
+# Discord 統一改用 provider-agnostic `/video_delete [日期]`：日期省略=今天（Asia/Taipei），
+# 列出當日所有收藏影片的編號/時間/模型/主題/規格，選號後二次確認再刪除。
+# 不綁 H3；未來 Seedance/Wan/Grok 等只要進同一 video archive，就可用同一指令管理。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206z.py
