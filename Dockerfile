@@ -8,27 +8,17 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 設定工作目錄
 WORKDIR /workspace
-
-# Bookworm 受 PEP 668 保護，不直接污染 system Python；統一使用專案虛擬環境。
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
-# 優先複製 requirements.txt 以利用 Docker 快取機制
 COPY requirements.txt .
-
-# 安裝 Python 依賴套件到 venv
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
-
-# 複製專案內的所有檔案到容器的工作目錄
 COPY . .
-
-# 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06ah：保留 ag 的 H3 Max Turbo + body.prompt recovery 與 ae fal-native image transport。
-# 唯一調整是後製旁白：改用 Gemini 3.1 Flash TTS + Leda（官方標示 Youthful），
-# H3 仍先完成畫面與環境音，TTS 只在成片後以 ffmpeg post-mix，不影響 H3 prompt/模型/成本路徑。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ah.py
+# v1.12.06ai：直接疊 ag，刻意 bypass ah 的 Gemini TTS/Leda 改動。
+# H3 Max Turbo 自己生成 native audio；fal 的 Turbo schema 沒有 voice/speaker 欄位，
+# 因此以 H3 prompt 指定年輕、明亮、自然的台灣女性畫外音風格。
+# 保留 ag body.prompt recovery 與 ae fal-native image transport。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ai.py
