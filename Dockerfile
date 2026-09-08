@@ -28,8 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06ag：先救回昨天已驗證可用的 body.prompt 422 recovery。
-# 正常路徑仍為 af：H3 只收視覺 Action/Reaction/Camera/ambience，Sulafat 僅成片後 post-mix；
-# 若 fal 明確回 content_policy_violation/body.prompt，先以同一 Hero Action 的 action-only prompt 重試，
-# 若仍為同一 422，再以 generic minimal-motion prompt 作最後 recovery。ae 的 fal-native image transport 保留。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ag.py
+# v1.12.06ah：保留 ag 的 H3 Max Turbo + body.prompt recovery 與 ae fal-native image transport。
+# 唯一調整是後製旁白：改用 Gemini 3.1 Flash TTS + Leda（官方標示 Youthful），
+# H3 仍先完成畫面與環境音，TTS 只在成片後以 ffmpeg post-mix，不影響 H3 prompt/模型/成本路徑。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ah.py
