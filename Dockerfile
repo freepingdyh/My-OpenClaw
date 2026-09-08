@@ -28,7 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06ac：保留 aa 的 `/影片 <劇情>｜<台詞>` 與 z 的 provider-agnostic `/video_delete`；
-# ac 不再疊 ab 的長條列限制，而是把 Gemini 定位成「忠實導演翻譯器」：理解大俠原意，
-# 僅為 10 秒與起始圖做必要收斂，再輸出簡潔的 Hero Action / Reaction / Camera 給 H3。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ac.py
+# v1.12.06ad：保留 ac 的忠實 Gemini Director；H3 prompt 改為短而連貫的 Action / Reaction / Camera / audio 描述，
+# 不再把 video_theme、motion 訓話與長串 negative rules 一起塞給 H3；不做 app-side sanitizing retry。
+# fal/provider safety checker 維持原設定；另記錄 submitted_prompt 與 expanded_prompt 供逐層追蹤。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ad.py
