@@ -28,8 +28,8 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06af：延續 ae 的 fal-native source-image transport 與 ad/ac 的 Gemini Director。
-# H3 request 只含 Action / Reaction / Camera / natural ambience，不再送 Gemini/Sulafat 旁白文字或 speech 指令。
-# H3 成片後才另外用 Sulafat TTS + ffmpeg 混入畫外音；TTS/混音失敗時保留 H3 ambient-only 成片，
-# 不以 H3 native narration 作 fallback，也不做 prompt sanitizing retry。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206af.py
+# v1.12.06ag：先救回昨天已驗證可用的 body.prompt 422 recovery。
+# 正常路徑仍為 af：H3 只收視覺 Action/Reaction/Camera/ambience，Sulafat 僅成片後 post-mix；
+# 若 fal 明確回 content_policy_violation/body.prompt，先以同一 Hero Action 的 action-only prompt 重試，
+# 若仍為同一 422，再以 generic minimal-motion prompt 作最後 recovery。ae 的 fal-native image transport 保留。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ag.py
