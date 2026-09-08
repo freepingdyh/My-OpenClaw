@@ -28,8 +28,7 @@ COPY . .
 # 全域安裝 openclaw 框架
 RUN npm install -g openclaw
 
-# v1.12.06z：保留 y 的私有影片 archive 與刪除能力；
-# Discord 統一改用 provider-agnostic `/video_delete [日期]`：日期省略=今天（Asia/Taipei），
-# 列出當日所有收藏影片的編號/時間/模型/主題/規格，選號後二次確認再刪除。
-# 不綁 H3；未來 Seedance/Wan/Grok 等只要進同一 video archive，就可用同一指令管理。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206z.py
+# v1.12.06aa：保留 z 的 provider-agnostic `/video_delete` 與私有影片 archive；
+# `/影片` 新增可選劇情輸入：空白=Gemini 自由導演；有文字=大俠指定劇情意圖；
+# `/影片 <劇情>｜<台詞>` 可另指定想說的話，Gemini 仍負責收斂成適合 10 秒與起始圖的導演方案。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aa.py
