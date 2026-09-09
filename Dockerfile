@@ -17,8 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06aj：疊在 ai 上，只修正 Love Intent 的 Discord 顯示層。
-# 內部 LOVE INTENT SOLO/POSE/OUTFIT 指令仍保留給 Seedream 生成，
-# 但不再混入使用者看到的「場景／服裝」文字。
-# ai 的 H3 native voice、ag prompt recovery、ae fal-native image transport 全部保留。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aj.py
+# v1.12.06ak：疊在 aj 上；新圖仍走 Seedream v4.5，只有「修正這張」改走 GPT-Image 2.5 Sunburst。
+# 使用目前這張圖直接做 image edit，不經 Gemini 重寫；連續「再修一次」以上一版修圖結果繼續。
+# aj Love Intent 顯示清理、ai H3 native voice、ag prompt recovery、ae fal-native image transport 全部保留。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ak.py
