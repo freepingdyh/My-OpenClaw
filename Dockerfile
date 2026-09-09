@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ai：直接疊 ag，刻意 bypass ah 的 Gemini TTS/Leda 改動。
-# H3 Max Turbo 自己生成 native audio；fal 的 Turbo schema 沒有 voice/speaker 欄位，
-# 因此以 H3 prompt 指定年輕、明亮、自然的台灣女性畫外音風格。
-# 保留 ag body.prompt recovery 與 ae fal-native image transport。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ai.py
+# v1.12.06aj：疊在 ai 上，只修正 Love Intent 的 Discord 顯示層。
+# 內部 LOVE INTENT SOLO/POSE/OUTFIT 指令仍保留給 Seedream 生成，
+# 但不再混入使用者看到的「場景／服裝」文字。
+# ai 的 H3 native voice、ag prompt recovery、ae fal-native image transport 全部保留。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aj.py
