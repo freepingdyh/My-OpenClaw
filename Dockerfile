@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06aj：修圖恢復原有 Seedream v4.5 backend；不啟用 ak Sunburst repair hook。
-# 保留 aj Love Intent 顯示清理、ai H3 native voice、ag prompt recovery、ae fal-native image transport。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aj.py
+# v1.12.06al：修圖維持 Seedream v4.5；強化 Love Intent 顯示邊界，內部英文規則不再輸出到 Discord。
+# 保留 ai H3 native voice、ag prompt recovery、ae fal-native image transport。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206al.py
