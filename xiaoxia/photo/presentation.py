@@ -76,6 +76,12 @@ def build_photo_presentation(
             wardrobe_prefix = f"【{wardrobe_id}{('｜' + wardrobe_name) if wardrobe_name else ''}】\n"
         fields.append(("服裝／搭配", (wardrobe_prefix + str(ctx.get("outfit_summary")))[:900]))
 
+    # Debug-friendly, human-visible note for the Pose + Wardrobe experiment.
+    # This is the exact short camera description Gemini handed to Seedream.
+    camera_intent = _compact(ctx.get("pose_camera_intent") or "")
+    if camera_intent:
+        fields.append(("📷 Gemini 鏡位判讀", camera_intent[:900]))
+
     return {
         "title": str(raw_title)[:256],
         "description": str(description)[:4096],
