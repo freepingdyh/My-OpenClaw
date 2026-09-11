@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06bf：修正這張維持 3 refs（成品主圖 + 2 Identity anchors），但允許針對使用者指出的
-# 手腳/關節/肢體長度等局部 anatomy 錯誤真正改動局部幾何；場景、服裝、鏡位、整體姿勢仍鎖定原成品。
-# 同時保留 be 的 Pose 公開輸出清理與舊 v5 Pose guard，以及 bd/bb 的 Pose Authority/附件路由。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bf.py
+# v1.12.07：將 v1.12.06al 之後仍有效的功能直接由模組一次安裝，停止使用長串 migration runtime。
+# 目前先保留舊 runtime 檔作 rollback；待 Zeabur 部署與主要功能驗證後，再安全刪除 post-al 舊 runtime。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11207.py
