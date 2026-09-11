@@ -2,10 +2,24 @@
 """Native Discord slash-command bridge for legacy Xiaoxia text commands."""
 from __future__ import annotations
 
+import contextlib
 import inspect
 from discord import app_commands
 
-VERSION = "1.12.06aq"
+VERSION = "1.12.06as"
+
+
+class _TypingProxy:
+    """Async context manager compatible with `async with ctx.typing()`.
+
+    Native slash interactions have no classic channel typing lifecycle that matters here,
+    so this becomes a harmless no-op while preserving legacy command code.
+    """
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _InteractionCtx:
@@ -18,9 +32,22 @@ class _InteractionCtx:
         self.message = _InteractionMessage(interaction, content)
 
     async def send(self, content=None, **kwargs):
+        # Legacy prefix commands often call ctx.send(). A slash command may already have
+        # been deferred, in which case every visible reply must go through followup.
+        kwargs.pop("mention_author", None)
         if not self.interaction.response.is_done():
             return await self.interaction.response.send_message(content, **kwargs)
         return await self.interaction.followup.send(content, **kwargs)
+
+    async def reply(self, content=None, **kwargs):
+        # Prefix handlers such as /影片 use ctx.reply(..., mention_author=False).
+        # Interactions do not have a message to reply to in the same way, so map it to send.
+        kwargs.pop("mention_author", None)
+        return await self.send(content, **kwargs)
+
+    def typing(self):
+        # Preserve `async with ctx.typing()` used by long-running legacy handlers.
+        return _TypingProxy()
 
 
 class _InteractionMessage:
@@ -32,12 +59,19 @@ class _InteractionMessage:
         self.id = interaction.id
         self.attachments = []
 
+    async def delete(self):
+        # Some legacy commands delete the invoking prefix message. There is no ordinary
+        # user-authored message to delete for an application command, so this is a no-op.
+        return None
+
 
 async def _run_prefix_callback(app, interaction, command_name, args=""):
     cmd = app.girlfriend_bot.get_command(command_name)
     if cmd is None:
         if not interaction.response.is_done():
             await interaction.response.send_message(f"⚠️ 找不到既有指令：/{command_name}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"⚠️ 找不到既有指令：/{command_name}", ephemeral=True)
         return
     content = f"/{command_name}" + (f" {args}" if args else "")
     ctx = _InteractionCtx(app, interaction, content)
@@ -55,7 +89,21 @@ async def _run_prefix_callback(app, interaction, command_name, args=""):
 
 def _make_generic_callback(app, command_name):
     async def callback(interaction, args: str = ""):
-        await _run_prefix_callback(app, interaction, command_name, args)
+        # Discord requires an initial application-command acknowledgement quickly.
+        # Legacy commands may do API/video work before their first ctx.send(), so defer
+        # immediately and let the adapter route all later output through followups.
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True)
+        try:
+            await _run_prefix_callback(app, interaction, command_name, args)
+        except Exception as exc:
+            print(f"❌ [NATIVE_SLASH_HANDLER_FAILED] /{command_name} {type(exc).__name__}: {exc}")
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    f"⚠️ `/{command_name}` 執行失敗：`{type(exc).__name__}` — `{str(exc)[:300]}`",
+                    ephemeral=True,
+                )
+            raise
     return callback
 
 
