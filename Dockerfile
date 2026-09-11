@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ax：Gemini 看 Pose Reference 的取景判讀會直接顯示在 Discord，並保留 stdout log，方便比對 Seedream 結果。
-# 保留 aw Camera Observer、au Director TypeError 修正、at 附件型 legacy 指令流程與 H3 修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ax.py
+# v1.12.06ay：Pose Reference 存在時，Figure 9 + Gemini Camera 取得姿勢/鏡位權限；
+# generic /photo 不再繼承 Scene Director 自行產生的海邊/花園/全身景等內容，且內部 contract 不顯示在 Discord。
+# 保留 ax 鏡位可視診斷、aw Camera Observer、au Director TypeError 修正、at legacy 附件流程與 H3 修正。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ay.py
