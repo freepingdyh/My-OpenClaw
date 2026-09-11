@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06bb：/photo 附圖預設視為 Pose Reference；若文字明確說背景/場景/在這裡拍，才走舊實景背景參考。
-# 若舊 photo pipeline 已先把附件吃成 background_reference，bb 會在生成前回收同一張圖、改標為 Pose，並清掉背景權限。
-# 生成仍沿用 az：8 Identity + Figure 9 Visible Pose + Figure 10 Wardrobe + Gemini Camera，單張消耗。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bb.py
+# v1.12.06bc：修正這張改為 3 refs：成品 A 為主要修正 authority + 2 張小俠 identity anchors。
+# 不再讓 9 張 identity 與成品 A 競爭；repair prompt 只要求最小必要修正，其他照片內容以成品 A 為準。
+# 其餘沿用 bb：/photo 附圖預設 Pose Reference，明確背景語意才走實景背景。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bc.py
