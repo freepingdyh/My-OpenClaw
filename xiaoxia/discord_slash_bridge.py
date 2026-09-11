@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Native Discord slash-command bridge for legacy Xiaoxia text commands.
-
-Discord mobile increasingly treats a leading slash as application-command UI.
-This bridge registers the bot's existing prefix commands as native slash commands
-without replacing their legacy handlers. /photo is special because it is handled
-inside on_message rather than discord.py's prefix command registry.
-"""
+"""Native Discord slash-command bridge for legacy Xiaoxia text commands."""
 from __future__ import annotations
 
 import inspect
@@ -15,7 +9,6 @@ VERSION = "1.12.06aq"
 
 
 class _InteractionCtx:
-    """Small Context adapter sufficient for the existing command callbacks."""
     def __init__(self, app, interaction, content):
         self.bot = app.girlfriend_bot
         self.interaction = interaction
@@ -49,12 +42,10 @@ async def _run_prefix_callback(app, interaction, command_name, args=""):
     content = f"/{command_name}" + (f" {args}" if args else "")
     ctx = _InteractionCtx(app, interaction, content)
     callback = cmd.callback
-    sig = inspect.signature(callback)
-    params = list(sig.parameters.values())[1:]  # skip ctx
+    params = list(inspect.signature(callback).parameters.values())[1:]
     if not params:
         await callback(ctx)
         return
-    # Existing Xiaoxia commands mostly use one optional positional or keyword-only text argument.
     p = params[0]
     if p.kind == inspect.Parameter.KEYWORD_ONLY:
         await callback(ctx, **{p.name: args})
@@ -62,12 +53,17 @@ async def _run_prefix_callback(app, interaction, command_name, args=""):
         await callback(ctx, args or None)
 
 
+def _make_generic_callback(app, command_name):
+    async def callback(interaction, args: str = ""):
+        await _run_prefix_callback(app, interaction, command_name, args)
+    return callback
+
+
 def install_native_slash_commands(app):
     bot = app.girlfriend_bot
     tree = bot.tree
     registered = []
 
-    # /photo is not a prefix Command; it is a special on_message route.
     async def photo_cb(interaction, prompt: str = ""):
         if not interaction.response.is_done():
             await interaction.response.defer(thinking=True)
@@ -75,38 +71,29 @@ def install_native_slash_commands(app):
         msg = _InteractionMessage(interaction, content)
         await app.handle_unified_photo_command(msg, prompt)
 
-    photo_cmd = app_commands.Command(
-        name="photo",
-        description="拍一張小俠照片",
-        callback=photo_cb,
-    )
     try:
-        tree.add_command(photo_cmd, override=True)
+        tree.add_command(app_commands.Command(name="photo", description="拍一張小俠照片", callback=photo_cb), override=True)
         registered.append("photo")
     except Exception as exc:
         print(f"⚠️ [SLASH_REGISTER_SKIP] /photo {type(exc).__name__}: {exc}")
 
-    # Mirror all ordinary prefix commands. One free-text option keeps legacy syntax flexible.
     for legacy in list(bot.commands):
         name = str(getattr(legacy, "name", "") or "").strip()
         if not name or name == "photo" or len(name) > 32:
             continue
-
-        async def generic_cb(interaction, args: str = "", _name=name):
-            await _run_prefix_callback(app, interaction, _name, args)
-
         try:
-            cmd = app_commands.Command(
-                name=name,
-                description=(str(getattr(legacy, "help", "") or f"小俠指令：/{name}")[:100]),
-                callback=generic_cb,
+            tree.add_command(
+                app_commands.Command(
+                    name=name,
+                    description=(str(getattr(legacy, "help", "") or f"小俠指令：/{name}")[:100]),
+                    callback=_make_generic_callback(app, name),
+                ),
+                override=True,
             )
-            tree.add_command(cmd, override=True)
             registered.append(name)
         except Exception as exc:
             print(f"⚠️ [SLASH_REGISTER_SKIP] /{name} {type(exc).__name__}: {exc}")
 
-    # Sync once after login. Preserve the existing on_ready behavior by wrapping it.
     original_ready = getattr(bot, "on_ready", None)
     synced = False
 
