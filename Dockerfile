@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06am：新增 Seedream v4.5 小俠姿勢庫生產器；支援文字姿勢與姿勢圖換人。
-# 9 張小俠 Identity references；圖片模式第 10 張為 Pose reference。
+# v1.12.06an：姿勢候選圖先審核，確認後才收入姿勢庫。
+# 支援 Seedream v4.5 重抽與 Seedream v5 Pro 修姿勢；保留 9 張小俠 Identity refs。
 # 保留 al Love Intent 顯示邊界、ai H3 native voice、ag prompt recovery、ae fal-native image transport。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206am.py
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206an.py
