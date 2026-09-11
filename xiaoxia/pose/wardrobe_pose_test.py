@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06ax — Pose + Wardrobe with visible Gemini Camera diagnostics.
+"""v1.12.06ay — Pose authority before Seedream prompt assembly.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
@@ -7,16 +7,81 @@ Experiment contract:
   Figure 10    = selected Wxxx outfit authority
   Camera       = concise Gemini description OBSERVED from Figure 9
 
-For debugging, the exact Gemini camera description is echoed to Discord before
-Seedream generation and remains in Zeabur stdout logs.
-Without an attachment the existing wardrobe/photo path is untouched.
+When a pending Pose Reference exists, the old /photo scene director is not allowed
+to silently dictate action, gaze, shot size, camera framing, or an invented location.
+For generic requests such as `/photo 拍一張`, its generated scene is suppressed.
+For explicit requests, only the user's own short instruction is retained as scene/story
+context, while Figure 9 + Camera remain the pose/framing authority.
 """
 from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06ax-camera-observer-debug"
+VERSION = "1.12.06ay-pose-authority"
 _STATE_KEY = "photo_pending_pose_reference"
+_GENERIC_PHOTO_REQUESTS = {
+    "", ".", "。", "拍一張", "拍張", "拍照", "來一張", "來張", "一張", "照一張", "拍一下"
+}
+
+
+def _photo_instruction_from_message(msg) -> str:
+    text = str(getattr(msg, "content", "") or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^/photo\b", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def _clean_pose_scene(ctx, msg) -> tuple[str, str, bool]:
+    """Return (clean_scene, original_generated_scene, generic_request).
+
+    Pose mode must not inherit an invented scene/action/camera from the normal photo
+    director.  Generic /photo requests get a neutral scene shell.  Explicit requests
+    keep only the user's own words, not the director's expansion.
+    """
+    original = str(
+        ctx.get("authoritative_scene")
+        or ctx.get("scene_text")
+        or ctx.get("scene_summary")
+        or ctx.get("prompt_base")
+        or ""
+    ).strip()
+    user_instruction = _photo_instruction_from_message(msg)
+    generic = user_instruction.strip() in _GENERIC_PHOTO_REQUESTS
+
+    if generic:
+        clean = (
+            "背景保持自然且不搶戲；不要自行指定特定地點、活動、人物動作、視線、景別或鏡位。"
+            "人物姿勢以 Figure 9 為準，取景以 Camera 指令為準。"
+        )
+    else:
+        clean = (
+            f"大俠本次指定：{user_instruction}。"
+            "只把這段文字當作場景／故事需求；人物姿勢以 Figure 9 為準，取景以 Camera 指令為準。"
+        )
+    return clean, original, generic
+
+
+def _apply_pose_scene_authority(ctx, clean_scene: str) -> None:
+    """Remove upstream action/framing authority before the Seedream prompt is built."""
+    ctx["scene_text"] = clean_scene
+    ctx["scene_summary"] = clean_scene
+    ctx["action_summary"] = ""
+    ctx["mood_summary"] = ""
+    ctx["camera_framing"] = ""
+    ctx["title"] = clean_scene
+    ctx["render_title"] = clean_scene
+
+    scene_data = ctx.get("scene_data")
+    if isinstance(scene_data, dict):
+        scene_data = dict(scene_data)
+        scene_data["authoritative_scene"] = clean_scene
+        scene_data["scene_summary"] = clean_scene
+        scene_data["action_summary"] = ""
+        scene_data["mood_summary"] = ""
+        scene_data["camera_framing"] = ""
+        scene_data["photo_prompt"] = clean_scene
+        ctx["scene_data"] = scene_data
 
 
 def install_wardrobe_pose_test(app):
@@ -71,6 +136,11 @@ def install_wardrobe_pose_test(app):
             return await original_generate(context, msg=msg)
 
         try:
+            # Pose authority starts here: discard the normal /photo director's invented
+            # action/camera/location before composing the generation prompt.
+            clean_scene, suppressed_scene, generic_request = _clean_pose_scene(ctx, msg)
+            _apply_pose_scene_authority(ctx, clean_scene)
+
             identity_urls = await app._seedream_upload_reference_images(
                 selected_figure_indexes=[1, 2, 3, 4, 5, 6, 7, 8]
             )
@@ -104,7 +174,6 @@ def install_wardrobe_pose_test(app):
                 camera_intent = str(await camera_builder(ctx) or "").strip()
             ctx["pose_camera_intent"] = camera_intent
 
-            # Visible debug trace: this is exactly what Gemini contributes to Seedream.
             debug_line = camera_intent or "(Gemini 未產生取景描述)"
             try:
                 channel = getattr(msg, "channel", None) if msg is not None else None
@@ -127,12 +196,21 @@ def install_wardrobe_pose_test(app):
             if camera_intent:
                 pose_rule += f" Camera: {camera_intent}."
 
-            base_scene = str(ctx.get("authoritative_scene") or ctx.get("prompt_base") or "").strip()
-            ctx["authoritative_scene"] = (base_scene + "\n\n" + pose_rule).strip()
-            ctx["prompt_base"] = (str(ctx.get("prompt_base") or base_scene).strip() + "\n\n" + pose_rule).strip()
+            # Keep the generation contract internal to the Seedream prompt assembly.
+            # Public presentation sanitizes this marker so engineering text never appears
+            # in Discord even though the stable monolith still consumes these legacy fields.
+            ctx["authoritative_scene"] = (clean_scene + "\n\n" + pose_rule).strip()
+            ctx["prompt_base"] = (clean_scene + "\n\n" + pose_rule).strip()
+            ctx["pose_public_scene"] = clean_scene
+            ctx["pose_suppressed_scene"] = suppressed_scene
+            ctx["pose_generic_photo_request"] = generic_request
             ctx["wardrobe_pose_test"] = True
             ctx["wardrobe_pose_test_version"] = VERSION
 
+            print(
+                f"🎬 [POSE_AUTHORITY] generic={generic_request} "
+                f"suppressed={suppressed_scene[:220]!r} clean={clean_scene[:220]!r}"
+            )
             print(
                 f"💃 [WARDROBE_POSE_TEST] version={VERSION} wardrobe={wardrobe_id or expected_wid} "
                 f"inputs={len(input_urls[:10])} roles=8_identity+pose+wardrobe observed_camera={camera_intent!r} model=v4.5"
@@ -145,4 +223,9 @@ def install_wardrobe_pose_test(app):
 
     app._handle_wardrobe_message_direct = _direct_with_optional_pose
     app._generate_photo_from_context = _generate_with_pending_pose
-    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45", "one_shot": True, "debug_echo": True}
+    return {
+        "version": VERSION,
+        "mode": "pose_authority_8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45",
+        "one_shot": True,
+        "debug_echo": True,
+    }
