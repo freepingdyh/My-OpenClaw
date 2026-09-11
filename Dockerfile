@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06at：撤回 aq/as 的 native slash bridge，恢復原本可在同一則訊息夾帶圖片的 legacy 指令流程。
-# 保留 ap 的衣櫃+Pose 實驗，以及 ar 的 H3 TypeError 音訊修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206at.py
+# v1.12.06au：修正 Seedance 共用 Director callable 簽名不一致造成的 TypeError。
+# 保留 at 的附件型 legacy 指令流程、H3 TypeError 修正與 Pose 實驗。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206au.py
