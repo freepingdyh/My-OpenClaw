@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ao：姿勢圖換人改為 Seedream V5 Pro Edit 兩圖模式。
-# Figure 1 = 原姿勢圖／主畫布；Figure 2 = 單張小俠 Identity；結果仍先審核再收錄。
-# 純文字姿勢仍保留 v4.5 多 Identity 路徑；保留 al/ai/ag/ae 既有功能。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ao.py
+# v1.12.06ap：/衣櫃 穿 Wxxx 可選附一張 Pose Reference。
+# 測試路徑：Figure 1-8 = 小俠 Identity；Figure 9 = 原姿勢圖；Figure 10 = Wxxx 衣服；Seedream V4.5。
+# 沒附圖時完全維持原 /衣櫃 穿 行為；Pose 為 one-shot，只作用下一張 /photo。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ap.py
