@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06az — Visible Pose Authority + Camera framing authority.
+"""v1.12.06bd — Pose Geometry Authority + Camera framing authority.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
-  Figure 9     = visible-pose authority only for body regions actually shown
+  Figure 9     = pose geometry authority for all geometry visible in the image
   Figure 10    = selected Wxxx outfit authority within the requested framing
   Camera       = concise Gemini description OBSERVED from Figure 9
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06az-visible-pose-authority"
+VERSION = "1.12.06bd-pose-geometry-authority"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
@@ -30,8 +30,6 @@ def _strip_photo_prefix(text: str) -> str:
 
 
 def _photo_instruction_from_context(ctx, msg) -> str:
-    # The context preserves the real user command more reliably than downstream
-    # synthetic/status messages. Prefer it whenever available.
     candidates = [
         ctx.get("user_input"),
         ctx.get("raw_scene_text"),
@@ -68,12 +66,12 @@ def _clean_pose_scene(ctx, msg) -> tuple[str, str, bool]:
     if generic:
         clean = (
             "背景保持自然且不搶戲；不要自行指定特定地點、活動、人物動作、視線、景別或鏡位。"
-            "人物姿勢只依 Figure 9 畫面中實際看得到的身體區域，取景與景別以 Camera 指令為準。"
+            "人物姿勢以 Figure 9 的整體可見姿勢幾何為準，取景與景別以 Camera 指令為準。"
         )
     else:
         clean = (
             f"大俠本次指定：{user_instruction}。"
-            "只把這段文字當作場景／故事需求；人物姿勢只依 Figure 9 畫面中實際看得到的身體區域，"
+            "只把這段文字當作場景／故事需求；人物姿勢以 Figure 9 的整體可見姿勢幾何為準，"
             "取景與景別以 Camera 指令為準。"
         )
     return clean, original, generic
@@ -129,7 +127,7 @@ def install_wardrobe_pose_test(app):
                 app.save_state(state)
                 await message.channel.send(
                     "💃 已把這張附圖記為 **Pose Reference**。下一張 `/photo` 會測試："
-                    "**8 張小俠 Identity + Visible Pose + Wxxx 衣服 + Gemini 看圖取景 → Seedream V4.5**。"
+                    "**8 張小俠 Identity + Pose Geometry + Wxxx 衣服 + Gemini 看圖取景 → Seedream V4.5**。"
                 )
         return handled
 
@@ -166,7 +164,7 @@ def install_wardrobe_pose_test(app):
             ]
 
             input_urls.append(pose_url)
-            roles.append({"figure": 9, "role": "visible_pose_reference", "url": pose_url})
+            roles.append({"figure": 9, "role": "pose_geometry_reference", "url": pose_url})
 
             if str(reference_path).startswith("http"):
                 outfit_url = str(reference_path)
@@ -215,20 +213,22 @@ def install_wardrobe_pose_test(app):
             except Exception as exc:
                 print(f"⚠️ [POSE_CAMERA_DEBUG_ECHO_FAILED] {type(exc).__name__}: {exc}")
             print(f"🔎 [POSE_CAMERA_TO_SEEDREAM] {debug_line}")
-            print(f"🧩 [POSE_VISIBLE_SCOPE] scope={visible_scope!r} pose={pose_description!r}")
+            print(f"🧩 [POSE_ANALYSIS] scope={visible_scope!r} pose={pose_description!r}")
 
-            scope_clause = visible_scope or "only the body regions clearly visible in Figure 9"
-            pose_clause = pose_description or "the visible pose and contact/support relationships shown in Figure 9"
+            # Gemini's scope/description are observational metadata only.  They must
+            # never reduce Figure 9's authority or exclude hips/pelvis/legs that are
+            # actually visible in the reference image.
+            pose_clause = pose_description or "the pose, body orientation, joint relationships, weight distribution, and support/contact geometry visible in Figure 9"
             pose_rule = (
                 "REFERENCE ROLE CONTRACT — Figures 1-8 are the identity authority for Xiaoxia. "
-                "Figure 9 is VISIBLE-POSE AUTHORITY ONLY, not full-body authority. "
-                f"Visible pose scope: {scope_clause}. Visible pose: {pose_clause}. "
-                "Reproduce only the pose geometry, body orientation, limb placement, and support/contact relationships that are clearly visible in Figure 9. "
-                "Do not infer, invent, or force unseen hips, legs, feet, or other body geometry merely to complete a full-body pose. "
-                "If the Camera instruction is a close-up or medium close-up, keep that framing and let body regions outside the frame remain unseen. "
-                "Do not widen the framing just to show more clothing or more of the body. "
-                "Do not copy Figure 9 person's identity, appearance, clothing, or background. "
-                "Figure 10 is wardrobe authority only for garment portions naturally visible inside the Camera framing; do not widen the shot to display the full outfit. "
+                "Figure 9 is POSE GEOMETRY AUTHORITY. Preserve the complete pose geometry that is visually observable in Figure 9 as one connected body configuration. "
+                f"Observed pose note: {pose_clause}. "
+                "Match the relative geometry of head, shoulders, spine/torso, pelvis/hips, arms, hands, thighs, knees, and any other visible body parts; preserve joint relationships, body orientation, weight distribution, limb placement, and support/contact points. "
+                "Do not reinterpret the pose into a more common, more comfortable, or merely similar pose. Do not use Gemini's visible-scope text as permission to discard visible pelvis, hip, thigh, leg, or support geometry from Figure 9. "
+                "The pose reference controls geometry only; do not copy Figure 9 person's identity, facial appearance, body identity, clothing, background, lighting, or scene. "
+                "Figure 10 is wardrobe authority only for garment portions naturally visible inside the Camera framing. "
+                "Camera authority and Pose authority are independent: Camera controls crop/viewpoint while Figure 9 controls the body configuration inside that crop. "
+                "Do not widen the shot merely to display more clothing, and do not alter Figure 9 pose geometry merely to fit the wardrobe. "
                 "Do not blend identity, pose, and wardrobe reference roles."
             )
             if camera_intent:
@@ -248,7 +248,7 @@ def install_wardrobe_pose_test(app):
             )
             print(
                 f"💃 [WARDROBE_POSE_TEST] version={VERSION} wardrobe={wardrobe_id or expected_wid} "
-                f"inputs={len(input_urls[:10])} roles=8_identity+visible_pose+wardrobe observed_camera={camera_intent!r} model=v4.5"
+                f"inputs={len(input_urls[:10])} roles=8_identity+pose_geometry+wardrobe observed_camera={camera_intent!r} model=v4.5"
             )
             return await original_generate(ctx, msg=msg)
         finally:
@@ -260,7 +260,7 @@ def install_wardrobe_pose_test(app):
     app._generate_photo_from_context = _generate_with_pending_pose
     return {
         "version": VERSION,
-        "mode": "visible_pose_authority_8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45",
+        "mode": "pose_geometry_authority_8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45",
         "one_shot": True,
         "debug_echo": True,
     }
