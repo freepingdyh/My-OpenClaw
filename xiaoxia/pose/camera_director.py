@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06av — concise Gemini Camera Director for Pose + Wardrobe photos.
+"""v1.12.06aw — Gemini reads the attached Pose image and describes its camera framing.
 
-Camera Director has one job only: choose a short camera intent for Seedream V4.5.
-It must not rewrite identity, wardrobe, pose, scene, lighting, or the full prompt.
+Camera Director does NOT choose a new viewpoint. It observes the actual Pose Reference
+and emits one concise English camera description for Seedream V4.5.
 """
 from __future__ import annotations
 
@@ -12,29 +12,23 @@ from google.genai import types
 
 
 async def build_camera_intent(app: Any, context: Dict[str, Any]) -> str:
-    user_text = str(
-        context.get("user_prompt")
-        or context.get("message")
-        or context.get("request")
-        or context.get("prompt_user")
-        or ""
-    ).strip()
+    pose_url = str(context.get("pose_reference_url") or "").strip()
+    mime_type = str(context.get("pose_reference_mime_type") or "image/jpeg").strip() or "image/jpeg"
+    if not pose_url:
+        return ""
 
-    instruction = f"""You are a Camera Director for one Seedream V4.5 photo.
-Choose ONE concise camera intent that best presents the existing pose and the user's intent.
+    instruction = """Inspect the attached pose reference image and describe the camera viewpoint that is ACTUALLY PRESENT in that image.
+Do not invent, improve, or choose a different camera angle.
 
-Rules:
-- Output English only, one line only, normally 10-25 words.
-- Describe ONLY camera position/direction, height, angle, distance, and framing when useful.
-- Do NOT describe the person's identity, face, body shape, clothing, pose/action, background, lighting, mood, or image quality.
+Output rules:
+- English only, one line only, normally 10-25 words.
+- Describe only observable camera direction, subject-facing direction, camera height, tilt/angle, distance, perspective, and framing/composition when useful.
+- Be concrete enough that an image model can reproduce the same viewpoint.
+- Do NOT describe identity, face, body shape, clothing, pose/action, background, lighting, mood, or image quality.
 - Do NOT rewrite the full image prompt.
-- The pose reference controls body pose. Camera intent controls viewpoint only.
-- If the user already specifies a camera/viewpoint, preserve that intent and merely translate/condense it.
-- If the user gives no camera instruction, choose a viewpoint that clearly presents the referenced pose without changing it.
+- If uncertain about one camera property, omit it rather than guessing.
 
-User request: {user_text}
-
-Return only the camera intent."""
+Return only the concise camera description."""
 
     try:
         model = (
@@ -42,17 +36,18 @@ Return only the camera intent."""
             or getattr(app, "GEMINI_MODEL", None)
             or "gemini-2.5-flash"
         )
+        image_part = types.Part.from_uri(file_uri=pose_url, mime_type=mime_type)
         resp = await app.gemini_client.aio.models.generate_content(
             model=model,
-            contents=instruction,
-            config=types.GenerateContentConfig(temperature=0.35),
+            contents=[image_part, instruction],
+            config=types.GenerateContentConfig(temperature=0.1),
         )
         text = str(getattr(resp, "text", "") or "").strip().replace("\n", " ")
         text = " ".join(text.split())
-        # Keep this a small steering signal even if Gemini ignores the requested length.
         words = text.split()
         if len(words) > 30:
             text = " ".join(words[:30])
+        print(f"📷 [POSE_CAMERA_OBSERVED] {text!r}")
         return text.strip(" \"'")
     except Exception as exc:
         print(f"⚠️ [POSE_CAMERA_DIRECTOR_FAILED] {type(exc).__name__}: {exc}")
@@ -60,12 +55,11 @@ Return only the camera intent."""
 
 
 def install_camera_director(app: Any) -> Dict[str, Any]:
-    # Export a narrow seam; wardrobe_pose_test calls it only when a pending Pose exists.
     app.build_pose_camera_intent = lambda context: build_camera_intent(app, context)
     return {
-        "version": "1.12.06av",
-        "camera_director": "Gemini concise intent",
+        "version": "1.12.06aw",
+        "camera_director": "Gemini visual camera observer",
         "target_words": "10-25",
         "hard_cap_words": 30,
-        "scope": "camera viewpoint only",
+        "scope": "describe camera viewpoint already present in Pose Reference",
     }
