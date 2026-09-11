@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06au：修正 Seedance 共用 Director callable 簽名不一致造成的 TypeError。
-# 保留 at 的附件型 legacy 指令流程、H3 TypeError 修正與 Pose 實驗。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206au.py
+# v1.12.06av：Pose + Wardrobe 流程加入 Gemini concise Camera Director。
+# 保留 au Director TypeError 修正、at 附件型 legacy 指令流程與 H3 修正。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206av.py
