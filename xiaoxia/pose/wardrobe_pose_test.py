@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06aw — Pose + Wardrobe with visual Camera Observer.
+"""v1.12.06ax — Pose + Wardrobe with visible Gemini Camera diagnostics.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
@@ -7,13 +7,15 @@ Experiment contract:
   Figure 10    = selected Wxxx outfit authority
   Camera       = concise Gemini description OBSERVED from Figure 9
 
+For debugging, the exact Gemini camera description is echoed to Discord before
+Seedream generation and remains in Zeabur stdout logs.
 Without an attachment the existing wardrobe/photo path is untouched.
 """
 from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06aw-camera-observer"
+VERSION = "1.12.06ax-camera-observer-debug"
 _STATE_KEY = "photo_pending_pose_reference"
 
 
@@ -102,6 +104,18 @@ def install_wardrobe_pose_test(app):
                 camera_intent = str(await camera_builder(ctx) or "").strip()
             ctx["pose_camera_intent"] = camera_intent
 
+            # Visible debug trace: this is exactly what Gemini contributes to Seedream.
+            debug_line = camera_intent or "(Gemini 未產生取景描述)"
+            try:
+                channel = getattr(msg, "channel", None) if msg is not None else None
+                if channel is None:
+                    channel = ctx.get("channel")
+                if channel is not None and hasattr(channel, "send"):
+                    await channel.send(f"🔎 **Gemini 取景判讀：** `{debug_line}`")
+            except Exception as exc:
+                print(f"⚠️ [POSE_CAMERA_DEBUG_ECHO_FAILED] {type(exc).__name__}: {exc}")
+            print(f"🔎 [POSE_CAMERA_TO_SEEDREAM] {debug_line}")
+
             pose_rule = (
                 "REFERENCE ROLE CONTRACT — Figures 1-8 are the identity authority for Xiaoxia. "
                 "Figure 9 is the pose authority. Reproduce its spatial body configuration, body orientation, limb placement, weight distribution, "
@@ -131,4 +145,4 @@ def install_wardrobe_pose_test(app):
 
     app._handle_wardrobe_message_direct = _direct_with_optional_pose
     app._generate_photo_from_context = _generate_with_pending_pose
-    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45", "one_shot": True}
+    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45", "one_shot": True, "debug_echo": True}
