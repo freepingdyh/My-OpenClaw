@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ay：Pose Reference 存在時，Figure 9 + Gemini Camera 取得姿勢/鏡位權限；
-# generic /photo 不再繼承 Scene Director 自行產生的海邊/花園/全身景等內容，且內部 contract 不顯示在 Discord。
-# 保留 ax 鏡位可視診斷、aw Camera Observer、au Director TypeError 修正、at legacy 附件流程與 H3 修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ay.py
+# v1.12.06az：Pose Reference 由 Gemini 同時判讀鏡位、可見身體範圍與可見姿勢；
+# Figure 9 只約束畫面中真正看得到的身體區域，close-up 不再被迫補全下半身或為了 Wxxx 拉遠。
+# generic /photo、/photo 拍照、/photo 拍一張等從原始 context 判定，避免 downstream message 誤判。
+# 保留 ay Pose Authority、ax 鏡位可視診斷、au Director TypeError 修正、at legacy 附件流程與 H3 修正。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206az.py
