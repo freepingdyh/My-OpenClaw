@@ -1,34 +1,51 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06aw — Gemini reads the attached Pose image and describes its camera framing.
+"""v1.12.06az — Gemini observes camera framing plus visible pose scope.
 
-Camera Director does NOT choose a new viewpoint. It observes the actual Pose Reference
-and emits one concise English camera description for Seedream V4.5.
+The observer does not choose a new shot. It reports what is actually visible in the
+Pose Reference so Seedream can reproduce only supported pose geometry and avoid
+inventing unseen lower-body poses from a close-up reference.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 
 from google.genai import types
 
 
-async def build_camera_intent(app: Any, context: Dict[str, Any]) -> str:
+def _clean_json_text(text: str) -> str:
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = value.strip("`").strip()
+        if value.lower().startswith("json"):
+            value = value[4:].strip()
+    return value
+
+
+async def analyze_pose_reference(app: Any, context: Dict[str, Any]) -> Dict[str, str]:
     pose_url = str(context.get("pose_reference_url") or "").strip()
     mime_type = str(context.get("pose_reference_mime_type") or "image/jpeg").strip() or "image/jpeg"
     if not pose_url:
-        return ""
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
 
-    instruction = """Inspect the attached pose reference image and describe the camera viewpoint that is ACTUALLY PRESENT in that image.
-Do not invent, improve, or choose a different camera angle.
+    instruction = """Inspect the attached Pose Reference and report ONLY information that is visibly supported by the image.
+Do not invent, improve, or choose a different camera angle or unseen body geometry.
 
-Output rules:
-- English only, one line only, normally 10-25 words.
-- Describe only observable camera direction, subject-facing direction, camera height, tilt/angle, distance, perspective, and framing/composition when useful.
-- Be concrete enough that an image model can reproduce the same viewpoint.
-- Do NOT describe identity, face, body shape, clothing, pose/action, background, lighting, mood, or image quality.
-- Do NOT rewrite the full image prompt.
-- If uncertain about one camera property, omit it rather than guessing.
+Return one JSON object with exactly these keys:
+{
+  "camera_intent": "...",
+  "visible_pose_scope": "...",
+  "pose_description": "..."
+}
 
-Return only the concise camera description."""
+Rules:
+- camera_intent: English, one concise line, normally 10-25 words. Describe the camera direction, subject-facing direction, camera height/angle, distance, perspective, and shot framing actually present.
+- visible_pose_scope: English, short phrase listing only body regions whose pose is clearly visible, e.g. "head, shoulders, arms, upper torso" or "full body".
+- pose_description: English, one concise line describing only the visible pose/action and support/contact relationships, e.g. "cheek resting on one hand, upper body leaning slightly forward".
+- Do NOT describe identity, face appearance, body shape, clothing, background, lighting, mood, or image quality.
+- Do NOT infer legs, hips, feet, or other body regions hidden outside the frame.
+- If uncertain about a property, omit it rather than guessing.
+- Return JSON only."""
 
     try:
         model = (
@@ -42,24 +59,45 @@ Return only the concise camera description."""
             contents=[image_part, instruction],
             config=types.GenerateContentConfig(temperature=0.1),
         )
-        text = str(getattr(resp, "text", "") or "").strip().replace("\n", " ")
-        text = " ".join(text.split())
-        words = text.split()
+        raw = _clean_json_text(str(getattr(resp, "text", "") or ""))
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Gemini pose analysis did not return an object")
+
+        camera = " ".join(str(data.get("camera_intent") or "").split()).strip(" \"'")
+        scope = " ".join(str(data.get("visible_pose_scope") or "").split()).strip(" \"'")
+        pose_desc = " ".join(str(data.get("pose_description") or "").split()).strip(" \"'")
+
+        # Keep the camera clause compact so it remains a strong, simple instruction.
+        words = camera.split()
         if len(words) > 30:
-            text = " ".join(words[:30])
-        print(f"📷 [POSE_CAMERA_OBSERVED] {text!r}")
-        return text.strip(" \"'")
+            camera = " ".join(words[:30])
+
+        result = {
+            "camera_intent": camera,
+            "visible_pose_scope": scope,
+            "pose_description": pose_desc,
+        }
+        print(f"📷 [POSE_REFERENCE_ANALYSIS] {result!r}")
+        return result
     except Exception as exc:
-        print(f"⚠️ [POSE_CAMERA_DIRECTOR_FAILED] {type(exc).__name__}: {exc}")
-        return ""
+        print(f"⚠️ [POSE_REFERENCE_ANALYSIS_FAILED] {type(exc).__name__}: {exc}")
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
+
+
+async def build_camera_intent(app: Any, context: Dict[str, Any]) -> str:
+    """Backward-compatible camera-only seam."""
+    result = await analyze_pose_reference(app, context)
+    return str(result.get("camera_intent") or "").strip()
 
 
 def install_camera_director(app: Any) -> Dict[str, Any]:
+    app.build_pose_reference_analysis = lambda context: analyze_pose_reference(app, context)
     app.build_pose_camera_intent = lambda context: build_camera_intent(app, context)
     return {
-        "version": "1.12.06aw",
-        "camera_director": "Gemini visual camera observer",
-        "target_words": "10-25",
+        "version": "1.12.06az",
+        "camera_director": "Gemini visual camera + visible pose scope observer",
+        "target_words": "10-25 camera words",
         "hard_cap_words": 30,
-        "scope": "describe camera viewpoint already present in Pose Reference",
+        "scope": "camera viewpoint + visible body regions + visible pose only",
     }
