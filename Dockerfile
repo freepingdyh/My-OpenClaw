@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06bc：修正這張改為 3 refs：成品 A 為主要修正 authority + 2 張小俠 identity anchors。
-# 不再讓 9 張 identity 與成品 A 競爭；repair prompt 只要求最小必要修正，其他照片內容以成品 A 為準。
-# 其餘沿用 bb：/photo 附圖預設 Pose Reference，明確背景語意才走實景背景。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bc.py
+# v1.12.06bd：/photo + Pose 改為 Figure 9 Pose Geometry Authority。
+# Gemini visible-scope 只作觀察資訊，不再有權排除畫面中實際可見的骨盆、臀、腿或支撐幾何。
+# Camera 只控制取景/視角；Figure 9 控制取景內的整體身體幾何。仍為 8 Identity + Pose + Wxxx → Seedream V4.5。
+# 同時保留 bc 的「修正這張」3-ref patch 與 bb 的附件路由修正。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bd.py
