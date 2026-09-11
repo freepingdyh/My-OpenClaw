@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ar：修正 H3/Sulafat TTS 音訊資料型別造成的 TypeError 風險，並保留 aq 的 native slash bridge。
-# 422 content-policy 行為不繞過、不改寫；僅修本地型別處理與錯誤診斷。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ar.py
+# v1.12.06as：native slash commands 立即 defer，並補齊 legacy ctx.reply / ctx.typing 相容層。
+# 保留 ar 的 H3 TypeError 修正、aq 的 slash 註冊，以及 ap 的衣櫃+Pose 實驗。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206as.py
