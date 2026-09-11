@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06be：Pose 照片公開顯示/相簿資料不再混入 REFERENCE ROLE CONTRACT 與英文 Gemini debug。
-# Pose 照片暫停舊 v5.0 場景升級：該流程會把 Figure 9 Pose Authority 換成 v5 背景板，導致姿勢與場景漂移。
-# 仍保留 bd 的 Figure 9 Pose Geometry Authority、bc 的 3-ref 修正這張、bb 的 /photo 附件路由。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206be.py
+# v1.12.06bf：修正這張維持 3 refs（成品主圖 + 2 Identity anchors），但允許針對使用者指出的
+# 手腳/關節/肢體長度等局部 anatomy 錯誤真正改動局部幾何；場景、服裝、鏡位、整體姿勢仍鎖定原成品。
+# 同時保留 be 的 Pose 公開輸出清理與舊 v5 Pose guard，以及 bd/bb 的 Pose Authority/附件路由。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bf.py
