@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06av — Pose + Wardrobe with a concise Camera Director.
+"""v1.12.06aw — Pose + Wardrobe with visual Camera Observer.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
   Figure 9     = user pose authority
   Figure 10    = selected Wxxx outfit authority
-  Camera       = short Gemini intent (or condensed user-specified viewpoint)
+  Camera       = concise Gemini description OBSERVED from Figure 9
 
 Without an attachment the existing wardrobe/photo path is untouched.
 """
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06av-camera-director"
+VERSION = "1.12.06aw-camera-observer"
 _STATE_KEY = "photo_pending_pose_reference"
 
 
@@ -38,13 +38,14 @@ def install_wardrobe_pose_test(app):
                 state = app.load_state()
                 state[_STATE_KEY] = {
                     "url": url,
+                    "content_type": content_type or "image/jpeg",
                     "wardrobe_id": m.group(1).upper(),
                     "message_id": getattr(message, "id", None),
                 }
                 app.save_state(state)
                 await message.channel.send(
                     "💃 已把這張附圖記為 **Pose Reference**。下一張 `/photo` 會測試："
-                    "**8 張小俠 Identity + Pose + Wxxx 衣服 + Camera Director → Seedream V4.5**。"
+                    "**8 張小俠 Identity + Pose + Wxxx 衣服 + Gemini 看圖取景描述 → Seedream V4.5**。"
                 )
         return handled
 
@@ -56,6 +57,7 @@ def install_wardrobe_pose_test(app):
 
         ctx = dict(context or {})
         pose_url = str(pose.get("url") or "").strip()
+        pose_mime = str(pose.get("content_type") or "image/jpeg").strip() or "image/jpeg"
         wardrobe_id = str(ctx.get("wardrobe_id") or "").strip().upper()
         expected_wid = str(pose.get("wardrobe_id") or "").strip().upper()
 
@@ -91,6 +93,8 @@ def install_wardrobe_pose_test(app):
             ctx["seedream_identity_selected_figures"] = [1, 2, 3, 4, 5, 6, 7, 8]
             ctx["figure10_present"] = True
             ctx["seedream_model_id"] = getattr(app, "SEEDREAM_V45_MODEL_ID", "fal-ai/bytedance/seedream/v4.5/edit")
+            ctx["pose_reference_url"] = pose_url
+            ctx["pose_reference_mime_type"] = pose_mime
 
             camera_intent = ""
             camera_builder = getattr(app, "build_pose_camera_intent", None)
@@ -98,7 +102,6 @@ def install_wardrobe_pose_test(app):
                 camera_intent = str(await camera_builder(ctx) or "").strip()
             ctx["pose_camera_intent"] = camera_intent
 
-            # Keep reference roles distinct. Figure 9 controls pose; camera is a short text steering signal.
             pose_rule = (
                 "REFERENCE ROLE CONTRACT — Figures 1-8 are the identity authority for Xiaoxia. "
                 "Figure 9 is the pose authority. Reproduce its spatial body configuration, body orientation, limb placement, weight distribution, "
@@ -118,7 +121,7 @@ def install_wardrobe_pose_test(app):
 
             print(
                 f"💃 [WARDROBE_POSE_TEST] version={VERSION} wardrobe={wardrobe_id or expected_wid} "
-                f"inputs={len(input_urls[:10])} roles=8_identity+pose+wardrobe camera={camera_intent!r} model=v4.5"
+                f"inputs={len(input_urls[:10])} roles=8_identity+pose+wardrobe observed_camera={camera_intent!r} model=v4.5"
             )
             return await original_generate(ctx, msg=msg)
         finally:
@@ -128,4 +131,4 @@ def install_wardrobe_pose_test(app):
 
     app._handle_wardrobe_message_direct = _direct_with_optional_pose
     app._generate_photo_from_context = _generate_with_pending_pose
-    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_camera_v45", "one_shot": True}
+    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45", "one_shot": True}
