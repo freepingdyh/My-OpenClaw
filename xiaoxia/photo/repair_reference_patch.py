@@ -1,21 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Repair reference slimming for v1.12.06bc.
+"""Minimal/local repair reference policy.
 
-The legacy PhotoRepairModal builds a 10-reference repair request: nine Xiaoxia
-identity images plus the completed photo.  Repair is an edit operation, not a new
-character synthesis pass, so this patch intercepts only that recognisable repair
-request at the fal_client boundary and reduces it to:
-
-  Figure 1 = completed photo (primary repair/source authority)
-  Figure 2-3 = two Xiaoxia identity anchors (identity only)
-
-All other fal requests are left untouched.
+Repair is not a new synthesis pass. Keep the completed photo as the dominant
+visual source and use only two Xiaoxia identity anchors. The prompt explicitly
+allows local anatomy correction so a malformed limb is not preserved merely
+because the source photo is otherwise authoritative.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-PATCH_VERSION = "1.12.06bc"
+PATCH_VERSION = "1.12.06bf"
 _REPAIR_SIGNATURE = "Image 10 is the current completed photo to repair"
 _SCENE_MARKER = "TITLE + SCENE CONTRACT:"
 
@@ -24,16 +19,29 @@ def _rewrite_prompt(prompt: str) -> str:
     text = str(prompt or "")
     if _REPAIR_SIGNATURE not in text:
         return text
+
+    # Keep the legacy tail because it contains the user's actual repair request,
+    # but replace the heavy identity/body preamble with a repair-specific contract.
     tail = ""
     if _SCENE_MARKER in text:
         tail = text[text.index(_SCENE_MARKER):].strip()
+
     head = (
-        "FIGURE ROLES: Figure 1 is the current completed Xiaoxia photo and is the PRIMARY REPAIR AUTHORITY. "
-        "Preserve Figure 1's face appearance, hairstyle, body appearance, outfit, pose, camera framing, scene, "
-        "lighting, props, and composition except for the specific defect the user asks to repair. "
-        "Figures 2-3 are Xiaoxia IDENTITY ANCHORS ONLY; use them only to prevent identity drift. "
-        "Do not copy their clothing, pose, camera, background, body proportions, or composition. "
-        "Make the smallest local correction necessary; do not redesign or restage the photo."
+        "REPAIR CONTRACT — this is a local correction of an already completed photo, not a new photo.\n"
+        "Figure 1 is the PRIMARY SOURCE PHOTO. Preserve its recognizable Xiaoxia, hairstyle, outfit, garment details, "
+        "background, props, lighting, camera viewpoint, crop, composition, and overall pose.\n"
+        "Figures 2-3 are IDENTITY ANCHORS ONLY. Use them only if needed to keep Xiaoxia recognizable; never copy their "
+        "pose, clothing, background, camera, or composition.\n"
+        "USER REPAIR REQUEST IS AUTHORITATIVE FOR THE DEFECT. Correct the requested defect even when doing so requires "
+        "changing the malformed local pixels or local limb geometry already present in Figure 1. Do not preserve an "
+        "anatomical error merely because Figure 1 is the source authority.\n"
+        "For anatomy repairs, restore plausible human joint structure, limb length, left/right continuity, hand/foot "
+        "attachment, bend direction, foreshortening, support/contact, and occlusion while keeping the same intended pose "
+        "and camera viewpoint. Change only the defective body region and the smallest immediately connected area needed "
+        "for anatomical continuity.\n"
+        "Do not restage the subject, change the pose category, move her to another place, change the camera, redesign the "
+        "outfit, beautify unrelated areas, or invent a new scene. Everything outside the requested repair region should "
+        "remain visually as close to Figure 1 as possible."
     )
     return head + (("\n\n" + tail) if tail else "")
 
@@ -51,12 +59,12 @@ def _rewrite_arguments(arguments: Any) -> Tuple[Any, bool]:
         value = out.get(key)
         if isinstance(value, (list, tuple)) and len(value) >= 10:
             refs = list(value)
-            # Legacy order is identity 1..9 + completed photo 10.
+            # Legacy order: identity 1..9 + completed photo 10.
+            # Repair order: source photo + two identity anchors.
             out[key] = [refs[-1], refs[0], refs[1]]
             changed = True
             break
 
-    # Defensive support for wrappers that name a list `image`.
     if not changed:
         value = out.get("image")
         if isinstance(value, (list, tuple)) and len(value) >= 10:
@@ -77,12 +85,14 @@ def install_repair_reference_patch(app: Any) -> Dict[str, Any]:
     patched = []
     for name in ("subscribe", "run", "submit"):
         original = getattr(fal_client, name, None)
-        if original is None or getattr(original, "_xiaoxia_repair_bc", False):
+        if original is None:
+            continue
+        # bc may already have wrapped this callable earlier in the runtime chain.
+        # Wrap it once more with bf so the final request receives the newer contract.
+        if getattr(original, "_xiaoxia_repair_bf", False):
             continue
 
         def wrapper(*args, __orig=original, __name=name, **kwargs):
-            # fal_client commonly receives arguments={...}; support positional
-            # arguments dict as well without changing unrelated calls.
             local_kwargs = dict(kwargs)
             changed = False
             if "arguments" in local_kwargs:
@@ -93,10 +103,10 @@ def install_repair_reference_patch(app: Any) -> Dict[str, Any]:
                 if changed:
                     args = (args[0], rewritten, *args[2:])
             if changed:
-                print(f"🩹 [REPAIR_REF_BC] fal_method={__name} refs=3 source=completed_photo identity_anchors=2")
+                print(f"🩹 [REPAIR_REF_BF] fal_method={__name} refs=3 mode=local_anatomy_aware")
             return __orig(*args, **local_kwargs)
 
-        wrapper._xiaoxia_repair_bc = True
+        wrapper._xiaoxia_repair_bf = True
         wrapper.__name__ = getattr(original, "__name__", name)
         setattr(fal_client, name, wrapper)
         patched.append(name)
