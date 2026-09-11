@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06aw：Gemini 直接看 Pose Reference，萃取實際取景角度，再交給 Seedream V4.5。
-# 保留 au Director TypeError 修正、at 附件型 legacy 指令流程與 H3 修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aw.py
+# v1.12.06ax：Gemini 看 Pose Reference 的取景判讀會直接顯示在 Discord，並保留 stdout log，方便比對 Seedream 結果。
+# 保留 aw Camera Observer、au Director TypeError 修正、at 附件型 legacy 指令流程與 H3 修正。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ax.py
