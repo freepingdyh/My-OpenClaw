@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ba：臨時 Pose Reference 改由 /photo 附圖輸入；衣櫃只維持穿著狀態。
+# v1.12.06bb：/photo 附圖預設視為 Pose Reference；若文字明確說背景/場景/在這裡拍，才走舊實景背景參考。
+# 若舊 photo pipeline 已先把附件吃成 background_reference，bb 會在生成前回收同一張圖、改標為 Pose，並清掉背景權限。
 # 生成仍沿用 az：8 Identity + Figure 9 Visible Pose + Figure 10 Wardrobe + Gemini Camera，單張消耗。
-# 保留 ay Pose Authority、ax 鏡位可視診斷、au Director TypeError 修正、at legacy 附件流程與 H3 修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ba.py
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bb.py
