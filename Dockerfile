@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06al：修圖維持 Seedream v4.5；強化 Love Intent 顯示邊界，內部英文規則不再輸出到 Discord。
-# 保留 ai H3 native voice、ag prompt recovery、ae fal-native image transport。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206al.py
+# v1.12.06am：新增 Seedream v4.5 小俠姿勢庫生產器；支援文字姿勢與姿勢圖換人。
+# 9 張小俠 Identity references；圖片模式第 10 張為 Pose reference。
+# 保留 al Love Intent 顯示邊界、ai H3 native voice、ag prompt recovery、ae fal-native image transport。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206am.py
