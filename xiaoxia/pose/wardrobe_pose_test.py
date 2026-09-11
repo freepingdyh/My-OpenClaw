@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06ap — optional Pose Reference for `/衣櫃 穿 Wxxx`.
+"""v1.12.06av — Pose + Wardrobe with a concise Camera Director.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
-  Figure 9     = user pose/composition authority
+  Figure 9     = user pose authority
   Figure 10    = selected Wxxx outfit authority
+  Camera       = short Gemini intent (or condensed user-specified viewpoint)
 
 Without an attachment the existing wardrobe/photo path is untouched.
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06ap-generic-pose"
+VERSION = "1.12.06av-camera-director"
 _STATE_KEY = "photo_pending_pose_reference"
 
 
@@ -43,7 +44,7 @@ def install_wardrobe_pose_test(app):
                 app.save_state(state)
                 await message.channel.send(
                     "💃 已把這張附圖記為 **Pose Reference**。下一張 `/photo` 會測試："
-                    "**8 張小俠 Identity + Pose + Wxxx 衣服 → Seedream V4.5**。"
+                    "**8 張小俠 Identity + Pose + Wxxx 衣服 + Camera Director → Seedream V4.5**。"
                 )
         return handled
 
@@ -76,7 +77,7 @@ def install_wardrobe_pose_test(app):
             ]
 
             input_urls.append(pose_url)
-            roles.append({"figure": 9, "role": "pose_composition_reference_only", "url": pose_url})
+            roles.append({"figure": 9, "role": "pose_reference_only", "url": pose_url})
 
             if str(reference_path).startswith("http"):
                 outfit_url = str(reference_path)
@@ -91,16 +92,24 @@ def install_wardrobe_pose_test(app):
             ctx["figure10_present"] = True
             ctx["seedream_model_id"] = getattr(app, "SEEDREAM_V45_MODEL_ID", "fal-ai/bytedance/seedream/v4.5/edit")
 
-            # Generic contract: never describe or optimize for the particular pose in Figure 9.
+            camera_intent = ""
+            camera_builder = getattr(app, "build_pose_camera_intent", None)
+            if callable(camera_builder):
+                camera_intent = str(await camera_builder(ctx) or "").strip()
+            ctx["pose_camera_intent"] = camera_intent
+
+            # Keep reference roles distinct. Figure 9 controls pose; camera is a short text steering signal.
             pose_rule = (
                 "REFERENCE ROLE CONTRACT — Figures 1-8 are the identity authority for Xiaoxia. "
-                "Figure 9 is the pose and composition authority. Reproduce the pose shown in Figure 9 as faithfully as possible, "
-                "including its spatial body configuration, body orientation, limb placement, weight distribution, interaction with supporting surfaces, "
-                "camera viewpoint, perspective, framing, and composition. Preserve the distinctive visual characteristics of the referenced pose rather than "
-                "simplifying, normalizing, redesigning, or improving it. Figure 9 controls pose and composition only; do not copy its person's identity, "
-                "appearance, clothing, or background. Figure 10 is the wardrobe authority; reproduce the selected garment from Figure 10 while adapting it "
-                "naturally to Xiaoxia in the pose from Figure 9. Do not blend the identity, pose, and wardrobe reference roles."
+                "Figure 9 is the pose authority. Reproduce its spatial body configuration, body orientation, limb placement, weight distribution, "
+                "and interaction with supporting surfaces as faithfully as possible. Preserve the distinctive pose rather than simplifying or normalizing it. "
+                "Do not copy Figure 9 person's identity, appearance, clothing, or background. "
+                "Figure 10 is the wardrobe authority; reproduce its garment naturally on Xiaoxia. "
+                "Do not blend identity, pose, and wardrobe reference roles."
             )
+            if camera_intent:
+                pose_rule += f" Camera: {camera_intent}."
+
             base_scene = str(ctx.get("authoritative_scene") or ctx.get("prompt_base") or "").strip()
             ctx["authoritative_scene"] = (base_scene + "\n\n" + pose_rule).strip()
             ctx["prompt_base"] = (str(ctx.get("prompt_base") or base_scene).strip() + "\n\n" + pose_rule).strip()
@@ -109,7 +118,7 @@ def install_wardrobe_pose_test(app):
 
             print(
                 f"💃 [WARDROBE_POSE_TEST] version={VERSION} wardrobe={wardrobe_id or expected_wid} "
-                f"inputs={len(input_urls[:10])} roles=8_identity+generic_pose+wardrobe model=v4.5"
+                f"inputs={len(input_urls[:10])} roles=8_identity+pose+wardrobe camera={camera_intent!r} model=v4.5"
             )
             return await original_generate(ctx, msg=msg)
         finally:
@@ -119,4 +128,4 @@ def install_wardrobe_pose_test(app):
 
     app._handle_wardrobe_message_direct = _direct_with_optional_pose
     app._generate_photo_from_context = _generate_with_pending_pose
-    return {"version": VERSION, "mode": "8_identity_plus_generic_pose_plus_wardrobe_v45", "one_shot": True}
+    return {"version": VERSION, "mode": "8_identity_plus_pose_plus_wardrobe_plus_camera_v45", "one_shot": True}
