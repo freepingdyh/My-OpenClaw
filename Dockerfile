@@ -17,8 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06bd：/photo + Pose 改為 Figure 9 Pose Geometry Authority。
-# Gemini visible-scope 只作觀察資訊，不再有權排除畫面中實際可見的骨盆、臀、腿或支撐幾何。
-# Camera 只控制取景/視角；Figure 9 控制取景內的整體身體幾何。仍為 8 Identity + Pose + Wxxx → Seedream V4.5。
-# 同時保留 bc 的「修正這張」3-ref patch 與 bb 的附件路由修正。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206bd.py
+# v1.12.06be：Pose 照片公開顯示/相簿資料不再混入 REFERENCE ROLE CONTRACT 與英文 Gemini debug。
+# Pose 照片暫停舊 v5.0 場景升級：該流程會把 Figure 9 Pose Authority 換成 v5 背景板，導致姿勢與場景漂移。
+# 仍保留 bd 的 Figure 9 Pose Geometry Authority、bc 的 3-ref 修正這張、bb 的 /photo 附件路由。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206be.py
