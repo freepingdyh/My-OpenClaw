@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.06ap：/衣櫃 穿 Wxxx 可選附一張 Pose Reference。
-# 測試路徑：Figure 1-8 = 小俠 Identity；Figure 9 = 原姿勢圖；Figure 10 = Wxxx 衣服；Seedream V4.5。
-# 沒附圖時完全維持原 /衣櫃 穿 行為；Pose 為 one-shot，只作用下一張 /photo。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11206ap.py
+# v1.12.06aq：將既有小俠 prefix commands 同步註冊為 Discord native slash commands。
+# /photo 為特殊 on_message 路徑，另建 native bridge；保留 ap 的衣櫃+Pose V4.5 實驗。
+CMD npx openclaw gateway start & python xiaoxia_runtime_v11206aq.py
