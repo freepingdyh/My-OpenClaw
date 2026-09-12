@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.07：將 v1.12.06al 之後仍有效的功能直接由模組一次安裝，停止使用長串 migration runtime。
-# 目前先保留舊 runtime 檔作 rollback；待 Zeabur 部署與主要功能驗證後，再安全刪除 post-al 舊 runtime。
+# v1.12.07：目前正式 consolidated runtime。
+# v1.12.06al 仍是必要 stable base；al 之前的 runtime chain 目前仍屬實際 dependency，不能直接刪除。
+# al 之後的舊 migration wrappers 已移除；其內容仍可從 Git history 精確還原。
 CMD npx openclaw gateway start & python xiaoxia_runtime_v11207.py
