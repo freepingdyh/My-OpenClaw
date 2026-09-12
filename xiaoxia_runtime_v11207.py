@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.05 — consolidated runtime + visible/traceable Pose Composition.
+"""v1.13.06 — consolidated runtime + manual Pose Composition parsing fix.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -22,10 +22,10 @@ from xiaoxia.pose.library_authority import install_pose_library_authority
 from xiaoxia.pose.library_composition_replace import install_pose_library_composition_replace
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.05"
+MIGRATION_VERSION = "1.13.06"
 
 
-def _activate_v11305():
+def _activate_v11306():
     activated = {}
     activated["camera_observer"] = install_camera_director(app)
     activated["pose_commands"] = install_pose_commands(app)
@@ -33,7 +33,7 @@ def _activate_v11305():
     activated["wardrobe_pose"] = install_wardrobe_pose_test(app)
     activated["pose_library_authority"] = install_pose_library_authority(app)
     # Install last among Pose Library layers so it can add Composition while retaining
-    # the v1.13.03 saved-metadata authority behavior.
+    # saved-metadata authority and prevent manual Composition= from leaking into Pose.
     activated["pose_library_composition_replace"] = install_pose_library_composition_replace(app)
     activated["h3_typeerror"] = install_h3_typeerror_fix(app)
     activated["slash_rollback"] = install_native_slash_rollback(app)
@@ -43,16 +43,16 @@ def _activate_v11305():
     activated["pose_output_guard"] = install_pose_output_guard(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11305_POSE_LIBRARY_RUNTIME_ACTIVE]")
+    print("💃 [V11306_POSE_LIBRARY_RUNTIME_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
 
 
-_ACTIVATED = _activate_v11305()
+_ACTIVATED = _activate_v11306()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.05 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.06 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
