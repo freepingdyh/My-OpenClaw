@@ -7,10 +7,9 @@ Discord presentation or normal photo/gallery metadata.
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Dict
 
-PATCH_VERSION = "1.12.07a"
+PATCH_VERSION = "1.12.07b"
 _INTERNAL_MARKERS = (
     "REFERENCE ROLE CONTRACT",
     "FIGURE ROLES:",
@@ -52,11 +51,6 @@ def _strip_internal(text: Any) -> str:
         if pos >= 0:
             cut = min(cut, pos)
     value = value[:cut].strip(" \n。.-")
-
-    # A legacy pose scene can already contain human-facing Chinese mixed with internal
-    # tokens such as "Figure 9" / "Camera 指令" before the English contract starts.
-    # Do not try to surgically translate engineering prose; replace it at the public
-    # boundary with a neutral human-facing scene description instead.
     if any(hint in value for hint in _ENGINEERING_HINTS):
         return ""
     return value
@@ -66,59 +60,65 @@ def _public_scene(ctx: Dict[str, Any]) -> str:
     explicit = _strip_internal(ctx.get("pose_public_scene"))
     if explicit:
         return explicit
-
-    # Prefer genuinely human-facing scene text. Reject legacy pose-routing prose even
-    # when it is Chinese, because "Figure 9 / Camera" are implementation details.
     for key in ("scene_summary", "title", "render_title", "scene_text", "authoritative_scene", "composition"):
         cleaned = _strip_internal(ctx.get(key))
         if cleaned:
             return cleaned
-
     return "背景自然且不搶戲，小俠依姿勢參考留下這一刻。"
 
 
 def _sanitized_context(context: Any) -> Any:
     if not isinstance(context, dict) or not _is_pose_context(context):
         return context
-
     ctx = dict(context)
     public = _public_scene(ctx)
-
-    # Public/persistence metadata is deliberately separated from generation contracts.
-    # Do NOT mutate prompt_base/root_prompt_base/semantic_contract: those remain internal
-    # generation evidence and may be needed by More/replay/debug paths.
     for key in (
         "title", "render_title", "scene_summary", "scene_text",
         "composition", "authoritative_scene", "activity_title",
     ):
         ctx[key] = public
-
     ctx["pose_public_scene"] = public
-    ctx.pop("pose_camera_intent", None)  # raw Gemini English is internal-only
+    ctx.pop("pose_camera_intent", None)
     return ctx
 
 
 def install_pose_output_guard(app: Any) -> Dict[str, Any]:
     patched = []
 
+    # IMPORTANT: _build_result_embed may close over the presentation helper imported
+    # by the stable monolith. Wrapping only _build_result_embed was too late on that
+    # path: the helper could still receive the original context and print the contract.
+    # Patch the helper reference in the app namespace itself so sanitation happens at
+    # the presentation boundary before canonical text/fields are composed.
+    presentation_names = (
+        "build_photo_presentation",
+        "_build_photo_presentation",
+    )
+    for name in presentation_names:
+        original_presentation = getattr(app, name, None)
+        if callable(original_presentation) and not getattr(original_presentation, "_xiaoxia_pose_public_guard_v11207b", False):
+            def guarded_presentation(context, *args, __original=original_presentation, **kwargs):
+                return __original(_sanitized_context(context), *args, **kwargs)
+            guarded_presentation._xiaoxia_pose_public_guard_v11207b = True
+            setattr(app, name, guarded_presentation)
+            patched.append(name)
+
     original_embed = getattr(app, "_build_result_embed", None)
-    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard_v11207a", False):
+    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard_v11207b", False):
         def guarded_embed(context, *args, **kwargs):
             return original_embed(_sanitized_context(context), *args, **kwargs)
-        guarded_embed._xiaoxia_pose_public_guard_v11207a = True
+        guarded_embed._xiaoxia_pose_public_guard_v11207b = True
         app._build_result_embed = guarded_embed
         patched.append("result_embed")
 
     original_payload = getattr(app, "_photo_db_payload", None)
-    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard_v11207a", False):
+    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard_v11207b", False):
         def guarded_payload(context, *args, **kwargs):
             return original_payload(_sanitized_context(context), *args, **kwargs)
-        guarded_payload._xiaoxia_pose_public_guard_v11207a = True
+        guarded_payload._xiaoxia_pose_public_guard_v11207b = True
         app._photo_db_payload = guarded_payload
         patched.append("photo_db_payload")
 
-    # The current v5 refinement path consumes Figure 9 as a v5 background plate.
-    # On a pose-driven photo, Figure 9 is the Pose Authority, so keep that path blocked.
     try:
         from xiaoxia.photo import handlers
         original_v5 = handlers.HANDLERS.get("v5_refine")
@@ -139,4 +139,5 @@ def install_pose_output_guard(app: Any) -> Dict[str, Any]:
     except Exception as exc:
         print(f"⚠️ [POSE_OUTPUT_GUARD_V5_PATCH_FAILED] {type(exc).__name__}: {exc}")
 
+    print(f"🧹 [POSE_OUTPUT_GUARD] version={PATCH_VERSION} patched={patched}")
     return {"version": PATCH_VERSION, "patched": patched}
