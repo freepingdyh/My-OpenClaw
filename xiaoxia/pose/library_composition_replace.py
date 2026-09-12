@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""v1.13.04 — Pose Library composition + reference-image replacement.
+"""v1.13.05 — Pose Library Composition visibility + trace persistence.
 
-Adds two deliberately small capabilities without changing the proven 8+Pose+Wardrobe
-reference contract:
+Keeps the proven 8+Pose+Wardrobe reference contract unchanged while making
+Composition observable end-to-end:
 1) persist Gemini's observed composition_feature and reuse it for library poses;
-2) `/姿勢 修正 Pxxx` with an attached image replaces only that pose reference image,
-   preserving existing metadata unless the user separately edits it.
+2) `/姿勢 修正 Pxxx` with an attached image replaces only that pose reference image;
+3) `/姿勢 看` and `/姿勢 修正 ... 重新判讀` visibly echo Composition;
+4) `/photo` trace/context records pose_composition_feature explicitly.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import discord
 
 from xiaoxia.pose import core as pose_core
 
-VERSION = "1.13.04"
+VERSION = "1.13.05"
 _STATE_KEY = "photo_pending_pose_reference"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
@@ -70,8 +71,6 @@ async def _replace_reference(ctx: Any, wanted: str, attachment: Any) -> None:
     row["updated_at"] = row["reference_replaced_at"]
     pose_core._save_index(rows)
 
-    # If this same Pxxx is currently pending, clear it so the old uploaded URL cannot
-    # accidentally be used. User simply `/姿勢 穿 Pxxx` again after replacement.
     try:
         state = pose_core_app.load_state()
         pending = state.get(_STATE_KEY) if isinstance(state, dict) else None
@@ -96,8 +95,6 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
     global pose_core_app
     pose_core_app = app
 
-    # Capture composition returned during `/姿勢 新增` without changing core's
-    # existing analysis contract.
     original_analysis = getattr(app, "build_pose_reference_analysis", None)
     last_observation: Dict[str, str] = {"composition_feature": ""}
 
@@ -108,7 +105,7 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
         if comp:
             last_observation["composition_feature"] = comp
 
-        # For a selected library pose, the saved Composition is authoritative too.
+        # For a selected library pose, saved Composition is authoritative too.
         try:
             state = app.load_state()
             pending = state.get(_STATE_KEY) if isinstance(state, dict) else None
@@ -117,14 +114,34 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
                 if saved:
                     result["composition_feature"] = saved
                     camera = str(result.get("camera_intent") or "").strip()
-                    # Keep it one concise framing clause rather than adding another
-                    # long Seedream rule block.
-                    result["camera_intent"] = (camera + f" Composition emphasis: {saved}").strip()
+                    # One concise clause only; do not add another large Seedream block.
+                    if "Composition emphasis:" not in camera:
+                        result["camera_intent"] = (camera + f" Composition emphasis: {saved}").strip()
         except Exception:
             pass
         return result
 
     app.build_pose_reference_analysis = analysis_with_composition
+
+    # Explicitly copy Composition into the photo context so latest.json/photo_trace
+    # records it as its own field instead of hiding it only inside Camera text.
+    original_generate = getattr(app, "_generate_photo_from_context", None)
+    if callable(original_generate):
+        async def generate_with_composition_trace(context, msg=None):
+            ctx = dict(context or {})
+            try:
+                state = app.load_state()
+                pending = state.get(_STATE_KEY) if isinstance(state, dict) else None
+                if isinstance(pending, dict) and str(pending.get("source") or "") == "pose_library":
+                    comp = str(pending.get("composition_feature") or "").strip()
+                    if comp:
+                        ctx["pose_composition_feature"] = comp
+                        print(f"🧭 [POSE_COMPOSITION_TO_TRACE] {comp}")
+            except Exception as exc:
+                print(f"⚠️ [POSE_COMPOSITION_TRACE_FAILED] {type(exc).__name__}: {exc}")
+            return await original_generate(ctx, msg=msg)
+
+        app._generate_photo_from_context = generate_with_composition_trace
 
     old_command = app.girlfriend_bot.get_command("姿勢")
     if old_command is None:
@@ -135,7 +152,7 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
         pass
 
     @app.girlfriend_bot.command(name="姿勢")
-    async def pose_command_v11304(ctx, *, request: str = ""):
+    async def pose_command_v11305(ctx, *, request: str = ""):
         text = str(request or "").strip()
         attachments = [a for a in (getattr(getattr(ctx, "message", None), "attachments", []) or []) if _is_image_attachment(a)]
 
@@ -145,7 +162,8 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
             return
 
         is_add = bool(re.match(r"^新增(?:\s|$)", text))
-        if is_add:
+        reread_match = re.match(r"^修正\s+(P\d+)\s+(重新判讀|重判|Gemini)\s*$", text, re.I)
+        if is_add or reread_match:
             last_observation["composition_feature"] = ""
 
         await ctx.invoke(old_command, request=text)
@@ -157,29 +175,40 @@ def install_pose_library_composition_replace(app: Any) -> Dict[str, Any]:
                 await ctx.send(f"🧭 **Composition：** `{comp}`")
             return
 
+        # core.py already row.update(analysis) on re-read.  Echo the persisted value
+        # so the user can verify Composition immediately rather than infer it.
+        if reread_match:
+            wanted = reread_match.group(1).upper()
+            row = pose_core._find_pose(wanted)
+            comp = str((row or {}).get("composition_feature") or "").strip()
+            if comp:
+                await ctx.send(f"🧭 **Composition：** `{comp}`")
+            else:
+                await ctx.send("🧭 **Composition：** `—`")
+            return
+
         wear_match = re.match(r"^穿\s+(P\d+)\s*$", text, re.I)
         if wear_match:
             wanted = wear_match.group(1).upper()
             row = pose_core._find_pose(wanted)
             comp = str((row or {}).get("composition_feature") or "").strip()
-            if comp:
-                state = app.load_state()
-                pending = state.get(_STATE_KEY) if isinstance(state, dict) else None
-                if isinstance(pending, dict) and str(pending.get("pose_id") or "").upper() == wanted:
-                    pending["composition_feature"] = comp
-                    state[_STATE_KEY] = pending
-                    app.save_state(state)
+            state = app.load_state()
+            pending = state.get(_STATE_KEY) if isinstance(state, dict) else None
+            if isinstance(pending, dict) and str(pending.get("pose_id") or "").upper() == wanted:
+                pending["composition_feature"] = comp
+                state[_STATE_KEY] = pending
+                app.save_state(state)
             return
 
         look_match = re.match(r"^看\s+(P\d+)\s*$", text, re.I)
         if look_match:
             row = pose_core._find_pose(look_match.group(1))
             comp = str((row or {}).get("composition_feature") or "").strip()
-            if comp:
-                await ctx.send(f"🧭 **Composition：** `{comp}`")
+            await ctx.send(f"🧭 **Composition：** `{comp or '—'}`")
 
     return {
         "version": VERSION,
-        "composition": "Gemini observed + persisted + reused as concise framing emphasis",
+        "composition": "Gemini observed + persisted + visible + reused as concise framing emphasis",
+        "trace_field": "pose_composition_feature",
         "replace_reference": "/姿勢 修正 Pxxx + image; metadata preserved; no Gemini rerun",
     }
