@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-PATCH_VERSION = "1.12.07b"
+PATCH_VERSION = "1.12.07c"
 _INTERNAL_MARKERS = (
     "REFERENCE ROLE CONTRACT",
     "FIGURE ROLES:",
@@ -17,14 +17,8 @@ _INTERNAL_MARKERS = (
     "VISIBLE-POSE AUTHORITY",
 )
 _ENGINEERING_HINTS = (
-    "Figure 9",
-    "Figure 10",
-    "Figures 1-8",
-    "Camera 指令",
-    "Camera authority",
-    "Pose authority",
-    "POSE GEOMETRY",
-    "REFERENCE ROLE",
+    "Figure 9", "Figure 10", "Figures 1-8", "Camera 指令",
+    "Camera authority", "Pose authority", "POSE GEOMETRY", "REFERENCE ROLE",
 )
 
 
@@ -34,11 +28,8 @@ def _is_pose_context(ctx: Dict[str, Any] | None) -> bool:
         "authoritative_scene", "scene_text", "composition", "prompt_base", "root_prompt_base"
     ))
     return bool(
-        c.get("wardrobe_pose_test")
-        or c.get("pose_reference_url")
-        or c.get("pose_camera_intent")
-        or "POSE GEOMETRY AUTHORITY" in joined
-        or "VISIBLE-POSE AUTHORITY" in joined
+        c.get("wardrobe_pose_test") or c.get("pose_reference_url") or c.get("pose_camera_intent")
+        or "POSE GEOMETRY AUTHORITY" in joined or "VISIBLE-POSE AUTHORITY" in joined
         or "Figure 9" in joined
     )
 
@@ -60,6 +51,7 @@ def _public_scene(ctx: Dict[str, Any]) -> str:
     explicit = _strip_internal(ctx.get("pose_public_scene"))
     if explicit:
         return explicit
+    # Prefer fields least likely to have been repurposed as generation contracts.
     for key in ("scene_summary", "title", "render_title", "scene_text", "authoritative_scene", "composition"):
         cleaned = _strip_internal(ctx.get(key))
         if cleaned:
@@ -85,39 +77,34 @@ def _sanitized_context(context: Any) -> Any:
 def install_pose_output_guard(app: Any) -> Dict[str, Any]:
     patched = []
 
-    # IMPORTANT: _build_result_embed may close over the presentation helper imported
-    # by the stable monolith. Wrapping only _build_result_embed was too late on that
-    # path: the helper could still receive the original context and print the contract.
-    # Patch the helper reference in the app namespace itself so sanitation happens at
-    # the presentation boundary before canonical text/fields are composed.
-    presentation_names = (
-        "build_photo_presentation",
-        "_build_photo_presentation",
-    )
-    for name in presentation_names:
-        original_presentation = getattr(app, name, None)
-        if callable(original_presentation) and not getattr(original_presentation, "_xiaoxia_pose_public_guard_v11207b", False):
-            def guarded_presentation(context, *args, __original=original_presentation, **kwargs):
-                return __original(_sanitized_context(context), *args, **kwargs)
-            guarded_presentation._xiaoxia_pose_public_guard_v11207b = True
-            setattr(app, name, guarded_presentation)
-            patched.append(name)
+    # v1.12.01 installs the actual Discord seam as app._build_photo_embed. The
+    # presentation helper is a lexical import inside that wrapper, so patching a
+    # guessed helper name or _build_result_embed does not intercept this path.
+    # Guard the real seam directly.
+    original_photo_embed = getattr(app, "_build_photo_embed", None)
+    if callable(original_photo_embed) and not getattr(original_photo_embed, "_xiaoxia_pose_public_guard_v11207c", False):
+        def guarded_photo_embed(context, *args, **kwargs):
+            return original_photo_embed(_sanitized_context(context), *args, **kwargs)
+        guarded_photo_embed._xiaoxia_pose_public_guard_v11207c = True
+        app._build_photo_embed = guarded_photo_embed
+        patched.append("_build_photo_embed")
 
+    # Keep these guards for any newer/alternate result paths.
     original_embed = getattr(app, "_build_result_embed", None)
-    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard_v11207b", False):
+    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard_v11207c", False):
         def guarded_embed(context, *args, **kwargs):
             return original_embed(_sanitized_context(context), *args, **kwargs)
-        guarded_embed._xiaoxia_pose_public_guard_v11207b = True
+        guarded_embed._xiaoxia_pose_public_guard_v11207c = True
         app._build_result_embed = guarded_embed
-        patched.append("result_embed")
+        patched.append("_build_result_embed")
 
     original_payload = getattr(app, "_photo_db_payload", None)
-    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard_v11207b", False):
+    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard_v11207c", False):
         def guarded_payload(context, *args, **kwargs):
             return original_payload(_sanitized_context(context), *args, **kwargs)
-        guarded_payload._xiaoxia_pose_public_guard_v11207b = True
+        guarded_payload._xiaoxia_pose_public_guard_v11207c = True
         app._photo_db_payload = guarded_payload
-        patched.append("photo_db_payload")
+        patched.append("_photo_db_payload")
 
     try:
         from xiaoxia.photo import handlers
