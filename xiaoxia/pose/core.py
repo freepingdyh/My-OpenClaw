@@ -1,46 +1,32 @@
 # -*- coding: utf-8 -*-
-"""Xiaoxia Pose Library.
+"""Pose Library v1.13.00 — original-reference asset library.
 
-Image pose conversion uses Seedream v5 Pro Edit with exactly two references:
-1) the user's source/pose image as the base canvas and geometry authority;
-2) one canonical Xiaoxia identity image as the identity authority.
-
-Text-only pose generation keeps the older Seedream v4.5 multi-identity path because
-there is no source canvas to edit.
-
-All results are candidates first. Nothing enters the persistent pose library until
-its owner presses the Discord '收錄' button.
+Pxxx stores the ORIGINAL pose reference plus Gemini observational metadata.
+It never converts the source person into Xiaoxia during library ingestion.
+Command vocabulary intentionally mirrors Wardrobe: /姿勢, 看, 穿, 新增, 修正, 刪除.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import shutil
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import aiohttp
 import discord
 
-TEXT_MODEL_ID = "fal-ai/bytedance/seedream/v4.5/edit"
-IMAGE_MODEL_ID = os.environ.get("XIAOXIA_POSE_V5_MODEL") or "bytedance/seedream/v5/pro/edit"
-POSE_VERSION = "1.12.06ao"
-
-
-def _env_bool(name: str, default: bool = True) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+POSE_VERSION = "1.13.00"
+_STATE_KEY = "photo_pending_pose_reference"
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 
 def _root_dir() -> Path:
-    return Path(os.environ.get("XIAOXIA_POSE_LIBRARY_DIR") or "/data/memory/pose_library")
+    p = Path(os.environ.get("XIAOXIA_POSE_LIBRARY_DIR") or "/data/memory/pose_library")
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _files_dir() -> Path:
@@ -49,23 +35,13 @@ def _files_dir() -> Path:
     return p
 
 
-def _candidate_dir() -> Path:
-    p = _root_dir() / "candidates"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
 def _index_path() -> Path:
-    _root_dir().mkdir(parents=True, exist_ok=True)
     return _root_dir() / "index.json"
 
 
 def _load_index() -> List[Dict[str, Any]]:
-    p = _index_path()
-    if not p.exists():
-        return []
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(_index_path().read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -84,266 +60,95 @@ def _next_pose_id(rows: List[Dict[str, Any]]) -> str:
     return f"P{n + 1:03d}"
 
 
-def _identity_paths() -> List[str]:
-    """Nine canonical refs used only by text-only v4.5 generation."""
-    raw = str(os.environ.get("XIAOXIA_POSE_IDENTITY_REFS") or "").strip()
-    if raw:
-        candidates = [x.strip() for x in re.split(r"[;,\n]+", raw) if x.strip()]
-    else:
-        candidates = [f"dataset/Xiaoxia_{i:03d}.png" for i in range(1, 10)]
-    existing = [p for p in candidates if os.path.exists(p)]
-    if len(existing) < 9:
-        raise RuntimeError(f"POSE_IDENTITY_REFS_NEED_9: found={len(existing)}")
-    return existing[:9]
+def _find_pose(pose_id: str) -> Optional[Dict[str, Any]]:
+    wanted = str(pose_id or "").strip().upper()
+    return next((r for r in _load_index() if str(r.get("id") or "").upper() == wanted), None)
 
 
-def _v5_identity_path() -> str:
-    """One Xiaoxia identity reference for Seedream v5 image editing."""
-    configured = str(os.environ.get("XIAOXIA_POSE_V5_IDENTITY_REF") or "").strip()
-    candidates: List[str] = []
-    if configured:
-        candidates.append(configured)
-    # The first canonical identity is the deterministic default. It can be replaced
-    # without code changes through XIAOXIA_POSE_V5_IDENTITY_REF after A/B testing.
-    candidates.extend(["dataset/Xiaoxia_001.png", "dataset/Xiaoxia_002.png", "dataset/Xiaoxia_003.png"])
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    raise RuntimeError("POSE_V5_IDENTITY_REF_NOT_FOUND: set XIAOXIA_POSE_V5_IDENTITY_REF")
+def _is_image_attachment(a: Any) -> bool:
+    ct = str(getattr(a, "content_type", "") or "").lower()
+    fn = str(getattr(a, "filename", "") or "").lower()
+    return ct.startswith("image/") or fn.endswith(_IMAGE_EXTS)
 
 
-def _text_identity_block() -> str:
-    return (
-        "Figures 1-9 are canonical identity references for one and the same adult woman, Xiaoxia. "
-        "Preserve her facial identity and proportions, long brown slightly wavy hair with airy bangs, "
-        "and her consistent adult body identity. Do not invent another person."
-    )
+def _category_from_analysis(scope: str, desc: str) -> str:
+    text = f"{scope} {desc}".lower()
+    if any(x in text for x in ("lying", "reclining", "lying down")): return "躺姿"
+    if any(x in text for x in ("kneeling", "crouch", "squat")): return "蹲／跪姿"
+    if any(x in text for x in ("sitting", "seated")): return "坐姿"
+    if any(x in text for x in ("leaning", "lean against")): return "倚靠"
+    if any(x in text for x in ("standing", "stands")): return "站姿"
+    return "其他"
 
 
-def _standard_pose_asset_block() -> str:
-    return (
-        "The output is a reusable pose-library asset. Use a plain fitted white sleeveless top and plain "
-        "white shorts, no logos, jewelry or hat. Use a clean neutral light-gray studio background unless "
-        "the pose physically requires a minimal support surface. Keep the pose clearly readable."
-    )
+def _name_from_analysis(category: str, camera: str, desc: str) -> str:
+    # Human-facing name stays Chinese/simple; raw Gemini English remains metadata only.
+    camera_l = camera.lower()
+    bits = [category]
+    if "high-angle" in camera_l or "high angle" in camera_l or "from above" in camera_l: bits.append("俯拍")
+    elif "low-angle" in camera_l or "low angle" in camera_l or "from below" in camera_l: bits.append("仰拍")
+    if "full body" in camera_l: bits.append("全身")
+    elif "three-quarter" in camera_l or "3/4" in camera_l: bits.append("3/4身")
+    elif "close-up" in camera_l or "close up" in camera_l: bits.append("特寫")
+    return "・".join(dict.fromkeys(bits))[:80]
 
 
-def _build_text_prompt(user_text: str) -> str:
-    request = str(user_text or "").strip() or "a natural full-body standing pose"
-    return "\n\n".join([
-        _text_identity_block(),
-        f"Create Xiaoxia in this requested pose: {request}",
-        _standard_pose_asset_block(),
-    ])
+def _tags_from_analysis(category: str, camera: str, scope: str, desc: str) -> List[str]:
+    tags = [category]
+    blob = f"{camera} {scope} {desc}".lower()
+    mapping = [
+        ("俯拍", ("high-angle", "high angle", "from above")),
+        ("仰拍", ("low-angle", "low angle", "from below")),
+        ("全身", ("full body",)), ("3/4身", ("three-quarter", "3/4")),
+        ("特寫", ("close-up", "close up")), ("回頭", ("looking back", "looks back")),
+        ("雙手", ("both hands",)), ("交叉腿", ("crossed legs", "legs crossed")),
+    ]
+    for label, needles in mapping:
+        if any(n in blob for n in needles) and label not in tags: tags.append(label)
+    return tags[:8]
 
 
-def _build_v5_image_prompt(user_text: str) -> str:
-    """V5 two-image edit contract.
-
-    Figure 1 is deliberately first: it is the image to edit and the sole pose/camera
-    authority. Figure 2 provides Xiaoxia identity only.
-    """
-    request = str(user_text or "").strip()
-    text = (
-        "Edit Figure 1. Figure 1 is the base image and absolute authority for pose, body placement, "
-        "limb placement, hand and foot positions, torso direction, head direction, camera angle, camera "
-        "height, framing, crop and perspective. Preserve those geometric relationships as closely as possible. "
-        "Replace the woman in Figure 1 with the same adult woman shown in Figure 2, Xiaoxia. Figure 2 is "
-        "IDENTITY REFERENCE ONLY: use it for Xiaoxia's face identity, facial proportions and recognizable "
-        "personal appearance. Do not copy Figure 2's pose, framing, background or clothing. "
-        "Change the outfit to a plain fitted white sleeveless top and plain white shorts. Replace the background "
-        "with a clean neutral light-gray studio background while retaining any minimal support surface that is "
-        "physically necessary for the pose. Do not beautify into a different person and do not redesign the pose."
-    )
-    if request:
-        text += f" Additional user instruction: {request}."
-    return text
+async def _analyze(app: Any, url: str, mime: str) -> Dict[str, str]:
+    builder = getattr(app, "build_pose_reference_analysis", None)
+    if not callable(builder):
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
+    try:
+        return await builder({"pose_reference_url": url, "pose_reference_mime_type": mime}) or {}
+    except Exception as exc:
+        print(f"⚠️ [POSE_LIBRARY_ANALYSIS_FAILED] {type(exc).__name__}: {exc}")
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
 
 
-async def _upload_file(fal_client: Any, path: str) -> str:
-    url = await asyncio.to_thread(fal_client.upload_file, path)
-    url = str(url or "").strip()
-    if not url.startswith(("http://", "https://")):
-        raise RuntimeError("POSE_FAL_UPLOAD_NO_URL")
-    return url
-
-
-async def _attachment_to_persistent(attachment: discord.Attachment) -> str:
-    suffix = os.path.splitext(str(getattr(attachment, "filename", "") or ""))[1].lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
-        suffix = ".jpg"
-    path = _candidate_dir() / f"pose_ref_{uuid.uuid4().hex}{suffix}"
-    await attachment.save(str(path))
-    return str(path)
-
-
-async def _download(url: str, target: Path) -> None:
-    timeout = aiohttp.ClientTimeout(total=120)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"POSE_OUTPUT_DOWNLOAD_HTTP_{resp.status}")
-            data = await resp.read()
-    if not data:
-        raise RuntimeError("POSE_OUTPUT_DOWNLOAD_EMPTY")
-    target.write_bytes(data)
-
-
-async def _run_model(app: Any, *, model_id: str, prompt: str, paths: List[str]) -> str:
-    fal_client = app._get_fal_client()
-    urls = [await _upload_file(fal_client, path) for path in paths]
-    args = {
-        "prompt": prompt,
-        "image_urls": urls,
-        "image_size": os.environ.get("XIAOXIA_POSE_IMAGE_SIZE") or "portrait_16_9",
-        "num_images": 1,
-        "max_images": 1,
-        "enable_safety_checker": _env_bool("XIAOXIA_POSE_ENABLE_SAFETY_CHECKER", True),
-    }
-    result = await asyncio.to_thread(lambda: fal_client.subscribe(model_id, arguments=args, with_logs=True))
-    images = result.get("images") if isinstance(result, dict) else None
-    image_url = images[0].get("url") if isinstance(images, list) and images and isinstance(images[0], dict) else None
-    if not image_url:
-        raise RuntimeError(f"POSE_MODEL_NO_IMAGE: {str(result)[:1000]}")
-    return str(image_url)
-
-
-async def generate_pose_candidate(
-    app: Any,
-    *,
-    user_text: str = "",
-    pose_attachment: Optional[discord.Attachment] = None,
-    source_ref_path: str = "",
-) -> Dict[str, Any]:
-    if pose_attachment is not None:
-        source_ref_path = await _attachment_to_persistent(pose_attachment)
-    has_pose_reference = bool(source_ref_path and os.path.exists(source_ref_path))
-
-    if has_pose_reference:
-        # Seedream v5 image-edit path: exactly 2 refs.
-        # Figure 1 = source/base canvas (pose authority)
-        # Figure 2 = one Xiaoxia identity image (identity authority)
-        identity_path = _v5_identity_path()
-        paths = [source_ref_path, identity_path]
-        model_id = IMAGE_MODEL_ID
-        prompt = _build_v5_image_prompt(user_text)
-        mode = "v5_two_ref_edit"
-    else:
-        # Text-only generation has no base image, so retain the proven v4.5 identity route.
-        paths = _identity_paths()
-        model_id = TEXT_MODEL_ID
-        prompt = _build_text_prompt(user_text)
-        mode = "v45_text_generation"
-
-    print(f"💃 [POSE_CANDIDATE_START] model={model_id} refs={len(paths)} mode={mode}")
-    image_url = await _run_model(app, model_id=model_id, prompt=prompt, paths=paths)
-    candidate_path = _candidate_dir() / f"candidate_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-    await _download(image_url, candidate_path)
-    return {
-        "candidate_path": str(candidate_path),
-        "source_ref_path": source_ref_path,
-        "source": "image" if has_pose_reference else "text",
-        "instruction": str(user_text or "").strip(),
-        "model": model_id,
-        "mode": mode,
-        "input_ref_count": len(paths),
-        "provider_url": image_url,
-    }
-
-
-def save_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+async def _add_pose(app: Any, attachment: discord.Attachment, note: str = "") -> Dict[str, Any]:
     rows = _load_index()
     pose_id = _next_pose_id(rows)
-    final_path = _files_dir() / f"{pose_id}.png"
-    shutil.copy2(candidate["candidate_path"], final_path)
+    ext = os.path.splitext(str(getattr(attachment, "filename", "") or ""))[1].lower()
+    if ext not in _IMAGE_EXTS: ext = ".jpg"
+    final_path = _files_dir() / f"{pose_id}{ext}"
+    await attachment.save(str(final_path))
+    mime = str(getattr(attachment, "content_type", "") or "image/jpeg")
+    analysis = await _analyze(app, str(getattr(attachment, "url", "") or ""), mime)
+    camera = str(analysis.get("camera_intent") or "").strip()
+    scope = str(analysis.get("visible_pose_scope") or "").strip()
+    desc = str(analysis.get("pose_description") or "").strip()
+    category = _category_from_analysis(scope, desc)
     row = {
         "id": pose_id,
-        "name": str(candidate.get("instruction") or "").strip()[:120] or ("圖片姿勢" if candidate.get("source") == "image" else "姿勢"),
-        "source": candidate.get("source") or "text",
-        "instruction": str(candidate.get("instruction") or "").strip(),
+        "name": str(note or "").strip()[:80] or _name_from_analysis(category, camera, desc),
+        "category": category,
+        "tags": _tags_from_analysis(category, camera, scope, desc),
         "file_path": str(final_path),
-        "model": candidate.get("model") or IMAGE_MODEL_ID,
-        "mode": candidate.get("mode") or "",
-        "input_ref_count": int(candidate.get("input_ref_count") or 0),
+        "mime_type": mime,
+        "camera_intent": camera,
+        "visible_pose_scope": scope,
+        "pose_description": desc,
+        "source": "original_reference",
         "created_at": datetime.now().astimezone().isoformat(),
     }
     rows.insert(0, row)
     _save_index(rows)
-    print(f"✅ [POSE_LIBRARY_SAVED] id={pose_id} mode={row['mode']}")
+    print(f"✅ [POSE_LIBRARY_ADDED] id={pose_id} category={category} original_reference=True")
     return row
-
-
-def _safe_unlink(path: str) -> None:
-    try:
-        if path and os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
-
-
-class PoseReviewView(discord.ui.View):
-    def __init__(self, app: Any, candidate: Dict[str, Any], owner_id: int):
-        super().__init__(timeout=900)
-        self.app = app
-        self.candidate = candidate
-        self.owner_id = owner_id
-        self.done = False
-
-    async def _owner_only(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("這張姿勢候選圖只能由原提出者操作。", ephemeral=True)
-            return False
-        return True
-
-    def _disable(self) -> None:
-        for item in self.children:
-            item.disabled = True
-
-    @discord.ui.button(label="收錄", emoji="✅", style=discord.ButtonStyle.success)
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._owner_only(interaction):
-            return
-        if self.done:
-            return
-        self.done = True
-        row = save_candidate(self.candidate)
-        self._disable()
-        await interaction.response.edit_message(
-            content=f"✅ **{row['id']} 已收入小俠姿勢庫**｜{row['model']}｜refs={row['input_ref_count']}",
-            view=self,
-        )
-
-    @discord.ui.button(label="重抽", emoji="🔄", style=discord.ButtonStyle.secondary)
-    async def redraw(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._owner_only(interaction):
-            return
-        await interaction.response.defer()
-        try:
-            new = await generate_pose_candidate(
-                self.app,
-                user_text=self.candidate.get("instruction", ""),
-                source_ref_path=self.candidate.get("source_ref_path", ""),
-            )
-            view = PoseReviewView(self.app, new, self.owner_id)
-            label = "Seedream V5｜2 refs" if new.get("source") == "image" else "Seedream v4.5｜文字姿勢"
-            await interaction.followup.send(
-                f"🔄 **新姿勢候選圖**｜{label}｜滿意再收錄。",
-                file=discord.File(new["candidate_path"]),
-                view=view,
-            )
-        except Exception as exc:
-            await interaction.followup.send(f"⚠️ 重抽失敗：`{type(exc).__name__}: {str(exc)[:800]}`")
-
-    @discord.ui.button(label="放棄", emoji="❌", style=discord.ButtonStyle.danger)
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._owner_only(interaction):
-            return
-        if self.done:
-            return
-        self.done = True
-        _safe_unlink(self.candidate.get("candidate_path", ""))
-        self._disable()
-        await interaction.response.edit_message(content="❌ 已放棄這張候選圖，未收入姿勢庫。", view=self)
 
 
 def load_pose_library() -> List[Dict[str, Any]]:
@@ -351,114 +156,153 @@ def load_pose_library() -> List[Dict[str, Any]]:
 
 
 def pose_reference_for_generation(pose_id: str) -> Optional[str]:
-    wanted = str(pose_id or "").strip().upper()
-    for row in _load_index():
-        if str(row.get("id") or "").strip().upper() == wanted:
-            path = str(row.get("file_path") or "").strip()
-            return path if path and os.path.exists(path) else None
-    return None
+    row = _find_pose(pose_id)
+    path = str((row or {}).get("file_path") or "")
+    return path if path and os.path.exists(path) else None
+
+
+async def _show_pose(ctx: Any, row: Dict[str, Any]) -> None:
+    path = str(row.get("file_path") or "")
+    text = (
+        f"💃 **{row.get('id')}｜{row.get('name') or '姿勢'}**\n"
+        f"分類：{row.get('category') or '其他'}\n"
+        f"標籤：{'、'.join(row.get('tags') or []) or '—'}\n"
+        f"Camera：`{row.get('camera_intent') or '—'}`\n"
+        f"Visible：`{row.get('visible_pose_scope') or '—'}`\n"
+        f"Pose：`{row.get('pose_description') or '—'}`"
+    )
+    if path and os.path.exists(path):
+        await ctx.reply(text, file=discord.File(path), mention_author=False)
+    else:
+        await ctx.reply(text + "\n⚠️ 原始姿勢圖檔不存在。", mention_author=False)
+
+
+async def _list_poses(ctx: Any, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        await ctx.reply("💃 姿勢櫃目前是空的。附上一張姿勢圖後輸入 `/姿勢 新增` 即可收錄。", mention_author=False)
+        return
+    # Discord permits at most 10 attachments per message. Show newest 10 with thumbnails;
+    # the textual index still reports total count.
+    shown = rows[:10]
+    files, embeds = [], []
+    for i, row in enumerate(shown):
+        path = str(row.get("file_path") or "")
+        filename = f"pose_{i}{os.path.splitext(path)[1] or '.jpg'}"
+        emb = discord.Embed(title=f"{row.get('id')}｜{row.get('name') or '姿勢'}", description=f"{row.get('category') or '其他'}｜{'、'.join(row.get('tags') or [])}")
+        if path and os.path.exists(path):
+            files.append(discord.File(path, filename=filename))
+            emb.set_thumbnail(url=f"attachment://{filename}")
+        embeds.append(emb)
+    suffix = "" if len(rows) <= 10 else f"\n目前先顯示最新 10 張；共 {len(rows)} 張。"
+    await ctx.reply(f"💃 **小俠姿勢櫃**｜共 {len(rows)} 張{suffix}", embeds=embeds, files=files, mention_author=False)
+
+
+def _apply_field_updates(row: Dict[str, Any], spec: str) -> bool:
+    changed = False
+    aliases = {"名稱": "name", "分類": "category", "標籤": "tags", "camera": "camera_intent", "Camera": "camera_intent", "visible": "visible_pose_scope", "Visible": "visible_pose_scope", "pose": "pose_description", "Pose": "pose_description"}
+    for key_cn, key in aliases.items():
+        m = re.search(rf"(?:^|\s){re.escape(key_cn)}\s*[=:：]\s*(.+?)(?=\s+(?:名稱|分類|標籤|camera|Camera|visible|Visible|pose|Pose)\s*[=:：]|$)", spec)
+        if not m: continue
+        value = m.group(1).strip()
+        row[key] = [x.strip() for x in re.split(r"[,，、]+", value) if x.strip()] if key == "tags" else value
+        changed = True
+    return changed
 
 
 def install_pose_commands(app: Any) -> Dict[str, Any]:
     bot = getattr(app, "girlfriend_bot", None)
-    if bot is None:
-        raise RuntimeError("girlfriend_bot not found")
-
+    if bot is None: raise RuntimeError("girlfriend_bot not found")
     for name in ("姿勢", "姿勢庫"):
-        try:
-            bot.remove_command(name)
-        except Exception:
-            pass
+        try: bot.remove_command(name)
+        except Exception: pass
 
     @bot.command(name="姿勢")
     async def pose_command(ctx, *, request: str = ""):
         text = str(request or "").strip()
-        for prefix in ("建立", "換人"):
-            if text.startswith(prefix):
-                text = text[len(prefix):].lstrip(" ：:，,")
-                break
+        attachments = [a for a in (getattr(getattr(ctx, "message", None), "attachments", []) or []) if _is_image_attachment(a)]
 
-        attachments = list(getattr(getattr(ctx, "message", None), "attachments", []) or [])
-        pose_attachment = next(
-            (
-                a for a in attachments
-                if str(getattr(a, "content_type", "") or "").startswith("image/")
-                or str(getattr(a, "filename", "") or "").lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-            ),
-            None,
-        )
-
-        if not text and pose_attachment is None:
-            await ctx.reply(
-                "💃 用法：附姿勢圖後輸入 `/姿勢 換人`（Seedream V5：原圖 + 1 張小俠 Identity），"
-                "或用 `/姿勢 <文字描述>` 建立文字姿勢。生成後先審核，不會自動入庫。",
-                mention_author=False,
-            )
+        if not text:
+            await _list_poses(ctx, _load_index())
             return
 
-        if pose_attachment is not None:
-            status_text = "💃 正在用 **Seedream V5** 換成小俠姿勢候選圖…｜2 refs：原姿勢圖 + 1 張小俠 Identity｜不會自動入庫。"
-        else:
-            status_text = "💃 正在建立文字姿勢候選圖…｜Seedream v4.5｜不會自動入庫。"
-        status = await ctx.reply(status_text, mention_author=False)
-
-        try:
-            candidate = await generate_pose_candidate(app, user_text=text, pose_attachment=pose_attachment)
-            view = PoseReviewView(app, candidate, ctx.author.id)
-            if candidate["source"] == "image":
-                caption = "🧪 **V5 姿勢換人候選圖**｜原圖掌管姿勢／1 張小俠圖掌管身份｜請選：✅收錄／🔄重抽／❌放棄"
-            else:
-                caption = "🧪 **文字姿勢候選圖**｜請選：✅收錄／🔄重抽／❌放棄"
-            await ctx.reply(
-                caption,
-                file=discord.File(candidate["candidate_path"]),
-                view=view,
-                mention_author=False,
-            )
-            try:
-                await status.delete()
-            except Exception:
-                pass
-        except Exception as exc:
-            try:
-                await status.edit(content=f"⚠️ 姿勢候選圖建立失敗：`{type(exc).__name__}: {str(exc)[:1200]}`")
-            except Exception:
-                pass
-
-    @bot.command(name="姿勢庫")
-    async def pose_library_command(ctx, *, request: str = ""):
-        text = str(request or "").strip()
-        m = re.match(r"^(?:刪除|delete)\s+(P\d+)$", text, re.I)
+        m = re.match(r"^看\s+(P\d+)\s*$", text, re.I)
         if m:
-            wanted = m.group(1).upper()
-            rows = _load_index()
-            hit = next((r for r in rows if str(r.get("id") or "").upper() == wanted), None)
-            if not hit:
-                await ctx.reply(f"找不到 `{wanted}`。", mention_author=False)
-                return
-            _safe_unlink(str(hit.get("file_path") or ""))
-            rows = [r for r in rows if str(r.get("id") or "").upper() != wanted]
-            _save_index(rows)
-            await ctx.reply(f"🗑️ `{wanted}` 已從姿勢庫刪除。", mention_author=False)
+            row = _find_pose(m.group(1))
+            if not row: await ctx.reply(f"找不到 `{m.group(1).upper()}`。", mention_author=False); return
+            await _show_pose(ctx, row); return
+
+        m = re.match(r"^穿\s+(P\d+)\s*$", text, re.I)
+        if m:
+            row = _find_pose(m.group(1))
+            if not row: await ctx.reply(f"找不到 `{m.group(1).upper()}`。", mention_author=False); return
+            path = str(row.get("file_path") or "")
+            if not path or not os.path.exists(path): await ctx.reply("⚠️ 這個姿勢的原始圖檔不存在。", mention_author=False); return
+            try:
+                pose_url = await app._seedream_upload_single_file(path)
+            except Exception as exc:
+                await ctx.reply(f"⚠️ 姿勢圖上傳失敗：`{type(exc).__name__}: {str(exc)[:500]}`", mention_author=False); return
+            state = app.load_state()
+            state[_STATE_KEY] = {
+                "url": pose_url, "content_type": row.get("mime_type") or "image/jpeg", "pose_id": row.get("id"),
+                "camera_intent": row.get("camera_intent") or "", "visible_pose_scope": row.get("visible_pose_scope") or "",
+                "pose_description": row.get("pose_description") or "", "source": "pose_library",
+            }
+            app.save_state(state)
+            await ctx.reply(f"💃 已穿上 **{row.get('id')}｜{row.get('name')}**。下一張 `/photo` 會使用這個姿勢。", mention_author=False)
             return
 
-        rows = _load_index()
-        if not rows:
-            await ctx.reply("💃 姿勢庫目前是空的。", mention_author=False)
+        if re.match(r"^新增(?:\s|$)", text):
+            if not attachments:
+                await ctx.reply("請附上一張原始 Pose Reference，再輸入 `/姿勢 新增`。不會換人、不會改衣服、不會改背景。", mention_author=False); return
+            note = re.sub(r"^新增\s*", "", text).strip()
+            status = await ctx.reply("🔎 正在保存原始姿勢圖並讓 Gemini 建立姿勢／鏡位 metadata…", mention_author=False)
+            try:
+                row = await _add_pose(app, attachments[0], note)
+                await status.delete()
+                await _show_pose(ctx, row)
+            except Exception as exc:
+                await status.edit(content=f"⚠️ 姿勢新增失敗：`{type(exc).__name__}: {str(exc)[:900]}`")
             return
-        lines = [f"💃 **小俠姿勢庫**｜共 {len(rows)} 張"]
-        for row in rows[:20]:
-            source = "圖" if row.get("source") == "image" else "文"
-            lines.append(f"`{row.get('id')}` [{source}] {str(row.get('name') or '姿勢')[:70]}")
-        await ctx.reply("\n".join(lines), mention_author=False)
+
+        m = re.match(r"^修正\s+(P\d+)\s*(.*)$", text, re.I)
+        if m:
+            wanted, spec = m.group(1).upper(), m.group(2).strip()
+            rows = _load_index(); row = next((r for r in rows if str(r.get("id") or "").upper() == wanted), None)
+            if not row: await ctx.reply(f"找不到 `{wanted}`。", mention_author=False); return
+            if spec in ("重新判讀", "重判", "Gemini"):
+                path = str(row.get("file_path") or "")
+                if not path or not os.path.exists(path): await ctx.reply("⚠️ 原始姿勢圖不存在。", mention_author=False); return
+                url = await app._seedream_upload_single_file(path)
+                analysis = await _analyze(app, url, row.get("mime_type") or "image/jpeg")
+                row.update(analysis)
+                row["category"] = _category_from_analysis(row.get("visible_pose_scope", ""), row.get("pose_description", ""))
+                row["tags"] = _tags_from_analysis(row["category"], row.get("camera_intent", ""), row.get("visible_pose_scope", ""), row.get("pose_description", ""))
+            elif not spec or not _apply_field_updates(row, spec):
+                await ctx.reply("用法：`/姿勢 修正 P001 名稱=... 分類=... 標籤=...`，或 `/姿勢 修正 P001 重新判讀`。", mention_author=False); return
+            row["updated_at"] = datetime.now().astimezone().isoformat(); _save_index(rows)
+            await _show_pose(ctx, row); return
+
+        m = re.match(r"^刪除\s+(P\d+)\s*$", text, re.I)
+        if m:
+            wanted = m.group(1).upper(); rows = _load_index(); row = next((r for r in rows if str(r.get("id") or "").upper() == wanted), None)
+            if not row: await ctx.reply(f"找不到 `{wanted}`。", mention_author=False); return
+            try: os.remove(str(row.get("file_path") or ""))
+            except Exception: pass
+            _save_index([r for r in rows if str(r.get("id") or "").upper() != wanted])
+            state = app.load_state(); pending = state.get(_STATE_KEY)
+            if isinstance(pending, dict) and str(pending.get("pose_id") or "").upper() == wanted:
+                state[_STATE_KEY] = None; app.save_state(state)
+            await ctx.reply(f"🗑️ `{wanted}` 已從姿勢櫃刪除。", mention_author=False); return
+
+        await ctx.reply("💃 用法：`/姿勢`、`/姿勢 看 P001`、`/姿勢 穿 P001`、附圖 `/姿勢 新增`、`/姿勢 修正 P001 ...`、`/姿勢 刪除 P001`。", mention_author=False)
+
+    # Temporary alias for old muscle memory; all UI/docs use /姿勢.
+    @bot.command(name="姿勢庫", hidden=True)
+    async def pose_library_alias(ctx, *, request: str = ""):
+        command = bot.get_command("姿勢")
+        if command:
+            await ctx.invoke(command, request=request)
 
     app.pose_reference_for_generation = pose_reference_for_generation
     app.load_pose_library = load_pose_library
-    return {
-        "patched": True,
-        "commands": ["/姿勢", "/姿勢庫"],
-        "image_model": IMAGE_MODEL_ID,
-        "image_refs": 2,
-        "text_model": TEXT_MODEL_ID,
-        "review_before_save": True,
-    }
+    return {"version": POSE_VERSION, "commands": ["/姿勢", "看", "穿", "新增", "修正", "刪除"], "asset": "original_pose_reference", "gemini_metadata": True}
