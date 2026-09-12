@@ -1,28 +1,38 @@
 # -*- coding: utf-8 -*-
-"""Pose-photo presentation cleanup and v5 background guard.
+"""Pose-photo public/internal metadata boundary and v5 background guard.
 
-Goals:
-- keep internal pose/reference contracts out of Discord/gallery/public records
-- avoid exposing English Gemini camera debug in normal user-facing presentation
-- prevent legacy v5-background upgrade from replacing Figure 9 Pose with a background plate
-  on pose-driven /photo results
+Generation contracts may contain Figure/Camera/POSE engineering instructions. Those
+instructions must stay available to the generation pipeline, but must never leak into
+Discord presentation or normal photo/gallery metadata.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
-PATCH_VERSION = "1.12.06be"
+PATCH_VERSION = "1.12.07a"
 _INTERNAL_MARKERS = (
     "REFERENCE ROLE CONTRACT",
     "FIGURE ROLES:",
     "POSE GEOMETRY AUTHORITY",
+    "VISIBLE-POSE AUTHORITY",
+)
+_ENGINEERING_HINTS = (
+    "Figure 9",
+    "Figure 10",
+    "Figures 1-8",
+    "Camera 指令",
+    "Camera authority",
+    "Pose authority",
+    "POSE GEOMETRY",
+    "REFERENCE ROLE",
 )
 
 
 def _is_pose_context(ctx: Dict[str, Any] | None) -> bool:
     c = ctx if isinstance(ctx, dict) else {}
     joined = " ".join(str(c.get(k) or "") for k in (
-        "authoritative_scene", "scene_text", "composition", "prompt_base"
+        "authoritative_scene", "scene_text", "composition", "prompt_base", "root_prompt_base"
     ))
     return bool(
         c.get("wardrobe_pose_test")
@@ -30,6 +40,7 @@ def _is_pose_context(ctx: Dict[str, Any] | None) -> bool:
         or c.get("pose_camera_intent")
         or "POSE GEOMETRY AUTHORITY" in joined
         or "VISIBLE-POSE AUTHORITY" in joined
+        or "Figure 9" in joined
     )
 
 
@@ -40,30 +51,50 @@ def _strip_internal(text: Any) -> str:
         pos = value.find(marker)
         if pos >= 0:
             cut = min(cut, pos)
-    return value[:cut].strip(" \n。.-")
+    value = value[:cut].strip(" \n。.-")
+
+    # A legacy pose scene can already contain human-facing Chinese mixed with internal
+    # tokens such as "Figure 9" / "Camera 指令" before the English contract starts.
+    # Do not try to surgically translate engineering prose; replace it at the public
+    # boundary with a neutral human-facing scene description instead.
+    if any(hint in value for hint in _ENGINEERING_HINTS):
+        return ""
+    return value
 
 
 def _public_scene(ctx: Dict[str, Any]) -> str:
-    explicit = str(ctx.get("pose_public_scene") or "").strip()
+    explicit = _strip_internal(ctx.get("pose_public_scene"))
     if explicit:
-        return _strip_internal(explicit)
+        return explicit
+
+    # Prefer genuinely human-facing scene text. Reject legacy pose-routing prose even
+    # when it is Chinese, because "Figure 9 / Camera" are implementation details.
     for key in ("scene_summary", "title", "render_title", "scene_text", "authoritative_scene", "composition"):
         cleaned = _strip_internal(ctx.get(key))
         if cleaned:
             return cleaned
-    return "小俠依大俠提供的姿勢參考留下這一刻。"
+
+    return "背景自然且不搶戲，小俠依姿勢參考留下這一刻。"
 
 
 def _sanitized_context(context: Any) -> Any:
     if not isinstance(context, dict) or not _is_pose_context(context):
         return context
+
     ctx = dict(context)
     public = _public_scene(ctx)
-    # Internal contracts remain available in the live generation context, but all normal
-    # presentation/persistence fields are replaced with concise public Chinese text.
-    for key in ("title", "render_title", "scene_summary", "scene_text", "composition", "authoritative_scene"):
+
+    # Public/persistence metadata is deliberately separated from generation contracts.
+    # Do NOT mutate prompt_base/root_prompt_base/semantic_contract: those remain internal
+    # generation evidence and may be needed by More/replay/debug paths.
+    for key in (
+        "title", "render_title", "scene_summary", "scene_text",
+        "composition", "authoritative_scene", "activity_title",
+    ):
         ctx[key] = public
-    ctx.pop("pose_camera_intent", None)  # do not expose raw English Gemini debug in public UI
+
+    ctx["pose_public_scene"] = public
+    ctx.pop("pose_camera_intent", None)  # raw Gemini English is internal-only
     return ctx
 
 
@@ -71,25 +102,23 @@ def install_pose_output_guard(app: Any) -> Dict[str, Any]:
     patched = []
 
     original_embed = getattr(app, "_build_result_embed", None)
-    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard", False):
+    if callable(original_embed) and not getattr(original_embed, "_xiaoxia_pose_public_guard_v11207a", False):
         def guarded_embed(context, *args, **kwargs):
             return original_embed(_sanitized_context(context), *args, **kwargs)
-        guarded_embed._xiaoxia_pose_public_guard = True
+        guarded_embed._xiaoxia_pose_public_guard_v11207a = True
         app._build_result_embed = guarded_embed
         patched.append("result_embed")
 
     original_payload = getattr(app, "_photo_db_payload", None)
-    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard", False):
+    if callable(original_payload) and not getattr(original_payload, "_xiaoxia_pose_public_guard_v11207a", False):
         def guarded_payload(context, *args, **kwargs):
             return original_payload(_sanitized_context(context), *args, **kwargs)
-        guarded_payload._xiaoxia_pose_public_guard = True
+        guarded_payload._xiaoxia_pose_public_guard_v11207a = True
         app._photo_db_payload = guarded_payload
         patched.append("photo_db_payload")
 
     # The current v5 refinement path consumes Figure 9 as a v5 background plate.
-    # On a pose-driven photo, Figure 9 is the Pose Authority, so using that path destroys
-    # the very reference we need. Block this incompatible path instead of silently changing
-    # pose/scene. A future dedicated pose-aware v5 path can use a separate reference budget.
+    # On a pose-driven photo, Figure 9 is the Pose Authority, so keep that path blocked.
     try:
         from xiaoxia.photo import handlers
         original_v5 = handlers.HANDLERS.get("v5_refine")
@@ -98,8 +127,8 @@ def install_pose_output_guard(app: Any) -> Dict[str, Any]:
                 ctx = dict(getattr(view, "context", {}) or {})
                 if _is_pose_context(ctx):
                     await interaction.response.send_message(
-                        "⚠️ 這張是 Pose Reference 照片；目前的 v5.0 場景升級會把 Pose 參考位改成背景圖，"
-                        "因此會破壞原姿勢與場景。這類照片暫不執行 v5.0 場景升級。",
+                        "⚠️ 這張是姿勢參考照片；目前的 v5.0 場景升級會占用姿勢參考位置，"
+                        "因此可能破壞原姿勢與場景。這類照片暫不執行 v5.0 場景升級。",
                         ephemeral=True,
                     )
                     return
