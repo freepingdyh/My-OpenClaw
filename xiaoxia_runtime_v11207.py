@@ -1,16 +1,8 @@
 # -*- coding: utf-8 -*-
-"""v1.12.07 — consolidated runtime entrypoint.
+"""v1.13.00 — consolidated runtime + original-reference Pose Library.
 
-Purpose
--------
-Collapse the long experimental runtime chain after v1.12.06al into one explicit
-activation layer.  v1.12.06al remains the temporary stable base because it already
-contains the earlier proven migrations.  Everything developed after that point is
-installed here directly from its real module instead of importing ao -> ap -> at ->
-au -> aw -> ax -> ay -> az -> ba -> bb -> bc -> bd -> be -> bf.
-
-Once this entrypoint is deployment-tested, those post-al migration runtime files can
-be removed safely; the feature modules under xiaoxia/ remain the source of truth.
+v1.12.06al remains the stable base. Post-al features are installed directly from
+xiaoxia/ modules; no migration-runtime chain is reintroduced.
 """
 import traceback
 
@@ -27,34 +19,33 @@ from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 
 app = stable_base.app
-MIGRATION_VERSION = "1.12.07"
+MIGRATION_VERSION = "1.13.00"
 
 
-def _activate_v11207():
+def _activate_v11300():
     activated = {}
-
-    # Preserve the effective order of the proven runtime chain.
+    # Camera observer is installed before Pose commands so /姿勢 新增 can use it.
+    activated["camera_observer"] = install_camera_director(app)
     activated["pose_commands"] = install_pose_commands(app)
     activated["wardrobe_pose"] = install_wardrobe_pose_test(app)
     activated["h3_typeerror"] = install_h3_typeerror_fix(app)
     activated["slash_rollback"] = install_native_slash_rollback(app)
     activated["director_signature"] = install_director_signature_fix(app)
-    activated["camera_observer"] = install_camera_director(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("🧹 [V11207_CONSOLIDATED_RUNTIME_ACTIVE]")
+    print("💃 [V11300_POSE_LIBRARY_RUNTIME_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
 
 
-_ACTIVATED = _activate_v11207()
+_ACTIVATED = _activate_v11300()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.12.07 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.00 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
