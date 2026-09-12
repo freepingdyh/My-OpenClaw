@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""v1.13.04 — Gemini observes camera, visible pose, pose geometry, and composition.
+"""v1.13.07 — Gemini Pose Observer geometry/composition precision update.
 
-Composition is observational: it describes the visual emphasis/perspective already
-present in the Pose Reference. It must not invent a new shot or exaggerate anatomy.
+Gemini remains an Observer, not a Director. The observer now prioritizes articulated
+body geometry and support/contact relationships, and Composition is explicitly
+subject-centric so background objects do not leak into Pose Library metadata.
 """
 from __future__ import annotations
 
@@ -27,7 +28,8 @@ async def analyze_pose_reference(app: Any, context: Dict[str, Any]) -> Dict[str,
     if not pose_url:
         return {"camera_intent": "", "visible_pose_scope": "", "pose_description": "", "composition_feature": ""}
 
-    instruction = """Inspect the attached Pose Reference and report ONLY information visibly supported by the image.
+    instruction = """Inspect the attached Pose Reference as an OBSERVER and report ONLY information visibly supported by the current image.
+The purpose is high-fidelity human pose transfer. Describe the subject's geometry precisely; do not direct or redesign the image.
 Do not invent, improve, exaggerate, sexualize, or choose a different camera angle or unseen body geometry.
 
 Return one JSON object with exactly these keys:
@@ -39,13 +41,16 @@ Return one JSON object with exactly these keys:
 }
 
 Rules:
-- camera_intent: English, one concise line, normally 10-25 words. Describe camera direction, subject-facing direction, camera height/angle, distance, perspective, and shot framing actually present.
-- visible_pose_scope: English, short phrase listing only body regions whose pose is clearly visible.
-- pose_description: English, one concise line describing only visible pose/action and support/contact relationships.
-- composition_feature: English, one concise line describing the image's distinctive spatial emphasis/perspective as observed, e.g. which visible region/object is prominent in the near foreground versus farther from camera. Describe relative prominence, not attractiveness; do not request enlargement or exaggeration. If there is no distinctive composition feature, return an empty string.
+- camera_intent: English, one concise line, normally 10-30 words. Describe ONLY the observed camera viewpoint: camera height/angle, front/rear/side or three-quarter view, distance/framing, and meaningful perspective. Do not describe furniture or scene objects.
+- visible_pose_scope: English, short phrase listing only clearly visible body regions. When visible, distinguish head, neck, shoulders, back, arms, hands, torso, hips/pelvis, thighs, knees, lower legs, and feet rather than collapsing them into generic "legs".
+- pose_description: English, concise but geometrically specific. First identify the base posture (standing, seated, kneeling, crouching/squatting, prone, supine, side-lying/reclining, or leaning). Then describe, when visibly supported: torso orientation/lean/twist; pelvis/hip position; each arm/hand placement; thigh, knee, lower-leg and foot arrangement; left/right or asymmetric relationships; weight distribution; and support/contact relationships. Distinguish a hand merely resting from a hand planted to support body weight. For kneeling, distinguish knees, lower legs, pelvis height and whether the pelvis rests on the heels. For seated poses, state what body region bears weight and how the legs fold/extend/cross. For standing poses, state the primary weight-bearing leg when visually clear. Use support-surface-neutral wording such as "supporting surface" unless the physical object is essential to the body geometry. Never include material or decor such as rug, wooden floor, bed, magazine, stuffed animal, furniture style, or room details.
+- composition_feature: English, one concise SUBJECT-CENTRIC line describing only spatial relationships among visible parts of the subject: which body regions are nearer/farther from camera, the primary/secondary focal region, diagonal/vertical/horizontal body flow, foreshortening, or foreground-to-background depth. Do NOT describe background, props, furniture, floor, bedding, text, or any non-subject object. Never invent an object. If no distinctive subject-centric composition feature is visible, return an empty string.
+- Facial expression (smile, wink, etc.) is NOT pose geometry; omit it unless it changes head orientation or visible geometry.
+- Clothing and hair are NOT pose geometry; ignore them except where they genuinely occlude a body region.
 - Do NOT describe identity, face appearance, body shape, clothing, background, lighting, mood, text, logo, watermark, or image quality.
-- Do NOT infer legs, hips, feet, or other body regions hidden outside the frame.
+- Do NOT infer legs, hips, feet, hands, support, or other geometry hidden outside the frame.
 - If uncertain about a property, omit it rather than guessing.
+- Before returning, verify that every statement refers to something visible in the CURRENT image and that composition_feature contains no scene object.
 - Return JSON only."""
 
     try:
@@ -66,11 +71,11 @@ Rules:
         pose_desc = " ".join(str(data.get("pose_description") or "").split()).strip(" \"'")
         composition = " ".join(str(data.get("composition_feature") or "").split()).strip(" \"'")
         words = camera.split()
-        if len(words) > 30:
-            camera = " ".join(words[:30])
+        if len(words) > 35:
+            camera = " ".join(words[:35])
         comp_words = composition.split()
-        if len(comp_words) > 35:
-            composition = " ".join(comp_words[:35])
+        if len(comp_words) > 55:
+            composition = " ".join(comp_words[:55])
 
         result = {
             "camera_intent": camera,
@@ -94,9 +99,9 @@ def install_camera_director(app: Any) -> Dict[str, Any]:
     app.build_pose_reference_analysis = lambda context: analyze_pose_reference(app, context)
     app.build_pose_camera_intent = lambda context: build_camera_intent(app, context)
     return {
-        "version": "1.13.04",
-        "camera_director": "Gemini visual camera + pose + composition observer",
-        "target_words": "10-25 camera words",
-        "hard_cap_words": 30,
-        "scope": "camera viewpoint + visible body regions + visible pose + observed composition",
+        "version": "1.13.07",
+        "camera_director": "Gemini subject-centric pose geometry + camera + composition observer",
+        "target_words": "10-30 camera words",
+        "hard_cap_words": 35,
+        "scope": "camera viewpoint + articulated visible body regions + support/contact geometry + subject-centric composition",
     }
