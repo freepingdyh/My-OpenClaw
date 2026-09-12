@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06az — Gemini observes camera framing plus visible pose scope.
+"""v1.13.04 — Gemini observes camera, visible pose, pose geometry, and composition.
 
-The observer does not choose a new shot. It reports what is actually visible in the
-Pose Reference so Seedream can reproduce only supported pose geometry and avoid
-inventing unseen lower-body poses from a close-up reference.
+Composition is observational: it describes the visual emphasis/perspective already
+present in the Pose Reference. It must not invent a new shot or exaggerate anatomy.
 """
 from __future__ import annotations
 
@@ -26,33 +25,31 @@ async def analyze_pose_reference(app: Any, context: Dict[str, Any]) -> Dict[str,
     pose_url = str(context.get("pose_reference_url") or "").strip()
     mime_type = str(context.get("pose_reference_mime_type") or "image/jpeg").strip() or "image/jpeg"
     if not pose_url:
-        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": "", "composition_feature": ""}
 
-    instruction = """Inspect the attached Pose Reference and report ONLY information that is visibly supported by the image.
-Do not invent, improve, or choose a different camera angle or unseen body geometry.
+    instruction = """Inspect the attached Pose Reference and report ONLY information visibly supported by the image.
+Do not invent, improve, exaggerate, sexualize, or choose a different camera angle or unseen body geometry.
 
 Return one JSON object with exactly these keys:
 {
   "camera_intent": "...",
   "visible_pose_scope": "...",
-  "pose_description": "..."
+  "pose_description": "...",
+  "composition_feature": "..."
 }
 
 Rules:
-- camera_intent: English, one concise line, normally 10-25 words. Describe the camera direction, subject-facing direction, camera height/angle, distance, perspective, and shot framing actually present.
-- visible_pose_scope: English, short phrase listing only body regions whose pose is clearly visible, e.g. "head, shoulders, arms, upper torso" or "full body".
-- pose_description: English, one concise line describing only the visible pose/action and support/contact relationships, e.g. "cheek resting on one hand, upper body leaning slightly forward".
-- Do NOT describe identity, face appearance, body shape, clothing, background, lighting, mood, or image quality.
+- camera_intent: English, one concise line, normally 10-25 words. Describe camera direction, subject-facing direction, camera height/angle, distance, perspective, and shot framing actually present.
+- visible_pose_scope: English, short phrase listing only body regions whose pose is clearly visible.
+- pose_description: English, one concise line describing only visible pose/action and support/contact relationships.
+- composition_feature: English, one concise line describing the image's distinctive spatial emphasis/perspective as observed, e.g. which visible region/object is prominent in the near foreground versus farther from camera. Describe relative prominence, not attractiveness; do not request enlargement or exaggeration. If there is no distinctive composition feature, return an empty string.
+- Do NOT describe identity, face appearance, body shape, clothing, background, lighting, mood, text, logo, watermark, or image quality.
 - Do NOT infer legs, hips, feet, or other body regions hidden outside the frame.
 - If uncertain about a property, omit it rather than guessing.
 - Return JSON only."""
 
     try:
-        model = (
-            getattr(app, "GEMINI_FLASH_MODEL", None)
-            or getattr(app, "GEMINI_MODEL", None)
-            or "gemini-2.5-flash"
-        )
+        model = getattr(app, "GEMINI_FLASH_MODEL", None) or getattr(app, "GEMINI_MODEL", None) or "gemini-2.5-flash"
         image_part = types.Part.from_uri(file_uri=pose_url, mime_type=mime_type)
         resp = await app.gemini_client.aio.models.generate_content(
             model=model,
@@ -67,26 +64,28 @@ Rules:
         camera = " ".join(str(data.get("camera_intent") or "").split()).strip(" \"'")
         scope = " ".join(str(data.get("visible_pose_scope") or "").split()).strip(" \"'")
         pose_desc = " ".join(str(data.get("pose_description") or "").split()).strip(" \"'")
-
-        # Keep the camera clause compact so it remains a strong, simple instruction.
+        composition = " ".join(str(data.get("composition_feature") or "").split()).strip(" \"'")
         words = camera.split()
         if len(words) > 30:
             camera = " ".join(words[:30])
+        comp_words = composition.split()
+        if len(comp_words) > 35:
+            composition = " ".join(comp_words[:35])
 
         result = {
             "camera_intent": camera,
             "visible_pose_scope": scope,
             "pose_description": pose_desc,
+            "composition_feature": composition,
         }
         print(f"📷 [POSE_REFERENCE_ANALYSIS] {result!r}")
         return result
     except Exception as exc:
         print(f"⚠️ [POSE_REFERENCE_ANALYSIS_FAILED] {type(exc).__name__}: {exc}")
-        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": ""}
+        return {"camera_intent": "", "visible_pose_scope": "", "pose_description": "", "composition_feature": ""}
 
 
 async def build_camera_intent(app: Any, context: Dict[str, Any]) -> str:
-    """Backward-compatible camera-only seam."""
     result = await analyze_pose_reference(app, context)
     return str(result.get("camera_intent") or "").strip()
 
@@ -95,9 +94,9 @@ def install_camera_director(app: Any) -> Dict[str, Any]:
     app.build_pose_reference_analysis = lambda context: analyze_pose_reference(app, context)
     app.build_pose_camera_intent = lambda context: build_camera_intent(app, context)
     return {
-        "version": "1.12.06az",
-        "camera_director": "Gemini visual camera + visible pose scope observer",
+        "version": "1.13.04",
+        "camera_director": "Gemini visual camera + pose + composition observer",
         "target_words": "10-25 camera words",
         "hard_cap_words": 30,
-        "scope": "camera viewpoint + visible body regions + visible pose only",
+        "scope": "camera viewpoint + visible body regions + visible pose + observed composition",
     }
