@@ -9,7 +9,22 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Callable
 
-_INTERNAL_CONTRACT_MARKER = "REFERENCE ROLE CONTRACT"
+_INTERNAL_CONTRACT_MARKERS = (
+    "REFERENCE ROLE CONTRACT",
+    "FIGURE ROLES:",
+    "POSE GEOMETRY AUTHORITY",
+    "VISIBLE-POSE AUTHORITY",
+)
+_ENGINEERING_HINTS = (
+    "Figure 9",
+    "Figure 10",
+    "Figures 1-8",
+    "Camera 指令",
+    "Camera authority",
+    "Pose authority",
+    "POSE GEOMETRY",
+    "REFERENCE ROLE",
+)
 
 
 def _compact(value: Any) -> str:
@@ -19,15 +34,21 @@ def _compact(value: Any) -> str:
 def _public_text(value: Any) -> str:
     """Hide generation-only engineering contracts from Discord presentation."""
     text = str(value or "")
-    if _INTERNAL_CONTRACT_MARKER in text:
-        text = text.split(_INTERNAL_CONTRACT_MARKER, 1)[0]
-    return text.strip()
+    cut = len(text)
+    for marker in _INTERNAL_CONTRACT_MARKERS:
+        pos = text.find(marker)
+        if pos >= 0:
+            cut = min(cut, pos)
+    text = text[:cut].strip()
+    if any(hint in text for hint in _ENGINEERING_HINTS):
+        return ""
+    return text
 
 
 def compact_scene_title(context: Dict[str, Any] | None, fallback: str = "快門瞬間") -> str:
     ctx = context if isinstance(context, dict) else {}
     base = _compact(
-        ctx.get("pose_public_scene")
+        _public_text(ctx.get("pose_public_scene"))
         or _public_text(ctx.get("title"))
         or _public_text(ctx.get("scene_summary"))
         or _public_text(ctx.get("scene_text"))
@@ -100,10 +121,9 @@ def build_photo_presentation(
             wardrobe_prefix = f"【{wardrobe_id}{('｜' + wardrobe_name) if wardrobe_name else ''}】\n"
         fields.append(("服裝／搭配", (wardrobe_prefix + str(ctx.get("outfit_summary")))[:900]))
 
-    # Exact short camera description Gemini handed to Seedream.
-    camera_intent = _compact(ctx.get("pose_camera_intent") or "")
-    if camera_intent:
-        fields.append(("📷 Gemini 鏡位判讀", camera_intent[:900]))
+    # pose_camera_intent is an internal Gemini→Seedream instruction. It must not be
+    # surfaced verbatim in Discord. Pose Library can later expose a dedicated Chinese
+    # human-facing camera description instead.
 
     return {
         "title": str(raw_title)[:256],
