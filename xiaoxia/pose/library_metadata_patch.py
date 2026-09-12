@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Pose Library v1.13.01 metadata backfill.
+"""Pose Library v1.13.02 metadata durability patch.
 
-Keeps the v1.13.00 command surface, but fixes two practical ingestion/display cases:
-1) new items whose Discord attachment URL could not be inspected by Gemini;
-2) legacy Pxxx rows created before the original-reference library had metadata.
+Command semantics are deliberately strict:
+- /姿勢 看 is read-only and never mutates library metadata.
+- /姿勢 修正 Pxxx 重新判讀 is the explicit operation that reruns Gemini.
+- /姿勢 新增 may retry analysis from the stored image only when initial ingestion
+  produced blank metadata, because that is still part of the add transaction.
 
-The stored pose image itself is uploaded to the existing image transport and becomes
-the observation source.  No pose conversion or person replacement is performed.
+No pose conversion or person replacement is performed here.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from typing import Any, Dict
 
 from xiaoxia.pose import core
 
-VERSION = "1.13.01"
+VERSION = "1.13.02"
 _PLACEHOLDER_NAMES = {"", "姿勢", "圖片姿勢", "其他"}
 
 
@@ -37,7 +38,11 @@ def _persist_row(updated: Dict[str, Any]) -> None:
             return
 
 
-async def _refresh_from_stored_image(app: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+async def refresh_from_stored_image(app: Any, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Explicit metadata refresh primitive used by repair flows.
+
+    This function does not run merely because an item is viewed.
+    """
     path = str(row.get("file_path") or "").strip()
     if not path or not os.path.exists(path):
         return row
@@ -47,14 +52,14 @@ async def _refresh_from_stored_image(app: Any, row: Dict[str, Any]) -> Dict[str,
         public_url = await app._seedream_upload_single_file(path)
         analysis = await core._analyze(app, public_url, mime)
     except Exception as exc:
-        print(f"⚠️ [POSE_LIBRARY_BACKFILL_UPLOAD_FAILED] {type(exc).__name__}: {exc}")
+        print(f"⚠️ [POSE_LIBRARY_METADATA_UPLOAD_FAILED] {type(exc).__name__}: {exc}")
         return row
 
     camera = str(analysis.get("camera_intent") or "").strip()
     scope = str(analysis.get("visible_pose_scope") or "").strip()
     desc = str(analysis.get("pose_description") or "").strip()
     if not any((camera, scope, desc)):
-        print(f"⚠️ [POSE_LIBRARY_BACKFILL_EMPTY] id={row.get('id')}")
+        print(f"⚠️ [POSE_LIBRARY_METADATA_EMPTY] id={row.get('id')}")
         return row
 
     updated = dict(row)
@@ -69,8 +74,8 @@ async def _refresh_from_stored_image(app: Any, row: Dict[str, Any]) -> Dict[str,
     if old_name in _PLACEHOLDER_NAMES:
         updated["name"] = core._name_from_analysis(category, camera, desc)
 
-    # Old Pxxx entries may have been produced by the pre-v1.13 experiment.  Keep
-    # them usable, but do not falsely relabel them as original-reference assets.
+    # Old Pxxx entries may have been produced by the pre-v1.13 experiment. Keep
+    # them usable without falsely relabeling them as original-reference assets.
     if str(updated.get("source") or "").strip() != "original_reference":
         updated["source"] = "legacy_pose_asset"
 
@@ -78,33 +83,28 @@ async def _refresh_from_stored_image(app: Any, row: Dict[str, Any]) -> Dict[str,
     updated["metadata_version"] = VERSION
     updated["updated_at"] = datetime.now().astimezone().isoformat()
     _persist_row(updated)
-    print(f"✅ [POSE_LIBRARY_METADATA_BACKFILLED] id={updated.get('id')} category={category}")
+    print(f"✅ [POSE_LIBRARY_METADATA_REFRESHED] id={updated.get('id')} category={category}")
     return updated
 
 
 def install_pose_library_metadata_patch(app: Any) -> Dict[str, Any]:
     original_add = core._add_pose
-    original_show = core._show_pose
 
     async def add_with_durable_analysis(app_arg, attachment, note=""):
         row = await original_add(app_arg, attachment, note)
         if _metadata_missing(row):
-            row = await _refresh_from_stored_image(app, row)
+            row = await refresh_from_stored_image(app, row)
         return row
 
-    async def show_with_backfill(ctx, row):
-        current = row
-        if _metadata_missing(current):
-            current = await _refresh_from_stored_image(app, current)
-        await original_show(ctx, current)
-
+    # Only ingestion is patched. _show_pose remains untouched/read-only.
     core._add_pose = add_with_durable_analysis
-    core._show_pose = show_with_backfill
     core.POSE_VERSION = VERSION
+    app.refresh_pose_library_metadata = lambda row: refresh_from_stored_image(app, row)
 
     return {
         "version": VERSION,
         "new_ingest_fallback": "stored-image upload -> Gemini observer",
-        "legacy_backfill": "automatic on /姿勢 看 and after blank new ingest",
+        "view_semantics": "read-only",
+        "repair_semantics": "/姿勢 修正 ...",
         "pose_conversion": False,
     }
