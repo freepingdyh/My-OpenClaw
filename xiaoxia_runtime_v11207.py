@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""v1.13.14 — Pose Library Test A process-memory selector on stable v1.12.06al base.
+"""v1.13.15 — direct P013 Test C on stable v1.12.06al base.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
+
+Test C no longer relies on the failed Test-A selector handoff. P013 is handled
+inside wardrobe_pose_test itself: stored Camera/Pose/Composition text is primary,
+Figure 9 is secondary visual evidence, Figure 10 remains wardrobe authority.
 """
 import traceback
 
@@ -23,13 +27,12 @@ from xiaoxia.pose.library_composition_replace import install_pose_library_compos
 from xiaoxia.pose.category_patch import install_pose_category_patch
 from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
-from xiaoxia.pose.pose_test_mode_patch import install_pose_test_mode_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.14"
+MIGRATION_VERSION = "1.13.15"
 
 
-def _activate_v11314():
+def _activate_v11315():
     activated = {}
     activated["camera_observer"] = install_camera_director(app)
     activated["pose_category"] = install_pose_category_patch(app)
@@ -46,20 +49,18 @@ def _activate_v11314():
     activated["repair"] = install_repair_reference_patch(app)
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
-    # Install last so the selector lookup is the outermost generation wrapper.
-    activated["pose_test_mode"] = install_pose_test_mode_patch(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11314_POSE_TEST_A_RUNTIME_ACTIVE]")
+    print("💃 [V11315_POSE_TEST_C_RUNTIME_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
 
 
-_ACTIVATED = _activate_v11314()
+_ACTIVATED = _activate_v11315()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.14 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.15 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
