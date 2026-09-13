@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""v1.13.16 — generic Pose Library Test C on stable v1.12.06al base.
+"""v1.13.17 — generic Pose Library Test C with clean final Figure-9 role boundary.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
 
-Any stored Pose Library entry with complete Camera/Pose/Composition metadata now
-uses generic Test C inside wardrobe_pose_test itself: stored text is primary,
-Figure 9 is secondary visual evidence, Figure 10 remains wardrobe authority.
+Any stored Pose Library entry with complete Camera/Pose/Composition metadata uses
+generic Test C inside wardrobe_pose_test: stored text is primary, Figure 9 is
+secondary visual evidence, Figure 10 remains wardrobe authority.  The final FAL
+guard now removes Figure 9 from the legacy identity-only prohibition for Test C
+without changing the C primary/secondary hierarchy.
 """
 import traceback
 
@@ -29,10 +31,10 @@ from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.16"
+MIGRATION_VERSION = "1.13.17"
 
 
-def _activate_v11316():
+def _activate_v11317():
     activated = {}
     activated["camera_observer"] = install_camera_director(app)
     activated["pose_category"] = install_pose_category_patch(app)
@@ -51,16 +53,16 @@ def _activate_v11316():
     activated["pose_output_guard"] = install_pose_output_guard(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11316_GENERIC_POSE_TEST_C_RUNTIME_ACTIVE]")
+    print("💃 [V11317_GENERIC_C_FINAL_ROLE_GUARD_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
 
 
-_ACTIVATED = _activate_v11316()
+_ACTIVATED = _activate_v11317()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.16 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.17 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
