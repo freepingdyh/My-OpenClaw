@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.10 — concise Pose Library + lightweight Figure 9 guidance.
+"""v1.13.11 — direct Figure 9 pose/camera/composition authority.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -22,12 +22,13 @@ from xiaoxia.pose.library_authority import install_pose_library_authority
 from xiaoxia.pose.library_composition_replace import install_pose_library_composition_replace
 from xiaoxia.pose.category_patch import install_pose_category_patch
 from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
+from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.10"
+MIGRATION_VERSION = "1.13.11"
 
 
-def _activate_v11310():
+def _activate_v11311():
     activated = {}
     activated["camera_observer"] = install_camera_director(app)
     activated["pose_category"] = install_pose_category_patch(app)
@@ -42,19 +43,20 @@ def _activate_v11310():
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
+    activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11310_POSE_LIBRARY_RUNTIME_ACTIVE]")
+    print("💃 [V11311_POSE_LIBRARY_RUNTIME_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
 
 
-_ACTIVATED = _activate_v11310()
+_ACTIVATED = _activate_v11311()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.10 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.11 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
