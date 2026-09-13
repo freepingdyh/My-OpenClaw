@@ -9,14 +9,52 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Callable
 
+_INTERNAL_CONTRACT_MARKERS = (
+    "REFERENCE ROLE CONTRACT",
+    "FIGURE ROLES:",
+    "POSE GEOMETRY AUTHORITY",
+    "VISIBLE-POSE AUTHORITY",
+)
+_ENGINEERING_HINTS = (
+    "Figure 9",
+    "Figure 10",
+    "Figures 1-8",
+    "Camera 指令",
+    "Camera authority",
+    "Pose authority",
+    "POSE GEOMETRY",
+    "REFERENCE ROLE",
+)
+
 
 def _compact(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _public_text(value: Any) -> str:
+    """Hide generation-only engineering contracts from Discord presentation."""
+    text = str(value or "")
+    cut = len(text)
+    for marker in _INTERNAL_CONTRACT_MARKERS:
+        pos = text.find(marker)
+        if pos >= 0:
+            cut = min(cut, pos)
+    text = text[:cut].strip()
+    if any(hint in text for hint in _ENGINEERING_HINTS):
+        return ""
+    return text
+
+
 def compact_scene_title(context: Dict[str, Any] | None, fallback: str = "快門瞬間") -> str:
     ctx = context if isinstance(context, dict) else {}
-    base = _compact(ctx.get("title") or ctx.get("scene_summary") or ctx.get("scene_text") or ctx.get("composition") or fallback)
+    base = _compact(
+        _public_text(ctx.get("pose_public_scene"))
+        or _public_text(ctx.get("title"))
+        or _public_text(ctx.get("scene_summary"))
+        or _public_text(ctx.get("scene_text"))
+        or _public_text(ctx.get("composition"))
+        or fallback
+    )
     return base[:48] if base else fallback
 
 
@@ -52,21 +90,28 @@ def build_photo_presentation(
             description = user_instruction or f"「{album_title}」第 {shot_number} 張。"
     else:
         raw_title = f"{title_prefix}｜{compact_scene_title(ctx)}"
-        description = str(canonical_text(ctx) or "")
+        description = _public_text(canonical_text(ctx) or "")
         if not description:
             if is_autonomy(ctx):
-                description = str(autonomy_text(ctx) or ctx.get("action_summary") or "小俠今天的自主生活片刻。")
+                description = _public_text(autonomy_text(ctx) or ctx.get("action_summary") or "小俠今天的自主生活片刻。")
             else:
-                description = str(ctx.get("message") or ctx.get("action_summary") or "小俠留下的這一刻。")
+                description = _public_text(ctx.get("message") or ctx.get("action_summary") or "小俠留下的這一刻。")
 
     fields = []
     is_diary = str(ctx.get("source_mode") or ctx.get("type") or "").lower() == "diary"
-    if (not is_photobook) and is_diary and (ctx.get("authoritative_scene") or ctx.get("composition")):
-        fields.append(("📸 寫真構想", str(ctx.get("authoritative_scene") or ctx.get("composition"))[:1024]))
-    elif (not is_photobook) and is_autonomy(ctx) and (ctx.get("authoritative_scene") or ctx.get("scene_summary")):
-        fields.append(("場景", str(ctx.get("authoritative_scene") or ctx.get("scene_summary"))[:1024]))
-    elif (not is_photobook) and ctx.get("scene_summary"):
-        fields.append(("場景", str(ctx.get("scene_summary"))[:900]))
+    public_scene = _public_text(
+        ctx.get("pose_public_scene")
+        or ctx.get("authoritative_scene")
+        or ctx.get("composition")
+        or ctx.get("scene_summary")
+        or ""
+    )
+    if (not is_photobook) and is_diary and public_scene:
+        fields.append(("📸 寫真構想", public_scene[:1024]))
+    elif (not is_photobook) and is_autonomy(ctx) and public_scene:
+        fields.append(("場景", public_scene[:1024]))
+    elif (not is_photobook) and public_scene:
+        fields.append(("場景", public_scene[:900]))
 
     if ctx.get("outfit_summary"):
         wardrobe_id = str(ctx.get("wardrobe_id") or "").strip().upper()
@@ -75,6 +120,10 @@ def build_photo_presentation(
         if wardrobe_id:
             wardrobe_prefix = f"【{wardrobe_id}{('｜' + wardrobe_name) if wardrobe_name else ''}】\n"
         fields.append(("服裝／搭配", (wardrobe_prefix + str(ctx.get("outfit_summary")))[:900]))
+
+    # pose_camera_intent is an internal Gemini→Seedream instruction. It must not be
+    # surfaced verbatim in Discord. Pose Library can later expose a dedicated Chinese
+    # human-facing camera description instead.
 
     return {
         "title": str(raw_title)[:256],
