@@ -5,8 +5,8 @@ Figures 1-8 = Xiaoxia identity authority
 Figure 9     = primary pose-image authority
 Figure 10    = wardrobe authority
 
-Camera / Pose / Composition are intentionally concise guidance.  The detailed Pose
-Library metadata is not converted into a joint-by-joint skeleton prompt.
+Camera / Pose / Composition are intentionally concise guidance. Detailed legacy
+Pose Library text is never converted into a joint-by-joint Seedream prompt.
 """
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
 }
+_LEGACY_ANATOMY_TERMS = (
+    "pelvis", "hip higher", "hip lower", "torso is", "torso slightly", "elbow", "forearm",
+    "weight bearing", "bearing weight", "weight appears", "joint", "lower leg is", "knee is bent"
+)
 
 
 def _strip_photo_prefix(text: str) -> str:
@@ -72,7 +76,6 @@ def _apply_pose_scene_authority(ctx, clean_scene: str) -> None:
 
 
 def _split_camera_composition(camera: str, composition: str) -> tuple[str, str]:
-    """Undo older v1.13.06 compatibility text that appended Composition to Camera."""
     cam = str(camera or "").strip()
     comp = str(composition or "").strip()
     marker = "Composition emphasis:"
@@ -86,6 +89,16 @@ def _split_camera_composition(camera: str, composition: str) -> tuple[str, str]:
 
 def _short_words(text: str, cap: int) -> str:
     return " ".join(str(text or "").strip().split()[:cap])
+
+
+def _safe_pose_hint(text: str) -> str:
+    """Use new concise metadata; suppress old anatomy-heavy metadata entirely."""
+    value = " ".join(str(text or "").strip().split())
+    low = value.lower()
+    hits = sum(1 for term in _LEGACY_ANATOMY_TERMS if term in low)
+    if hits >= 2:
+        return ""
+    return _short_words(value, 34)
 
 
 def install_wardrobe_pose_test(app):
@@ -105,12 +118,7 @@ def install_wardrobe_pose_test(app):
             looks_image = content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".webp"))
             if url and looks_image:
                 state = app.load_state()
-                state[_STATE_KEY] = {
-                    "url": url,
-                    "content_type": content_type or "image/jpeg",
-                    "wardrobe_id": m.group(1).upper(),
-                    "message_id": getattr(message, "id", None),
-                }
+                state[_STATE_KEY] = {"url": url, "content_type": content_type or "image/jpeg", "wardrobe_id": m.group(1).upper(), "message_id": getattr(message, "id", None)}
                 app.save_state(state)
                 await message.channel.send("💃 已把附圖記為 Pose Reference。下一張 `/photo` 使用 Figure 9 圖像 + 精簡 Camera/Pose/Composition。")
         return handled
@@ -172,9 +180,8 @@ def install_wardrobe_pose_test(app):
             composition_feature = str(analysis.get("composition_feature") or "").strip() if isinstance(analysis, dict) else ""
             camera_intent, composition_feature = _split_camera_composition(camera_intent, composition_feature)
 
-            # Hard caps keep legacy verbose library rows from recreating the old skeleton prompt.
             camera_hint = _short_words(camera_intent, 28)
-            pose_hint = _short_words(pose_description, 34)
+            pose_hint = _safe_pose_hint(pose_description)
             composition_hint = _short_words(composition_feature, 30)
 
             ctx["pose_camera_intent"] = camera_intent
@@ -192,10 +199,7 @@ def install_wardrobe_pose_test(app):
                 parts.append(f"Camera cue: {camera_hint}")
             if composition_hint:
                 parts.append(f"Composition cue: {composition_hint}")
-            parts.extend([
-                "Do not copy Figure 9 identity, clothing, background, or lighting.",
-                "Figure 10 defines wardrobe only.",
-            ])
+            parts.extend(["Do not copy Figure 9 identity, clothing, background, or lighting.", "Figure 10 defines wardrobe only."])
             pose_rule = " ".join(parts)
 
             try:
@@ -206,14 +210,13 @@ def install_wardrobe_pose_test(app):
                     await channel.send(
                         "🔎 **Pose 精簡指引 → Seedream**\n"
                         f"Camera: `{camera_hint or '—'}`\n"
-                        f"Pose: `{pose_hint or '—'}`\n"
+                        f"Pose: `{pose_hint or '—（舊版過細 metadata 已略過）'}`\n"
                         f"Composition: `{composition_hint or '—'}`"
                     )
             except Exception as exc:
                 print(f"⚠️ [POSE_GUIDANCE_ECHO_FAILED] {type(exc).__name__}: {exc}")
 
             print(f"🧩 [POSE_LIGHT_GUIDANCE] camera={camera_hint!r} pose={pose_hint!r} composition={composition_hint!r}")
-
             ctx["authoritative_scene"] = (clean_scene + "\n\n" + pose_rule).strip()
             ctx["prompt_base"] = (clean_scene + "\n\n" + pose_rule).strip()
             ctx["pose_public_scene"] = clean_scene
@@ -222,7 +225,6 @@ def install_wardrobe_pose_test(app):
             ctx["wardrobe_pose_test"] = True
             ctx["wardrobe_pose_test_version"] = VERSION
             ctx["pose_generation_contract"] = "figure9_plus_lightweight_metadata"
-
             print(f"🎬 [POSE_AUTHORITY_LIGHT] generic={generic_request} clean={clean_scene[:220]!r}")
             return await original_generate(ctx, msg=msg)
         finally:
@@ -236,6 +238,6 @@ def install_wardrobe_pose_test(app):
         "version": VERSION,
         "mode": "figure9_image_authority_plus_lightweight_camera_pose_composition_v45",
         "one_shot": True,
-        "metadata_to_seedream": "concise_only",
+        "metadata_to_seedream": "concise_only; legacy anatomy-heavy pose omitted",
         "debug_echo": True,
     }
