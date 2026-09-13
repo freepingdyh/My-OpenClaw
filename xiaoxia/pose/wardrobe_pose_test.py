@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
-"""v1.12.06bd — Pose Geometry Authority + Camera framing authority.
+"""v1.13.09 — minimal Figure 9 pose-image authority.
 
 Experiment contract:
   Figures 1-8 = Xiaoxia identity authority
-  Figure 9     = pose geometry authority for all geometry visible in the image
-  Figure 10    = selected Wxxx outfit authority within the requested framing
-  Camera       = concise Gemini description OBSERVED from Figure 9
+  Figure 9     = direct pose-image authority
+  Figure 10    = selected Wxxx wardrobe authority
 
-When a pending Pose Reference exists, the old /photo scene director is not allowed
-to silently dictate action, gaze, shot size, camera framing, or an invented location.
-Generic `/photo`, `/photo 拍照`, `/photo 拍一張` style requests are recognized from
-the original context input, not only from the transient Discord message object.
+Gemini Camera / Visible / Pose / Composition metadata remains useful for the Pose
+Library, search, display and trace, but is deliberately NOT translated back into a
+long Seedream pose instruction.  This A/B keeps the image itself as the highest
+resolution description of the pose and avoids a second, text-derived pose source.
 """
 from __future__ import annotations
 
 import re
 
-VERSION = "1.12.06bd-pose-geometry-authority"
+VERSION = "1.13.09-minimal-pose-image-authority"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
@@ -66,13 +65,12 @@ def _clean_pose_scene(ctx, msg) -> tuple[str, str, bool]:
     if generic:
         clean = (
             "背景保持自然且不搶戲；不要自行指定特定地點、活動、人物動作、視線、景別或鏡位。"
-            "人物姿勢以 Figure 9 的整體可見姿勢幾何為準，取景與景別以 Camera 指令為準。"
+            "人物姿勢直接以 Figure 9 圖像為準。"
         )
     else:
         clean = (
             f"大俠本次指定：{user_instruction}。"
-            "只把這段文字當作場景／故事需求；人物姿勢以 Figure 9 的整體可見姿勢幾何為準，"
-            "取景與景別以 Camera 指令為準。"
+            "只把這段文字當作場景／故事需求；人物姿勢直接以 Figure 9 圖像為準。"
         )
     return clean, original, generic
 
@@ -127,7 +125,7 @@ def install_wardrobe_pose_test(app):
                 app.save_state(state)
                 await message.channel.send(
                     "💃 已把這張附圖記為 **Pose Reference**。下一張 `/photo` 會測試："
-                    "**8 張小俠 Identity + Pose Geometry + Wxxx 衣服 + Gemini 看圖取景 → Seedream V4.5**。"
+                    "**8 張小俠 Identity + Figure 9 Pose Image + Wxxx 衣服 → Seedream V4.5**。"
                 )
         return handled
 
@@ -181,6 +179,8 @@ def install_wardrobe_pose_test(app):
             ctx["pose_reference_url"] = pose_url
             ctx["pose_reference_mime_type"] = pose_mime
 
+            # Keep Pose Library metadata for trace/debug only.  None of these text
+            # descriptions is injected into the Seedream generation contract below.
             analysis = {}
             analysis_builder = getattr(app, "build_pose_reference_analysis", None)
             if callable(analysis_builder):
@@ -193,46 +193,37 @@ def install_wardrobe_pose_test(app):
             camera_intent = str(analysis.get("camera_intent") or "").strip() if isinstance(analysis, dict) else ""
             visible_scope = str(analysis.get("visible_pose_scope") or "").strip() if isinstance(analysis, dict) else ""
             pose_description = str(analysis.get("pose_description") or "").strip() if isinstance(analysis, dict) else ""
-
-            if not camera_intent:
-                camera_builder = getattr(app, "build_pose_camera_intent", None)
-                if callable(camera_builder):
-                    camera_intent = str(await camera_builder(ctx) or "").strip()
+            composition_feature = str(analysis.get("composition_feature") or "").strip() if isinstance(analysis, dict) else ""
 
             ctx["pose_camera_intent"] = camera_intent
             ctx["pose_visible_scope"] = visible_scope
             ctx["pose_visible_description"] = pose_description
+            if composition_feature:
+                ctx["pose_composition_feature"] = composition_feature
 
-            debug_line = camera_intent or "(Gemini 未產生取景描述)"
             try:
                 channel = getattr(msg, "channel", None) if msg is not None else None
                 if channel is None:
                     channel = ctx.get("channel")
                 if channel is not None and hasattr(channel, "send"):
-                    await channel.send(f"🔎 **Gemini 取景判讀：** `{debug_line}`")
+                    await channel.send(
+                        "🔎 **Pose metadata 已讀取（僅紀錄，不送 Seedream）：** "
+                        f"`{camera_intent or '—'}`"
+                    )
             except Exception as exc:
-                print(f"⚠️ [POSE_CAMERA_DEBUG_ECHO_FAILED] {type(exc).__name__}: {exc}")
-            print(f"🔎 [POSE_CAMERA_TO_SEEDREAM] {debug_line}")
-            print(f"🧩 [POSE_ANALYSIS] scope={visible_scope!r} pose={pose_description!r}")
+                print(f"⚠️ [POSE_METADATA_DEBUG_ECHO_FAILED] {type(exc).__name__}: {exc}")
 
-            # Gemini's scope/description are observational metadata only.  They must
-            # never reduce Figure 9's authority or exclude hips/pelvis/legs that are
-            # actually visible in the reference image.
-            pose_clause = pose_description or "the pose, body orientation, joint relationships, weight distribution, and support/contact geometry visible in Figure 9"
+            print(
+                f"🧩 [POSE_METADATA_TRACE_ONLY] camera={camera_intent!r} scope={visible_scope!r} "
+                f"pose={pose_description!r} composition={composition_feature!r}"
+            )
+
             pose_rule = (
                 "REFERENCE ROLE CONTRACT — Figures 1-8 are the identity authority for Xiaoxia. "
-                "Figure 9 is POSE GEOMETRY AUTHORITY. Preserve the complete pose geometry that is visually observable in Figure 9 as one connected body configuration. "
-                f"Observed pose note: {pose_clause}. "
-                "Match the relative geometry of head, shoulders, spine/torso, pelvis/hips, arms, hands, thighs, knees, and any other visible body parts; preserve joint relationships, body orientation, weight distribution, limb placement, and support/contact points. "
-                "Do not reinterpret the pose into a more common, more comfortable, or merely similar pose. Do not use Gemini's visible-scope text as permission to discard visible pelvis, hip, thigh, leg, or support geometry from Figure 9. "
-                "The pose reference controls geometry only; do not copy Figure 9 person's identity, facial appearance, body identity, clothing, background, lighting, or scene. "
-                "Figure 10 is wardrobe authority only for garment portions naturally visible inside the Camera framing. "
-                "Camera authority and Pose authority are independent: Camera controls crop/viewpoint while Figure 9 controls the body configuration inside that crop. "
-                "Do not widen the shot merely to display more clothing, and do not alter Figure 9 pose geometry merely to fit the wardrobe. "
-                "Do not blend identity, pose, and wardrobe reference roles."
+                "Figure 9 is the pose authority. Match Xiaoxia to the complete visible body pose and spatial geometry shown in Figure 9. "
+                "Figure 9 controls pose only; do not copy its identity, facial appearance, clothing, background, lighting, or scene. "
+                "Figure 10 is the wardrobe authority only. Do not blend identity, pose, and wardrobe reference roles."
             )
-            if camera_intent:
-                pose_rule += f" Camera framing authority: {camera_intent}."
 
             ctx["authoritative_scene"] = (clean_scene + "\n\n" + pose_rule).strip()
             ctx["prompt_base"] = (clean_scene + "\n\n" + pose_rule).strip()
@@ -241,14 +232,16 @@ def install_wardrobe_pose_test(app):
             ctx["pose_generic_photo_request"] = generic_request
             ctx["wardrobe_pose_test"] = True
             ctx["wardrobe_pose_test_version"] = VERSION
+            ctx["pose_generation_contract"] = "figure9_image_only"
 
             print(
-                f"🎬 [POSE_AUTHORITY] generic={generic_request} "
+                f"🎬 [POSE_AUTHORITY_MINIMAL] generic={generic_request} "
                 f"suppressed={suppressed_scene[:220]!r} clean={clean_scene[:220]!r}"
             )
             print(
                 f"💃 [WARDROBE_POSE_TEST] version={VERSION} wardrobe={wardrobe_id or expected_wid} "
-                f"inputs={len(input_urls[:10])} roles=8_identity+pose_geometry+wardrobe observed_camera={camera_intent!r} model=v4.5"
+                f"inputs={len(input_urls[:10])} roles=8_identity+pose_image+wardrobe "
+                "metadata_to_seedream=false model=v4.5"
             )
             return await original_generate(ctx, msg=msg)
         finally:
@@ -260,7 +253,8 @@ def install_wardrobe_pose_test(app):
     app._generate_photo_from_context = _generate_with_pending_pose
     return {
         "version": VERSION,
-        "mode": "pose_geometry_authority_8_identity_plus_pose_plus_wardrobe_plus_observed_camera_v45",
+        "mode": "minimal_pose_image_authority_8_identity_plus_pose_plus_wardrobe_v45",
         "one_shot": True,
+        "metadata_to_seedream": False,
         "debug_echo": True,
     }
