@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""v1.13.07 — Gemini Pose Observer geometry/composition precision update.
+"""v1.13.10 — concise Pose Library observer metadata.
 
-Gemini remains an Observer, not a Director. The observer now prioritizes articulated
-body geometry and support/contact relationships, and Composition is explicitly
-subject-centric so background objects do not leak into Pose Library metadata.
+Gemini remains an Observer, not a Director.  Figure 9 is the high-resolution pose
+source; metadata is intentionally lightweight so it helps search and generation
+without becoming a second skeleton specification.
 """
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ async def analyze_pose_reference(app: Any, context: Dict[str, Any]) -> Dict[str,
     if not pose_url:
         return {"camera_intent": "", "visible_pose_scope": "", "pose_description": "", "composition_feature": ""}
 
-    instruction = """Inspect the attached Pose Reference as an OBSERVER and report ONLY information visibly supported by the current image.
-The purpose is high-fidelity human pose transfer. Describe the subject's geometry precisely; do not direct or redesign the image.
-Do not invent, improve, exaggerate, sexualize, or choose a different camera angle or unseen body geometry.
+    instruction = """Inspect the attached Pose Reference as an OBSERVER and report ONLY what is visibly supported by the current image.
+The image itself is the primary pose authority. Metadata must be short, discriminative, and easy for another image model to understand.
+Do not turn the pose into an anatomical or joint-by-joint specification.
 
 Return one JSON object with exactly these keys:
 {
@@ -41,16 +41,13 @@ Return one JSON object with exactly these keys:
 }
 
 Rules:
-- camera_intent: English, one concise line, normally 10-30 words. Describe ONLY the observed camera viewpoint: camera height/angle, front/rear/side or three-quarter view, distance/framing, and meaningful perspective. Do not describe furniture or scene objects.
-- visible_pose_scope: English, short phrase listing only clearly visible body regions. When visible, distinguish head, neck, shoulders, back, arms, hands, torso, hips/pelvis, thighs, knees, lower legs, and feet rather than collapsing them into generic "legs".
-- pose_description: English, concise but geometrically specific. First identify the base posture (standing, seated, kneeling, crouching/squatting, prone, supine, side-lying/reclining, or leaning). Then describe, when visibly supported: torso orientation/lean/twist; pelvis/hip position; each arm/hand placement; thigh, knee, lower-leg and foot arrangement; left/right or asymmetric relationships; weight distribution; and support/contact relationships. Distinguish a hand merely resting from a hand planted to support body weight. For kneeling, distinguish knees, lower legs, pelvis height and whether the pelvis rests on the heels. For seated poses, state what body region bears weight and how the legs fold/extend/cross. For standing poses, state the primary weight-bearing leg when visually clear. Use support-surface-neutral wording such as "supporting surface" unless the physical object is essential to the body geometry. Never include material or decor such as rug, wooden floor, bed, magazine, stuffed animal, furniture style, or room details.
-- composition_feature: English, one concise SUBJECT-CENTRIC line describing only spatial relationships among visible parts of the subject: which body regions are nearer/farther from camera, the primary/secondary focal region, diagonal/vertical/horizontal body flow, foreshortening, or foreground-to-background depth. Do NOT describe background, props, furniture, floor, bedding, text, or any non-subject object. Never invent an object. If no distinctive subject-centric composition feature is visible, return an empty string.
-- Facial expression (smile, wink, etc.) is NOT pose geometry; omit it unless it changes head orientation or visible geometry.
-- Clothing and hair are NOT pose geometry; ignore them except where they genuinely occlude a body region.
-- Do NOT describe identity, face appearance, body shape, clothing, background, lighting, mood, text, logo, watermark, or image quality.
-- Do NOT infer legs, hips, feet, hands, support, or other geometry hidden outside the frame.
-- If uncertain about a property, omit it rather than guessing.
-- Before returning, verify that every statement refers to something visible in the CURRENT image and that composition_feature contains no scene object.
+- camera_intent: English, ONE concise sentence, target 8-22 words. Include only viewpoint/framing that materially affects the pose: high/low/eye-level, front/rear/side/three-quarter, full-body/3-4 body/medium/close framing, and strong perspective if obvious.
+- visible_pose_scope: English, short comma-separated list of only clearly visible broad body regions. Prefer broad groups such as head, shoulders, arms/hands, torso/back, hips, legs, feet. Do not over-segment into pelvis/thigh/knee/lower-leg unless one of those is uniquely important to what is visible.
+- pose_description: English, ONE short sentence, target 10-30 words. Describe the pose the way a photographer or person would naturally distinguish it: base posture + the 1-3 defining actions/relationships. Examples: "Standing on stairs, one hand on the rail, turning the upper body back toward the camera." / "Seated on the floor with knees together, legs extending toward the camera, both hands supporting the face." Do NOT enumerate torso angle, pelvis rotation, hip height, elbow angles, individual joint mechanics, weight-bearing details, or anatomical relationships unless absolutely necessary to distinguish the pose.
+- composition_feature: English, ONE concise sentence, target 8-25 words. Describe only the subject's major visual flow/depth: diagonal/vertical/horizontal line, near-vs-far body regions, foreshortening, or primary focal relationship. Do not describe props or decor.
+- Preserve discriminative differences such as standing vs kneeling, seated vs crouching, front vs rear three-quarter, legs together vs apart, arms supporting vs merely raised, or feet projecting toward camera.
+- Facial expression, clothing, hair, identity, body shape, background, lighting, mood, text, logo, watermark, and decor are not pose metadata.
+- Do not invent hidden geometry. If uncertain, omit it.
 - Return JSON only."""
 
     try:
@@ -70,12 +67,10 @@ Rules:
         scope = " ".join(str(data.get("visible_pose_scope") or "").split()).strip(" \"'")
         pose_desc = " ".join(str(data.get("pose_description") or "").split()).strip(" \"'")
         composition = " ".join(str(data.get("composition_feature") or "").split()).strip(" \"'")
-        words = camera.split()
-        if len(words) > 35:
-            camera = " ".join(words[:35])
-        comp_words = composition.split()
-        if len(comp_words) > 55:
-            composition = " ".join(comp_words[:55])
+
+        camera = " ".join(camera.split()[:28])
+        pose_desc = " ".join(pose_desc.split()[:40])
+        composition = " ".join(composition.split()[:32])
 
         result = {
             "camera_intent": camera,
@@ -83,7 +78,7 @@ Rules:
             "pose_description": pose_desc,
             "composition_feature": composition,
         }
-        print(f"📷 [POSE_REFERENCE_ANALYSIS] {result!r}")
+        print(f"📷 [POSE_REFERENCE_ANALYSIS_CONCISE] {result!r}")
         return result
     except Exception as exc:
         print(f"⚠️ [POSE_REFERENCE_ANALYSIS_FAILED] {type(exc).__name__}: {exc}")
@@ -99,9 +94,8 @@ def install_camera_director(app: Any) -> Dict[str, Any]:
     app.build_pose_reference_analysis = lambda context: analyze_pose_reference(app, context)
     app.build_pose_camera_intent = lambda context: build_camera_intent(app, context)
     return {
-        "version": "1.13.07",
-        "camera_director": "Gemini subject-centric pose geometry + camera + composition observer",
-        "target_words": "10-30 camera words",
-        "hard_cap_words": 35,
-        "scope": "camera viewpoint + articulated visible body regions + support/contact geometry + subject-centric composition",
+        "version": "1.13.10",
+        "camera_director": "Gemini concise pose observer",
+        "pose_style": "photographer-level discriminative summary, not anatomy",
+        "scope": "lightweight Camera + Visible + Pose + Composition",
     }
