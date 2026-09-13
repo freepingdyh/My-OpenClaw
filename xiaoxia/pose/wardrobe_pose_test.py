@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
-"""v1.13.10 — Figure 9 image authority + lightweight metadata guidance.
+"""v1.13.11 — direct Figure 9 pose/camera/composition authority.
 
 Figures 1-8 = Xiaoxia identity authority
-Figure 9     = primary pose-image authority
+Figure 9     = sole pose + camera + composition authority
 Figure 10    = wardrobe authority
 
-Camera / Pose / Composition are intentionally concise guidance. Detailed legacy
-Pose Library text is never converted into a joint-by-joint Seedream prompt.
+Pose Library metadata remains available for display/search/trace, but Camera/Pose/
+Composition text is NOT translated back into the Seedream generation prompt.
 """
 from __future__ import annotations
 
 import re
 
-VERSION = "1.13.10-lightweight-pose-guidance"
+VERSION = "1.13.11-direct-figure9-authority"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
 }
-_LEGACY_ANATOMY_TERMS = (
-    "pelvis", "hip higher", "hip lower", "torso is", "torso slightly", "elbow", "forearm",
-    "weight bearing", "bearing weight", "weight appears", "joint", "lower leg is", "knee is bent"
-)
 
 
 def _strip_photo_prefix(text: str) -> str:
@@ -49,9 +45,9 @@ def _clean_pose_scene(ctx, msg) -> tuple[str, str, bool]:
     user_instruction = _photo_instruction_from_context(ctx, msg)
     generic = _is_generic_photo_instruction(user_instruction)
     if generic:
-        clean = "背景保持自然且不搶戲；人物姿勢以 Figure 9 圖像為準。"
+        clean = "背景保持自然且不搶戲；Figure 9 直接決定人物姿勢、鏡頭與構圖。"
     else:
-        clean = f"大俠本次指定：{user_instruction}。只把這段文字當作場景／故事需求；人物姿勢以 Figure 9 圖像為準。"
+        clean = f"大俠本次指定：{user_instruction}。場景／故事需求保留；人物姿勢、鏡頭與構圖直接以 Figure 9 圖像為準。"
     return clean, original, generic
 
 
@@ -75,32 +71,6 @@ def _apply_pose_scene_authority(ctx, clean_scene: str) -> None:
         ctx["scene_data"] = scene_data
 
 
-def _split_camera_composition(camera: str, composition: str) -> tuple[str, str]:
-    cam = str(camera or "").strip()
-    comp = str(composition or "").strip()
-    marker = "Composition emphasis:"
-    if marker in cam:
-        left, right = cam.split(marker, 1)
-        cam = left.strip()
-        if not comp:
-            comp = right.strip()
-    return cam, comp
-
-
-def _short_words(text: str, cap: int) -> str:
-    return " ".join(str(text or "").strip().split()[:cap])
-
-
-def _safe_pose_hint(text: str) -> str:
-    """Use new concise metadata; suppress old anatomy-heavy metadata entirely."""
-    value = " ".join(str(text or "").strip().split())
-    low = value.lower()
-    hits = sum(1 for term in _LEGACY_ANATOMY_TERMS if term in low)
-    if hits >= 2:
-        return ""
-    return _short_words(value, 34)
-
-
 def install_wardrobe_pose_test(app):
     original_direct = app._handle_wardrobe_message_direct
     original_generate = app._generate_photo_from_context
@@ -120,7 +90,7 @@ def install_wardrobe_pose_test(app):
                 state = app.load_state()
                 state[_STATE_KEY] = {"url": url, "content_type": content_type or "image/jpeg", "wardrobe_id": m.group(1).upper(), "message_id": getattr(message, "id", None)}
                 app.save_state(state)
-                await message.channel.send("💃 已把附圖記為 Pose Reference。下一張 `/photo` 使用 Figure 9 圖像 + 精簡 Camera/Pose/Composition。")
+                await message.channel.send("💃 已把附圖記為 Pose Reference。下一張 `/photo`：Figures 1-8 身分、Figure 9 姿勢/鏡頭/構圖、Figure 10 服裝。")
         return handled
 
     async def _generate_with_pending_pose(context, msg=None):
@@ -148,8 +118,9 @@ def install_wardrobe_pose_test(app):
             identity_urls = await app._seedream_upload_reference_images(selected_figure_indexes=[1, 2, 3, 4, 5, 6, 7, 8])
             input_urls = list(identity_urls[:8])
             roles = [{"figure": i + 1, "role": "xiaoxia_identity", "source_figure": i + 1, "url": url} for i, url in enumerate(input_urls)]
+
             input_urls.append(pose_url)
-            roles.append({"figure": 9, "role": "pose_geometry_reference", "url": pose_url})
+            roles.append({"figure": 9, "role": "pose_camera_composition_reference", "url": pose_url})
 
             if str(reference_path).startswith("http"):
                 outfit_url = str(reference_path)
@@ -166,6 +137,8 @@ def install_wardrobe_pose_test(app):
             ctx["pose_reference_url"] = pose_url
             ctx["pose_reference_mime_type"] = pose_mime
 
+            # Metadata is still read so the library/trace remains useful, but none of
+            # Camera / Visible / Pose / Composition text is sent to Seedream.
             analysis = {}
             analysis_builder = getattr(app, "build_pose_reference_analysis", None)
             if callable(analysis_builder):
@@ -178,29 +151,17 @@ def install_wardrobe_pose_test(app):
             visible_scope = str(analysis.get("visible_pose_scope") or "").strip() if isinstance(analysis, dict) else ""
             pose_description = str(analysis.get("pose_description") or "").strip() if isinstance(analysis, dict) else ""
             composition_feature = str(analysis.get("composition_feature") or "").strip() if isinstance(analysis, dict) else ""
-            camera_intent, composition_feature = _split_camera_composition(camera_intent, composition_feature)
-
-            camera_hint = _short_words(camera_intent, 28)
-            pose_hint = _safe_pose_hint(pose_description)
-            composition_hint = _short_words(composition_feature, 30)
-
             ctx["pose_camera_intent"] = camera_intent
             ctx["pose_visible_scope"] = visible_scope
             ctx["pose_visible_description"] = pose_description
             ctx["pose_composition_feature"] = composition_feature
 
-            parts = [
-                "REFERENCE ROLE CONTRACT — Figures 1-8 define Xiaoxia identity.",
-                "Figure 9 is the primary pose authority; match its overall visible pose and silhouette.",
-            ]
-            if pose_hint:
-                parts.append(f"Pose cue: {pose_hint}")
-            if camera_hint:
-                parts.append(f"Camera cue: {camera_hint}")
-            if composition_hint:
-                parts.append(f"Composition cue: {composition_hint}")
-            parts.extend(["Do not copy Figure 9 identity, clothing, background, or lighting.", "Figure 10 defines wardrobe only."])
-            pose_rule = " ".join(parts)
+            pose_rule = (
+                "REFERENCE ROLE CONTRACT — Figures 1-8 define Xiaoxia identity only. "
+                "Figure 9 is the sole pose, camera, and composition authority; reproduce its visible body arrangement, viewpoint, framing, crop, and subject-to-camera spatial relationship directly from the image. "
+                "Do not use Figure 9 for identity and do not copy its clothing, background, or lighting. "
+                "Figure 10 defines wardrobe only; do not let Figure 10 change pose, camera, composition, or identity."
+            )
 
             try:
                 channel = getattr(msg, "channel", None) if msg is not None else None
@@ -208,15 +169,16 @@ def install_wardrobe_pose_test(app):
                     channel = ctx.get("channel")
                 if channel is not None and hasattr(channel, "send"):
                     await channel.send(
-                        "🔎 **Pose 精簡指引 → Seedream**\n"
-                        f"Camera: `{camera_hint or '—'}`\n"
-                        f"Pose: `{pose_hint or '—（舊版過細 metadata 已略過）'}`\n"
-                        f"Composition: `{composition_hint or '—'}`"
+                        "🎯 **Figure 9 直接控制 → Seedream**\n"
+                        "Camera / Pose / Composition metadata：`僅紀錄，不送 Seedream`"
                     )
             except Exception as exc:
-                print(f"⚠️ [POSE_GUIDANCE_ECHO_FAILED] {type(exc).__name__}: {exc}")
+                print(f"⚠️ [POSE_DIRECT_ECHO_FAILED] {type(exc).__name__}: {exc}")
 
-            print(f"🧩 [POSE_LIGHT_GUIDANCE] camera={camera_hint!r} pose={pose_hint!r} composition={composition_hint!r}")
+            print(
+                f"🧩 [POSE_METADATA_TRACE_ONLY_V11311] camera={camera_intent!r} scope={visible_scope!r} "
+                f"pose={pose_description!r} composition={composition_feature!r}"
+            )
             ctx["authoritative_scene"] = (clean_scene + "\n\n" + pose_rule).strip()
             ctx["prompt_base"] = (clean_scene + "\n\n" + pose_rule).strip()
             ctx["pose_public_scene"] = clean_scene
@@ -224,8 +186,12 @@ def install_wardrobe_pose_test(app):
             ctx["pose_generic_photo_request"] = generic_request
             ctx["wardrobe_pose_test"] = True
             ctx["wardrobe_pose_test_version"] = VERSION
-            ctx["pose_generation_contract"] = "figure9_plus_lightweight_metadata"
-            print(f"🎬 [POSE_AUTHORITY_LIGHT] generic={generic_request} clean={clean_scene[:220]!r}")
+            ctx["pose_generation_contract"] = "figure9_direct_pose_camera_composition_authority"
+
+            print(
+                f"🎬 [POSE_AUTHORITY_DIRECT_V11311] generic={generic_request} "
+                f"inputs={len(input_urls[:10])} metadata_to_seedream=false"
+            )
             return await original_generate(ctx, msg=msg)
         finally:
             latest = app.load_state()
@@ -236,8 +202,8 @@ def install_wardrobe_pose_test(app):
     app._generate_photo_from_context = _generate_with_pending_pose
     return {
         "version": VERSION,
-        "mode": "figure9_image_authority_plus_lightweight_camera_pose_composition_v45",
+        "mode": "figure9_direct_pose_camera_composition_authority_v45",
         "one_shot": True,
-        "metadata_to_seedream": "concise_only; legacy anatomy-heavy pose omitted",
+        "metadata_to_seedream": False,
         "debug_echo": True,
     }
