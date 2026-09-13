@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
-"""v1.13.15 — controlled Pose Library Test C on the real wardrobe/pose path.
+"""v1.13.16 — generic Pose Library Test C on the real wardrobe/pose path.
 
-This version deliberately stops trying to route Test A through a separate selector.
-For P013 only, the existing production pose wrapper itself becomes Test C:
+For any stored Pose Library entry with complete Camera / Pose / Composition metadata:
 
 Figures 1-8 = Xiaoxia identity authority
-Figure 9     = P013 visual pose/camera/composition reference (secondary)
+Figure 9     = pose visual reference (secondary)
 Figure 10    = wardrobe authority
 Stored Camera / Pose / Composition text = primary pose authority
-Gemini re-read = OFF for P013 Test C
+Gemini re-read = OFF
 
-All other stored poses keep the previous Figure-9-direct behaviour.
+Entries without complete stored metadata fall back to the previous Figure-9-direct behaviour.
 """
 from __future__ import annotations
 
 import re
 
-VERSION = "1.13.15-test-c-text-primary-figure9-secondary"
+VERSION = "1.13.16-generic-c-text-primary-figure9-secondary"
 _STATE_KEY = "photo_pending_pose_reference"
-_TEST_C_POSE_ID = "P013"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
 }
@@ -100,13 +98,18 @@ def _apply_pose_scene_authority(ctx, clean_scene: str) -> None:
 def _stored_pose_metadata(pose: dict) -> tuple[str, str, str, str]:
     camera = str(pose.get("camera_intent") or "").strip()
     # library_composition_replace may append Composition emphasis to camera_intent.
-    # Test C must use the fixed manual Camera and Composition as two separate fields.
+    # Generic C must use fixed Camera and Composition as two separate fields.
     if "Composition emphasis:" in camera:
         camera = camera.split("Composition emphasis:", 1)[0].strip()
     scope = str(pose.get("visible_pose_scope") or "").strip()
     description = str(pose.get("pose_description") or "").strip()
     composition = str(pose.get("composition_feature") or "").strip()
     return camera, scope, description, composition
+
+
+def _has_complete_stored_metadata(pose: dict) -> bool:
+    camera, _scope, description, composition = _stored_pose_metadata(pose)
+    return bool(camera and description and composition)
 
 
 def install_wardrobe_pose_test(app):
@@ -148,7 +151,7 @@ def install_wardrobe_pose_test(app):
         pose_url = str(pose.get("url") or "").strip()
         pose_mime = str(pose.get("content_type") or "image/jpeg").strip() or "image/jpeg"
         pose_id = str(pose.get("pose_id") or "").strip().upper()
-        test_c = pose_id == _TEST_C_POSE_ID
+        test_c = bool(pose_id) and _has_complete_stored_metadata(pose)
 
         wardrobe_id = str(ctx.get("wardrobe_id") or "").strip().upper()
         expected_wid = str(pose.get("wardrobe_id") or "").strip().upper()
@@ -177,7 +180,6 @@ def install_wardrobe_pose_test(app):
                 for i, url in enumerate(input_urls)
             ]
 
-            # Test C intentionally keeps P013 itself as Figure 9.
             input_urls.append(pose_url)
             roles.append(
                 {
@@ -209,8 +211,7 @@ def install_wardrobe_pose_test(app):
             ctx["pose_reference_mime_type"] = pose_mime
 
             if test_c:
-                # Critical experimental control: use the already-saved P013 metadata.
-                # No Gemini re-read and no regenerated wording.
+                # Generic C uses the already-saved metadata. No Gemini re-read.
                 camera_intent, visible_scope, pose_description, composition_feature = _stored_pose_metadata(pose)
                 pose_rule = (
                     "POSE TEST C — STORED TEXT PRIMARY + FIGURE 9 VISUAL SECONDARY. "
@@ -219,7 +220,7 @@ def install_wardrobe_pose_test(app):
                     f"Camera: {camera_intent}\n"
                     f"Pose: {pose_description}\n"
                     f"Composition: {composition_feature}\n"
-                    "Figure 9 is SECONDARY visual evidence only: use it to reinforce the same body arrangement, stair-step relationship, viewpoint, framing, and ascending silhouette described above. "
+                    "Figure 9 is SECONDARY visual evidence only: use it to reinforce the same body arrangement, viewpoint, framing, crop, subject-to-camera spatial relationship, and composition described above. "
                     "If Figure 9 and the stored text differ, follow the stored text. "
                     "Do not use Figure 9 for identity, clothing, background, or lighting. "
                     "Do not let Figure 10 change pose, camera, composition, or identity."
@@ -228,10 +229,10 @@ def install_wardrobe_pose_test(app):
                 ab_mode = "C_TEXT_PRIMARY_FIGURE9_SECONDARY"
                 metadata_to_seedream = True
                 debug_text = (
-                    "🧪 **P013 Test C → Seedream**\n"
+                    f"🧪 **{pose_id} Test C → Seedream**\n"
                     "Stored Camera / Pose / Composition：`PRIMARY / ON`\n"
-                    "Figure 9 P013 visual reference：`SECONDARY / ON`\n"
-                    "Figure 10 W142 wardrobe：`ON`\n"
+                    f"Figure 9 {pose_id} visual reference：`SECONDARY / ON`\n"
+                    "Figure 10 wardrobe：`ON`\n"
                     "Gemini re-read：`OFF`"
                 )
             else:
@@ -257,7 +258,7 @@ def install_wardrobe_pose_test(app):
                 metadata_to_seedream = False
                 debug_text = (
                     "🎯 **Figure 9 直接控制 → Seedream**\n"
-                    "Camera / Pose / Composition metadata：`僅紀錄，不送 Seedream`"
+                    "Stored metadata incomplete；Camera / Pose / Composition metadata：`僅紀錄，不送 Seedream`"
                 )
 
             ctx["pose_camera_intent"] = camera_intent
@@ -274,8 +275,9 @@ def install_wardrobe_pose_test(app):
             except Exception as exc:
                 print(f"⚠️ [POSE_TEST_ECHO_FAILED] {type(exc).__name__}: {exc}")
 
+            mode_name = "C_TEXT_PRIMARY_FIGURE9_SECONDARY" if test_c else "FIGURE9_DIRECT"
             print(
-                f"🧩 [POSE_METADATA_V11315] mode={'C_TEXT_PRIMARY_FIGURE9_SECONDARY' if test_c else 'FIGURE9_DIRECT'} "
+                f"🧩 [POSE_METADATA_V11316] mode={mode_name} "
                 f"pose_id={pose_id or '?'} camera={camera_intent!r} scope={visible_scope!r} "
                 f"pose={pose_description!r} composition={composition_feature!r}"
             )
@@ -293,9 +295,10 @@ def install_wardrobe_pose_test(app):
             ctx["pose_metadata_to_seedream"] = metadata_to_seedream
             ctx["pose_test_c_pose_id"] = pose_id if test_c else ""
             ctx["pose_test_c_gemini_reread"] = False if test_c else None
+            ctx["pose_test_c_generic"] = bool(test_c)
 
             print(
-                f"🎬 [POSE_AUTHORITY_V11315] mode={'C_TEXT_PRIMARY_FIGURE9_SECONDARY' if test_c else 'FIGURE9_DIRECT'} "
+                f"🎬 [POSE_AUTHORITY_V11316] mode={mode_name} "
                 f"generic={generic_request} inputs={len(input_urls[:10])} "
                 f"metadata_to_seedream={str(metadata_to_seedream).lower()} figure9_visual=true"
             )
@@ -310,9 +313,9 @@ def install_wardrobe_pose_test(app):
     app._generate_photo_from_context = _generate_with_pending_pose
     return {
         "version": VERSION,
-        "p013_mode": "test_c_stored_text_primary + figure9_visual_secondary + figure10_wardrobe",
-        "other_pose_mode": "figure9_direct_pose_camera_composition_authority_v45",
-        "gemini_reread_p013": False,
+        "complete_pose_mode": "generic_c_stored_text_primary + figure9_visual_secondary + figure10_wardrobe",
+        "incomplete_pose_fallback": "figure9_direct_pose_camera_composition_authority_v45",
+        "gemini_reread_complete_pose": False,
         "one_shot": True,
         "debug_echo": True,
     }
