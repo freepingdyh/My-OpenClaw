@@ -217,7 +217,7 @@ def install_wardrobe_pose_test(app):
                     "POSE TEST C — STORED TEXT PRIMARY + FIGURE 9 VISUAL SECONDARY. "
                     "Figures 1-8 define Xiaoxia identity only. "
                     + ("Figure 10 defines wardrobe only. " if reference_path else "")
-                    "The following stored Pose Library instructions are the PRIMARY authority for pose, camera, and composition.\n"
+                    + "The following stored Pose Library instructions are the PRIMARY authority for pose, camera, and composition.\n"
                     f"Camera: {camera_intent}\n"
                     f"Pose: {pose_description}\n"
                     f"Composition: {composition_feature}\n"
