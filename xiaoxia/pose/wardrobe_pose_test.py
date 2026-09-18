@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.16 — generic Pose Library Test C on the real wardrobe/pose path.
+"""v1.13.18 — Pose Library C works with or without an active wardrobe reference.
 
 For any stored Pose Library entry with complete Camera / Pose / Composition metadata:
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.13.16-generic-c-text-primary-figure9-secondary"
+VERSION = "1.13.18-generic-c-wardrobe-optional"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
@@ -158,9 +158,8 @@ def install_wardrobe_pose_test(app):
         if expected_wid and wardrobe_id and expected_wid != wardrobe_id:
             return await original_generate(context, msg=msg)
 
+        # Pose Library must not depend on wardrobe state.
         reference_path = ctx.get("reference_item_path") or ctx.get("reference_item_url")
-        if not reference_path:
-            return await original_generate(context, msg=msg)
 
         try:
             clean_scene, suppressed_scene, generic_request = _clean_pose_scene(ctx, msg, test_c=test_c)
@@ -193,17 +192,18 @@ def install_wardrobe_pose_test(app):
                 }
             )
 
-            if str(reference_path).startswith("http"):
-                outfit_url = str(reference_path)
-            else:
-                outfit_url = await app._seedream_upload_single_file(reference_path)
-            input_urls.append(outfit_url)
-            roles.append({"figure": 10, "role": "wardrobe_reference", "url": outfit_url})
+            if reference_path:
+                if str(reference_path).startswith("http"):
+                    outfit_url = str(reference_path)
+                else:
+                    outfit_url = await app._seedream_upload_single_file(reference_path)
+                input_urls.append(outfit_url)
+                roles.append({"figure": 10, "role": "wardrobe_reference", "url": outfit_url})
 
             ctx["seedream_input_images_override"] = input_urls[:10]
             ctx["seedream_input_image_roles_override"] = roles[:10]
             ctx["seedream_identity_selected_figures"] = [1, 2, 3, 4, 5, 6, 7, 8]
-            ctx["figure10_present"] = True
+            ctx["figure10_present"] = bool(reference_path)
             ctx["seedream_model_id"] = getattr(
                 app, "SEEDREAM_V45_MODEL_ID", "fal-ai/bytedance/seedream/v4.5/edit"
             )
@@ -215,7 +215,8 @@ def install_wardrobe_pose_test(app):
                 camera_intent, visible_scope, pose_description, composition_feature = _stored_pose_metadata(pose)
                 pose_rule = (
                     "POSE TEST C — STORED TEXT PRIMARY + FIGURE 9 VISUAL SECONDARY. "
-                    "Figures 1-8 define Xiaoxia identity only. Figure 10 defines wardrobe only. "
+                    "Figures 1-8 define Xiaoxia identity only. "
+                    + ("Figure 10 defines wardrobe only. " if reference_path else "")
                     "The following stored Pose Library instructions are the PRIMARY authority for pose, camera, and composition.\n"
                     f"Camera: {camera_intent}\n"
                     f"Pose: {pose_description}\n"
@@ -223,7 +224,7 @@ def install_wardrobe_pose_test(app):
                     "Figure 9 is SECONDARY visual evidence only: use it to reinforce the same body arrangement, viewpoint, framing, crop, subject-to-camera spatial relationship, and composition described above. "
                     "If Figure 9 and the stored text differ, follow the stored text. "
                     "Do not use Figure 9 for identity, clothing, background, or lighting. "
-                    "Do not let Figure 10 change pose, camera, composition, or identity."
+                    + ("Do not let Figure 10 change pose, camera, composition, or identity." if reference_path else "")
                 )
                 generation_contract = "test_c_stored_text_primary_figure9_visual_secondary"
                 ab_mode = "C_TEXT_PRIMARY_FIGURE9_SECONDARY"
@@ -277,7 +278,7 @@ def install_wardrobe_pose_test(app):
 
             mode_name = "C_TEXT_PRIMARY_FIGURE9_SECONDARY" if test_c else "FIGURE9_DIRECT"
             print(
-                f"🧩 [POSE_METADATA_V11316] mode={mode_name} "
+                f"🧩 [POSE_METADATA_V11318] mode={mode_name} "
                 f"pose_id={pose_id or '?'} camera={camera_intent!r} scope={visible_scope!r} "
                 f"pose={pose_description!r} composition={composition_feature!r}"
             )
@@ -298,7 +299,7 @@ def install_wardrobe_pose_test(app):
             ctx["pose_test_c_generic"] = bool(test_c)
 
             print(
-                f"🎬 [POSE_AUTHORITY_V11316] mode={mode_name} "
+                f"🎬 [POSE_AUTHORITY_V11318] mode={mode_name} "
                 f"generic={generic_request} inputs={len(input_urls[:10])} "
                 f"metadata_to_seedream={str(metadata_to_seedream).lower()} figure9_visual=true"
             )
