@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.13.18-generic-c-wardrobe-optional"
+VERSION = "1.13.19-generic-c-explicit-wardrobe-only"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
@@ -158,8 +158,12 @@ def install_wardrobe_pose_test(app):
         if expected_wid and wardrobe_id and expected_wid != wardrobe_id:
             return await original_generate(context, msg=msg)
 
-        # Pose Library must not depend on wardrobe state.
+        # Figure 10 is allowed only for an explicitly selected wardrobe item.
+        # A carried-over current-outfit photo must not become a framing reference.
         reference_path = ctx.get("reference_item_path") or ctx.get("reference_item_url")
+        explicit_wardrobe = bool(wardrobe_id) and bool(reference_path)
+        if not explicit_wardrobe:
+            reference_path = None
 
         try:
             clean_scene, suppressed_scene, generic_request = _clean_pose_scene(ctx, msg, test_c=test_c)
@@ -299,7 +303,7 @@ def install_wardrobe_pose_test(app):
             ctx["pose_test_c_generic"] = bool(test_c)
 
             print(
-                f"🎬 [POSE_AUTHORITY_V11318] mode={mode_name} "
+                f"🎬 [POSE_AUTHORITY_V11319] mode={mode_name} "
                 f"generic={generic_request} inputs={len(input_urls[:10])} "
                 f"metadata_to_seedream={str(metadata_to_seedream).lower()} figure9_visual=true"
             )
