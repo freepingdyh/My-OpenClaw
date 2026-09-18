@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.18 — generic Pose Library Test C with clean final Figure-9 role boundary.
+"""v1.13.19 — close-up isolation + final Figure-9 role boundary.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -31,7 +31,7 @@ from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.17"
+MIGRATION_VERSION = "1.13.19"
 
 
 def _activate_v11317():
@@ -49,11 +49,12 @@ def _activate_v11317():
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
-    activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
+    # Must be last: nothing downstream may replace/wrap fal_client after this boundary guard.
+    activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11318_POSE_WITHOUT_WARDROBE_ACTIVE]")
+    print("💃 [V11319_POSE_CLOSEUP_ISOLATION_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
@@ -62,7 +63,7 @@ def _activate_v11317():
 _ACTIVATED = _activate_v11317()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.17 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.19 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
