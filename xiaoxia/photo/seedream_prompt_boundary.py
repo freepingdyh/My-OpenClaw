@@ -8,7 +8,7 @@ provider boundary.
 """
 from __future__ import annotations
 
-VERSION = "1.13.21-root-pose-role-builder"
+VERSION = "1.13.23-root-pose-role-builder-signature-sync"
 
 
 def install_seedream_photo_prompt_boundary(app):
@@ -20,6 +20,8 @@ def install_seedream_photo_prompt_boundary(app):
         current_outfit=None,
         visual_checklist=None,
         semantic_contract_locked=False,
+        input_image_roles=None,
+        **kwargs,
     ):
         prompt = legacy_builder(
             custom_prompt,
@@ -27,6 +29,8 @@ def install_seedream_photo_prompt_boundary(app):
             current_outfit=current_outfit,
             visual_checklist=visual_checklist,
             semantic_contract_locked=semantic_contract_locked,
+            input_image_roles=input_image_roles,
+            **kwargs,
         )
 
         ctx = getattr(app, "_xiaoxia_seedream_prompt_context", None)
@@ -50,7 +54,13 @@ def install_seedream_photo_prompt_boundary(app):
             "do not copy their pose, outfit, background or composition. "
             "Figure 9 is pose/camera/composition visual evidence only; never use Figure 9 for identity, clothing, background or lighting."
         )
-        if has_reference:
+        figure10_explicit = any(
+            isinstance(x, dict)
+            and str(x.get("figure")) == "10"
+            and str(x.get("role") or "") == "wardrobe_reference"
+            for x in (input_image_roles or [])
+        )
+        if figure10_explicit:
             pose_roles += (
                 " Figure 10 is clothing / visible fashion-accessory authority only; "
                 "it must not change pose, camera, composition, identity or background."
