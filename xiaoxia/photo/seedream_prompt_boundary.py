@@ -8,7 +8,7 @@ provider boundary.
 """
 from __future__ import annotations
 
-VERSION = "1.13.20-root-pose-role-builder"
+VERSION = "1.13.21-root-pose-role-builder"
 
 
 def install_seedream_photo_prompt_boundary(app):
@@ -64,7 +64,7 @@ def install_seedream_photo_prompt_boundary(app):
         else:
             print(
                 f"✅ [POSE_ROOT_ROLE_BUILDER] version={VERSION} "
-                f"figure10={str(bool(has_reference)).lower()} contract={pose_contract}"
+                f"figure10={str(bool(figure10_explicit)).lower()} contract={pose_contract}"
             )
         return rewritten
 
