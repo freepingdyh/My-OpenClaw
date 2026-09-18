@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.17 — generic Pose Library Test C with clean final Figure-9 role boundary.
+"""v1.13.18 — generic Pose Library Test C with clean final Figure-9 role boundary.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -53,7 +53,7 @@ def _activate_v11317():
     activated["pose_output_guard"] = install_pose_output_guard(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11317_GENERIC_C_FINAL_ROLE_GUARD_ACTIVE]")
+    print("💃 [V11318_POSE_WITHOUT_WARDROBE_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
