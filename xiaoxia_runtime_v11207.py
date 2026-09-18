@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.19 — close-up isolation + final Figure-9 role boundary.
+"""v1.13.20 — extracted Seedream prompt boundary + native Pose figure roles.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -21,7 +21,7 @@ from xiaoxia.discord_slash_rollback import install_native_slash_rollback
 from xiaoxia.video.director_signature_fix import install_director_signature_fix
 from xiaoxia.pose.camera_director import install_camera_director
 from xiaoxia.pose.photo_pose_input import install_photo_pose_input
-from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
+from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch\nfrom xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.library_metadata_patch import install_pose_library_metadata_patch
 from xiaoxia.pose.library_authority import install_pose_library_authority
@@ -31,7 +31,7 @@ from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.19"
+MIGRATION_VERSION = "1.13.20"
 
 
 def _activate_v11317():
@@ -54,7 +54,7 @@ def _activate_v11317():
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11319_POSE_CLOSEUP_ISOLATION_ACTIVE]")
+    print("💃 [V11320_ROOT_POSE_PROMPT_BOUNDARY_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
@@ -63,7 +63,7 @@ def _activate_v11317():
 _ACTIVATED = _activate_v11317()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.19 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.20 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
