@@ -21,7 +21,8 @@ from xiaoxia.discord_slash_rollback import install_native_slash_rollback
 from xiaoxia.video.director_signature_fix import install_director_signature_fix
 from xiaoxia.pose.camera_director import install_camera_director
 from xiaoxia.pose.photo_pose_input import install_photo_pose_input
-from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch\nfrom xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
+from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
+from xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.library_metadata_patch import install_pose_library_metadata_patch
 from xiaoxia.pose.library_authority import install_pose_library_authority
@@ -49,6 +50,7 @@ def _activate_v11317():
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
+    activated["seedream_prompt_boundary"] = install_seedream_photo_prompt_boundary(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
     # Must be last: nothing downstream may replace/wrap fal_client after this boundary guard.
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
