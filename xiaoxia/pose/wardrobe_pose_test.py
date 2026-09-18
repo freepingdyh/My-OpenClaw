@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "1.13.19-generic-c-explicit-wardrobe-only"
+VERSION = "1.13.22-generic-c-role-consistent"
 _STATE_KEY = "photo_pending_pose_reference"
 _GENERIC_PHOTO_REQUESTS = {
     "", ".", "。", "拍一張", "拍張", "拍照", "拍照吧", "拍一張吧", "來一張", "來張", "一張", "照一張", "拍一下", "拍吧"
@@ -207,7 +207,7 @@ def install_wardrobe_pose_test(app):
             ctx["seedream_input_images_override"] = input_urls[:10]
             ctx["seedream_input_image_roles_override"] = roles[:10]
             ctx["seedream_identity_selected_figures"] = [1, 2, 3, 4, 5, 6, 7, 8]
-            ctx["figure10_present"] = bool(reference_path)
+            ctx["figure10_present"] = bool(explicit_wardrobe)
             ctx["seedream_model_id"] = getattr(
                 app, "SEEDREAM_V45_MODEL_ID", "fal-ai/bytedance/seedream/v4.5/edit"
             )
