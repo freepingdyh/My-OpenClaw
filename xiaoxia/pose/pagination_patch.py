@@ -16,7 +16,7 @@ import discord
 
 from xiaoxia.pose import core as pose_core
 
-VERSION = "1.13.08"
+VERSION = "1.13.24"
 PAGE_SIZE = 10
 
 
@@ -63,11 +63,19 @@ class PosePager(discord.ui.View):
         if self.owner_id is not None and getattr(getattr(interaction, "user", None), "id", None) != self.owner_id:
             await interaction.response.send_message("這是大俠目前開啟的姿勢櫃頁面。", ephemeral=True)
             return
+        # ACK first: opening up to ten local thumbnails can exceed Discord's
+        # component acknowledgement window and otherwise shows "未及時回應".
+        await interaction.response.defer()
         content, embeds, files, page, pages = _page_payload(self.rows, page)
         self.page = page
         self.pages = pages
         self._sync_buttons()
-        await interaction.response.edit_message(content=content, embeds=embeds, attachments=files, view=self)
+        await interaction.message.edit(
+            content=content,
+            embeds=embeds,
+            attachments=files,
+            view=self,
+        )
 
     @discord.ui.button(label="上一頁", emoji="◀️", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
