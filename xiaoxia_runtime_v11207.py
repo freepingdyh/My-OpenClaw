@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.13.23 — extracted Seedream prompt boundary + native Pose figure roles.
+"""v1.13.24 — Pose Library pager interaction timeout fix.
 
 v1.12.06al remains the stable base. Post-al features are installed directly from
 xiaoxia/ modules; no migration-runtime chain is reintroduced.
@@ -32,7 +32,7 @@ from xiaoxia.pose.pagination_patch import install_pose_pagination_patch
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
 app = stable_base.app
-MIGRATION_VERSION = "1.13.23"
+MIGRATION_VERSION = "1.13.24"
 
 
 def _activate_v11317():
@@ -56,7 +56,7 @@ def _activate_v11317():
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
 
     app.LOBSTER_VERSION = MIGRATION_VERSION
-    print("💃 [V11323_ROOT_POSE_PROMPT_ROLE_FIX_ACTIVE]")
+    print("💃 [V11324_POSE_PAGER_ACK_FIX_ACTIVE]")
     for name, info in activated.items():
         print(f"   • {name}: {info}")
     return activated
@@ -65,7 +65,7 @@ def _activate_v11317():
 _ACTIVATED = _activate_v11317()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.23 consolidated_after=1.12.06al stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.13.24 consolidated_after=1.12.06al stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
