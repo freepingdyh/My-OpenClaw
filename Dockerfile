@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 RUN npm install -g openclaw
 
-# v1.12.07：目前正式 consolidated runtime。
-# v1.12.06al 仍是必要 stable base；al 之前的 runtime chain 目前仍屬實際 dependency，不能直接刪除。
-# al 之後的舊 migration wrappers 已移除；其內容仍可從 Git history 精確還原。
-CMD npx openclaw gateway start & python xiaoxia_runtime_v11207.py
+# v1.14.00-flat：正式單一 composition-root runtime。
+# 舊 runtime wrapper chain 已完成 smoke test 後移除；Git history 保留 rollback 能力。
+CMD npx openclaw gateway start & python xiaoxia_runtime_flat.py
