@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.14.00-flat candidate — behavior-equivalent flattening of the active runtime chain.
+"""v1.14.00-flat — production single composition-root runtime.
 
 IMPORTANT:
 - Candidate only. Production entrypoint remains xiaoxia_runtime_v11207.py.
