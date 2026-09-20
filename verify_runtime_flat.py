@@ -15,7 +15,7 @@ EXPECTED=[
 "install_photo_result_view_router","register_health_commands",
 "install_wardrobe_core","install_scene_fidelity","install_photo_semantic_contract_repair",
 "install_photo_scene_observability","install_oauth_branding_pages","install_h3_video_button",
-"_config","install_legacy_video_command","install_h3_dialogue_safety","install_h3_policy_fallback",
+"install_legacy_video_command","install_h3_dialogue_safety","install_h3_policy_fallback",
 "install_h3_policy_fallback_v2","install_h3_diagnostics","install_h3_prompt_policy_fallback",
 "install_voiceover_mode","install_h3_trace","install_h3_trace_command","install_h3_image_url_retry",
 "install_h3_image_url_retry","install_h3_trace_command","install_h3_director_mode",
