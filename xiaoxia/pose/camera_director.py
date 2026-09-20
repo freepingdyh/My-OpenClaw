@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""v1.14.00 — Pose Reference observer built from P012/P013 field tests.
+"""v1.14.01 — Pose Reference observer built from P012/P013/P029 field tests.
 
 Gemini is an Observer, never a pose Director. Figure 9 carries fine geometry.
-Metadata exists to remove ambiguity, especially camera position and depth, without
-turning the prompt into an anatomical reconstruction.
+Metadata removes ambiguity without turning perspective cues into invented depth.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from typing import Any, Dict
 
 from google.genai import types
 
-VERSION = "1.14.00"
+VERSION = "1.14.01"
 
 
 def _clean_json_text(text: str) -> str:
@@ -48,9 +47,9 @@ FIELD JOBS — keep them separate:
    - camera height when meaningful (low / eye-level / slightly elevated / high);
    - subject-relative side or end (front / rear / side / three-quarter);
    - framing (full-body / 3-4 / medium / close);
-   - FROM WHERE -> TOWARD WHERE whenever the subject has depth through the frame.
+   - FROM WHERE -> TOWARD WHERE whenever the image clearly places the camera at a particular end/side of a subject extending in depth.
    Example: "Slightly elevated rear three-quarter full-body view from the legs-and-hips side, looking diagonally toward the face."
-   Do not merely say "looking along the body" if the photographer's end/side can be identified.
+   Do not invent a subject-relative end merely because a low/high angle makes one region appear larger.
 
 2. visible_pose_scope = VISIBILITY ONLY.
    Short English list of broad visible regions, e.g. "Full body, including face, torso, arms, hips, legs and feet."
@@ -62,19 +61,28 @@ FIELD JOBS — keep them separate:
    Do NOT enumerate anatomy, joint angles, pelvis rotation, elbow angles, knee mechanics, weight-bearing analysis, or hidden geometry.
    Never add a corrective instruction that is not visibly true. Do not say "face-down" merely because the pose is prone if the face is turned toward camera.
 
-4. composition_feature = VISUAL FLOW + CAMERA-RELATIVE DEPTH.
-   One concise English sentence. State the dominant diagonal/vertical/horizontal flow and, when visible, explicitly say which major body region is CLOSER TO THE CAMERA and which is FARTHER FROM THE CAMERA.
-   Example: "The body forms a strong diagonal, with the legs and hips closer to the camera and the face farther from the camera."
-   Avoid vague "nearer one end / opposite end" when actual camera-relative depth is visible.
+4. composition_feature = VISIBLE COMPOSITION FIRST; DEPTH ONLY WHEN UNAMBIGUOUS.
+   In one concise English sentence state the dominant visible flow/axis or placement.
+   Add camera-relative near/far depth ONLY when the image clearly shows substantial foreground/background separation ALONG THE CAMERA AXIS — for example, a reclining body extending from near legs/hips to a farther face.
+   Do NOT infer "closer to camera / farther from camera" merely from:
+   - low-angle or high-angle viewpoint,
+   - apparent size differences,
+   - perspective distortion or foreshortening,
+   - a standing body's lower region appearing larger,
+   - pose curvature alone.
+   If true camera-relative depth is not clearly visible, OMIT near/far language entirely.
+   Good standing example: "The standing figure forms a gentle diagonal flow through the frame, with the raised arms extending the composition upward."
+   Good clear-depth example: "The body forms a strong diagonal, with the legs and hips closer to the camera and the face farther from the camera."
+   Avoid vague "nearer one end / opposite end".
 
 CONSISTENCY CHECK before answering:
-- Camera and Composition must agree about near/far direction.
-- Camera must answer where the photographer is when the image makes that inferable.
+- Camera and Composition must agree about any near/far direction actually stated.
+- Camera must answer where the photographer is only when the image makes that inferable.
 - Pose must not duplicate Camera or Composition.
 - Prefer fewer high-value words. If Figure 9 already shows a detail and omitting it does not create a plausible wrong interpretation, omit it.
-- Preserve meaningful distinctions: standing/kneeling/seated/prone; front/rear three-quarter; support/contact gesture; looking back; near/far perspective.
+- Preserve meaningful distinctions: standing/kneeling/seated/prone; front/rear three-quarter; support/contact gesture; looking back; clearly visible near/far depth.
 - Ignore identity, clothing, body shape, hair, expression, background, lighting, mood, text, logo, watermark and decor.
-- If uncertain, omit rather than invent.
+- If uncertain about depth, omit it rather than infer it.
 """
 
     try:
@@ -99,7 +107,7 @@ CONSISTENCY CHECK before answering:
             "pose_description": clean("pose_description", 34),
             "composition_feature": clean("composition_feature", 30),
         }
-        print(f"📷 [POSE_OBSERVER_V11400] {result!r}")
+        print(f"📷 [POSE_OBSERVER_V11401] {result!r}")
         return result
     except Exception as exc:
         print(f"⚠️ [POSE_REFERENCE_ANALYSIS_FAILED] {type(exc).__name__}: {exc}")
@@ -117,7 +125,7 @@ def install_camera_director(app: Any) -> Dict[str, Any]:
     return {
         "version": VERSION,
         "observer": "Figure 9 geometry + ambiguity-removal metadata",
-        "camera": "photographer position + from/to direction",
-        "composition": "visual flow + camera-relative depth",
+        "camera": "photographer position only when visually inferable",
+        "composition": "visible flow; camera-relative depth only when unambiguous",
         "pose": "distinctive actions only; no anatomy reconstruction",
     }
