@@ -19,7 +19,7 @@ from xiaoxia.scene.fidelity import install_scene_fidelity
 from xiaoxia.scene.semantic_contract import install_photo_semantic_contract_repair
 from xiaoxia.scene.observability import install_photo_scene_observability
 from xiaoxia.web.oauth_branding import install_oauth_branding_pages
-from xiaoxia.video.h3 import install_h3_video_button, H3VideoButton, _config
+from xiaoxia.video.h3 import install_h3_video_button, H3VideoButton
 from xiaoxia.video.legacy_command import install_legacy_video_command
 from xiaoxia.video.safety_retry import install_h3_dialogue_safety
 from xiaoxia.video.policy_fallback import install_h3_policy_fallback
