@@ -132,7 +132,6 @@ def _activate_flat():
     )
     app.PhotoResultView = routed_h3_photo_result_view
     app.LOBSTER_VERSION="1.12.06a"
-    _config()  # preserve config read side effect
 
     install_legacy_video_command(app); app.LOBSTER_VERSION="1.12.06b"
     install_h3_dialogue_safety(app); app.LOBSTER_VERSION="1.12.06c"
