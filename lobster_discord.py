@@ -1,3 +1,32 @@
+# =============================================================================
+# ⚠️ ARCHITECTURE GUARDRAIL — LEGACY CORE / DO NOT GROW THIS FILE
+# =============================================================================
+# lobster_discord.py is Xiaoxia's production-stable LEGACY CORE.
+#
+# DEFAULT RULES:
+#   1. Do NOT add new features here unless technically necessary.
+#   2. New functionality should normally live under xiaoxia/*.
+#   3. xiaoxia_runtime_flat.py is the SINGLE production composition root.
+#   4. Do NOT recreate xiaoxia_runtime_vxxxxx.py wrapper chains.
+#   5. Do NOT refactor/delete historical code merely to make this file cleaner.
+#
+# EXISTING CODE:
+#   If it works, leave it alone. Dead/duplicate-looking code alone is NOT
+#   sufficient reason for deletion; dynamic references/aliases/patches may exist.
+#   When an existing subsystem needs substantial functional work, consider
+#   extracting THAT subsystem to xiaoxia/* as part of the real change.
+#
+# STRICT INVARIANT FOR STRUCTURAL WORK:
+#   Preserve prompts, model IDs, generation/API parameters, Seedream/H3 behavior,
+#   reference-image roles/order, retry/fallback behavior, Discord semantics,
+#   ENV names/defaults, schemas/data formats, installer order, monkey patches,
+#   and import side effects.
+#
+# PRINCIPLE: "只搬家，不裝潢。"
+# Full policy: ARCHITECTURE_GUARDRAILS.md
+# Decision: 2026-09-21
+# =============================================================================
+
 # ==========================================
 # ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 雙核共生終極版)
 # ==========================================
