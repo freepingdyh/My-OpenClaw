@@ -398,6 +398,23 @@ def install_pose_commands(app: Any) -> Dict[str, Any]:
                 await status.edit(content=f"⚠️ 姿勢新增失敗：`{type(exc).__name__}: {str(exc)[:900]}`")
             return
 
+        m = re.match(r"^換圖\s+(P\d+)\s*$", text, re.I)
+        if m:
+            wanted = m.group(1).upper()
+            if not attachments:
+                await ctx.reply(f"請附上一張新 Pose Reference，再輸入 `/姿勢 換圖 {wanted}`。", mention_author=False)
+                return
+            row = _find_pose(wanted)
+            if not row:
+                await ctx.reply(f"找不到 `{wanted}`。", mention_author=False)
+                return
+            updated = await _replace_reference(app, wanted, attachments[0])
+            await ctx.reply(
+                f"🖼️ **{wanted} 姿勢參考圖已更換。** Camera / Visible / Pose / Composition 全部保留，沒有重新判讀。",
+                file=discord.File(str(updated.get("file_path"))),
+                mention_author=False,
+            )
+            return
         m = re.match(r"^修正\s+(P\d+)\s*(.*)$", text, re.I | re.S)
         if m:
             wanted, spec = m.group(1).upper(), m.group(2).strip()
@@ -445,7 +462,7 @@ def install_pose_commands(app: Any) -> Dict[str, Any]:
             await ctx.reply(f"🗑️ `{wanted}` 已從姿勢櫃刪除。", mention_author=False)
             return
 
-        await ctx.reply("💃 用法：`/姿勢`、`/姿勢 看 P001`、`/姿勢 穿 P001`、附圖 `/姿勢 新增`、`/姿勢 修正 P001 ...`、`/姿勢 刪除 P001`。", mention_author=False)
+        await ctx.reply("💃 用法：`/姿勢`、`/姿勢 看 P001`、`/姿勢 穿 P001`、附圖 `/姿勢 新增`、`/姿勢 換圖 P001`、`/姿勢 修正 P001 ...`、`/姿勢 刪除 P001`。", mention_author=False)
 
     @bot.command(name="姿勢庫", hidden=True)
     async def pose_library_alias(ctx, *, request: str = ""):
@@ -457,7 +474,7 @@ def install_pose_commands(app: Any) -> Dict[str, Any]:
     app.load_pose_library = load_pose_library
     return {
         "version": POSE_VERSION,
-        "commands": ["/姿勢", "看", "穿", "新增", "修正", "刪除"],
+        "commands": ["/姿勢", "看", "穿", "新增", "換圖", "修正", "刪除"],
         "metadata": ["Camera", "Visible", "Pose", "Composition"],
         "pagination": True,
         "asset": "original_pose_reference",
