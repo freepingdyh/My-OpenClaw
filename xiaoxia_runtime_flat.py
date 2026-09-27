@@ -45,6 +45,7 @@ from xiaoxia.video.director_sensual_motion import install_sensual_motion_directo
 from xiaoxia.video.legacy_archive_ui import install_legacy_archive_ui
 from xiaoxia.video.archive_privacy import install_archive_privacy
 from xiaoxia.web.video_room_privacy import install_video_room_privacy
+from xiaoxia.web.photo_delete import install_photo_delete
 from xiaoxia.video.archive_delete_command import install_archive_delete_command
 from xiaoxia.video.video_delete_command import install_video_delete_command
 from xiaoxia.video.legacy_story_direction import install_legacy_story_direction
@@ -167,7 +168,7 @@ def _activate_flat():
 
     install_h3_archive_retry(app); app.LOBSTER_VERSION="1.12.06v"
     install_sensual_motion_director(app); install_legacy_archive_ui(app); app.LOBSTER_VERSION="1.12.06w"
-    install_archive_privacy(app); install_video_room_privacy(app); app.LOBSTER_VERSION="1.12.06x"
+    install_archive_privacy(app); install_video_room_privacy(app); install_photo_delete(app); app.LOBSTER_VERSION="1.12.06x"
     install_archive_delete_command(app); app.LOBSTER_VERSION="1.12.06y"
     install_video_delete_command(app); app.LOBSTER_VERSION="1.12.06z"
     install_legacy_story_direction(app); app.LOBSTER_VERSION="1.12.06aa"
