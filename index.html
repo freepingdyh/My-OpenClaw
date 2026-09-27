@@ -261,6 +261,7 @@
                 // 只記住「這個瀏覽器分頁／工作階段已登入」。
                 // 重新整理不必重輸密碼；關閉分頁/瀏覽器或按「登出」後失效。
                 sessionStorage.setItem(VAULT_SESSION_KEY, '1');
+                sessionStorage.setItem('xiaoxia_vault_key', pass);
                 document.getElementById('lock-error').classList.add('hidden');
                 openVaultSession();
             } else {
@@ -270,6 +271,7 @@
 
         function logoutVault() {
             sessionStorage.removeItem(VAULT_SESSION_KEY);
+            sessionStorage.removeItem('xiaoxia_vault_key');
             sessionStorage.removeItem(VAULT_ACTIVE_TAB_KEY);
             sessionStorage.removeItem(VAULT_OVERVIEW_FILTER_KEY);
             location.reload();
