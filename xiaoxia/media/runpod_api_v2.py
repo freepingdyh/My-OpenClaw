@@ -7,10 +7,6 @@ behavior.
 
 Environment:
     RUNPOD_API_KEY
-
-This first step deliberately discovers the live OpenAPI document instead of
-guessing beta endpoint shapes. It costs no GPU time and lets us bind the
-fallback-deploy controller to the exact API surface available to the account.
 """
 
 from __future__ import annotations
@@ -20,7 +16,10 @@ from typing import Any
 
 import aiohttp
 
-_BASE_URL = "https://api.runpod.io/v2"
+# The live OpenAPI document declares https://api.runpod.io as its server and
+# exposes paths beginning with /v2. Keep the host and path prefix separate to
+# avoid accidentally calling /v2/v2/....
+_BASE_URL = "https://api.runpod.io"
 
 
 class RunPodV2Error(RuntimeError):
@@ -80,20 +79,45 @@ async def _request(
 
 
 async def fetch_openapi() -> dict[str, Any]:
-    """Return the live RunPod API v2 OpenAPI document."""
-    payload = await _request("GET", "/openapi.json")
+    payload = await _request("GET", "/v2/openapi.json")
     if not isinstance(payload, dict):
         raise RunPodV2Error("OpenAPI response is not an object")
     return payload
 
 
-async def discover_relevant_operations() -> dict[str, list[dict[str, str]]]:
-    """Summarize live v2 operations relevant to Xiaoxia Pod automation.
+async def get_pod(pod_id: str) -> dict[str, Any]:
+    payload = await _request("GET", f"/v2/pods/{pod_id}")
+    if not isinstance(payload, dict):
+        raise RunPodV2Error("Pod response is not an object")
+    return payload
 
-    We intentionally derive this from RunPod's current OpenAPI schema because
-    v2 is beta. The returned summary is safe to print: it contains paths and
-    operation metadata only, never the API key.
-    """
+
+async def pod_action(pod_id: str, action: str) -> dict[str, Any]:
+    payload = await _request(
+        "POST",
+        f"/v2/pods/{pod_id}/action",
+        json_body={"action": action},
+    )
+    if not isinstance(payload, dict):
+        raise RunPodV2Error("Pod action response is not an object")
+    return payload
+
+
+async def list_gpu_types() -> dict[str, Any]:
+    payload = await _request("GET", "/v2/catalog/gpus")
+    if not isinstance(payload, dict):
+        raise RunPodV2Error("GPU catalog response is not an object")
+    return payload
+
+
+async def get_gpu_type(gpu_id: str) -> dict[str, Any]:
+    payload = await _request("GET", f"/v2/catalog/gpus/{gpu_id}")
+    if not isinstance(payload, dict):
+        raise RunPodV2Error("GPU catalog response is not an object")
+    return payload
+
+
+async def discover_relevant_operations() -> dict[str, list[dict[str, str]]]:
     spec = await fetch_openapi()
     paths = spec.get("paths")
     if not isinstance(paths, dict):
@@ -141,14 +165,28 @@ async def discover_relevant_operations() -> dict[str, list[dict[str, str]]]:
 
 
 async def probe() -> dict[str, Any]:
-    """Cheap connectivity/authentication probe for Zeabur -> RunPod API v2."""
     spec = await fetch_openapi()
     info = spec.get("info") if isinstance(spec.get("info"), dict) else {}
     paths = spec.get("paths") if isinstance(spec.get("paths"), dict) else {}
+    servers = spec.get("servers") if isinstance(spec.get("servers"), list) else []
     return {
         "ok": True,
         "title": info.get("title"),
         "version": info.get("version"),
         "path_count": len(paths),
-        "base_url": _BASE_URL,
+        "server": servers[0].get("url") if servers and isinstance(servers[0], dict) else None,
     }
+
+
+async def get_create_pod_schema() -> dict[str, Any]:
+    """Return the fully expanded CreatePodRequest schema from live OpenAPI."""
+    spec = await fetch_openapi()
+    schemas = (
+        spec.get("components", {}).get("schemas", {})
+        if isinstance(spec.get("components"), dict)
+        else {}
+    )
+    schema = schemas.get("CreatePodRequest")
+    if not isinstance(schema, dict):
+        raise RunPodV2Error("CreatePodRequest schema not found")
+    return schema
