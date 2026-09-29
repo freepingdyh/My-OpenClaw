@@ -190,3 +190,25 @@ async def get_create_pod_schema() -> dict[str, Any]:
     if not isinstance(schema, dict):
         raise RunPodV2Error("CreatePodRequest schema not found")
     return schema
+
+
+async def get_pod_schema_bundle() -> dict[str, Any]:
+    """Return live schemas needed to create a GPU Pod safely."""
+    spec = await fetch_openapi()
+    schemas = (
+        spec.get("components", {}).get("schemas", {})
+        if isinstance(spec.get("components"), dict)
+        else {}
+    )
+    names = [
+        "CreatePodRequest",
+        "ContainerConfig",
+        "CreateGpuConfig",
+        "Mounts",
+    ]
+    result: dict[str, Any] = {}
+    for name in names:
+        schema = schemas.get(name)
+        if isinstance(schema, dict):
+            result[name] = schema
+    return result
