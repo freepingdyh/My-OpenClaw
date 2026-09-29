@@ -13,11 +13,23 @@ class RunPodGatewayConfigError(RuntimeError):
     pass
 
 
+def _gateway_url() -> str:
+    explicit = os.getenv("XIAOXIA_RUNPOD_GATEWAY_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    pod_id = os.getenv("XIAOXIA_RUNPOD_POD_ID", "").strip()
+    port = os.getenv("XIAOXIA_RUNPOD_GATEWAY_PORT", "8190").strip() or "8190"
+    if not pod_id:
+        raise RunPodGatewayConfigError(
+            "Set XIAOXIA_RUNPOD_GATEWAY_URL or XIAOXIA_RUNPOD_POD_ID"
+        )
+    return f"https://{pod_id}-{port}.proxy.runpod.net"
+
+
 def _config() -> tuple[str, str]:
-    base_url = os.getenv("XIAOXIA_RUNPOD_GATEWAY_URL", "").strip().rstrip("/")
+    base_url = _gateway_url()
     api_key = os.getenv("XIAOXIA_RUNPOD_GATEWAY_KEY", "").strip()
-    if not base_url:
-        raise RunPodGatewayConfigError("XIAOXIA_RUNPOD_GATEWAY_URL is not configured")
     if not api_key:
         raise RunPodGatewayConfigError("XIAOXIA_RUNPOD_GATEWAY_KEY is not configured")
     return base_url, api_key
