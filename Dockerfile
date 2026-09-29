@@ -4,7 +4,7 @@ FROM node:20-bookworm-slim
 
 # 安裝 Python 3、venv、pip、ffmpeg 與必要編譯工具
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv build-essential ffmpeg && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv build-essential ffmpeg curl wget ca-certificates gzip tar && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
