@@ -42,9 +42,14 @@ class RunPodServerlessError(RuntimeError):
 
 
 def _api_key() -> str:
-    key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    key = (
+        os.environ.get("XIAOXIA_RUNPOD_SERVERLESS_API_KEY", "").strip()
+        or os.environ.get("RUNPOD_API_KEY", "").strip()
+    )
     if not key:
-        raise RunPodServerlessError("RUNPOD_API_KEY is not configured")
+        raise RunPodServerlessError(
+            "XIAOXIA_RUNPOD_SERVERLESS_API_KEY is not configured"
+        )
     return key
 
 
