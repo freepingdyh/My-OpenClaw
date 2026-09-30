@@ -12,6 +12,7 @@ are staged into /comfyui/input by the worker cold-start asset sync.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import json
@@ -256,3 +257,137 @@ async def get_job_status(job_id: str) -> dict[str, Any]:
     if not job_id:
         raise RunPodServerlessError("job_id is required")
     return await _request("GET", f"/status/{job_id}", timeout_seconds=30.0)
+
+_TERMINAL_JOB_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
+
+
+async def wait_for_job(
+    job_id: str,
+    *,
+    timeout_seconds: float = 600.0,
+    poll_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Poll a RunPod Serverless job until it reaches a terminal state."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(timeout_seconds)
+    last: dict[str, Any] | None = None
+
+    while loop.time() < deadline:
+        last = await get_job_status(job_id)
+        state = str(last.get("status") or "").upper()
+        if state in _TERMINAL_JOB_STATES:
+            return last
+        await asyncio.sleep(float(poll_seconds))
+
+    raise RunPodServerlessError(
+        f"RunPod job did not finish within {timeout_seconds:.0f}s; "
+        f"job_id={job_id} last_status={(last or {}).get('status')}"
+    )
+
+
+def decode_qwen21_output_images(
+    completed_job: dict[str, Any],
+) -> list[tuple[str, bytes]]:
+    """Decode image bytes from the official worker-comfyui response format.
+
+    worker-comfyui returns:
+        output.images[] = {
+            "filename": "...",
+            "type": "base64",
+            "data": "<base64>"
+        }
+
+    S3 URL output is intentionally rejected here because Xiaoxia's current
+    endpoint does not configure BUCKET_ENDPOINT_URL.
+    """
+    state = str(completed_job.get("status") or "").upper()
+    if state != "COMPLETED":
+        raise RunPodServerlessError(
+            f"Cannot decode images from non-completed job: status={state or 'UNKNOWN'}"
+        )
+
+    output = completed_job.get("output")
+    if not isinstance(output, dict):
+        raise RunPodServerlessError("Completed RunPod job has no output object")
+
+    top_error = output.get("error")
+    if top_error:
+        raise RunPodServerlessError(f"RunPod worker returned error: {top_error}")
+
+    images = output.get("images")
+    if not isinstance(images, list) or not images:
+        raise RunPodServerlessError("Completed RunPod job returned no images")
+
+    decoded: list[tuple[str, bytes]] = []
+    for index, item in enumerate(images, start=1):
+        if not isinstance(item, dict):
+            raise RunPodServerlessError(
+                f"Unexpected image result at index {index}: {type(item).__name__}"
+            )
+
+        filename = str(item.get("filename") or f"qwen21_{index}.png")
+        result_type = str(item.get("type") or "")
+        data = item.get("data")
+
+        if result_type != "base64":
+            raise RunPodServerlessError(
+                f"Unsupported RunPod image result type: {result_type or 'missing'}"
+            )
+        if not isinstance(data, str) or not data:
+            raise RunPodServerlessError(
+                f"RunPod image result has no base64 data: {filename}"
+            )
+
+        try:
+            blob = base64.b64decode(data, validate=True)
+        except Exception as exc:
+            raise RunPodServerlessError(
+                f"Invalid base64 image returned by RunPod: {filename}"
+            ) from exc
+
+        if not blob:
+            raise RunPodServerlessError(
+                f"RunPod returned an empty image: {filename}"
+            )
+        decoded.append((filename, blob))
+
+    return decoded
+
+
+async def run_qwen21(
+    image_bytes: bytes,
+    *,
+    prompt: str | None = None,
+    negative_prompt: str | None = None,
+    seed: int | None = None,
+    timeout_seconds: float = 600.0,
+    poll_seconds: float = 2.0,
+) -> list[tuple[str, bytes]]:
+    """Submit one Qwen21 job, wait for completion, and return decoded images."""
+    submitted = await submit_qwen21(
+        image_bytes,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+    )
+    job_id = str(submitted.get("id") or "").strip()
+    if not job_id:
+        raise RunPodServerlessError(
+            f"RunPod submit response has no job id: {submitted}"
+        )
+
+    completed = await wait_for_job(
+        job_id,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+    state = str(completed.get("status") or "").upper()
+    if state != "COMPLETED":
+        raise RunPodServerlessError(
+            f"RunPod job ended with status={state or 'UNKNOWN'} "
+            f"job_id={job_id} error={completed.get('error')}"
+        )
+
+    return decode_qwen21_output_images(completed)
+
