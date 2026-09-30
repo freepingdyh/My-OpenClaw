@@ -1,9 +1,15 @@
-# Xiaoxia RunPod Serverless workflows
+# Xiaoxia RunPod Serverless
 
-This directory stores version-controlled ComfyUI workflow JSON files used by the Xiaoxia RunPod Serverless path.
+This directory contains code for the RunPod Serverless Qwen Image 2.1 path.
 
-Current source workflow:
-- `xiaoxia_qwen21_special_v1.json` — ComfyUI UI workflow source.
-- A separate API-format workflow will be added for RunPod Serverless execution after export/conversion is verified.
+Asset ownership:
+- Fixed image_2 through image_6 reference PNGs live in Zeabur persistent storage under `/data/memory/qwen21/refs/`.
+- The ComfyUI source workflow JSON lives in Zeabur persistent storage under `/data/memory/qwen21/workflows/`.
+- Neither the fixed refs nor workflow JSON are stored in this public GitHub repository.
 
-Reference images are intentionally NOT stored in GitHub. The fixed image_2–image_6 assets remain in Zeabur persistent storage and are staged into the Serverless worker at runtime.
+Runtime staging:
+- `fetch_qwen21_assets.py` downloads the five fixed refs from Zeabur's protected asset routes during worker cold start.
+- Every ref is checked against `/internal/qwen21/meta/sha256.txt` before it is written to `/comfyui/input`.
+- `start_qwen21_worker.sh` performs that sync and then hands control to the official worker-comfyui `/start.sh`.
+
+The API-format ComfyUI workflow is intentionally not committed here until conversion/export from the verified source workflow has been completed and tested.
