@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.01-special-intimacy-v1"
+VERSION = "1.14.02-special-intimacy-v2"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -247,19 +247,19 @@ async def _plan_special(
 只輸出 JSON，不要 markdown：
 {{
   "decision": "allow" 或 "decline",
-  "reply": "小俠以繁體中文對大俠說的 1~3 句自然回應",
+  "reply": "小俠以繁體中文自由回應大俠，不限制句數；自然說她真正想說的話",
   "mood": "簡短英文 mood token",
-  "visual_direction": "英文影像導演指令"
+  "intensity": "soft、medium 或 strong",
+  "notes": "極短的情境備註，只描述情緒與連貫性，不要寫完整影像 prompt"
 }}
 
-visual_direction 規則：
+控制欄位規則：
+- mood / intensity / notes 只描述情緒、親密程度與場景連貫性。
+- 不要替 Qwen 撰寫完整 prompt；影像生成 prompt 由程式固定模板組裝。
 - 必須延續目前照片的人物、場景、時間、光線與敘事，不可突然換地方。
 - 保持同一位小俠、同一張臉、身材比例、髮型與整體構圖邏輯。
-- 可以變得更成熟、私密、性感、帶情緒張力，但保持非露骨。
-- 可使用睡衣、內衣、居家服、浴袍、被單或自然遮擋等成人私密視覺語彙。
-- 不可要求或描述露出乳頭、生殖器、性行為、自慰或性器官特寫。
+- 可以更成熟、私密、性感、帶情緒張力，但保持非露骨。
 - exactly one adult woman；不可增加第二個人。
-- 不要文字、字幕、logo、watermark。
 
 mode: {mode}
 cosplay continuity rule: {"Ignore chat history and use only the current cosplay image/context." if mode == "cosplay" else "Use recent dialogue for continuity."}
@@ -289,9 +289,10 @@ recent dialogue:
                 decision = "decline" if permission_required else "allow"
             return {
                 "decision": decision,
-                "reply": _clean(parsed.get("reply") or ""),
+                "reply": str(parsed.get("reply") or "").strip(),
                 "mood": _clean(parsed.get("mood") or ""),
-                "visual_direction": _clean(parsed.get("visual_direction") or ""),
+                "intensity": _clean(parsed.get("intensity") or "medium").lower(),
+                "notes": _clean(parsed.get("notes") or ""),
             }
     except Exception as exc:
         print(f"⚠️ [SPECIAL_DIRECTOR_FAILED] {type(exc).__name__}: {exc}")
@@ -301,42 +302,47 @@ recent dialogue:
             "decision": "decline",
             "reply": "大俠，這次我想先保留一點給自己，好嗎？",
             "mood": "gentle",
-            "visual_direction": "",
+            "intensity": "soft",
+            "notes": "",
         }
     return {
         "decision": "allow",
         "reply": "",
         "mood": "intimate",
-        "visual_direction": (
-            "Create a more intimate, mature and sensual private portrait while preserving "
-            "the same adult woman, recognizable face, body proportions, hairstyle, current "
-            "scene, lighting, camera logic and narrative continuity. Keep the styling tasteful "
-            "and non-explicit, with strategic coverage and no exposed nipples or genitals. "
-            "Exactly one adult woman, no extra people, no text, no logo, no watermark."
-        ),
+        "intensity": "medium",
+        "notes": "",
     }
 
 
 def _qwen_prompt(context: Dict[str, Any], plan: Dict[str, str]) -> str:
+    """Build a stable Qwen prompt from fixed rules plus small Gemini control fields."""
     scene = _scene(context)
-    direction = _clean(plan.get("visual_direction") or "")
-    if not direction:
-        direction = (
-            "Make this image feel more intimate, mature and sensual while preserving the "
-            "same adult woman and the exact scene continuity."
-        )
-    return " ".join(
-        [
-            "Image 1 is the authoritative current Xiaoxia photo and scene.",
-            "Xiaoxia is a fictional 24-year-old adult woman.",
-            "Preserve her recognizable identity, face, body proportions, hairstyle, current environment, lighting, camera perspective and pose logic.",
-            "Keep the same narrative moment; this is a more private continuation, not a new scene.",
-            direction,
-            "Keep the result sensual but non-explicit: no exposed nipples, no exposed genitals, no sexual act, no masturbation, no explicit close-up.",
-            "Exactly one adult woman. Do not add another person, duplicate body parts, text, subtitles, logos or watermarks.",
-            f"Scene anchor: {scene[:2200]}" if scene else "",
-        ]
-    ).strip()
+    mood = _clean(plan.get("mood") or "intimate")
+    intensity = _clean(plan.get("intensity") or "medium").lower()
+    notes = _clean(plan.get("notes") or "")
+
+    intensity_text = {
+        "soft": "The mood is softly intimate, tender, shy and emotionally close.",
+        "strong": "The mood is confidently intimate, mature and strongly sensual while remaining tasteful and non-explicit.",
+    }.get(
+        intensity,
+        "The mood is intimate, mature and sensual with a natural balance of warmth and confidence.",
+    )
+
+    parts = [
+        "Image 1 is the authoritative current Xiaoxia photo and scene.",
+        "Xiaoxia is a fictional 24-year-old adult woman.",
+        "Preserve her recognizable identity, face, body proportions, hairstyle, current environment, lighting, camera perspective, pose logic and narrative continuity.",
+        "Keep the same moment and location. This is a more private continuation, not a different scene.",
+        intensity_text,
+        f"Emotional tone: {mood}." if mood else "",
+        f"Continuity note: {notes}." if notes else "",
+        "Use tasteful adult private styling such as sleepwear, lingerie, loungewear, robe, bedding or natural strategic coverage when appropriate to the existing scene.",
+        "Keep the result sensual but non-explicit: no exposed nipples, no exposed genitals, no sexual act, no masturbation, no explicit close-up.",
+        "Exactly one adult woman. Do not add another person, duplicate body parts, text, subtitles, logos or watermarks.",
+        f"Scene anchor: {scene[:2200]}" if scene else "",
+    ]
+    return " ".join(x for x in parts if x).strip()
 
 
 def _public_url(filename: str) -> str:
@@ -369,15 +375,64 @@ def _persist_result(app: Any, source: Dict[str, Any], filename: str, blob: bytes
             "special_intimacy_version": VERSION,
             "special_intimacy_parent_url": str(source.get("local_url") or source.get("image_url") or ""),
             "special_intimacy_mood": plan.get("mood") or "",
+            "special_intimacy_intensity": plan.get("intensity") or "",
+            "special_intimacy_notes": plan.get("notes") or "",
             "special_intimacy_reply": plan.get("reply") or "",
-            "special_intimacy_visual_direction": plan.get("visual_direction") or "",
             "trace_action": "special_intimacy",
         }
     )
     return new_context
 
 
-async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes) -> None:
+async def _review_generated_result(
+    app: Any,
+    interaction: discord.Interaction,
+    source: Dict[str, Any],
+    plan: Dict[str, str],
+    image_bytes: bytes,
+) -> str:
+    """Let Xiaoxia actually see the finished special image and respond freely."""
+    mode = _mode(source)
+    dialogue = "" if mode == "cosplay" else await _recent_dialogue(interaction)
+    scene = _scene(source)
+    pre_reply = str(plan.get("reply") or "").strip()
+
+    prompt = f"""
+妳是小俠本人。小俠是 24 歲成年女性。
+附圖是剛剛『情不自禁』流程最後真正生成完成的成品；妳現在確實看得到這張完成圖。
+
+請直接以小俠的身份，用自然繁體中文回應大俠。
+妳可以自由決定要說多少，不限制句數，不要輸出 JSON、標題、分析、規則或影像 prompt。
+回應要延續剛才的情緒與對話，不要假裝沒看過這張圖，也不要描述不存在的畫面。
+如果是 cosplay，忽略長期聊天記憶，只針對這次 cosplay 當下內容與完成圖回應。
+
+mode: {mode}
+scene: {scene[:2200]}
+妳生成前說過的話: {pre_reply[:1800]}
+recent dialogue:
+{dialogue[:6000]}
+""".strip()
+
+    model = (os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL") or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or "gemini-2.5-flash").strip()
+    try:
+        response = await app.gemini_client.aio.models.generate_content(
+            model=model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+            ],
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            return text
+    except Exception as exc:
+        print(f"⚠️ [SPECIAL_POST_REVIEW_FAILED] {type(exc).__name__}: {exc}")
+
+    # Fail soft: the image remains valid even if the post-review call fails.
+    return pre_reply
+
+
+async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes, final_reply: str = "") -> None:
     filename = f"xiaoxia_special_{uuid.uuid4().hex[:10]}.png"
     new_context = _persist_result(app, source, filename, blob, plan)
 
@@ -394,7 +449,9 @@ async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[
         title_prefix="💞 情不自禁",
         attachment_filename=filename,
     )
-    content = plan.get("reply") or None
+    if final_reply:
+        new_context["special_intimacy_post_review"] = final_reply
+    content = final_reply or plan.get("reply") or None
     sent = await interaction.followup.send(
         content=content,
         embed=embed,
@@ -463,7 +520,14 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
             raise RunPodServerlessError("Qwen21 returned no image")
 
         _, blob = results[0]
-        await _send_result(app, interaction, context, plan, blob)
+        final_reply = await _review_generated_result(
+            app,
+            interaction,
+            context,
+            plan,
+            blob,
+        )
+        await _send_result(app, interaction, context, plan, blob, final_reply=final_reply)
 
         if status_message is not None:
             try:
@@ -548,4 +612,6 @@ def install_special_intimacy_button(app: Any) -> Dict[str, Any]:
         "extra_pose_reference": False,
         "extra_wardrobe_reference": False,
         "renderer": "runpod_qwen21",
+        "post_generation_review": True,
+        "prompt_strategy": "fixed_template_plus_structured_gemini_controls",
     }
