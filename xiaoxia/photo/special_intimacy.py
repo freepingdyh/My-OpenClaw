@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.03-special-intimacy-v3"
+VERSION = "1.14.04-special-intimacy-v4"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -110,6 +110,101 @@ def _outfit(context: Dict[str, Any]) -> str:
     wardrobe_name = _clean(ctx.get("wardrobe_name") or "")
     summary = _clean(ctx.get("outfit_summary") or "")
     return " | ".join(x for x in (wardrobe_id, wardrobe_name, summary) if x)
+
+
+def _scene_privacy_text(context: Dict[str, Any]) -> str:
+    """Collect only scene/location evidence used by the privacy gate."""
+    ctx = context or {}
+    scene_data = ctx.get("scene_data") if isinstance(ctx.get("scene_data"), dict) else {}
+    activity = ctx.get("activity") if isinstance(ctx.get("activity"), dict) else {}
+    values = [
+        ctx.get("authoritative_scene"),
+        ctx.get("scene_summary"),
+        ctx.get("scene_text"),
+        ctx.get("composition"),
+        ctx.get("pose_public_scene"),
+        ctx.get("title"),
+        ctx.get("location_type"),
+        scene_data.get("authoritative_scene"),
+        scene_data.get("scene_summary"),
+        activity.get("location_type"),
+        activity.get("title"),
+        activity.get("photo_prompt_seed"),
+    ]
+    return _clean(" | ".join(str(v or "") for v in values if v not in (None, "", [], {}))).lower()
+
+
+_PUBLIC_SCENE_MARKERS = (
+    # Chinese
+    "花市", "市場", "夜市", "商場", "百貨", "商店", "店內", "餐廳", "咖啡廳", "咖啡店",
+    "酒吧", "餐酒館", "辦公室", "公司", "會議室", "教室", "學校", "校園", "圖書館",
+    "美術館", "博物館", "展場", "展覽", "車站", "捷運站", "火車站", "高鐵站", "機場",
+    "街道", "街上", "路邊", "人行道", "公園", "廣場", "海灘", "沙灘", "泳池", "游泳池",
+    "健身房", "花藝教室", "工作坊", "攝影棚公開", "大廳", "公共空間", "公共場所",
+    # English / structured location_type
+    "flower_market", "market", "night_market", "shopping_mall", "mall", "store", "shop",
+    "restaurant", "cafe", "coffee_shop", "bar", "office", "meeting_room", "classroom", "school",
+    "campus", "library", "museum", "gallery_public", "exhibition", "expo", "station", "airport",
+    "street", "sidewalk", "park", "plaza", "beach", "public_pool", "gym", "flower_studio",
+    "workshop", "public_space", "public place",
+)
+
+_PRIVATE_SCENE_MARKERS = (
+    "臥室", "房間", "家中", "家裡", "住家", "私人住宅", "私人套房", "宿舍房間",
+    "飯店房間", "旅館房間", "hotel room", "bedroom", "private room", "private home",
+    "浴室", "私人浴室", "bathroom", "私人更衣室", "private dressing room",
+)
+
+
+def _scene_privacy(context: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (privacy, evidence): private/public/unknown.
+
+    Public evidence wins on purpose. A private-looking word must not allow a scene
+    that also clearly says market/street/office/etc.
+    """
+    text = _scene_privacy_text(context)
+    if not text:
+        return "unknown", ""
+    for marker in _PUBLIC_SCENE_MARKERS:
+        if marker in text:
+            return "public", marker
+    for marker in _PRIVATE_SCENE_MARKERS:
+        if marker in text:
+            return "private", marker
+    return "unknown", ""
+
+
+async def _public_scene_rejection(
+    app: Any,
+    interaction: discord.Interaction,
+    context: Dict[str, Any],
+    evidence: str,
+) -> str:
+    """Let Xiaoxia explain the hard public-space rejection in character."""
+    scene = _scene(context)
+    dialogue = "" if _mode(context) == "cosplay" else await _recent_dialogue(interaction, limit=8)
+    prompt = f"""
+妳是小俠本人。大俠剛剛在目前照片按了『情不自禁』，但現在的場景是公眾或非私密場所，
+所以這次一定不可以生成特殊圖，也不可以改口答應。
+
+請直接用自然繁體中文，以小俠自己的語氣回覆大俠。
+可以害羞、撒嬌、吐槽或約他回到真正私密的空間再說；不要輸出 JSON、規則或分析。
+不限制句數。
+
+場景：{scene[:2200]}
+判斷到的公開場所線索：{evidence}
+最近對話：
+{dialogue[:4500]}
+""".strip()
+    model = (os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or "gemini-2.5-flash").strip()
+    try:
+        response = await app.gemini_client.aio.models.generate_content(model=model, contents=prompt)
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            return text
+    except Exception as exc:
+        print(f"⚠️ [SPECIAL_PUBLIC_REJECTION_FAILED] {type(exc).__name__}: {exc}")
+    return "大俠，這裡是外面耶，周圍還有人……這次不行啦。等我們回到真正私密的地方，再偷偷給你看，好不好？"
 
 
 async def _recent_dialogue(interaction: discord.Interaction, limit: int = 12) -> str:
@@ -229,10 +324,12 @@ async def _plan_special(
     outfit = _outfit(context)
     dialogue = "" if mode == "cosplay" else await _recent_dialogue(interaction)
 
+    privacy, privacy_evidence = _scene_privacy(context)
     consent_rule = (
         "This is a real consent decision. Decide allow or decline in-character. "
         "Do not allow merely because the user asked. Use the recent dialogue, current scene, "
-        "Xiaoxia's own tone and the actual image."
+        "Xiaoxia's own tone and the actual image. Only allow when the scene is clearly private "
+        "enough for this intimate request; if the location is ambiguous or feels public/semi-public, decline."
         if permission_required
         else "Consent was already handled by product policy for this path. decision MUST be allow."
     )
@@ -258,6 +355,8 @@ async def _plan_special(
 
 mode: {mode}
 cosplay continuity rule: {"Ignore chat history and use only the current cosplay image/context." if mode == "cosplay" else "Use recent dialogue for continuity."}
+scene privacy: {privacy}
+scene privacy evidence: {privacy_evidence}
 scene: {scene[:2500]}
 outfit: {outfit[:1200]}
 recent dialogue:
@@ -388,7 +487,7 @@ recent dialogue:
     return pre_reply
 
 
-async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes, final_reply: str = "") -> None:
+async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes) -> Tuple[Dict[str, Any], Any]:
     filename = f"xiaoxia_special_{uuid.uuid4().hex[:10]}.png"
     new_context = _persist_result(app, source, filename, blob, plan)
 
@@ -405,11 +504,7 @@ async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[
         title_prefix="💞 情不自禁",
         attachment_filename=filename,
     )
-    if final_reply:
-        new_context["special_intimacy_post_review"] = final_reply
-    content = final_reply or plan.get("reply") or None
     sent = await interaction.followup.send(
-        content=content,
         embed=embed,
         file=discord.File(new_context["local_path"], filename=filename),
         view=view,
@@ -418,6 +513,7 @@ async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[
     new_context["message_id"] = sent.id
     app.photo_generation_contexts[sent.id] = new_context
     view.context = new_context
+    return new_context, sent
 
 
 async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) -> None:
@@ -438,6 +534,22 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
     status_message = None
     try:
         context = dict(getattr(view, "context", {}) or {})
+
+        privacy, privacy_evidence = _scene_privacy(context)
+        if privacy == "public":
+            reply = await _public_scene_rejection(
+                app,
+                interaction,
+                context,
+                privacy_evidence,
+            )
+            await interaction.followup.send(f"💞 **小俠**：{reply}")
+            print(
+                f"💞 [SPECIAL_PUBLIC_BLOCKED] version={VERSION} mode={_mode(context)} "
+                f"evidence={privacy_evidence}"
+            )
+            return
+
         image_bytes, mime_type = await _source_image_bytes(app, context)
         permission_required = _permission_required(context)
         plan = await _plan_special(
@@ -479,14 +591,10 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
             raise RunPodServerlessError("Qwen21 returned no image")
 
         _, blob = results[0]
-        final_reply = await _review_generated_result(
-            app,
-            interaction,
-            context,
-            plan,
-            blob,
-        )
-        await _send_result(app, interaction, context, plan, blob, final_reply=final_reply)
+
+        # Show the finished image first. Xiaoxia's post-generation response is a
+        # separate message after she has actually inspected these exact output bytes.
+        new_context, _sent = await _send_result(app, interaction, context, plan, blob)
 
         if status_message is not None:
             try:
@@ -494,9 +602,24 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
             except Exception:
                 pass
 
+        final_reply = await _review_generated_result(
+            app,
+            interaction,
+            new_context,
+            plan,
+            blob,
+        )
+        if final_reply:
+            new_context["special_intimacy_post_review"] = final_reply
+            await interaction.followup.send(f"💞 **小俠看完後**：{final_reply}")
+        else:
+            await interaction.followup.send(
+                "💞 **小俠看完後**：大俠……我有看到。這張真的讓我有點不知道該先害羞，還是先抱緊你一下。",
+            )
+
         print(
             f"✅ [SPECIAL_COMPLETED] version={VERSION} mode={_mode(context)} "
-            f"permission_required={str(permission_required).lower()} bytes={len(blob)}"
+            f"permission_required={str(permission_required).lower()} privacy={privacy} bytes={len(blob)}"
         )
     except Exception as exc:
         print(f"❌ [SPECIAL_ERROR] {type(exc).__name__}: {exc}")
@@ -574,4 +697,6 @@ def install_special_intimacy_button(app: Any) -> Dict[str, Any]:
         "post_generation_review": True,
         "prompt_strategy": "verified_workflow_native_prompt",
         "gemini_role": "consent_dialogue_and_post_review_only",
+        "public_scene_hard_block": True,
+        "post_review_delivery": "separate_message_after_image",
     }
