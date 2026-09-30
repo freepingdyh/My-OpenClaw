@@ -227,7 +227,7 @@ async def _plan_special(
     mode = _mode(context)
     scene = _scene(context)
     outfit = _outfit(context)
-    dialogue = await _recent_dialogue(interaction)
+    dialogue = "" if mode == "cosplay" else await _recent_dialogue(interaction)
 
     consent_rule = (
         "This is a real consent decision. Decide allow or decline in-character. "
@@ -262,6 +262,7 @@ visual_direction 規則：
 - 不要文字、字幕、logo、watermark。
 
 mode: {mode}
+cosplay continuity rule: {"Ignore chat history and use only the current cosplay image/context." if mode == "cosplay" else "Use recent dialogue for continuity."}
 scene: {scene[:2500]}
 outfit: {outfit[:1200]}
 recent dialogue:
@@ -353,7 +354,7 @@ def _persist_result(app: Any, source: Dict[str, Any], filename: str, blob: bytes
     inherit = getattr(app, "_inherit_photo_lineage", None)
     if callable(inherit):
         try:
-            target: Dict[str, Any] = {}
+            target: Dict[str, Any] = dict(source or {})
             new_context = inherit(source, target, action="special_intimacy")
         except Exception as exc:
             print(f"⚠️ [SPECIAL_LINEAGE_INHERIT_FAILED] {type(exc).__name__}: {exc}")
