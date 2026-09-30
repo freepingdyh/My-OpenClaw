@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.02-special-intimacy-v2"
+VERSION = "1.14.03-special-intimacy-v3"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -248,18 +248,13 @@ async def _plan_special(
 {{
   "decision": "allow" 或 "decline",
   "reply": "小俠以繁體中文自由回應大俠，不限制句數；自然說她真正想說的話",
-  "mood": "簡短英文 mood token",
-  "intensity": "soft、medium 或 strong",
-  "notes": "極短的情境備註，只描述情緒與連貫性，不要寫完整影像 prompt"
+  "mood": "簡短英文 mood token"
 }}
 
-控制欄位規則：
-- mood / intensity / notes 只描述情緒、親密程度與場景連貫性。
-- 不要替 Qwen 撰寫完整 prompt；影像生成 prompt 由程式固定模板組裝。
-- 必須延續目前照片的人物、場景、時間、光線與敘事，不可突然換地方。
-- 保持同一位小俠、同一張臉、身材比例、髮型與整體構圖邏輯。
-- 可以更成熟、私密、性感、帶情緒張力，但保持非露骨。
-- exactly one adult woman；不可增加第二個人。
+規則：
+- 這一步只做小俠的意願與對話，不要替 Qwen 撰寫影像 prompt。
+- 不要輸出影像生成指令、服裝修改指令或視覺 transformation prompt。
+- 圖像編輯完全使用已驗證的 ComfyUI / Qwen Image 2.1 workflow 原生 prompt。
 
 mode: {mode}
 cosplay continuity rule: {"Ignore chat history and use only the current cosplay image/context." if mode == "cosplay" else "Use recent dialogue for continuity."}
@@ -291,8 +286,6 @@ recent dialogue:
                 "decision": decision,
                 "reply": str(parsed.get("reply") or "").strip(),
                 "mood": _clean(parsed.get("mood") or ""),
-                "intensity": _clean(parsed.get("intensity") or "medium").lower(),
-                "notes": _clean(parsed.get("notes") or ""),
             }
     except Exception as exc:
         print(f"⚠️ [SPECIAL_DIRECTOR_FAILED] {type(exc).__name__}: {exc}")
@@ -302,47 +295,12 @@ recent dialogue:
             "decision": "decline",
             "reply": "大俠，這次我想先保留一點給自己，好嗎？",
             "mood": "gentle",
-            "intensity": "soft",
-            "notes": "",
         }
     return {
         "decision": "allow",
         "reply": "",
         "mood": "intimate",
-        "intensity": "medium",
-        "notes": "",
     }
-
-
-def _qwen_prompt(context: Dict[str, Any], plan: Dict[str, str]) -> str:
-    """Build a stable Qwen prompt from fixed rules plus small Gemini control fields."""
-    scene = _scene(context)
-    mood = _clean(plan.get("mood") or "intimate")
-    intensity = _clean(plan.get("intensity") or "medium").lower()
-    notes = _clean(plan.get("notes") or "")
-
-    intensity_text = {
-        "soft": "The mood is softly intimate, tender, shy and emotionally close.",
-        "strong": "The mood is confidently intimate, mature and strongly sensual while remaining tasteful and non-explicit.",
-    }.get(
-        intensity,
-        "The mood is intimate, mature and sensual with a natural balance of warmth and confidence.",
-    )
-
-    parts = [
-        "Image 1 is the authoritative current Xiaoxia photo and scene.",
-        "Xiaoxia is a fictional 24-year-old adult woman.",
-        "Preserve her recognizable identity, face, body proportions, hairstyle, current environment, lighting, camera perspective, pose logic and narrative continuity.",
-        "Keep the same moment and location. This is a more private continuation, not a different scene.",
-        intensity_text,
-        f"Emotional tone: {mood}." if mood else "",
-        f"Continuity note: {notes}." if notes else "",
-        "Use tasteful adult private styling such as sleepwear, lingerie, loungewear, robe, bedding or natural strategic coverage when appropriate to the existing scene.",
-        "Keep the result sensual but non-explicit: no exposed nipples, no exposed genitals, no sexual act, no masturbation, no explicit close-up.",
-        "Exactly one adult woman. Do not add another person, duplicate body parts, text, subtitles, logos or watermarks.",
-        f"Scene anchor: {scene[:2200]}" if scene else "",
-    ]
-    return " ".join(x for x in parts if x).strip()
 
 
 def _public_url(filename: str) -> str:
@@ -375,8 +333,6 @@ def _persist_result(app: Any, source: Dict[str, Any], filename: str, blob: bytes
             "special_intimacy_version": VERSION,
             "special_intimacy_parent_url": str(source.get("local_url") or source.get("image_url") or ""),
             "special_intimacy_mood": plan.get("mood") or "",
-            "special_intimacy_intensity": plan.get("intensity") or "",
-            "special_intimacy_notes": plan.get("notes") or "",
             "special_intimacy_reply": plan.get("reply") or "",
             "trace_action": "special_intimacy",
         }
@@ -514,8 +470,11 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
                 wait=True,
             )
 
-        qwen_prompt = _qwen_prompt(context, plan)
-        results = await run_qwen21(image_bytes, prompt=qwen_prompt)
+        # IMPORTANT: do not override TextEncodeQwenImage21.prompt here.
+        # The Zeabur API workflow is generated from the verified ComfyUI UI workflow
+        # and already contains the tested special-edit prompt. Passing prompt= would
+        # replace that prompt and materially weaken/change the intended edit.
+        results = await run_qwen21(image_bytes)
         if not results:
             raise RunPodServerlessError("Qwen21 returned no image")
 
@@ -613,5 +572,6 @@ def install_special_intimacy_button(app: Any) -> Dict[str, Any]:
         "extra_wardrobe_reference": False,
         "renderer": "runpod_qwen21",
         "post_generation_review": True,
-        "prompt_strategy": "fixed_template_plus_structured_gemini_controls",
+        "prompt_strategy": "verified_workflow_native_prompt",
+        "gemini_role": "consent_dialogue_and_post_review_only",
     }
