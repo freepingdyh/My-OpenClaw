@@ -19,6 +19,7 @@ from xiaoxia.scene.fidelity import install_scene_fidelity
 from xiaoxia.scene.semantic_contract import install_photo_semantic_contract_repair
 from xiaoxia.scene.observability import install_photo_scene_observability
 from xiaoxia.web.oauth_branding import install_oauth_branding_pages
+from xiaoxia.web.qwen21_assets import install_qwen21_asset_routes
 from xiaoxia.video.h3 import install_h3_video_button, H3VideoButton
 from xiaoxia.video.legacy_command import install_legacy_video_command
 from xiaoxia.video.safety_retry import install_h3_dialogue_safety
@@ -115,6 +116,7 @@ def _activate_flat():
     install_photo_semantic_contract_repair(app); app.LOBSTER_VERSION="1.12.05"
     install_photo_scene_observability(app); app.LOBSTER_VERSION="1.12.05a"
     install_oauth_branding_pages(app); app.LOBSTER_VERSION="1.12.05b"
+    install_qwen21_asset_routes(app)
     install_h3_video_button(app); app.LOBSTER_VERSION="1.12.06"
 
     current_factory = getattr(app, "PhotoResultView", None)
