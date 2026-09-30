@@ -28,6 +28,7 @@ _ALLOWED_REFS = {
 }
 _ALLOWED_WORKFLOWS = {
     "xiaoxia_qwen21_special_v1.json",
+    "xiaoxia_qwen21_special_v1_api.json",
 }
 
 
