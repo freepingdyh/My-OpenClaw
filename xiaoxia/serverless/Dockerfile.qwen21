@@ -1,8 +1,8 @@
-FROM runpod/worker-comfyui:5.11.0-base
+FROM runpod/worker-comfyui:5.10.0-base
 
 ARG COMFYUI_COMMIT=a7169322485d0049380fb207fa17e9fb3ec40486
 
-# worker-comfyui 5.11.0 ships ComfyUI v0.34.0, which predates the Qwen Image
+# worker-comfyui 5.10.0 base is the latest published Docker Hub base tag as of 2026-09-30.\n# Its bundled ComfyUI predates the Qwen Image
 # 2.1 nodes used by Xiaoxia's verified workflow. Replace only ComfyUI itself,
 # while keeping RunPod's official handler and /start.sh.
 RUN rm -rf /comfyui && \
