@@ -65,6 +65,7 @@ from xiaoxia.pose.camera_director import install_camera_director
 from xiaoxia.pose.photo_pose_input import install_photo_pose_input
 from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
 from xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
+from xiaoxia.photo.special_intimacy import install_special_intimacy_button
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
@@ -135,6 +136,7 @@ def _activate_flat():
     )
     app.PhotoResultView = routed_h3_photo_result_view
     app.LOBSTER_VERSION="1.12.06a"
+    install_special_intimacy_button(app); app.LOBSTER_VERSION="1.14.01"
 
     install_legacy_video_command(app); app.LOBSTER_VERSION="1.12.06b"
     install_h3_dialogue_safety(app); app.LOBSTER_VERSION="1.12.06c"
