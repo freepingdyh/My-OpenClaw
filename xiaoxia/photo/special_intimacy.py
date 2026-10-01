@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.06-special-intimacy-v5"
+VERSION = "1.14.07-special-intimacy-v6"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -325,14 +325,23 @@ async def _plan_special(
     dialogue = "" if mode == "cosplay" else await _recent_dialogue(interaction)
 
     privacy, privacy_evidence = _scene_privacy(context)
-    consent_rule = (
-        "This is a real consent decision. Decide allow or decline in-character. "
-        "Do not allow merely because the user asked. Use the recent dialogue, current scene, "
-        "Xiaoxia's own tone and the actual image. Only allow when the scene is clearly private "
-        "enough for this intimate request; if the location is ambiguous or feels public/semi-public, decline."
-        if permission_required
-        else "Consent was already handled by product policy for this path. decision MUST be allow."
-    )
+    if permission_required:
+        if privacy == "private":
+            consent_rule = (
+                "This is a real consent decision. The scene is already established as a private home/private-room setting. "
+                "Do NOT invent bystanders, crowds, people watching, public exposure, or lack of privacy. "
+                "If Xiaoxia declines, she must decline because she personally does not want to do it right now, and say that plainly in-character. "
+                "If she is willing, allow."
+            )
+        else:
+            consent_rule = (
+                "This is a real consent decision. Decide allow or decline in-character. "
+                "Do not allow merely because the user asked. Use the recent dialogue, current scene, "
+                "Xiaoxia's own tone and the actual image. If the location is ambiguous or feels public/semi-public, decline. "
+                "Do not invent people or a crowd unless that is actually supported by the scene/context."
+            )
+    else:
+        consent_rule = "Consent was already handled by product policy for this path. decision MUST be allow."
 
     prompt = f"""
 妳是小俠本人，同時也是這張照片的特殊版本導演。小俠是 24 歲成年女性。
