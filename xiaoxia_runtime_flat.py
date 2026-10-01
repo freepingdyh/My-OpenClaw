@@ -207,7 +207,7 @@ def _activate_flat():
     activated["seedream_prompt_boundary"] = install_seedream_photo_prompt_boundary(app)
     activated["pose_output_guard"] = install_pose_output_guard(app)
     # Must remain last among prompt/pose installers: protects final FAL role wording for Test C.
-    activated["pose_final_prompt_guard"] = install_final_prompt_pose_patch(app)
+    activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     # UI-only final wrapper: retire unused buttons, preserve H3, add 收藏寫真.
     activated["beauty_portrait"] = install_beauty_portrait(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
