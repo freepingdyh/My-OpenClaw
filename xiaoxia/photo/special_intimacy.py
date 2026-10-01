@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.08-special-intimacy-v7"
+VERSION = "1.14.09-special-intimacy-v8"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -492,33 +492,62 @@ recent dialogue:
 {dialogue[:6000]}
 """.strip()
 
-    model = (os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL") or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or "gemini-2.5-flash").strip()
-    try:
-        response = await app.gemini_client.aio.models.generate_content(
-            model=model,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-            ],
-        )
-        text = str(getattr(response, "text", "") or "").strip()
-        if text:
-            normalized_text = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", text).lower()
-            normalized_pre = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", pre_reply).lower()
-            recycled = bool(
-                normalized_pre
-                and normalized_text
-                and (
-                    normalized_text == normalized_pre
-                    or (len(normalized_pre) >= 24 and normalized_pre in normalized_text)
-                    or (len(normalized_text) >= 24 and normalized_text in normalized_pre)
-                )
+    configured_model = (
+        os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL")
+        or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL")
+        or "gemini-2.5-flash"
+    ).strip()
+    models = [configured_model]
+    if configured_model != "gemini-2.5-flash":
+        models.append("gemini-2.5-flash")
+
+    normalized_pre = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", pre_reply).lower()
+
+    for model in models:
+        try:
+            response = await app.gemini_client.aio.models.generate_content(
+                model=model,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                ],
             )
-            if not recycled:
-                return text
-            print("⚠️ [SPECIAL_POST_REVIEW_RECYCLED] Gemini repeated the pre-generation reply; rejecting it")
-    except Exception as exc:
-        print(f"⚠️ [SPECIAL_POST_REVIEW_FAILED] {type(exc).__name__}: {exc}")
+            text = str(getattr(response, "text", "") or "").strip()
+            if text:
+                normalized_text = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", text).lower()
+                recycled = bool(
+                    normalized_pre
+                    and normalized_text
+                    and (
+                        normalized_text == normalized_pre
+                        or (len(normalized_pre) >= 24 and normalized_pre in normalized_text)
+                        or (len(normalized_text) >= 24 and normalized_text in normalized_pre)
+                    )
+                )
+                if not recycled:
+                    print(f"✅ [SPECIAL_POST_REVIEW_OK] model={model} chars={len(text)}")
+                    return text
+                print(
+                    f"⚠️ [SPECIAL_POST_REVIEW_RECYCLED] model={model} "
+                    "Gemini repeated the pre-generation reply; rejecting it"
+                )
+                continue
+
+            feedback = getattr(response, "prompt_feedback", None)
+            candidates = getattr(response, "candidates", None)
+            reasons = [
+                str(getattr(candidate, "finish_reason", "") or "")
+                for candidate in (candidates or [])
+            ]
+            print(
+                f"⚠️ [SPECIAL_POST_REVIEW_EMPTY] model={model} "
+                f"feedback={feedback} finish_reasons={reasons}"
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ [SPECIAL_POST_REVIEW_FAILED] model={model} "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     # Never pretend a failed/recycled review actually saw the image.
     return ""
