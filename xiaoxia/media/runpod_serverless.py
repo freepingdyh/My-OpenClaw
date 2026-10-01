@@ -125,6 +125,7 @@ def build_qwen21_job(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
@@ -156,12 +157,15 @@ def build_qwen21_job(
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
 
-    if seed is not None:
+    if seed is not None or steps is not None:
         _, sampler = _single_node(workflow, "KSampler")
         sampler_inputs = sampler.get("inputs")
         if not isinstance(sampler_inputs, dict):
             raise RunPodServerlessError("KSampler inputs are invalid")
-        sampler_inputs["seed"] = int(seed)
+        if seed is not None:
+            sampler_inputs["seed"] = int(seed)
+        if steps is not None:
+            sampler_inputs["steps"] = int(steps)
 
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     images = [
@@ -271,6 +275,7 @@ async def submit_qwen21(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
@@ -279,6 +284,7 @@ async def submit_qwen21(
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
+        steps=steps,
         workflow_image_replacements=workflow_image_replacements,
         extra_images=extra_images,
     )
@@ -393,6 +399,7 @@ async def run_qwen21(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
     timeout_seconds: float = 600.0,

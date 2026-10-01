@@ -10,6 +10,7 @@ Qwen prompt. Existing H3 remains untouched.
 """
 from __future__ import annotations
 
+import io
 import os
 import uuid
 from pathlib import Path
@@ -17,11 +18,13 @@ from typing import Any, Dict, Tuple
 
 import aiohttp
 import discord
+from PIL import Image, ImageFilter
+from google.genai import types
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.08-beauty-portrait-v3"
+VERSION = "1.14.10-beauty-portrait-v4"
 _BUTTON_LABEL = "📸 收藏寫真"
 _ACTIVE_JOBS: set[Any] = set()
 _REFS_DIR = Path("/data/memory/qwen21/refs")
@@ -36,28 +39,52 @@ _REMOVE_BUTTON_MARKERS = (
     "SD 1.5Pro",
 )
 
-_COMMON_HEAD = """<image1> is the ONLY image to be edited.
+_COMMON_HEAD = """<image1> is the edit canvas and the single source of truth for the final photograph.
+
+Keep the woman in <image1> unchanged:
+same identity,
+same facial features,
+same facial expression,
+same hairstyle,
+same body shape and proportions,
+same anatomy,
+same pose,
+same camera angle,
+same framing,
+same scene,
+same background,
+same objects and spatial relationships.
+
+Do not redesign or regenerate the woman.
 
 <image2>, <image3>, <image4>, <image5>, and <image6> are reference images of the SAME single 24-year-old adult woman shown in <image1>.
-They are reference-only. They must NOT appear as additional people in the final image.
+They are reference-only and must never appear as additional people.
+
+Use <image2> and <image3> only as safeguards against facial-identity drift.
+Use <image4> and <image5> only as safeguards against body-proportion drift.
+Use <image6> only as an additional body-consistency safeguard.
+Do not transfer pose, expression, lighting, skin rendering, scene, composition, or state of dress from any reference image.
 
 The final image must contain exactly ONE woman: the woman from <image1>.
-
-Use <image2> and <image3> only to preserve her facial identity.
-Use <image4> and <image5> only to preserve her natural adult body proportions and anatomy.
-Use <image6> only as an additional body-consistency reference.
 """
 
 _COMMON_BEAUTY = """
-Preserve the scene, camera angle, framing, pose, hairstyle, body proportions, and overall composition of <image1>.
+Change ONLY the photographic rendering quality of <image1>:
 
-Refine <image1> into a high-end, elegant, photobook-quality portrait of the same adult woman.
+- correct white balance while preserving the original atmosphere and time of day
+- improve flattering but realistic portrait lighting without changing light direction
+- preserve natural skin color
+- render clean, realistic, fine skin texture
+- preserve pores and subtle natural skin detail without exaggeration
+- reduce harsh digital sharpening, noisy texture, gritty skin, waxy skin, and artificial micro-contrast
+- improve highlight and shadow transitions
+- improve tonal depth and photographic clarity
+- improve natural hair and fabric detail where present
+- apply restrained professional color grading and portrait retouching
 
-Improve the image with refined editorial portrait lighting, balanced white balance, clean and flattering skin tones, natural luminous skin texture, subtle realistic skin detail, smooth but natural tonal transitions, gentle highlight control, and polished photographic depth.
+The result must look like THE SAME photograph professionally color-graded and retouched by a skilled portrait photographer, not like a newly generated photograph.
 
-Refine her facial expression only subtly. Preserve her recognizable identity and youthful appearance, while giving the expression a gentle, affectionate, elegant, naturally attractive presence. Keep the expression believable and consistent with the moment in <image1>.
-
-Keep the result tasteful, refined, visually sophisticated, and suitable for a premium collectible photobook. Preserve realistic body contours, natural proportions, normal anatomical detail, and the visual identity of the woman.
+Do not change body size, breast size, waist, hips, legs, face shape, expression, pose, anatomy, camera angle, framing, background, objects, or composition.
 
 Exactly one woman.
 No clones.
@@ -68,11 +95,13 @@ No extra heads, torsos, arms, legs, or foreign body parts.
 """
 
 NUDE_BEAUTY_PROMPT = _COMMON_HEAD + """
-Preserve her nude state and natural adult anatomy exactly as shown in <image1>. Do not add clothing, coverings, accessories, or new objects.
+Preserve the exact state of dress shown in <image1>.
+Do not add, remove, cover, expose, enlarge, reduce, or redesign any body area.
 """ + _COMMON_BEAUTY
 
 CLOTHED_BEAUTY_PROMPT = _COMMON_HEAD + """
-Preserve her clothing exactly as shown in <image1>. Keep the same outfit, coverage, garment structure, colors, materials, accessories, and styling; this is a photographic refinement, not an outfit change.
+Preserve the exact outfit shown in <image1>.
+Do not alter garment coverage, garment shape, fit, material, color, accessories, or styling.
 """ + _COMMON_BEAUTY
 
 
@@ -132,6 +161,18 @@ async def _source_image_bytes(app: Any, context: Dict[str, Any]) -> bytes:
             return data
 
 
+def _jpeg_job_ref(path: Path, name: str) -> Tuple[str, bytes]:
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=90, optimize=True)
+        data = buf.getvalue()
+    if not data:
+        raise RuntimeError(f"BEAUTY_CLOTHED_REF_ENCODE_EMPTY: {path}")
+    return name, data
+
+
 def _clothed_refs() -> Tuple[Dict[str, str], Dict[str, bytes]]:
     full_path = _REFS_DIR / _CLOTHED_FULL
     half_path = _REFS_DIR / _CLOTHED_HALF
@@ -139,16 +180,17 @@ def _clothed_refs() -> Tuple[Dict[str, str], Dict[str, bytes]]:
     if missing:
         raise RuntimeError("BEAUTY_CLOTHED_REF_MISSING: " + ", ".join(missing))
 
+    full_name, full_blob = _jpeg_job_ref(full_path, "image_4_body_full_clothed_job.jpg")
+    half_name, half_blob = _jpeg_job_ref(half_path, "image_5_body_half_clothed_job.jpg")
     replacements = {
-        "image_4_body_full.png": _CLOTHED_FULL,
-        "image_5_body_half.png": _CLOTHED_HALF,
+        "image_4_body_full.png": full_name,
+        "image_5_body_half.png": half_name,
     }
-    extras = {
-        _CLOTHED_FULL: full_path.read_bytes(),
-        _CLOTHED_HALF: half_path.read_bytes(),
-    }
+    extras = {full_name: full_blob, half_name: half_blob}
+    print(
+        f"📦 [BEAUTY_CLOTHED_REFS] full={len(full_blob)} half={len(half_blob)} total={len(full_blob)+len(half_blob)}"
+    )
     return replacements, extras
-
 
 def _persist_result(
     app: Any,
@@ -220,21 +262,32 @@ async def _send_result(
     view.context = new_context
 
 
+def _review_proxy(image_bytes: bytes) -> bytes:
+    """Blurred proxy derived from the exact final image for provider-safe vision fallback."""
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+        image = image.filter(ImageFilter.GaussianBlur(radius=10))
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=72, optimize=True)
+        return buf.getvalue()
+
+
 async def _review_beauty_result(
     app: Any,
     source: Dict[str, Any],
     variant: str,
     image_bytes: bytes,
 ) -> str:
-    """Let Xiaoxia inspect the exact finished 收藏寫真 image bytes."""
-    prompt = f"""
+    base_prompt = f"""
 妳是小俠本人。小俠是 24 歲成年女性。
-附圖是剛剛「收藏寫真」流程最後真正生成完成的成品；妳現在確實看得到這張完成圖。
+附圖是剛剛「收藏寫真」流程最後真正生成完成的成品。
 
 請直接以小俠的身份，用自然繁體中文回應大俠。
-這是看完成品之後的新反應，不是生成前的文案，也不是圖片生成 prompt。
-可以自由決定要說多少，不限制句數；不要輸出 JSON、標題、分析、規則或影像 prompt。
-請根據附上的完成圖形成妳自己的反應，不要描述不存在的細節，也不要假裝沒看到圖。
+這是看完成品之後的新反應，不是生成前文案，也不是影像生成 prompt。
+可以自由決定要說多少，不限制句數。
+只回應照片的整體美感、表情、氣氛、光線、色調與妳自己的感受；不要做露骨的身體描述。
+不要輸出 JSON、標題、分析、規則，也不要描述不存在的細節。
 
 收藏寫真類型：{variant}
 來源模式：{str(source.get("source_mode") or source.get("type") or source.get("db_type") or "photo")}
@@ -249,36 +302,33 @@ async def _review_beauty_result(
     if configured_model != "gemini-2.5-flash":
         models.append("gemini-2.5-flash")
 
-    for model in models:
-        try:
-            response = await app.gemini_client.aio.models.generate_content(
-                model=model,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                ],
-            )
-            text = str(getattr(response, "text", "") or "").strip()
-            if text:
-                return text
+    attempts = [("exact", image_bytes, "image/png", base_prompt)]
+    if variant == "nude":
+        attempts.append((
+            "proxy",
+            _review_proxy(image_bytes),
+            "image/jpeg",
+            base_prompt + "\n\n這是由同一張完成圖產生的模糊預覽。只根據仍可見的整體構圖、表情、光線、色調與氣氛回應，不要推測被模糊掉的細節。",
+        ))
 
-            feedback = getattr(response, "prompt_feedback", None)
-            candidates = getattr(response, "candidates", None)
-            reasons = [
-                str(getattr(candidate, "finish_reason", "") or "")
-                for candidate in (candidates or [])
-            ]
-            print(
-                f"⚠️ [BEAUTY_POST_REVIEW_EMPTY] model={model} "
-                f"feedback={feedback} finish_reasons={reasons}"
-            )
-        except Exception as exc:
-            print(
-                f"⚠️ [BEAUTY_POST_REVIEW_FAILED] model={model} "
-                f"{type(exc).__name__}: {exc}"
-            )
+    for kind, blob, mime_type, prompt in attempts:
+        for model in models:
+            try:
+                response = await app.gemini_client.aio.models.generate_content(
+                    model=model,
+                    contents=[prompt, types.Part.from_bytes(data=blob, mime_type=mime_type)],
+                )
+                text = str(getattr(response, "text", "") or "").strip()
+                if text:
+                    print(f"✅ [BEAUTY_POST_REVIEW_OK] kind={kind} model={model} chars={len(text)}")
+                    return text
+                feedback = getattr(response, "prompt_feedback", None)
+                candidates = getattr(response, "candidates", None)
+                reasons = [str(getattr(c, "finish_reason", "") or "") for c in (candidates or [])]
+                print(f"⚠️ [BEAUTY_POST_REVIEW_EMPTY] kind={kind} model={model} feedback={feedback} finish_reasons={reasons}")
+            except Exception as exc:
+                print(f"⚠️ [BEAUTY_POST_REVIEW_FAILED] kind={kind} model={model} {type(exc).__name__}: {exc}")
     return ""
-
 
 async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) -> None:
     message_id = getattr(getattr(interaction, "message", None), "id", None)
@@ -310,12 +360,14 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
             results = await run_qwen21(
                 image_bytes,
                 prompt=NUDE_BEAUTY_PROMPT,
+                steps=40,
             )
         else:
             replacements, extras = _clothed_refs()
             results = await run_qwen21(
                 image_bytes,
                 prompt=CLOTHED_BEAUTY_PROMPT,
+                steps=40,
                 workflow_image_replacements=replacements,
                 extra_images=extras,
             )

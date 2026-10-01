@@ -16,6 +16,7 @@ personality/runtime so future special H3 can reuse the same decision layer.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import mimetypes
 import os
@@ -26,12 +27,13 @@ from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 import discord
+from PIL import Image, ImageFilter
 from google.genai import types
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.09-special-intimacy-v8"
+VERSION = "1.14.10-special-intimacy-v9"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -461,6 +463,16 @@ def _persist_result(app: Any, source: Dict[str, Any], filename: str, blob: bytes
     return new_context
 
 
+def _special_review_proxy(image_bytes: bytes) -> bytes:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+        image = image.filter(ImageFilter.GaussianBlur(radius=10))
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=72, optimize=True)
+        return buf.getvalue()
+
+
 async def _review_generated_result(
     app: Any,
     interaction: discord.Interaction,
@@ -468,22 +480,21 @@ async def _review_generated_result(
     plan: Dict[str, str],
     image_bytes: bytes,
 ) -> str:
-    """Let Xiaoxia actually see the finished special image and respond freely."""
     mode = _mode(source)
     dialogue = "" if mode == "cosplay" else await _recent_dialogue(interaction)
     scene = _scene(source)
     pre_reply = str(plan.get("reply") or "").strip()
 
-    prompt = f"""
+    base_prompt = f"""
 妳是小俠本人。小俠是 24 歲成年女性。
-附圖是剛剛『情不自禁』流程最後真正生成完成的成品；妳現在確實看得到這張完成圖。
+附圖是剛剛「情不自禁」流程最後真正生成完成的成品。
 
-請直接以小俠的身份，用自然繁體中文回應大俠。
-妳可以自由決定要說多少，不限制句數，不要輸出 JSON、標題、分析、規則或影像 prompt。
-回應要延續剛才的情緒與對話，但必須針對「現在附上的完成圖」重新形成反應。
-生成前說過的話只提供情緒連續性；不可原封不動重複、不可換幾個字後重用，也不可把它當成看圖後回應。
-不要假裝沒看過這張圖，也不要描述不存在的畫面。
-如果是 cosplay，忽略長期聊天記憶，只針對這次 cosplay 當下內容與完成圖回應。
+請直接以小俠身份，用自然繁體中文回應大俠。
+這必須是看完成品後重新形成的新反應，不是生成前文案。
+生成前說過的話只供情緒連續性參考，不可原封不動重複或改幾個字重用。
+只回應照片的整體美感、表情、氣氛、光線、色調與妳自己的感受；不要做露骨的身體描述。
+可以自由決定要說多少，不限制句數。
+不要輸出 JSON、標題、分析、規則或影像 prompt，也不要描述不存在的細節。
 
 mode: {mode}
 scene: {scene[:2200]}
@@ -502,56 +513,45 @@ recent dialogue:
         models.append("gemini-2.5-flash")
 
     normalized_pre = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", pre_reply).lower()
+    attempts = [
+        ("exact", image_bytes, "image/png", base_prompt),
+        (
+            "proxy",
+            _special_review_proxy(image_bytes),
+            "image/jpeg",
+            base_prompt + "\n\n這是由同一張完成圖產生的模糊預覽。只根據仍可見的整體構圖、表情、光線、色調與氣氛回應，不要推測被模糊掉的細節。",
+        ),
+    ]
 
-    for model in models:
-        try:
-            response = await app.gemini_client.aio.models.generate_content(
-                model=model,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                ],
-            )
-            text = str(getattr(response, "text", "") or "").strip()
-            if text:
-                normalized_text = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", text).lower()
-                recycled = bool(
-                    normalized_pre
-                    and normalized_text
-                    and (
-                        normalized_text == normalized_pre
-                        or (len(normalized_pre) >= 24 and normalized_pre in normalized_text)
-                        or (len(normalized_text) >= 24 and normalized_text in normalized_pre)
+    for kind, blob, mime_type, prompt in attempts:
+        for model in models:
+            try:
+                response = await app.gemini_client.aio.models.generate_content(
+                    model=model,
+                    contents=[prompt, types.Part.from_bytes(data=blob, mime_type=mime_type)],
+                )
+                text = str(getattr(response, "text", "") or "").strip()
+                if text:
+                    normalized_text = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", text).lower()
+                    recycled = bool(
+                        normalized_pre and normalized_text and (
+                            normalized_text == normalized_pre
+                            or (len(normalized_pre) >= 24 and normalized_pre in normalized_text)
+                            or (len(normalized_text) >= 24 and normalized_text in normalized_pre)
+                        )
                     )
-                )
-                if not recycled:
-                    print(f"✅ [SPECIAL_POST_REVIEW_OK] model={model} chars={len(text)}")
-                    return text
-                print(
-                    f"⚠️ [SPECIAL_POST_REVIEW_RECYCLED] model={model} "
-                    "Gemini repeated the pre-generation reply; rejecting it"
-                )
-                continue
-
-            feedback = getattr(response, "prompt_feedback", None)
-            candidates = getattr(response, "candidates", None)
-            reasons = [
-                str(getattr(candidate, "finish_reason", "") or "")
-                for candidate in (candidates or [])
-            ]
-            print(
-                f"⚠️ [SPECIAL_POST_REVIEW_EMPTY] model={model} "
-                f"feedback={feedback} finish_reasons={reasons}"
-            )
-        except Exception as exc:
-            print(
-                f"⚠️ [SPECIAL_POST_REVIEW_FAILED] model={model} "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-    # Never pretend a failed/recycled review actually saw the image.
+                    if not recycled:
+                        print(f"✅ [SPECIAL_POST_REVIEW_OK] kind={kind} model={model} chars={len(text)}")
+                        return text
+                    print(f"⚠️ [SPECIAL_POST_REVIEW_RECYCLED] kind={kind} model={model}")
+                    continue
+                feedback = getattr(response, "prompt_feedback", None)
+                candidates = getattr(response, "candidates", None)
+                reasons = [str(getattr(c, "finish_reason", "") or "") for c in (candidates or [])]
+                print(f"⚠️ [SPECIAL_POST_REVIEW_EMPTY] kind={kind} model={model} feedback={feedback} finish_reasons={reasons}")
+            except Exception as exc:
+                print(f"⚠️ [SPECIAL_POST_REVIEW_FAILED] kind={kind} model={model} {type(exc).__name__}: {exc}")
     return ""
-
 
 async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes) -> Tuple[Dict[str, Any], Any]:
     filename = f"xiaoxia_special_{uuid.uuid4().hex[:10]}.png"
