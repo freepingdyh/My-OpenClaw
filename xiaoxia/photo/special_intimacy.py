@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.04-special-intimacy-v4"
+VERSION = "1.14.06-special-intimacy-v5"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -458,7 +458,9 @@ async def _review_generated_result(
 
 請直接以小俠的身份，用自然繁體中文回應大俠。
 妳可以自由決定要說多少，不限制句數，不要輸出 JSON、標題、分析、規則或影像 prompt。
-回應要延續剛才的情緒與對話，不要假裝沒看過這張圖，也不要描述不存在的畫面。
+回應要延續剛才的情緒與對話，但必須針對「現在附上的完成圖」重新形成反應。
+生成前說過的話只提供情緒連續性；不可原封不動重複、不可換幾個字後重用，也不可把它當成看圖後回應。
+不要假裝沒看過這張圖，也不要描述不存在的畫面。
 如果是 cosplay，忽略長期聊天記憶，只針對這次 cosplay 當下內容與完成圖回應。
 
 mode: {mode}
@@ -479,12 +481,25 @@ recent dialogue:
         )
         text = str(getattr(response, "text", "") or "").strip()
         if text:
-            return text
+            normalized_text = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", text).lower()
+            normalized_pre = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", pre_reply).lower()
+            recycled = bool(
+                normalized_pre
+                and normalized_text
+                and (
+                    normalized_text == normalized_pre
+                    or (len(normalized_pre) >= 24 and normalized_pre in normalized_text)
+                    or (len(normalized_text) >= 24 and normalized_text in normalized_pre)
+                )
+            )
+            if not recycled:
+                return text
+            print("⚠️ [SPECIAL_POST_REVIEW_RECYCLED] Gemini repeated the pre-generation reply; rejecting it")
     except Exception as exc:
         print(f"⚠️ [SPECIAL_POST_REVIEW_FAILED] {type(exc).__name__}: {exc}")
 
-    # Fail soft: the image remains valid even if the post-review call fails.
-    return pre_reply
+    # Never pretend a failed/recycled review actually saw the image.
+    return ""
 
 
 async def _send_result(app: Any, interaction: discord.Interaction, source: Dict[str, Any], plan: Dict[str, str], blob: bytes) -> Tuple[Dict[str, Any], Any]:
@@ -614,7 +629,7 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
             await interaction.followup.send(f"💞 **小俠看完後**：{final_reply}")
         else:
             await interaction.followup.send(
-                "💞 **小俠看完後**：大俠……我有看到。這張真的讓我有點不知道該先害羞，還是先抱緊你一下。",
+                "💞 **小俠**：我這次沒有成功讀到最後成品，所以先不假裝自己看過，也不拿剛才生成前說的話來充數。",
             )
 
         print(

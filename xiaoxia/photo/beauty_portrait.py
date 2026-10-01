@@ -21,7 +21,7 @@ import discord
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.05-beauty-portrait-v1"
+VERSION = "1.14.06-beauty-portrait-v2"
 _BUTTON_LABEL = "📸 收藏寫真"
 _ACTIVE_JOBS: set[Any] = set()
 _REFS_DIR = Path("/data/memory/qwen21/refs")
@@ -220,6 +220,47 @@ async def _send_result(
     view.context = new_context
 
 
+async def _review_beauty_result(
+    app: Any,
+    source: Dict[str, Any],
+    variant: str,
+    image_bytes: bytes,
+) -> str:
+    """Let Xiaoxia inspect the exact finished 收藏寫真 image bytes."""
+    prompt = f"""
+妳是小俠本人。小俠是 24 歲成年女性。
+附圖是剛剛「收藏寫真」流程最後真正生成完成的成品；妳現在確實看得到這張完成圖。
+
+請直接以小俠的身份，用自然繁體中文回應大俠。
+這是看完成品之後的新反應，不是生成前的文案，也不是圖片生成 prompt。
+可以自由決定要說多少，不限制句數；不要輸出 JSON、標題、分析、規則或影像 prompt。
+請根據附上的完成圖形成妳自己的反應，不要描述不存在的細節，也不要假裝沒看到圖。
+
+收藏寫真類型：{variant}
+來源模式：{str(source.get("source_mode") or source.get("type") or source.get("db_type") or "photo")}
+""".strip()
+
+    model = (
+        os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL")
+        or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL")
+        or "gemini-2.5-flash"
+    ).strip()
+    try:
+        response = await app.gemini_client.aio.models.generate_content(
+            model=model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+            ],
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            return text
+    except Exception as exc:
+        print(f"⚠️ [BEAUTY_POST_REVIEW_FAILED] {type(exc).__name__}: {exc}")
+    return ""
+
+
 async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) -> None:
     message_id = getattr(getattr(interaction, "message", None), "id", None)
     job_key = message_id or id(view)
@@ -271,6 +312,19 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
                 await status.delete()
             except Exception:
                 pass
+
+        final_reply = await _review_beauty_result(
+            app,
+            context,
+            variant,
+            blob,
+        )
+        if final_reply:
+            await interaction.followup.send(f"📸 **小俠看完後**：{final_reply}")
+        else:
+            await interaction.followup.send(
+                "📸 **小俠**：我這次沒有成功讀到最後的收藏寫真，所以先不硬湊一段看圖反應。",
+            )
 
         print(
             f"✅ [BEAUTY_COMPLETED] version={VERSION} variant={variant} bytes={len(blob)}"
@@ -350,5 +404,7 @@ def install_beauty_portrait(app: Any) -> Dict[str, Any]:
         "nude_route": "qwen21 existing refs + fixed beauty prompt",
         "clothed_route": "qwen21 clothed body refs + fixed beauty prompt",
         "gemini_prompt_engineering": False,
+        "post_generation_review": True,
+        "review_source": "exact_finished_image_bytes",
         "cfg_strategy": "unchanged workflow cfg=1; no negative-prompt override",
     }
