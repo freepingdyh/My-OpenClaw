@@ -31,7 +31,7 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.07-special-intimacy-v6"
+VERSION = "1.14.08-special-intimacy-v7"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
 
@@ -159,18 +159,20 @@ _PRIVATE_SCENE_MARKERS = (
 def _scene_privacy(context: Dict[str, Any]) -> Tuple[str, str]:
     """Return (privacy, evidence): private/public/unknown.
 
-    Public evidence wins on purpose. A private-looking word must not allow a scene
-    that also clearly says market/street/office/etc.
+    Product rule: an explicit home/private-indoor marker wins.  Context can carry
+    stale inherited scene text (for example an earlier outdoor activity); once the
+    current photo says home/room/private residence, that must not be reclassified
+    as public merely because an old field still mentions a street/market/etc.
     """
     text = _scene_privacy_text(context)
     if not text:
         return "unknown", ""
-    for marker in _PUBLIC_SCENE_MARKERS:
-        if marker in text:
-            return "public", marker
     for marker in _PRIVATE_SCENE_MARKERS:
         if marker in text:
             return "private", marker
+    for marker in _PUBLIC_SCENE_MARKERS:
+        if marker in text:
+            return "public", marker
     return "unknown", ""
 
 
@@ -200,6 +202,17 @@ async def _public_scene_rejection(
     try:
         response = await app.gemini_client.aio.models.generate_content(model=model, contents=prompt)
         text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            feedback = getattr(response, "prompt_feedback", None)
+            candidates = getattr(response, "candidates", None)
+            reasons = [
+                str(getattr(candidate, "finish_reason", "") or "")
+                for candidate in (candidates or [])
+            ]
+            print(
+                f"⚠️ [SPECIAL_POST_REVIEW_EMPTY] model={model} "
+                f"feedback={feedback} finish_reasons={reasons}"
+            )
         if text:
             return text
     except Exception as exc:

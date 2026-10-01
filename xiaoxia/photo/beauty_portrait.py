@@ -21,7 +21,7 @@ import discord
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.06-beauty-portrait-v2"
+VERSION = "1.14.08-beauty-portrait-v3"
 _BUTTON_LABEL = "📸 收藏寫真"
 _ACTIVE_JOBS: set[Any] = set()
 _REFS_DIR = Path("/data/memory/qwen21/refs")
@@ -240,24 +240,43 @@ async def _review_beauty_result(
 來源模式：{str(source.get("source_mode") or source.get("type") or source.get("db_type") or "photo")}
 """.strip()
 
-    model = (
+    configured_model = (
         os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL")
         or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL")
         or "gemini-2.5-flash"
     ).strip()
-    try:
-        response = await app.gemini_client.aio.models.generate_content(
-            model=model,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-            ],
-        )
-        text = str(getattr(response, "text", "") or "").strip()
-        if text:
-            return text
-    except Exception as exc:
-        print(f"⚠️ [BEAUTY_POST_REVIEW_FAILED] {type(exc).__name__}: {exc}")
+    models = [configured_model]
+    if configured_model != "gemini-2.5-flash":
+        models.append("gemini-2.5-flash")
+
+    for model in models:
+        try:
+            response = await app.gemini_client.aio.models.generate_content(
+                model=model,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                ],
+            )
+            text = str(getattr(response, "text", "") or "").strip()
+            if text:
+                return text
+
+            feedback = getattr(response, "prompt_feedback", None)
+            candidates = getattr(response, "candidates", None)
+            reasons = [
+                str(getattr(candidate, "finish_reason", "") or "")
+                for candidate in (candidates or [])
+            ]
+            print(
+                f"⚠️ [BEAUTY_POST_REVIEW_EMPTY] model={model} "
+                f"feedback={feedback} finish_reasons={reasons}"
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ [BEAUTY_POST_REVIEW_FAILED] model={model} "
+                f"{type(exc).__name__}: {exc}"
+            )
     return ""
 
 
