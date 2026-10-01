@@ -125,11 +125,26 @@ def build_qwen21_job(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    workflow_image_replacements: dict[str, str] | None = None,
+    extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     if not image_bytes:
         raise RunPodServerlessError("image_1 is empty")
 
     workflow = copy.deepcopy(load_qwen21_workflow())
+
+    if workflow_image_replacements:
+        pending = dict(workflow_image_replacements)
+        for _, node in _nodes_of_type(workflow, "LoadImage"):
+            inputs = node.get("inputs") or {}
+            current_name = str(inputs.get("image") or "")
+            if current_name in pending:
+                inputs["image"] = str(pending.pop(current_name))
+        if pending:
+            raise RunPodServerlessError(
+                "Qwen21 workflow image replacement target not found: "
+                + ", ".join(sorted(pending))
+            )
 
     _, encoder = _single_node(workflow, "TextEncodeQwenImage21")
     encoder_inputs = encoder.get("inputs")
@@ -149,16 +164,30 @@ def build_qwen21_job(
         sampler_inputs["seed"] = int(seed)
 
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    images = [
+        {
+            "name": _DYNAMIC_IMAGE_NAME,
+            "image": f"data:image/png;base64,{image_b64}",
+        }
+    ]
+    for name, blob in (extra_images or {}).items():
+        clean_name = str(name or "").strip()
+        if not clean_name or clean_name == _DYNAMIC_IMAGE_NAME:
+            raise RunPodServerlessError(f"Invalid extra image name: {clean_name!r}")
+        if not blob:
+            raise RunPodServerlessError(f"Extra image is empty: {clean_name}")
+        images.append(
+            {
+                "name": clean_name,
+                "image": "data:image/png;base64,"
+                + base64.b64encode(blob).decode("ascii"),
+            }
+        )
 
     return {
         "input": {
             "workflow": workflow,
-            "images": [
-                {
-                    "name": _DYNAMIC_IMAGE_NAME,
-                    "image": f"data:image/png;base64,{image_b64}",
-                }
-            ],
+            "images": images,
         }
     }
 
@@ -242,12 +271,16 @@ async def submit_qwen21(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    workflow_image_replacements: dict[str, str] | None = None,
+    extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     job = build_qwen21_job(
         image_bytes,
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
+        workflow_image_replacements=workflow_image_replacements,
+        extra_images=extra_images,
     )
     return await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
 
@@ -360,6 +393,8 @@ async def run_qwen21(
     prompt: str | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    workflow_image_replacements: dict[str, str] | None = None,
+    extra_images: dict[str, bytes] | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -369,6 +404,8 @@ async def run_qwen21(
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
+        workflow_image_replacements=workflow_image_replacements,
+        extra_images=extra_images,
     )
     job_id = str(submitted.get("id") or "").strip()
     if not job_id:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.14.00-flat — production single composition-root runtime.
+"""v1.14.05-flat — production single composition-root runtime.
 
 IMPORTANT:
 - Candidate only. Production entrypoint remains xiaoxia_runtime_v11207.py.
@@ -66,10 +66,11 @@ from xiaoxia.pose.photo_pose_input import install_photo_pose_input
 from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
 from xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
 from xiaoxia.photo.special_intimacy import install_special_intimacy_button
+from xiaoxia.photo.beauty_portrait import install_beauty_portrait
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
-MIGRATION_VERSION = "1.14.00"
+MIGRATION_VERSION = "1.14.05"
 
 def _activate_photo_modules():
     autonomy_recover = app._autonomy_display_share_text
@@ -208,13 +209,13 @@ def _activate_flat():
     # Must remain last: protects final FAL role wording for Test C.
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
-    print("🧱 [RUNTIME_FLAT_CANDIDATE_ACTIVE] version=1.14.00 wrappers=44 behavior_change_intended=False")
+    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.05 feature=beauty_portrait")
     return activated
 
 _ACTIVATED = _activate_flat()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.00-flat stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.05-flat stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
