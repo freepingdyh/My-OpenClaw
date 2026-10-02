@@ -5,7 +5,7 @@ Expected env:
 - XIAOXIA_ASSET_BASE_URL  e.g. https://example.zeabur.app
 - XIAOXIA_ASSET_TOKEN     shared secret used by the protected Zeabur routes
 
-The fixed refs required by production and Qwen Lab are staged into /comfyui/input before ComfyUI starts.
+The five fixed refs are staged into /comfyui/input before ComfyUI starts.
 The checksum manifest is fetched first and every downloaded ref is verified.
 """
 from __future__ import annotations
@@ -23,8 +23,6 @@ REFS = (
     "image_4_body_full.png",
     "image_5_body_half.png",
     "image_6_body_clothed.png",
-    "image_4_body_full_clothed.png",
-    "image_5_body_half_clothed.png",
 )
 
 INPUT_DIR = Path(os.environ.get("COMFYUI_INPUT_DIR") or "/comfyui/input")
