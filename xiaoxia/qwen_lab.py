@@ -40,6 +40,28 @@ _LAB_WORKFLOW_IMAGE_REPLACEMENTS = {
     "image_5_body_half.png": "image_5_body_half_clothed.png",
 }
 
+_LAB_EXTRA_REF_FILENAMES = (
+    "image_4_body_full_clothed.png",
+    "image_5_body_half_clothed.png",
+)
+
+
+def _lab_extra_images() -> Dict[str, bytes]:
+    """Load Lab-only clothed refs from Zeabur persistent storage for this job.
+
+    The production Qwen workflow and worker cold-start refs remain untouched.
+    """
+    payload: Dict[str, bytes] = {}
+    for filename in _LAB_EXTRA_REF_FILENAMES:
+        path = _REFS_DIR / filename
+        if not path.is_file():
+            raise RunPodServerlessError(f"Qwen Lab reference missing: {path}")
+        blob = path.read_bytes()
+        if not blob:
+            raise RunPodServerlessError(f"Qwen Lab reference is empty: {path}")
+        payload[filename] = blob
+    return payload
+
 SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
 
 <image1> is the ONLY image to be edited.
@@ -245,6 +267,7 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
                 seed=seed,
                 steps=int(steps),
                 workflow_image_replacements=dict(_LAB_WORKFLOW_IMAGE_REPLACEMENTS),
+                extra_images=_lab_extra_images(),
             )
             if not results:
                 raise RunPodServerlessError(f"candidate {index} returned no image")
