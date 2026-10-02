@@ -16,13 +16,13 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.14.14-qwen-lab-v4"
+VERSION = "1.14.15-qwen-lab-v5"
 
 _ROOT = Path("/data/memory/qwen21")
 _PROMPT_PATH = _ROOT / "lab_prompts.json"
 _RUNS_DIR = _ROOT / "lab_runs"
 _REFS_DIR = _ROOT / "refs"
-_PROMPT_REVISION = 4
+_PROMPT_REVISION = 5
 
 _MODES = ("front_view", "45_view", "side_view", "full_view")
 _MODE_TO_V2_REF = {
@@ -106,6 +106,9 @@ The final image must contain exactly ONE woman: the woman from <image1>.
 
 Preserve the scene, camera angle, framing, pose, facial expression, hairstyle, and overall composition of <image1> unless the user explicitly asks to change them.
 
+The selected view template is authoritative for framing and visible body range.
+Do not override the requested crop, zoom level, or visible body range using any reference image.
+
 Xiaoxia is a 24-year-old adult woman with these stable traits:
 - fair skin
 - tall and slender overall build
@@ -139,25 +142,44 @@ Do not reinterpret the references as visible subjects, a lineup, a collage, a co
 
     "front_view": """Target mode: front_view.
 
-If <image1> is already front-facing, preserve its current front-facing pose, framing, crop, and composition.
-Do not widen the shot or introduce a new composition unless the user delta explicitly requests it.
-Keep one single woman only.""",
+Keep a single front-facing HALF-BODY composition.
+Show approximately from the head to the lower waist / upper hips.
+Do not zoom out to a full-body view.
+Do not include the knees or feet.
+Do not create additional people.
+
+Preserve the current front-facing pose, framing, crop, and composition of <image1> as closely as possible unless the user delta explicitly requests a framing change.""",
 
     "45_view": """Target mode: 45_view.
 
-Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 45-degree three-quarter orientation while preserving her identity and overall framing as closely as practical.
-Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+Keep a single HALF-BODY composition at approximately a 45-degree three-quarter orientation.
+Show approximately from the head to the lower waist / upper hips.
+Do not zoom out to a full-body view.
+Do not include the knees or feet.
+Do not create additional people.
+
+Change only the viewing orientation as needed while preserving the same woman, scale, framing, and composition of <image1> as closely as possible.""",
 
     "side_view": """Target mode: side_view.
 
-Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 90-degree side profile while preserving her identity and overall framing as closely as practical.
-Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+Keep a single HALF-BODY composition at approximately a 90-degree side profile.
+Show approximately from the head to the lower waist / upper hips.
+Do not zoom out to a full-body view.
+Do not include the knees or feet.
+Do not create additional people.
+
+Change only the viewing orientation as needed while preserving the same woman, scale, framing, and composition of <image1> as closely as possible.""",
 
     "full_view": """Target mode: full_view.
 
-Only when this mode requires a framing change, extend the same woman from <image1> to a single full-body view from head to feet while preserving her identity, proportions, and pose continuity as closely as practical.
-Use <image4> primarily for height impression and full-body proportion consistency.
-Keep one single woman only. Do not create a lineup, comparison, or grouped composition."""
+Show exactly one FULL-BODY woman from head to feet.
+Keep the entire body visible.
+Do not crop out the feet.
+Do not convert to a half-body portrait.
+Do not create additional people.
+
+Preserve the same woman from <image1> while extending or preserving the framing as needed for a full-body composition.
+Use <image4> primarily for height impression and full-body proportion consistency."""
 }
 
 
