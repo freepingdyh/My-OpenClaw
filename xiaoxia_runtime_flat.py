@@ -60,6 +60,7 @@ from xiaoxia.pose.core import install_pose_commands
 from xiaoxia.pose.wardrobe_pose_test import install_wardrobe_pose_test
 from xiaoxia.video.h3_typeerror_fix import install_h3_typeerror_fix
 from xiaoxia.discord_slash_rollback import install_native_slash_rollback
+from xiaoxia.qwen_lab import install_qwen_lab
 from xiaoxia.video.director_signature_fix import install_director_signature_fix
 from xiaoxia.pose.camera_director import install_camera_director
 from xiaoxia.pose.photo_pose_input import install_photo_pose_input
@@ -201,6 +202,7 @@ def _activate_flat():
     activated["wardrobe_pose"] = install_wardrobe_pose_test(app)
     activated["h3_typeerror"] = install_h3_typeerror_fix(app)
     activated["slash_rollback"] = install_native_slash_rollback(app)
+    activated["qwen_lab"] = install_qwen_lab(app)
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)

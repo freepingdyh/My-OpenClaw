@@ -411,6 +411,7 @@ async def run_qwen21(
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
+        steps=steps,
         workflow_image_replacements=workflow_image_replacements,
         extra_images=extra_images,
     )
