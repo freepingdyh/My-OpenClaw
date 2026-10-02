@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.14.05-flat — production single composition-root runtime.
+"""v1.14.11-flat — production single composition-root runtime.
 
 IMPORTANT:
 - Candidate only. Production entrypoint remains xiaoxia_runtime_v11207.py.
@@ -71,7 +71,7 @@ from xiaoxia.photo.beauty_portrait import install_beauty_portrait
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
-MIGRATION_VERSION = "1.14.05"
+MIGRATION_VERSION = "1.14.11"
 
 def _activate_photo_modules():
     autonomy_recover = app._autonomy_display_share_text
@@ -213,13 +213,13 @@ def _activate_flat():
     # UI-only final wrapper: retire unused buttons, preserve H3, add 收藏寫真.
     activated["beauty_portrait"] = install_beauty_portrait(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
-    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.05 feature=beauty_portrait")
+    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab")
     return activated
 
 _ACTIVATED = _activate_flat()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.05-flat stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.11-flat stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:

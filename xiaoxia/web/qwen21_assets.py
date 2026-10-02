@@ -25,6 +25,11 @@ _ALLOWED_REFS = {
     "image_4_body_full.png",
     "image_5_body_half.png",
     "image_6_body_clothed.png",
+    # qwen2.1_special_v2 reference assets selected through /qwen_lab
+    "image_4_body_full_v2.png",
+    "image_5_body_half_front_v2.png",
+    "image_7_body_half_45_v2.png",
+    "image_8_body_half_90_v2.png",
 }
 _ALLOWED_WORKFLOWS = {
     "xiaoxia_qwen21_special_v1.json",
