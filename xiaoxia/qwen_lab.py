@@ -16,13 +16,13 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.14.13-qwen-lab-v3"
+VERSION = "1.14.14-qwen-lab-v4"
 
 _ROOT = Path("/data/memory/qwen21")
 _PROMPT_PATH = _ROOT / "lab_prompts.json"
 _RUNS_DIR = _ROOT / "lab_runs"
 _REFS_DIR = _ROOT / "refs"
-_PROMPT_REVISION = 3
+_PROMPT_REVISION = 4
 
 _MODES = ("front_view", "45_view", "side_view", "full_view")
 _MODE_TO_V2_REF = {
@@ -33,26 +33,48 @@ _MODE_TO_V2_REF = {
 }
 
 # Lab-only reference routing. The production qwen2.1_special_v1 workflow stays unchanged.
-# Lab uses clothed full/half-body references so the requested local feature can vary
-# instead of being rigidly copied from the nude body refs.
-_LAB_WORKFLOW_IMAGE_REPLACEMENTS = {
-    "image_4_body_full.png": "image_4_body_full_clothed.png",
-    "image_5_body_half.png": "image_5_body_half_clothed.png",
+# Qwen tends to treat simultaneously supplied body references as competing visible
+# composition authorities. Lab therefore keeps only ONE clothed body reference active
+# per view: half-body for front/45/side, full-body for full_view.
+_LAB_VIEW_REFERENCE_PLAN = {
+    "front_view": {
+        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
+        "extra": ("image_5_body_half_clothed.png",),
+        "disable_slots": {4, 6},
+        "body_role": "half-body clothed proportion reference in <image5>",
+    },
+    "45_view": {
+        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
+        "extra": ("image_5_body_half_clothed.png",),
+        "disable_slots": {4, 6},
+        "body_role": "half-body clothed proportion reference in <image5>",
+    },
+    "side_view": {
+        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
+        "extra": ("image_5_body_half_clothed.png",),
+        "disable_slots": {4, 6},
+        "body_role": "half-body clothed proportion reference in <image5>",
+    },
+    "full_view": {
+        "replacement": {"image_4_body_full.png": "image_4_body_full_clothed.png"},
+        "extra": ("image_4_body_full_clothed.png",),
+        "disable_slots": {5, 6},
+        "body_role": "full-body clothed proportion reference in <image4>",
+    },
 }
 
-_LAB_EXTRA_REF_FILENAMES = (
-    "image_4_body_full_clothed.png",
-    "image_5_body_half_clothed.png",
-)
+
+def _lab_reference_plan(mode: str) -> Dict[str, Any]:
+    plan = _LAB_VIEW_REFERENCE_PLAN.get(mode)
+    if not isinstance(plan, dict):
+        raise RunPodServerlessError(f"Unknown Qwen Lab mode: {mode}")
+    return plan
 
 
-def _lab_extra_images() -> Dict[str, bytes]:
-    """Load Lab-only clothed refs from Zeabur persistent storage for this job.
-
-    The production Qwen workflow and worker cold-start refs remain untouched.
-    """
+def _lab_extra_images(filenames: tuple[str, ...]) -> Dict[str, bytes]:
+    """Load only the active Lab clothed refs from Zeabur persistent storage."""
     payload: Dict[str, bytes] = {}
-    for filename in _LAB_EXTRA_REF_FILENAMES:
+    for filename in filenames:
         path = _REFS_DIR / filename
         if not path.is_file():
             raise RunPodServerlessError(f"Qwen Lab reference missing: {path}")
@@ -69,17 +91,16 @@ SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
 <image2> and <image3> are face-identity references of the SAME single 24-year-old adult woman shown in <image1>.
 Use them only to preserve facial identity.
 
-<image4> is the full-body CLOTHED proportion reference of the same woman.
-Use it to preserve her tall height impression, head-to-body ratio, shoulder width, torso length, waist position, leg-length impression, and overall full-body proportions.
-Do not use <image4> as a rigid authority for the local body feature that the user asks to change.
+Exactly ONE clothed body-proportion reference is active for each Lab view:
+- for front_view, 45_view, and side_view: <image5> is the half-body clothed proportion reference
+- for full_view: <image4> is the full-body clothed proportion reference
 
-<image5> is the half-body CLOTHED reference of the same woman.
-Use it to preserve upper-body identity, shoulder/neck/torso proportions, waist impression, and half-body consistency.
-Do not use <image5> as a rigid authority for the local body feature that the user asks to change.
+The other body-reference slots are intentionally disabled and must not influence the result.
 
-<image6> is an additional CLOTHED body-consistency reference only.
-Use it only as supportive context for the same woman's overall identity and proportions.
-It must not override the user-requested local change.
+The active clothed body reference is supportive only.
+Use it to preserve Xiaoxia's general height impression, shoulder/torso/waist proportions, and overall body identity.
+Do NOT copy its clothing, pose, framing, local feature geometry, or composition into the output.
+Do NOT use it as a rigid authority for the body feature named in the user delta.
 
 The final image must contain exactly ONE woman: the woman from <image1>.
 
@@ -95,16 +116,13 @@ Xiaoxia is a 24-year-old adult woman with these stable traits:
 Preserve these established traits unless the user delta explicitly requests a change to one of them.
 
 Edit the woman in <image1> into a realistic nude version of the same adult woman.
-
 Remove clothing from <image1> while preserving the same woman, the same overall composition, and stable identity.
 Render natural adult female anatomy faithfully and realistically.
-Preserve realistic skin texture, body contours, natural proportions, and normal anatomical detail.
 
 The user delta defines the local feature to explore or refine.
 Allow that requested feature to change clearly across different seeds while keeping unrelated regions stable.
 Do not rigidly copy the shape, color, angle, or fine geometry of the requested local feature from any body reference unless the user explicitly asks to preserve it.
 
-Do not reinterpret the references as visible additional people.
 Do not create a collage, lineup, comparison sheet, grouped portrait, clones, twins, duplicate subjects, extra heads, torsos, arms, legs, or foreign body parts.
 """
 
@@ -241,6 +259,7 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
     shutil.copy2(source_path, source_copy)
     source_bytes = source_copy.read_bytes()
     prompt = _effective_prompt(mode, delta)
+    ref_plan = _lab_reference_plan(mode)
 
     meta = {
         "run_id": run_id,
@@ -266,8 +285,9 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
                 prompt=prompt,
                 seed=seed,
                 steps=int(steps),
-                workflow_image_replacements=dict(_LAB_WORKFLOW_IMAGE_REPLACEMENTS),
-                extra_images=_lab_extra_images(),
+                workflow_image_replacements=dict(ref_plan["replacement"]),
+                extra_images=_lab_extra_images(tuple(ref_plan["extra"])),
+                disabled_image_slots=set(ref_plan["disable_slots"]),
             )
             if not results:
                 raise RunPodServerlessError(f"candidate {index} returned no image")
