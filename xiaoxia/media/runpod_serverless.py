@@ -128,6 +128,7 @@ def build_qwen21_job(
     steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
+    disabled_image_slots: set[int] | None = None,
 ) -> dict[str, Any]:
     if not image_bytes:
         raise RunPodServerlessError("image_1 is empty")
@@ -151,6 +152,14 @@ def build_qwen21_job(
     encoder_inputs = encoder.get("inputs")
     if not isinstance(encoder_inputs, dict):
         raise RunPodServerlessError("TextEncodeQwenImage21 inputs are invalid")
+
+    if disabled_image_slots:
+        for slot in sorted(set(int(x) for x in disabled_image_slots)):
+            if slot <= 1 or slot > 10:
+                raise RunPodServerlessError(
+                    f"Invalid Qwen21 image slot to disable: {slot}"
+                )
+            encoder_inputs.pop(f"images.image_{slot}", None)
 
     if prompt is not None:
         encoder_inputs["prompt"] = str(prompt)
@@ -278,6 +287,7 @@ async def submit_qwen21(
     steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
+    disabled_image_slots: set[int] | None = None,
 ) -> dict[str, Any]:
     job = build_qwen21_job(
         image_bytes,
@@ -287,6 +297,7 @@ async def submit_qwen21(
         steps=steps,
         workflow_image_replacements=workflow_image_replacements,
         extra_images=extra_images,
+        disabled_image_slots=disabled_image_slots,
     )
     return await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
 
@@ -402,6 +413,7 @@ async def run_qwen21(
     steps: int | None = None,
     workflow_image_replacements: dict[str, str] | None = None,
     extra_images: dict[str, bytes] | None = None,
+    disabled_image_slots: set[int] | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -414,6 +426,7 @@ async def run_qwen21(
         steps=steps,
         workflow_image_replacements=workflow_image_replacements,
         extra_images=extra_images,
+        disabled_image_slots=disabled_image_slots,
     )
     job_id = str(submitted.get("id") or "").strip()
     if not job_id:
