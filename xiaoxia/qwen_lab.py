@@ -16,13 +16,13 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.14.12-qwen-lab-v2"
+VERSION = "1.14.13-qwen-lab-v3"
 
 _ROOT = Path("/data/memory/qwen21")
 _PROMPT_PATH = _ROOT / "lab_prompts.json"
 _RUNS_DIR = _ROOT / "lab_runs"
 _REFS_DIR = _ROOT / "refs"
-_PROMPT_REVISION = 2
+_PROMPT_REVISION = 3
 
 _MODES = ("front_view", "45_view", "side_view", "full_view")
 _MODE_TO_V2_REF = {
@@ -32,34 +32,58 @@ _MODE_TO_V2_REF = {
     "full_view": "image_4_body_full_v2.png",
 }
 
+# Lab-only reference routing. The production qwen2.1_special_v1 workflow stays unchanged.
+# Lab uses clothed full/half-body references so the requested local feature can vary
+# instead of being rigidly copied from the nude body refs.
+_LAB_WORKFLOW_IMAGE_REPLACEMENTS = {
+    "image_4_body_full.png": "image_4_body_full_clothed.png",
+    "image_5_body_half.png": "image_5_body_half_clothed.png",
+}
+
 SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
 
 <image1> is the ONLY image to be edited.
 
-<image2>, <image3>, <image4>, <image5>, and <image6> are reference images of the SAME single 24-year-old adult woman shown in <image1>.
-They are reference-only. They must NOT appear as additional people in the final image.
+<image2> and <image3> are face-identity references of the SAME single 24-year-old adult woman shown in <image1>.
+Use them only to preserve facial identity.
+
+<image4> is the full-body CLOTHED proportion reference of the same woman.
+Use it to preserve her tall height impression, head-to-body ratio, shoulder width, torso length, waist position, leg-length impression, and overall full-body proportions.
+Do not use <image4> as a rigid authority for the local body feature that the user asks to change.
+
+<image5> is the half-body CLOTHED reference of the same woman.
+Use it to preserve upper-body identity, shoulder/neck/torso proportions, waist impression, and half-body consistency.
+Do not use <image5> as a rigid authority for the local body feature that the user asks to change.
+
+<image6> is an additional CLOTHED body-consistency reference only.
+Use it only as supportive context for the same woman's overall identity and proportions.
+It must not override the user-requested local change.
 
 The final image must contain exactly ONE woman: the woman from <image1>.
 
-Preserve the scene, camera angle, framing, pose, facial expression, hairstyle, and overall composition of <image1>.
+Preserve the scene, camera angle, framing, pose, facial expression, hairstyle, and overall composition of <image1> unless the user explicitly asks to change them.
 
-Use <image2> and <image3> only to preserve her facial identity.
-Use <image4> and <image5> only to preserve her natural adult body proportions and anatomy.
-Use <image6> only as an additional body-consistency reference.
+Xiaoxia is a 24-year-old adult woman with these stable traits:
+- fair skin
+- tall and slender overall build
+- long-legged, slim body proportions
+- a naturally very full and prominent bust
+- youthful adult facial identity
+
+Preserve these established traits unless the user delta explicitly requests a change to one of them.
 
 Edit the woman in <image1> into a realistic nude version of the same adult woman.
 
-Remove her clothing while preserving the original pose and composition.
+Remove clothing from <image1> while preserving the same woman, the same overall composition, and stable identity.
 Render natural adult female anatomy faithfully and realistically.
 Preserve realistic skin texture, body contours, natural proportions, and normal anatomical detail.
-Do not censor, blur, cover, smooth away, simplify, or stylize normal adult anatomy.
 
-Exactly one woman.
-No clones.
-No twins.
-No duplicate subjects.
-No additional people.
-No extra heads, torsos, arms, legs, or foreign body parts.
+The user delta defines the local feature to explore or refine.
+Allow that requested feature to change clearly across different seeds while keeping unrelated regions stable.
+Do not rigidly copy the shape, color, angle, or fine geometry of the requested local feature from any body reference unless the user explicitly asks to preserve it.
+
+Do not reinterpret the references as visible additional people.
+Do not create a collage, lineup, comparison sheet, grouped portrait, clones, twins, duplicate subjects, extra heads, torsos, arms, legs, or foreign body parts.
 """
 
 _DEFAULTS = {
@@ -67,23 +91,32 @@ _DEFAULTS = {
 
 Keep <image1> as the edit target and preserve all unrelated identity, anatomy, pose, framing, crop, camera, expression, hairstyle, lighting, and composition as closely as possible.
 
-Keep the result photorealistic and natural. Do not reinterpret the references as visible subjects, a lineup, a collage, a comparison sheet, or a grouped portrait.""",
+Keep the result photorealistic and natural.
+The body references establish Xiaoxia's general identity and proportions, not a fixed template for the local feature named in the user delta.
+When the user delta asks to change or explore a local feature, allow that feature to vary clearly while keeping unrelated regions stable.
+
+Do not reinterpret the references as visible subjects, a lineup, a collage, a comparison sheet, or a grouped portrait.""",
+
     "front_view": """Target mode: front_view.
 
 If <image1> is already front-facing, preserve its current front-facing pose, framing, crop, and composition.
 Do not widen the shot or introduce a new composition unless the user delta explicitly requests it.
 Keep one single woman only.""",
+
     "45_view": """Target mode: 45_view.
 
 Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 45-degree three-quarter orientation while preserving her identity and overall framing as closely as practical.
 Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+
     "side_view": """Target mode: side_view.
 
 Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 90-degree side profile while preserving her identity and overall framing as closely as practical.
 Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+
     "full_view": """Target mode: full_view.
 
 Only when this mode requires a framing change, extend the same woman from <image1> to a single full-body view from head to feet while preserving her identity, proportions, and pose continuity as closely as practical.
+Use <image4> primarily for height impression and full-body proportion consistency.
 Keep one single woman only. Do not create a lineup, comparison, or grouped composition."""
 }
 
@@ -206,7 +239,13 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
     try:
         for index in range(1, int(count) + 1):
             seed = secrets.randbelow(2**63 - 1)
-            results = await run_qwen21(source_bytes, prompt=prompt, seed=seed, steps=int(steps))
+            results = await run_qwen21(
+                source_bytes,
+                prompt=prompt,
+                seed=seed,
+                steps=int(steps),
+                workflow_image_replacements=dict(_LAB_WORKFLOW_IMAGE_REPLACEMENTS),
+            )
             if not results:
                 raise RunPodServerlessError(f"candidate {index} returned no image")
             _, blob = results[0]
