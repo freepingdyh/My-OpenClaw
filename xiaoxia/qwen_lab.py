@@ -16,12 +16,13 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.14.11-qwen-lab-v1"
+VERSION = "1.14.12-qwen-lab-v2"
 
 _ROOT = Path("/data/memory/qwen21")
 _PROMPT_PATH = _ROOT / "lab_prompts.json"
 _RUNS_DIR = _ROOT / "lab_runs"
 _REFS_DIR = _ROOT / "refs"
+_PROMPT_REVISION = 2
 
 _MODES = ("front_view", "45_view", "side_view", "full_view")
 _MODE_TO_V2_REF = {
@@ -33,46 +34,57 @@ _MODE_TO_V2_REF = {
 
 SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
 
-<image1> is the only image to be edited and is the primary authority for the current subject, pose, framing, and continuity.
+<image1> is the ONLY image to be edited.
 
 <image2>, <image3>, <image4>, <image5>, and <image6> are reference images of the SAME single 24-year-old adult woman shown in <image1>.
-They are reference-only and must never appear as additional people or contribute extra body parts.
+They are reference-only. They must NOT appear as additional people in the final image.
 
-The final image must contain exactly ONE woman: the same woman from <image1>.
+The final image must contain exactly ONE woman: the woman from <image1>.
 
-Use <image2> and <image3> only to preserve facial identity.
-Use <image4> and <image5> only to preserve stable adult body proportions and anatomy.
+Preserve the scene, camera angle, framing, pose, facial expression, hairstyle, and overall composition of <image1>.
+
+Use <image2> and <image3> only to preserve her facial identity.
+Use <image4> and <image5> only to preserve her natural adult body proportions and anatomy.
 Use <image6> only as an additional body-consistency reference.
 
-Do not transfer pose, camera, background, lighting, clothing, or composition from the references unless the editable view template explicitly requests a view change.
+Edit the woman in <image1> into a realistic nude version of the same adult woman.
 
-Preserve Xiaoxia's youthful adult identity and recognizable face. Do not make her older, harsher, more glamorous, or like a different person.
-Keep anatomy photorealistic and coherent. Avoid duplicate subjects, extra limbs, merged body parts, distorted hands or feet, plastic skin, waxy skin, and exaggerated anatomy.
+Remove her clothing while preserving the original pose and composition.
+Render natural adult female anatomy faithfully and realistically.
+Preserve realistic skin texture, body contours, natural proportions, and normal anatomical detail.
+Do not censor, blur, cover, smooth away, simplify, or stylize normal adult anatomy.
 
-This lab creates clean long-term body reference assets. The subject is an adult. The final reference image must be fully nude so body geometry and skin-tone references remain unobstructed. Remove clothing from <image1> while preserving the same woman.
+Exactly one woman.
+No clones.
+No twins.
+No duplicate subjects.
+No additional people.
+No extra heads, torsos, arms, legs, or foreign body parts.
 """
 
 _DEFAULTS = {
-    "system_base_prompt": """Create a clean, photorealistic Xiaoxia body-reference image suitable for long-term reuse by Qwen Image 2.1.
+    "system_base_prompt": """Apply only the user-requested delta to <image1>.
 
-Keep the result neutral and reference-friendly rather than theatrical:
-- natural skin texture and skin color
-- balanced white balance
-- soft, even, realistic light
-- minimal background distraction
-- no fashion styling, jewelry emphasis, props, text, watermark, or dramatic visual effects
-- do not exaggerate any body feature unless the user delta explicitly requests a change
-- preserve all features that the user delta does not ask to modify
+Keep <image1> as the edit target and preserve all unrelated identity, anatomy, pose, framing, crop, camera, expression, hairstyle, lighting, and composition as closely as possible.
 
-The user delta is the only per-run change request. Apply it precisely while keeping unrelated anatomy and identity stable.""",
-    "front_view": """Target reference view: front view.
-Keep a clear, useful front-facing reference composition with a neutral body orientation toward the camera. Preserve the useful crop of <image1> unless the user delta specifically requests a different crop or framing.""",
-    "45_view": """Target reference view: approximately 45-degree three-quarter view.
-Create a clear three-quarter body reference that reveals depth and contour while remaining neutral and anatomically readable. Preserve the useful crop of <image1> unless the user delta specifically requests a different crop or framing.""",
-    "side_view": """Target reference view: approximately 90-degree side profile.
-Create a clear side-profile body reference that reveals projection, depth, and silhouette while remaining neutral and anatomically readable. Preserve the useful crop of <image1> unless the user delta specifically requests a different crop or framing.""",
-    "full_view": """Target reference view: full-body reference.
-Keep the entire body clearly visible from head to feet with natural standing proportions and minimal perspective distortion. Preserve Xiaoxia's established height impression, head-to-body ratio, torso, waist, hips, legs, hands, and feet unless the user delta explicitly requests a specific change."""
+Keep the result photorealistic and natural. Do not reinterpret the references as visible subjects, a lineup, a collage, a comparison sheet, or a grouped portrait.""",
+    "front_view": """Target mode: front_view.
+
+If <image1> is already front-facing, preserve its current front-facing pose, framing, crop, and composition.
+Do not widen the shot or introduce a new composition unless the user delta explicitly requests it.
+Keep one single woman only.""",
+    "45_view": """Target mode: 45_view.
+
+Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 45-degree three-quarter orientation while preserving her identity and overall framing as closely as practical.
+Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+    "side_view": """Target mode: side_view.
+
+Only when this mode requires a view change, rotate the same woman from <image1> to an approximately 90-degree side profile while preserving her identity and overall framing as closely as practical.
+Keep one single woman only. Do not create alternate versions, comparisons, or grouped compositions.""",
+    "full_view": """Target mode: full_view.
+
+Only when this mode requires a framing change, extend the same woman from <image1> to a single full-body view from head to feet while preserving her identity, proportions, and pose continuity as closely as practical.
+Keep one single woman only. Do not create a lineup, comparison, or grouped composition."""
 }
 
 
@@ -85,21 +97,32 @@ def _ensure_dirs() -> None:
 def _load_prompts() -> Dict[str, str]:
     _ensure_dirs()
     data = dict(_DEFAULTS)
+    migrate = False
     try:
         stored = json.loads(_PROMPT_PATH.read_text(encoding="utf-8"))
         if isinstance(stored, dict):
-            for key in data:
-                value = stored.get(key)
-                if isinstance(value, str) and value.strip():
-                    data[key] = value.strip()
+            revision = int(stored.get("_prompt_revision") or 0)
+            if revision == _PROMPT_REVISION:
+                for key in data:
+                    value = stored.get(key)
+                    if isinstance(value, str) and value.strip():
+                        data[key] = value.strip()
+            else:
+                # v1 Lab prompts encouraged "create/reference composition" semantics and
+                # caused Qwen to synthesize the reference people into one group image.
+                # Reset once to the v2 edit-target defaults; subsequent UI edits persist.
+                migrate = True
     except Exception:
-        pass
+        migrate = True
+    if migrate:
+        _save_prompts(data)
     return data
 
 
 def _save_prompts(data: Dict[str, str]) -> None:
     _ensure_dirs()
-    payload = {k: str(data.get(k) or _DEFAULTS[k]).strip() for k in _DEFAULTS}
+    payload = {"_prompt_revision": _PROMPT_REVISION}
+    payload.update({k: str(data.get(k) or _DEFAULTS[k]).strip() for k in _DEFAULTS})
     tmp = _PROMPT_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, _PROMPT_PATH)
@@ -114,7 +137,7 @@ def _effective_prompt(mode: str, delta: str) -> str:
         + "\n\n"
         + prompts[mode].strip()
         + "\n\nUSER DELTA — apply this requested change precisely:\n"
-        + (str(delta or "").strip() or "No additional change beyond producing a clean reference asset.")
+        + (str(delta or "").strip() or "No additional delta. Preserve <image1> as closely as possible except for the fixed edit contract above.")
     )
 
 
