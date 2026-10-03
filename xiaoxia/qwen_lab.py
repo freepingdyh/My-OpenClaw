@@ -16,15 +16,14 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.14.15-qwen-lab-v5"
+VERSION = "1.14.16-qwen-lab-v6"
 
 _ROOT = Path("/data/memory/qwen21")
 _PROMPT_PATH = _ROOT / "lab_prompts.json"
 _RUNS_DIR = _ROOT / "lab_runs"
 _REFS_DIR = _ROOT / "refs"
-_PROMPT_REVISION = 5
+_PROMPT_REVISION = 6
 
-_MODES = ("front_view", "45_view", "side_view", "full_view")
 _MODE_TO_V2_REF = {
     "front_view": "image_5_body_half_front_v2.png",
     "45_view": "image_7_body_half_45_v2.png",
@@ -32,82 +31,16 @@ _MODE_TO_V2_REF = {
     "full_view": "image_4_body_full_v2.png",
 }
 
-# Lab-only reference routing. The production qwen2.1_special_v1 workflow stays unchanged.
-# Qwen tends to treat simultaneously supplied body references as competing visible
-# composition authorities. Lab therefore keeps only ONE clothed body reference active
-# per view: half-body for front/45/side, full-body for full_view.
-_LAB_VIEW_REFERENCE_PLAN = {
-    "front_view": {
-        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
-        "extra": ("image_5_body_half_clothed.png",),
-        "disable_slots": {4, 6},
-        "body_role": "half-body clothed proportion reference in <image5>",
-    },
-    "45_view": {
-        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
-        "extra": ("image_5_body_half_clothed.png",),
-        "disable_slots": {4, 6},
-        "body_role": "half-body clothed proportion reference in <image5>",
-    },
-    "side_view": {
-        "replacement": {"image_5_body_half.png": "image_5_body_half_clothed.png"},
-        "extra": ("image_5_body_half_clothed.png",),
-        "disable_slots": {4, 6},
-        "body_role": "half-body clothed proportion reference in <image5>",
-    },
-    "full_view": {
-        "replacement": {"image_4_body_full.png": "image_4_body_full_clothed.png"},
-        "extra": ("image_4_body_full_clothed.png",),
-        "disable_slots": {5, 6},
-        "body_role": "full-body clothed proportion reference in <image4>",
-    },
-}
-
-
-def _lab_reference_plan(mode: str) -> Dict[str, Any]:
-    plan = _LAB_VIEW_REFERENCE_PLAN.get(mode)
-    if not isinstance(plan, dict):
-        raise RunPodServerlessError(f"Unknown Qwen Lab mode: {mode}")
-    return plan
-
-
-def _lab_extra_images(filenames: tuple[str, ...]) -> Dict[str, bytes]:
-    """Load only the active Lab clothed refs from Zeabur persistent storage."""
-    payload: Dict[str, bytes] = {}
-    for filename in filenames:
-        path = _REFS_DIR / filename
-        if not path.is_file():
-            raise RunPodServerlessError(f"Qwen Lab reference missing: {path}")
-        blob = path.read_bytes()
-        if not blob:
-            raise RunPodServerlessError(f"Qwen Lab reference is empty: {path}")
-        payload[filename] = blob
-    return payload
-
 SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
 
-<image1> is the ONLY image to be edited.
-
-<image2> and <image3> are face-identity references of the SAME single 24-year-old adult woman shown in <image1>.
-Use them only to preserve facial identity.
-
-Exactly ONE clothed body-proportion reference is active for each Lab view:
-- for front_view, 45_view, and side_view: <image5> is the half-body clothed proportion reference
-- for full_view: <image4> is the full-body clothed proportion reference
-
-The other body-reference slots are intentionally disabled and must not influence the result.
-
-The active clothed body reference is supportive only.
-Use it to preserve Xiaoxia's general height impression, shoulder/torso/waist proportions, and overall body identity.
-Do NOT copy its clothing, pose, framing, local feature geometry, or composition into the output.
-Do NOT use it as a rigid authority for the body feature named in the user delta.
+<image1> is the ONLY visual authority and the ONLY image to be edited.
 
 The final image must contain exactly ONE woman: the woman from <image1>.
 
-Preserve the scene, camera angle, framing, pose, facial expression, hairstyle, and overall composition of <image1> unless the user explicitly asks to change them.
-
-The selected view template is authoritative for framing and visible body range.
-Do not override the requested crop, zoom level, or visible body range using any reference image.
+Preserve the woman in <image1> as the same person.
+Preserve her facial identity, hairstyle, facial expression, pose, body orientation, hand placement,
+camera angle, framing, crop, background, scene layout, lighting, and overall composition unless
+the user delta explicitly asks to change one of those things.
 
 Xiaoxia is a 24-year-old adult woman with these stable traits:
 - fair skin
@@ -116,70 +49,23 @@ Xiaoxia is a 24-year-old adult woman with these stable traits:
 - a naturally very full and prominent bust
 - youthful adult facial identity
 
-Preserve these established traits unless the user delta explicitly requests a change to one of them.
+The user delta is the only per-run change instruction.
+Apply it precisely. If the user delta asks for a different view, crop, framing, pose, body feature,
+clothing state, or any other change, follow that request. Otherwise preserve <image1> as closely as possible.
 
-Edit the woman in <image1> into a realistic nude version of the same adult woman.
-Remove clothing from <image1> while preserving the same woman, the same overall composition, and stable identity.
-Render natural adult female anatomy faithfully and realistically.
-
-The user delta defines the local feature to explore or refine.
-Allow that requested feature to change clearly across different seeds while keeping unrelated regions stable.
-Do not rigidly copy the shape, color, angle, or fine geometry of the requested local feature from any body reference unless the user explicitly asks to preserve it.
-
-Do not create a collage, lineup, comparison sheet, grouped portrait, clones, twins, duplicate subjects, extra heads, torsos, arms, legs, or foreign body parts.
+Do not reinterpret the scene and do not rebuild the image from other references.
+Do not create a collage, lineup, comparison sheet, grouped portrait, clones, twins, duplicate subjects,
+extra heads, torsos, arms, legs, or foreign body parts.
 """
 
 _DEFAULTS = {
     "system_base_prompt": """Apply only the user-requested delta to <image1>.
 
-Keep <image1> as the edit target and preserve all unrelated identity, anatomy, pose, framing, crop, camera, expression, hairstyle, lighting, and composition as closely as possible.
+Keep <image1> as the edit target and preserve all unrelated identity, anatomy, pose, framing, crop,
+camera, expression, hairstyle, lighting, background, and composition as closely as possible.
 
 Keep the result photorealistic and natural.
-The body references establish Xiaoxia's general identity and proportions, not a fixed template for the local feature named in the user delta.
-When the user delta asks to change or explore a local feature, allow that feature to vary clearly while keeping unrelated regions stable.
-
-Do not reinterpret the references as visible subjects, a lineup, a collage, a comparison sheet, or a grouped portrait.""",
-
-    "front_view": """Target mode: front_view.
-
-Keep a single front-facing HALF-BODY composition.
-Show approximately from the head to the lower waist / upper hips.
-Do not zoom out to a full-body view.
-Do not include the knees or feet.
-Do not create additional people.
-
-Preserve the current front-facing pose, framing, crop, and composition of <image1> as closely as possible unless the user delta explicitly requests a framing change.""",
-
-    "45_view": """Target mode: 45_view.
-
-Keep a single HALF-BODY composition at approximately a 45-degree three-quarter orientation.
-Show approximately from the head to the lower waist / upper hips.
-Do not zoom out to a full-body view.
-Do not include the knees or feet.
-Do not create additional people.
-
-Change only the viewing orientation as needed while preserving the same woman, scale, framing, and composition of <image1> as closely as possible.""",
-
-    "side_view": """Target mode: side_view.
-
-Keep a single HALF-BODY composition at approximately a 90-degree side profile.
-Show approximately from the head to the lower waist / upper hips.
-Do not zoom out to a full-body view.
-Do not include the knees or feet.
-Do not create additional people.
-
-Change only the viewing orientation as needed while preserving the same woman, scale, framing, and composition of <image1> as closely as possible.""",
-
-    "full_view": """Target mode: full_view.
-
-Show exactly one FULL-BODY woman from head to feet.
-Keep the entire body visible.
-Do not crop out the feet.
-Do not convert to a half-body portrait.
-Do not create additional people.
-
-Preserve the same woman from <image1> while extending or preserving the framing as needed for a full-body composition.
-Use <image4> primarily for height impression and full-body proportion consistency."""
+Do not introduce extra subjects or unrelated visual changes."""
 }
 
 
@@ -223,16 +109,14 @@ def _save_prompts(data: Dict[str, str]) -> None:
     os.replace(tmp, _PROMPT_PATH)
 
 
-def _effective_prompt(mode: str, delta: str) -> str:
+def _effective_prompt(delta: str) -> str:
     prompts = _load_prompts()
     return (
         SYSTEM_CORE_PROMPT.strip()
         + "\n\n"
         + prompts["system_base_prompt"].strip()
-        + "\n\n"
-        + prompts[mode].strip()
         + "\n\nUSER DELTA — apply this requested change precisely:\n"
-        + (str(delta or "").strip() or "No additional delta. Preserve <image1> as closely as possible except for the fixed edit contract above.")
+        + (str(delta or "").strip() or "No additional delta. Preserve <image1> as closely as possible.")
     )
 
 
@@ -267,37 +151,36 @@ def _run_text(meta: Dict[str, Any], index: int, seed: int) -> str:
     if len(delta) > 450:
         delta = delta[:447] + "..."
     return (
-        f"🧪 Qwen Lab | {meta.get('mode')}\n"
+        "🧪 Qwen Lab\n"
         f"Delta: {delta or '—'}\n"
         f"Steps: {meta.get('steps')} | Candidate: {index}/{meta.get('count')} | Seed: {seed}\n"
         f"Run: {meta.get('run_id')}"
     )
 
 
-async def _generate_run(app: Any, interaction: discord.Interaction, source_path: Path, mode: str, delta: str, count: int, steps: int, parent_run_id: str = "") -> str:
+async def _generate_run(app: Any, interaction: discord.Interaction, source_path: Path, delta: str, count: int, steps: int, parent_run_id: str = "") -> str:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
     run_dir = _run_dir(run_id)
     source_copy = run_dir / ("source" + source_path.suffix.lower())
     shutil.copy2(source_path, source_copy)
     source_bytes = source_copy.read_bytes()
-    prompt = _effective_prompt(mode, delta)
-    ref_plan = _lab_reference_plan(mode)
+    prompt = _effective_prompt(delta)
 
     meta = {
         "run_id": run_id,
         "created_at": datetime.now().astimezone().isoformat(),
-        "mode": mode,
         "delta": delta,
         "steps": int(steps),
         "count": int(count),
         "source_path": str(source_copy),
         "parent_run_id": parent_run_id,
         "effective_prompt": prompt,
+        "reference_policy": "image1_only",
         "outputs": [],
     }
     _write_meta(run_id, meta)
 
-    status = await interaction.followup.send(f"🧪 Qwen Lab: {mode} 正在產生 {count} 張候選圖...", wait=True)
+    status = await interaction.followup.send(f"🧪 Qwen Lab 正在產生 {count} 張候選圖...", wait=True)
     completed = 0
     try:
         for index in range(1, int(count) + 1):
@@ -307,9 +190,7 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
                 prompt=prompt,
                 seed=seed,
                 steps=int(steps),
-                workflow_image_replacements=dict(ref_plan["replacement"]),
-                extra_images=_lab_extra_images(tuple(ref_plan["extra"])),
-                disabled_image_slots=set(ref_plan["disable_slots"]),
+                disabled_image_slots={2, 3, 4, 5, 6},
             )
             if not results:
                 raise RunPodServerlessError(f"candidate {index} returned no image")
@@ -330,7 +211,7 @@ async def _generate_run(app: Any, interaction: discord.Interaction, source_path:
             await status.delete()
         except Exception:
             pass
-    print(f"✅ [QWEN_LAB_RUN] version={VERSION} run_id={run_id} mode={mode} count={completed}/{count} steps={steps}")
+    print(f"✅ [QWEN_LAB_RUN] version={VERSION} run_id={run_id} refs=image1_only count={completed}/{count} steps={steps}")
     return run_id
 
 
@@ -350,14 +231,15 @@ class DeltaModal(discord.ui.Modal):
             return
         await interaction.response.defer(thinking=True)
         meta = _read_meta(self.run_id)
-        await _generate_run(self.app, interaction, self.source_path, str(meta.get("mode") or "front_view"), str(self.delta_input.value or "").strip(), int(meta.get("count") or 4), int(meta.get("steps") or 25), self.run_id)
+        await _generate_run(self.app, interaction, self.source_path, str(self.delta_input.value or "").strip(), int(meta.get("count") or 4), int(meta.get("steps") or 25), self.run_id)
 
 
 class ConfirmAdoptView(discord.ui.View):
-    def __init__(self, run_id: str, candidate_path: Path, owner_id: int | None):
+    def __init__(self, run_id: str, candidate_path: Path, target_mode: str, owner_id: int | None):
         super().__init__(timeout=300)
         self.run_id = run_id
         self.candidate_path = candidate_path
+        self.target_mode = target_mode
         self.owner_id = owner_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -368,11 +250,9 @@ class ConfirmAdoptView(discord.ui.View):
 
     @discord.ui.button(label="確認採用", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        meta = _read_meta(self.run_id)
-        mode = str(meta.get("mode") or "")
-        filename = _MODE_TO_V2_REF.get(mode)
+        filename = _MODE_TO_V2_REF.get(self.target_mode)
         if not filename:
-            await interaction.response.send_message("⚠️ 找不到這個 mode 的 v2 底圖位置。", ephemeral=True)
+            await interaction.response.send_message("⚠️ 找不到這個 v2 底圖位置。", ephemeral=True)
             return
         target = _REFS_DIR / filename
         backup = None
@@ -380,15 +260,49 @@ class ConfirmAdoptView(discord.ui.View):
             backup = target.with_name(target.stem + "_previous" + target.suffix)
             shutil.copy2(target, backup)
         shutil.copy2(self.candidate_path, target)
-        text = f"✅ 已採用為 {mode} 的 qwen2.1_special_v2 底圖：{target.name}"
+        text = f"✅ 已採用為 {self.target_mode} 的 qwen2.1_special_v2 底圖：{target.name}"
         if backup:
             text += f"\n上一版備份：{backup.name}"
         await interaction.response.edit_message(content=text, view=None)
-        print(f"✅ [QWEN_LAB_ADOPT] mode={mode} source={self.candidate_path} target={target}")
+        print(f"✅ [QWEN_LAB_ADOPT] target={self.target_mode} source={self.candidate_path} target_file={target}")
 
     @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="已取消採用。", view=None)
+
+
+class AdoptTargetSelect(discord.ui.Select):
+    def __init__(self, run_id: str, candidate_path: Path, owner_id: int | None):
+        options = [
+            discord.SelectOption(label="正面 front_view", value="front_view", description=_MODE_TO_V2_REF["front_view"]),
+            discord.SelectOption(label="45度 45_view", value="45_view", description=_MODE_TO_V2_REF["45_view"]),
+            discord.SelectOption(label="側面 side_view", value="side_view", description=_MODE_TO_V2_REF["side_view"]),
+            discord.SelectOption(label="全身 full_view", value="full_view", description=_MODE_TO_V2_REF["full_view"]),
+        ]
+        super().__init__(placeholder="選擇要存入哪一個 v2 reference slot", min_values=1, max_values=1, options=options)
+        self.run_id = run_id
+        self.candidate_path = candidate_path
+        self.owner_id = owner_id
+
+    async def callback(self, interaction: discord.Interaction):
+        target_mode = self.values[0]
+        await interaction.response.edit_message(
+            content=f"要把這張採用為 {target_mode} 的正式 v2 底圖 {_MODE_TO_V2_REF[target_mode]} 嗎？",
+            view=ConfirmAdoptView(self.run_id, self.candidate_path, target_mode, self.owner_id),
+        )
+
+
+class AdoptTargetView(discord.ui.View):
+    def __init__(self, run_id: str, candidate_path: Path, owner_id: int | None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.add_item(AdoptTargetSelect(run_id, candidate_path, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab 操作。", ephemeral=True)
+            return False
+        return True
 
 
 class LabCandidateView(discord.ui.View):
@@ -418,7 +332,7 @@ class LabCandidateView(discord.ui.View):
         if not source.is_file():
             await interaction.followup.send("⚠️ 找不到這一輪原始 image_1。", ephemeral=True)
             return
-        await _generate_run(self.app, interaction, source, str(meta.get("mode") or "front_view"), str(meta.get("delta") or ""), 4, int(meta.get("steps") or 25), self.run_id)
+        await _generate_run(self.app, interaction, source, str(meta.get("delta") or ""), 4, int(meta.get("steps") or 25), self.run_id)
 
     @discord.ui.button(label="修改提示詞重跑", style=discord.ButtonStyle.secondary, row=1)
     async def reprompt(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -431,46 +345,36 @@ class LabCandidateView(discord.ui.View):
 
     @discord.ui.button(label="採用為 v2 底圖", style=discord.ButtonStyle.success, row=1)
     async def adopt(self, interaction: discord.Interaction, button: discord.ui.Button):
-        meta = _read_meta(self.run_id)
-        mode = str(meta.get("mode") or "")
         await interaction.response.send_message(
-            f"要把這張採用為 {mode} 的正式 v2 底圖 {_MODE_TO_V2_REF.get(mode, '?')} 嗎？",
-            view=ConfirmAdoptView(self.run_id, self.candidate_path, self.owner_id),
+            "請選擇這張候選圖要存入哪一個 v2 reference slot：",
+            view=AdoptTargetView(self.run_id, self.candidate_path, self.owner_id),
             ephemeral=True,
         )
 
 
 class PromptEditModal(discord.ui.Modal):
-    def __init__(self, key: str, current: str):
-        titles = {"system_base_prompt": "修改 SYSTEM_BASE_PROMPT", "front_view": "修改 front_view", "45_view": "修改 45_view", "side_view": "修改 side_view", "full_view": "修改 full_view"}
-        super().__init__(title=titles[key][:45], timeout=600)
-        self.key = key
-        self.body = discord.ui.TextInput(label=key, style=discord.TextStyle.paragraph, default=str(current or "")[:4000], required=True, max_length=4000)
+    def __init__(self, current: str):
+        super().__init__(title="修改 SYSTEM_BASE_PROMPT", timeout=600)
+        self.body = discord.ui.TextInput(
+            label="system_base_prompt",
+            style=discord.TextStyle.paragraph,
+            default=str(current or "")[:4000],
+            required=True,
+            max_length=4000,
+        )
         self.add_item(self.body)
 
     async def on_submit(self, interaction: discord.Interaction):
         data = _load_prompts()
-        data[self.key] = str(self.body.value or "").strip()
+        data["system_base_prompt"] = str(self.body.value or "").strip()
         _save_prompts(data)
-        await interaction.response.send_message(f"✅ 已更新 {self.key}。下一次 Qwen Lab 立即生效，不需 redeploy。", ephemeral=True)
-
-
-class PromptKeyButton(discord.ui.Button):
-    def __init__(self, key: str, label: str, row: int):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=row)
-        self.key = key
-
-    async def callback(self, interaction: discord.Interaction):
-        data = _load_prompts()
-        await interaction.response.send_modal(PromptEditModal(self.key, data[self.key]))
+        await interaction.response.send_message("✅ 已更新 SYSTEM_BASE_PROMPT。下一次 Qwen Lab 立即生效，不需 redeploy。", ephemeral=True)
 
 
 class PromptEditorView(discord.ui.View):
     def __init__(self, owner_id: int | None):
         super().__init__(timeout=900)
         self.owner_id = owner_id
-        for key, label, row in (("system_base_prompt", "SYSTEM_BASE_PROMPT", 0), ("front_view", "front_view", 0), ("45_view", "45_view", 0), ("side_view", "side_view", 1), ("full_view", "full_view", 1)):
-            self.add_item(PromptKeyButton(key, label, row))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id is not None and interaction.user.id != self.owner_id:
@@ -478,19 +382,31 @@ class PromptEditorView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="查看目前組裝結果", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="修改 SYSTEM_BASE_PROMPT", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_base(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = _load_prompts()
+        await interaction.response.send_modal(PromptEditModal(data["system_base_prompt"]))
+
+    @discord.ui.button(label="查看目前組裝結果", style=discord.ButtonStyle.primary, row=1)
     async def preview(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = _load_prompts()
-        text = "SYSTEM_CORE_PROMPT（固定不可編輯）\n" + SYSTEM_CORE_PROMPT.strip() + "\n\nSYSTEM_BASE_PROMPT\n" + data["system_base_prompt"] + "\n\n" + "\n\n".join(f"[{mode}]\n{data[mode]}" for mode in _MODES)
+        text = (
+            "SYSTEM_CORE_PROMPT（固定不可編輯）\n"
+            + SYSTEM_CORE_PROMPT.strip()
+            + "\n\nSYSTEM_BASE_PROMPT\n"
+            + data["system_base_prompt"]
+            + "\n\n[執行時再接 USER DELTA；不再有 mode/view template]"
+        )
         chunks = [text[i:i+1800] for i in range(0, len(text), 1800)]
         await interaction.response.send_message(chunks[0], ephemeral=True)
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk, ephemeral=True)
 
-    @discord.ui.button(label="還原預設", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="還原預設", style=discord.ButtonStyle.danger, row=1)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
         _save_prompts(dict(_DEFAULTS))
-        await interaction.response.send_message("✅ 已還原 SYSTEM_BASE_PROMPT 與 4 個 view templates。", ephemeral=True)
+        await interaction.response.send_message("✅ 已還原 SYSTEM_BASE_PROMPT。", ephemeral=True)
+
 
 
 def install_qwen_lab(app: Any) -> Dict[str, Any]:
@@ -499,14 +415,8 @@ def install_qwen_lab(app: Any) -> Dict[str, Any]:
     group = app_commands.Group(name="qwen_lab", description="Qwen Image 2.1 小俠底圖雕塑工具")
 
     @group.command(name="提示詞", description="上傳 image_1，輸入 Delta，產生底圖候選")
-    @app_commands.describe(image_1="這一輪要修改的主圖", mode="目標參考視角", delta="只寫這一輪想修改的部分", count="一次產生幾張候選圖", steps="Qwen sampling steps")
-    @app_commands.choices(mode=[
-        app_commands.Choice(name="正面 front_view", value="front_view"),
-        app_commands.Choice(name="45度 45_view", value="45_view"),
-        app_commands.Choice(name="側面 side_view", value="side_view"),
-        app_commands.Choice(name="全身 full_view", value="full_view"),
-    ])
-    async def generate(interaction: discord.Interaction, image_1: discord.Attachment, mode: app_commands.Choice[str], delta: str = "", count: app_commands.Range[int, 1, 4] = 4, steps: app_commands.Range[int, 20, 50] = 25):
+    @app_commands.describe(image_1="這一輪要修改的主圖", delta="只寫這一輪想修改的部分；視角/構圖需要時也直接寫在這裡", count="一次產生幾張候選圖", steps="Qwen sampling steps")
+    async def generate(interaction: discord.Interaction, image_1: discord.Attachment, delta: str = "", count: app_commands.Range[int, 1, 4] = 4, steps: app_commands.Range[int, 20, 50] = 25):
         content_type = str(image_1.content_type or "").lower()
         filename = str(image_1.filename or "")
         if not (content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))):
@@ -520,14 +430,14 @@ def install_qwen_lab(app: Any) -> Dict[str, Any]:
         upload_dir.mkdir(parents=True, exist_ok=True)
         source = upload_dir / f"upload_{interaction.id}_{uuid.uuid4().hex[:6]}{_image_ext(filename, content_type)}"
         source.write_bytes(await image_1.read())
-        await _generate_run(app, interaction, source, str(mode.value), str(delta or "").strip(), int(count), int(steps))
+        await _generate_run(app, interaction, source, str(delta or "").strip(), int(count), int(steps))
 
     @group.command(name="修改提示詞", description="修改 Qwen Lab 固定 Prompt")
     async def prompts(interaction: discord.Interaction):
         _ensure_dirs()
         if not _PROMPT_PATH.exists():
             _save_prompts(dict(_DEFAULTS))
-        await interaction.response.send_message("🧪 Qwen Lab Prompt 編輯器\nSYSTEM_CORE_PROMPT 固定不開放修改；Base / View 修改後立即生效。", view=PromptEditorView(getattr(interaction.user, "id", None)), ephemeral=True)
+        await interaction.response.send_message("🧪 Qwen Lab Prompt 編輯器\nSYSTEM_CORE_PROMPT 固定不開放修改；SYSTEM_BASE_PROMPT 修改後立即生效。視角/構圖需求直接寫在 Delta。", view=PromptEditorView(getattr(interaction.user, "id", None)), ephemeral=True)
 
     tree.add_command(group, override=True)
     original_ready = getattr(bot, "on_ready", None)
@@ -547,4 +457,4 @@ def install_qwen_lab(app: Any) -> Dict[str, Any]:
             print(f"❌ [QWEN_LAB_SLASH_SYNC_FAILED] {type(exc).__name__}: {exc}")
 
     bot.on_ready = on_ready_with_qwen_lab_sync
-    return {"version": VERSION, "group": "qwen_lab", "commands": ["提示詞", "修改提示詞"], "modes": list(_MODES), "default_count": 4, "prompt_storage": str(_PROMPT_PATH), "v2_refs": dict(_MODE_TO_V2_REF)}
+    return {"version": VERSION, "group": "qwen_lab", "commands": ["提示詞", "修改提示詞"], "generation_mode": "image1_only_delta_driven", "default_count": 4, "prompt_storage": str(_PROMPT_PATH), "v2_refs": dict(_MODE_TO_V2_REF)}
