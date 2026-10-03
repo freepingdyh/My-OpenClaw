@@ -33,9 +33,33 @@ from google.genai import types
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
 
-VERSION = "1.14.10-special-intimacy-v9"
+VERSION = "1.14.11-special-intimacy-v10"
 _BUTTON_LABEL = "💞 情不自禁"
 _ACTIVE_JOBS: set[Any] = set()
+
+# Production special-edit contract: image_1 is the sole visual authority.
+# Additional Qwen reference slots are intentionally disabled so they cannot
+# pull pose, framing, body geometry, or composition away from the source image.
+_SPECIAL_CORE_PROMPT = """
+<image1> is the ONLY visual authority and the ONLY image to be edited.
+
+Preserve the woman in <image1> as the same person.
+Preserve her face, hairstyle, facial expression, pose, body orientation, hand placement,
+camera angle, framing, background, scene layout, lighting, and overall composition unless
+the user delta explicitly asks to change one of those things.
+
+Do not reinterpret the scene and do not rebuild the image from other references.
+Do not add other people, clones, duplicate subjects, or extra body parts.
+Apply the user delta precisely while keeping unrelated visual information from <image1> stable.
+""".strip()
+
+# User-authored delta retained verbatim by request. Keep this separate from the
+# system/core contract so future A/B tests can change either layer independently.
+_SPECIAL_USER_DELTA = """
+請褪去圖中女子衣服與物件，使其裸身，女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，胸型為水滴狀，其乳頭為玫瑰粉色，乳暈適中，胸部略微上翹。請保持圖中女子樣貌及維持其背景。
+""".strip()
+
+_SPECIAL_QWEN_PROMPT = f"{_SPECIAL_CORE_PROMPT}\n\n{_SPECIAL_USER_DELTA}".strip()
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -648,11 +672,17 @@ async def _handle_button(app: Any, view: Any, interaction: discord.Interaction) 
                 wait=True,
             )
 
-        # IMPORTANT: do not override TextEncodeQwenImage21.prompt here.
-        # The Zeabur API workflow is generated from the verified ComfyUI UI workflow
-        # and already contains the tested special-edit prompt. Passing prompt= would
-        # replace that prompt and materially weaken/change the intended edit.
-        results = await run_qwen21(image_bytes)
+        # Production edit test: use image_1 as the sole visual authority.
+        # The user-authored delta is passed at runtime verbatim after the minimal core.
+        # Disable every legacy reference slot used by the old special workflow so
+        # face/body references cannot pull pose, framing, anatomy, or background away
+        # from the source photo.
+        results = await run_qwen21(
+            image_bytes,
+            prompt=_SPECIAL_QWEN_PROMPT,
+            steps=25,
+            disabled_image_slots={2, 3, 4, 5, 6},
+        )
         if not results:
             raise RunPodServerlessError("Qwen21 returned no image")
 
@@ -759,9 +789,10 @@ def install_special_intimacy_button(app: Any) -> Dict[str, Any]:
         "love_preapproval_supported": True,
         "extra_pose_reference": False,
         "extra_wardrobe_reference": False,
+        "qwen_reference_policy": "image1_only",
         "renderer": "runpod_qwen21",
         "post_generation_review": True,
-        "prompt_strategy": "verified_workflow_native_prompt",
+        "prompt_strategy": "runtime_core_plus_user_delta_image1_only",
         "gemini_role": "consent_dialogue_and_post_review_only",
         "public_scene_hard_block": True,
         "post_review_delivery": "separate_message_after_image",
