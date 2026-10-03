@@ -176,7 +176,7 @@ _PUBLIC_SCENE_MARKERS = (
 )
 
 _PRIVATE_SCENE_MARKERS = (
-    "臥室", "房間", "家中", "家裡", "住家", "私人住宅", "私人套房", "宿舍房間",“客廳”,“家中餐廳”,“家中書房”,“家中健身房”,
+    "臥室", "房間", "家中", "家裡", "住家", "私人住宅", "私人套房", "宿舍房間", "客廳", "家中餐廳", "家中書房", "家中健身房",
     "飯店房間", "旅館房間", "hotel room", "bedroom", "private room", "private home",
     "浴室", "私人浴室", "bathroom", "私人更衣室", "private dressing room",
 )
