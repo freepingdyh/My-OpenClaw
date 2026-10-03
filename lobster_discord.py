@@ -1,3 +1,32 @@
+# =============================================================================
+# ⚠️ ARCHITECTURE GUARDRAIL — LEGACY CORE / DO NOT GROW THIS FILE
+# =============================================================================
+# lobster_discord.py is Xiaoxia's production-stable LEGACY CORE.
+#
+# DEFAULT RULES:
+#   1. Do NOT add new features here unless technically necessary.
+#   2. New functionality should normally live under xiaoxia/*.
+#   3. xiaoxia_runtime_flat.py is the SINGLE production composition root.
+#   4. Do NOT recreate xiaoxia_runtime_vxxxxx.py wrapper chains.
+#   5. Do NOT refactor/delete historical code merely to make this file cleaner.
+#
+# EXISTING CODE:
+#   If it works, leave it alone. Dead/duplicate-looking code alone is NOT
+#   sufficient reason for deletion; dynamic references/aliases/patches may exist.
+#   When an existing subsystem needs substantial functional work, consider
+#   extracting THAT subsystem to xiaoxia/* as part of the real change.
+#
+# STRICT INVARIANT FOR STRUCTURAL WORK:
+#   Preserve prompts, model IDs, generation/API parameters, Seedream/H3 behavior,
+#   reference-image roles/order, retry/fallback behavior, Discord semantics,
+#   ENV names/defaults, schemas/data formats, installer order, monkey patches,
+#   and import side effects.
+#
+# PRINCIPLE: "只搬家，不裝潢。"
+# Full policy: ARCHITECTURE_GUARDRAILS.md
+# Decision: 2026-09-21
+# =============================================================================
+
 # ==========================================
 # ❤️ lobster_discord.py (Zeabur 金庫展示旗艦版 - 雙核共生終極版)
 # ==========================================
@@ -23603,7 +23632,7 @@ def _v1527_concise_people_policy(checklist=None):
     )
 
 
-def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None, semantic_contract_locked=False):
+def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=None, visual_checklist=None, semantic_contract_locked=False, input_image_roles=None):
     """Seedream photo prompt. v1.8.11: preserve Title + Scene verbatim; add only short technical reference rules."""
     if semantic_contract_locked:
         contract = str(custom_prompt or "").strip()
@@ -23616,12 +23645,18 @@ def _seedream_photo_prompt(custom_prompt, has_reference=False, current_outfit=No
             people_line = "People: Xiaoxia is primary; Scene-specified background people may appear only as secondary non-interacting figures; no male interaction; never show Daxia/viewer."
         else:
             people_line = "People: Xiaoxia is the only primary subject; no companion, no male interaction, and never show Daxia/viewer."
+        roles = input_image_roles if isinstance(input_image_roles, list) else []
+        role_by_figure = {str(x.get("figure")): str(x.get("role") or "") for x in roles if isinstance(x, dict)}
+        pose_figure9 = role_by_figure.get("9") in {"pose_camera_composition_secondary_reference", "pose_camera_composition_reference"}
+        wardrobe_figure10 = role_by_figure.get("10") == "wardrobe_reference"
         sections = [
-            "REFERENCES: Figures 1-9 preserve Xiaoxia identity/body only; do not copy their pose, outfit, background or composition.",
+            ("REFERENCES — POSE LIBRARY ROLE MAP: Figures 1-8 preserve Xiaoxia identity/body only; do not copy their pose, outfit, background or composition. Figure 9 is pose/camera/composition visual evidence only; never use Figure 9 for identity, clothing, background or lighting."
+             if pose_figure9 else
+             "REFERENCES: Figures 1-9 preserve Xiaoxia identity/body only; do not copy their pose, outfit, background or composition."),
             "XIAOXIA BODY IDENTITY — same baseline strength as Xiaoxia autonomy photos:\n" + XIAOXIA_SEEDREAM_BODY_IDENTITY_BLOCK,
             people_line,
         ]
-        if has_reference:
+        if wardrobe_figure10:
             sections.append("FIGURE 10: exact clothing / visible fashion-accessory authority only; preserve its actual design and do not let it change Scene, action, pose, camera or background.")
         elif current_outfit:
             sections.append("OUTFIT CONTINUITY: " + str(current_outfit).strip())
@@ -23824,6 +23859,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             current_outfit=current_outfit,
             visual_checklist=(trace_context or {}).get("visual_checklist") if isinstance(trace_context, dict) else None,
             semantic_contract_locked=bool((trace_context or {}).get("semantic_contract_locked")) if isinstance(trace_context, dict) else False,
+            input_image_roles=(trace_context or {}).get("seedream_input_image_roles_override") if isinstance(trace_context, dict) else None,
         )
         diary_prompt_stats = None
         print("✅ [PROMPT_ENGINE_ACTIVE] v1.5.30 conflict-free photo prompt builder")
@@ -23896,7 +23932,7 @@ async def generate_seedream_v45_photo(custom_prompt, reference_image_path=None, 
             "max_images": 1,
             "enable_safety_checker": bool(enable_safety_checker),
         }
-    _trace_stage(trace_context, "seedream_input_images", data={"count": len(image_urls), "images": list(image_urls), "figure_10_present": bool(reference_image_path)})
+    _trace_stage(trace_context, "seedream_input_images", data={"count": len(image_urls), "images": list(image_urls), "figure_10_present": any(str(x.get("figure")) == "10" and str(x.get("role") or "") == "wardrobe_reference" for x in (override_roles or []) if isinstance(x, dict)) if isinstance(override_roles, list) and override_roles else bool(reference_image_path)})
     try:
         result = await asyncio.to_thread(_subscribe, image_urls)
     except Exception as exc:
