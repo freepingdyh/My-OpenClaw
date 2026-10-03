@@ -56,7 +56,7 @@ Apply the user delta precisely while keeping unrelated visual information from <
 # User-authored delta retained verbatim by request. Keep this separate from the
 # system/core contract so future A/B tests can change either layer independently.
 _SPECIAL_USER_DELTA = """
-請褪去圖中女子衣服與物件，使其裸身，女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，胸型為水滴狀，其乳頭為玫瑰粉色，乳暈適中，胸部略微上翹。請保持圖中女子樣貌及維持其背景。
+請褪去圖中女子衣服與物件，使其裸身，女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，胸型為水滴狀，其乳頭為玫瑰粉色，乳暈適中，胸部前緣略微上翹，若圖片包含女子下體，則其陰部清晰可見。請保持圖中女子樣貌、姿勢及維持其背景。
 """.strip()
 
 _SPECIAL_QWEN_PROMPT = f"{_SPECIAL_CORE_PROMPT}\n\n{_SPECIAL_USER_DELTA}".strip()
@@ -176,7 +176,7 @@ _PUBLIC_SCENE_MARKERS = (
 )
 
 _PRIVATE_SCENE_MARKERS = (
-    "臥室", "房間", "家中", "家裡", "住家", "私人住宅", "私人套房", "宿舍房間",
+    "臥室", "房間", "家中", "家裡", "住家", "私人住宅", "私人套房", "宿舍房間",“客廳”,“家中餐廳”,“家中書房”,“家中健身房”,
     "飯店房間", "旅館房間", "hotel room", "bedroom", "private room", "private home",
     "浴室", "私人浴室", "bathroom", "私人更衣室", "private dressing room",
 )
