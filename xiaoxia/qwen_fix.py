@@ -92,6 +92,7 @@ async def run_mark_fix_bytes(
         raise ValueError("mark image bytes are empty")
 
     actual_seed = int(seed) if seed is not None else secrets.randbelow(2**63 - 1)
+    prompt = _effective_prompt(delta)
 
     results = await run_qwen21(
         mark_bytes,
@@ -115,7 +116,6 @@ async def _run_fix(
     count: int,
     steps: int,
 ) -> None:
-    prompt = _effective_prompt(delta)
     status = await interaction.followup.send(
         f"🩹 Qwen Fix 正在進行 mark-based 局部修正，候選 {count} 張…",
         wait=True,
