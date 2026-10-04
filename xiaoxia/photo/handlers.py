@@ -16,7 +16,7 @@ from typing import Any
 import discord
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
-from xiaoxia.qwen_fix import _effective_prompt as _qwen_mark_effective_prompt
+from xiaoxia.qwen_fix import run_mark_fix_bytes
 
 EXTRACTION_VERSION = "1.12.02c-repair-engine-selector"
 
@@ -444,20 +444,27 @@ async def _qwen_repair_context(
         prompt = _qwen_text_effective_prompt(request_text)
         input_mode = "text_only"
     else:
-        input_bytes = mark_bytes
-        prompt = _qwen_mark_effective_prompt(request_text)
         input_mode = "mark"
 
-    results = await run_qwen21(
-        input_bytes,
-        prompt=prompt,
-        steps=int(steps),
-        disabled_image_slots={2, 3, 4, 5, 6},
-    )
-    if not results:
-        raise RunPodServerlessError("Qwen-2.1 repair returned no image")
-
-    _, blob = results[0]
+    if input_mode == "mark":
+        # IMPORTANT: reuse the exact /qwen_fix marked-image core.
+        # Do not duplicate prompt assembly / seed / reference-slot behavior here.
+        blob, qwen_seed = await run_mark_fix_bytes(
+            mark_bytes,
+            request_text,
+            steps=int(steps),
+        )
+    else:
+        results = await run_qwen21(
+            input_bytes,
+            prompt=prompt,
+            steps=int(steps),
+            disabled_image_slots={2, 3, 4, 5, 6},
+        )
+        if not results:
+            raise RunPodServerlessError("Qwen-2.1 repair returned no image")
+        _, blob = results[0]
+        qwen_seed = None
     filename = f"qwen_repair_{uuid.uuid4().hex[:12]}.png"
     os.makedirs(app.OUTPUT_DIR, exist_ok=True)
     local_path = os.path.join(app.OUTPUT_DIR, filename)
@@ -475,6 +482,9 @@ async def _qwen_repair_context(
         "repair_request": request_text,
         "repair_engine": "qwen-2.1",
         "repair_input_mode": input_mode,
+        "qwen_seed": qwen_seed,
+        "seedream_model_id": None,
+        "seedream_model_label": None,
         "repaired_at": app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
         "composition": context.get("composition") or context.get("scene_summary") or "Qwen 修正版照片",
         "mood_summary": context.get("mood_summary") or context.get("mood") or "保留原本氛圍的 Qwen 修正版",
@@ -486,7 +496,7 @@ async def _qwen_repair_context(
     })
     print(
         f"✅ [PHOTO_REPAIR_QWEN] engine=qwen-2.1 mode={input_mode} "
-        f"steps={steps} output={filename}"
+        f"steps={steps} seed={qwen_seed} output={filename}"
     )
     return repaired
 
