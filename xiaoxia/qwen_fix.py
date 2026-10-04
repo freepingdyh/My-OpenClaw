@@ -25,7 +25,7 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.0.1-qwen-fix-v2"
+VERSION = "1.0.2-qwen-fix-v3-shared-core"
 
 _ROOT = Path("/data/memory/qwen21")
 _RUNS_DIR = _ROOT / "fix_runs"
@@ -76,6 +76,37 @@ def _ensure_dirs() -> None:
     _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+async def run_mark_fix_bytes(
+    mark_bytes: bytes,
+    delta: str,
+    *,
+    steps: int = 40,
+    seed: int | None = None,
+) -> tuple[bytes, int]:
+    """Single SSOT for Qwen marked-image Local Edit.
+
+    Both /qwen_fix and the photo "修正這張" flow must call this exact function so
+    model input, prompt, seed handling, steps, and disabled reference slots cannot drift.
+    """
+    if not mark_bytes:
+        raise ValueError("mark image bytes are empty")
+
+    actual_seed = int(seed) if seed is not None else secrets.randbelow(2**63 - 1)
+
+    results = await run_qwen21(
+        mark_bytes,
+        prompt=prompt,
+        seed=actual_seed,
+        steps=int(steps),
+        disabled_image_slots={2, 3, 4, 5, 6},
+    )
+    if not results:
+        raise RunPodServerlessError("Qwen marked-image Local Edit returned no image")
+
+    _, blob = results[0]
+    return blob, actual_seed
+
+
 async def _run_fix(
     interaction: discord.Interaction,
     *,
@@ -92,17 +123,11 @@ async def _run_fix(
     completed = 0
     try:
         for index in range(1, int(count) + 1):
-            seed = secrets.randbelow(2**63 - 1)
-            results = await run_qwen21(
+            blob, seed = await run_mark_fix_bytes(
                 mark_bytes,
-                prompt=prompt,
-                seed=seed,
+                delta,
                 steps=int(steps),
-                disabled_image_slots={2, 3, 4, 5, 6},
             )
-            if not results:
-                raise RunPodServerlessError(f"candidate {index} returned no image")
-            _, blob = results[0]
             filename = f"qwen_fix_{uuid.uuid4().hex[:10]}_{index}.png"
             await interaction.followup.send(
                 (
