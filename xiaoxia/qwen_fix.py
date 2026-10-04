@@ -2,11 +2,11 @@
 """Qwen Image 2.1 mark-based local repair command for Xiaoxia.
 
 MVP contract:
-- image_1: untouched original/source image and edit canvas.
-- mark_image: a copy of the same image with circles / painted annotations marking
-  only the region(s) to change.
+- mark_image: the single marked composite image. This is the same image the user wants
+  to repair, with circles / painted annotations drawn directly on it.
 - delta: what to change inside the marked region(s).
-- no Xiaoxia identity/body reference images are active in this path.
+- no separate clean source image and no Xiaoxia identity/body reference images are
+  sent to Qwen in this path.
 
 This is deliberately separate from the existing Seedream "修正這張" path so the
 old repair flow remains an immediate rollback option while Qwen local-edit quality
@@ -25,7 +25,7 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 
-VERSION = "1.0.0-qwen-fix-v1"
+VERSION = "1.0.1-qwen-fix-v2"
 
 _ROOT = Path("/data/memory/qwen21")
 _RUNS_DIR = _ROOT / "fix_runs"
@@ -34,23 +34,20 @@ _MARK_IMAGE_NAME = "qwen_fix_mark.png"
 
 SYSTEM_CORE_PROMPT = """QWEN FIX — MARK-BASED LOCAL EDIT
 
-<image1> is the ORIGINAL image and the only output canvas to edit.
-<image2> is the SAME image with circles, painted annotations, or markings that identify
-the target region(s) for this repair.
+<image1> is the single marked composite image to edit.
+The circles, painted annotations, arrows, or scribbles on <image1> indicate the local
+region(s) that should change. They are editing guides only and must not appear in the
+final image.
 
-Use <image2> only to locate the marked repair region(s).
-Do not copy the annotation marks themselves into the output.
-
-Modify only the marked region(s). Preserve everything outside the marked region(s)
-from <image1> as closely as possible, including identity, face, hairstyle, expression,
-pose, body orientation, hand placement, camera angle, framing, crop, background,
+Modify only the marked region(s) according to the USER DELTA.
+Preserve all unmarked content as closely as possible, including identity, face,
+hairstyle, expression, pose, body orientation, camera angle, framing, crop, background,
 scene layout, lighting, color, texture, clothing, props, and unrelated details.
 
-Do not restage the image, do not reinterpret the whole scene, and do not make broad
-global changes. Do not add extra people, clones, duplicate subjects, or extra body parts.
-
-The USER DELTA defines what should be changed inside the marked region(s).
-Apply it precisely and keep unmarked areas stable.
+After applying the requested local repair, remove all visible annotation marks and
+return a clean final image. Do not restage the image, reinterpret the whole scene, or
+make broad global changes. Do not add extra people, clones, duplicate subjects, or
+extra body parts.
 """.strip()
 
 
@@ -82,7 +79,6 @@ def _ensure_dirs() -> None:
 async def _run_fix(
     interaction: discord.Interaction,
     *,
-    source_bytes: bytes,
     mark_bytes: bytes,
     delta: str,
     count: int,
@@ -98,17 +94,11 @@ async def _run_fix(
         for index in range(1, int(count) + 1):
             seed = secrets.randbelow(2**63 - 1)
             results = await run_qwen21(
-                source_bytes,
+                mark_bytes,
                 prompt=prompt,
                 seed=seed,
                 steps=int(steps),
-                workflow_image_replacements={
-                    "image_2_face_front.png": _MARK_IMAGE_NAME,
-                },
-                extra_images={
-                    _MARK_IMAGE_NAME: mark_bytes,
-                },
-                disabled_image_slots={3, 4, 5, 6},
+                disabled_image_slots={2, 3, 4, 5, 6},
             )
             if not results:
                 raise RunPodServerlessError(f"candidate {index} returned no image")
@@ -134,7 +124,7 @@ async def _run_fix(
             pass
 
     print(
-        f"✅ [QWEN_FIX_RUN] version={VERSION} refs=image1+mark_image "
+        f"✅ [QWEN_FIX_RUN] version={VERSION} refs=marked_image_only "
         f"count={completed}/{count} steps={steps}"
     )
 
@@ -145,15 +135,11 @@ def install_qwen_fix(app: Any) -> Dict[str, Any]:
 
     async def qwen_fix_command(
         interaction: discord.Interaction,
-        image_1: discord.Attachment,
         mark_image: discord.Attachment,
         delta: str,
         count: app_commands.Range[int, 1, 4] = 1,
-        steps: app_commands.Range[int, 20, 50] = 25,
+        steps: app_commands.Range[int, 20, 50] = 40,
     ):
-        if not _is_image_attachment(image_1):
-            await interaction.response.send_message("⚠️ image_1 必須是圖片。", ephemeral=True)
-            return
         if not _is_image_attachment(mark_image):
             await interaction.response.send_message("⚠️ mark_image 必須是圖片。", ephemeral=True)
             return
@@ -166,21 +152,18 @@ def install_qwen_fix(app: Any) -> Dict[str, Any]:
 
         await interaction.response.defer(thinking=True)
         _ensure_dirs()
-        source_bytes = await image_1.read()
         mark_bytes = await mark_image.read()
-        if not source_bytes or not mark_bytes:
-            await interaction.followup.send("⚠️ 原圖或 mark 圖為空，無法修正。", ephemeral=True)
+        if not mark_bytes:
+            await interaction.followup.send("⚠️ mark 圖為空，無法修正。", ephemeral=True)
             return
 
-        # Keep temporary copies only for debugging/reproducibility on Zeabur persistent storage.
+        # Keep the exact marked composite for debugging/reproducibility.
         run_tag = f"{interaction.id}_{uuid.uuid4().hex[:6]}"
-        (_UPLOADS_DIR / f"{run_tag}_source{_ext(image_1)}").write_bytes(source_bytes)
         (_UPLOADS_DIR / f"{run_tag}_mark{_ext(mark_image)}").write_bytes(mark_bytes)
 
         try:
             await _run_fix(
                 interaction,
-                source_bytes=source_bytes,
                 mark_bytes=mark_bytes,
                 delta=str(delta or "").strip(),
                 count=int(count),
@@ -195,14 +178,13 @@ def install_qwen_fix(app: Any) -> Dict[str, Any]:
 
     command = app_commands.Command(
         name="qwen_fix",
-        description="Qwen 2.1 局部修正：上傳原圖、mark 標註圖與 Delta",
+        description="Qwen 2.1 局部修正：上傳已圈選/塗記的圖片與 Delta",
         callback=qwen_fix_command,
     )
-    command._params["image_1"].description = "原圖：要被局部修正的照片"
-    command._params["mark_image"].description = "標註圖：在同一張圖上圈選/塗記要修的區域"
+    command._params["mark_image"].description = "已標註圖：直接在要修的照片上圈選/塗記目標區域"
     command._params["delta"].description = "只描述標註區域要怎麼修改"
     command._params["count"].description = "候選張數（1~4）"
-    command._params["steps"].description = "Qwen sampling steps（20~50）"
+    command._params["steps"].description = "Qwen sampling steps（20~50，預設40）"
     tree.add_command(command, override=True)
 
     original_ready = getattr(bot, "on_ready", None)
@@ -226,7 +208,7 @@ def install_qwen_fix(app: Any) -> Dict[str, Any]:
     return {
         "version": VERSION,
         "command": "qwen_fix",
-        "input_contract": "image1_plus_mark_image_plus_delta",
-        "qwen_reference_policy": "image1_and_mark_only",
+        "input_contract": "marked_composite_plus_delta",
+        "qwen_reference_policy": "marked_image_only",
         "seedream_repair_unchanged": True,
     }
