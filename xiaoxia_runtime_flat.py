@@ -61,6 +61,7 @@ from xiaoxia.pose.wardrobe_pose_test import install_wardrobe_pose_test
 from xiaoxia.video.h3_typeerror_fix import install_h3_typeerror_fix
 from xiaoxia.discord_slash_rollback import install_native_slash_rollback
 from xiaoxia.qwen_lab import install_qwen_lab
+from xiaoxia.qwen_fix import install_qwen_fix
 from xiaoxia.video.director_signature_fix import install_director_signature_fix
 from xiaoxia.pose.camera_director import install_camera_director
 from xiaoxia.pose.photo_pose_input import install_photo_pose_input
@@ -203,6 +204,7 @@ def _activate_flat():
     activated["h3_typeerror"] = install_h3_typeerror_fix(app)
     activated["slash_rollback"] = install_native_slash_rollback(app)
     activated["qwen_lab"] = install_qwen_lab(app)
+    activated["qwen_fix"] = install_qwen_fix(app)
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
@@ -213,7 +215,7 @@ def _activate_flat():
     # UI-only final wrapper: retire unused buttons, preserve H3, add 收藏寫真.
     activated["beauty_portrait"] = install_beauty_portrait(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
-    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab")
+    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab,qwen_fix")
     return activated
 
 _ACTIVATED = _activate_flat()
