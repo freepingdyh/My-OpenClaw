@@ -15,9 +15,8 @@ import discord
 from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
-from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.1.2-qwen-photo-scene-v6-official-multiref"
+VERSION = "1.2.0-qwen-photo-scene-v7-official-no-canvas"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -28,27 +27,21 @@ _REF_FILES = {
     "body_clothed": "image_6_body_clothed.png",
 }
 
-_QWEN_SCENE_CORE = """QWEN PHOTO — NEW SCENE FROM FIVE REFERENCES
+_QWEN_SCENE_CORE = """QWEN IMAGE 2.1 — MULTI-REFERENCE SCENE GENERATION, NO CANVAS
 
-All five reference images show the SAME single adult woman.
-They are identity/body-consistency references only, not an edit target and not a canvas.
+All five inputs are identity sources for the SAME single adult woman. None is a canvas.
 
 Reference roles:
-- <image1>: full-body reference for overall height, long-legged proportions, waist, and body scale.
-- <image2>: front-face identity reference.
-- <image3>: 45-degree face identity reference.
-- <image4>: half-body reference for upper-body proportions.
-- <image5>: clothed body reference for silhouette and overall body consistency.
+- <image1>: full-body identity and overall body-proportion source.
+- <image2>: front-face identity source.
+- <image3>: 45-degree face identity source.
+- <image4>: half-body identity and upper-body proportion source.
+- <image5>: clothed body identity and silhouette source.
 
-Create a completely NEW photorealistic scene containing exactly ONE woman: the same woman shown in the
-references. Preserve her recognizable identity and established body proportions, but DO NOT copy any
-reference pose, background, clothing, framing, camera angle, or composition unless the user explicitly
-requests it.
-
-The COMPILED SCENE block defines environment, lighting, camera/framing, and mood.
-The SUBJECT DELTA block is direct user authority for the woman's action, pose, expression, and story beat.
-Follow SUBJECT DELTA literally and do not rewrite it.
-Do not add clones, duplicate subjects, extra people, extra limbs, or unrelated props.
+Generate a completely new composition from the rewritten instruction. Preserve the woman's identity from
+the five references. Follow the requested environment, clothing/state, action/pose, expression, camera
+view, framing, lighting, and atmosphere as stated in the rewritten instruction. The reference images
+provide identity; the rewritten instruction provides the new scene and composition.
 """.strip()
 
 
@@ -82,71 +75,99 @@ def _extract_json(text: str) -> dict:
             return {}
 
 
-async def _compile_scene_with_gemini(app: Any, *, scene_delta: str, camera_delta: str, mood_delta: str) -> dict:
+async def _compile_scene_with_gemini(
+    app: Any,
+    *,
+    scene_delta: str,
+    subject_delta: str,
+    camera_delta: str,
+    mood_delta: str,
+) -> dict:
     prompt = f"""
-你是影像場景導演，只負責把使用者的自然語言整理成適合影像模型理解的「場景／鏡頭／氣氛」描述。
+你是 Qwen-Image-2.1 的 prompt rewrite 階段。這是「多張 reference、沒有 canvas、重新生成新場景」任務。
 
-你不會看到、推測、補寫或改寫人物的肢體動作與劇情；那部分由另一個欄位直接交給影像模型。
+五張 reference 都是同一位成年女性的 identity source：
+<image1> 全身 identity／整體身材比例
+<image2> 正面臉部 identity
+<image3> 45 度臉部 identity
+<image4> 半身 identity／上半身比例
+<image5> 穿衣全身 identity／silhouette
 
+使用者原始要求：
 【場景／環境】
-{scene_delta or '未指定；請使用簡潔自然、不搶人物的環境'}
+{scene_delta}
 
-【想怎麼拍】
-{camera_delta or '自然生活照視角，構圖以人物為主'}
+【人物動作／表情／劇情／穿著狀態】
+{subject_delta}
+
+【鏡頭／構圖】
+{camera_delta}
 
 【整體氣氛】
-{mood_delta or '自然、寫實、生活感'}
+{mood_delta}
 
-請只回傳 JSON：
+請依 Qwen-Image-2.1 官方 scene-generation/no-canvas rewrite 原則，只回傳 JSON：
 {{
-  "compiled_scene_prompt": "一段可直接交給影像模型的英文場景描述，只寫 location/environment, lighting, camera/framing, atmosphere/mood；不要描述人物具體肢體動作，也不要改寫任何未提供的劇情。",
+  "rewritten_prompt": "一個完整、連續、沒有換行的英文 prompt。逐一引用 <image1> 到 <image5> 作為 identity source；完整保留使用者指定的場景、人物狀態/穿著、動作姿勢、表情、鏡頭構圖與氣氛。不要把任何 reference 當 canvas，不要改寫成沿用 reference 的姿勢、背景或服裝。不要加入使用者未要求的狀態。",
+  "wh_ratio": "輸出比例，例如 3:4、2:3、3:2、16:9；若使用者未明講比例，依官方 no-canvas scene semantics 決定。",
+  "ratio_follow": "",
   "scene_summary": "繁體中文，40字內",
   "camera_summary": "繁體中文，30字內",
   "mood_summary": "繁體中文，30字內"
 }}
 
 規則：
-1. 使用者可以完全不懂攝影術語；請把自然語言轉成合理的鏡頭與構圖語言。
-2. 不要自行加入第二人物。
-3. 不要自行加入人物姿勢、觸碰、肢體互動或劇情。
-4. 場景、鏡頭、氣氛之間要彼此一致，不要堆砌攝影術語。
+1. 這是 no-canvas scene generation；ratio_follow 必須為空字串。
+2. 若是 full-body scene，預設 wh_ratio=3:4；portrait/half-body 預設 2:3；landscape-oriented scene 預設 3:2。若使用者明確指定比例，使用指定比例。
+3. rewritten_prompt 必須是一個完整連續段落，不含比例資訊。
+4. identity 直接以 <image1>...<image5> 指向來源，不用額外發明人物外貌描述。
+5. 使用者明確指定的 clothing/state、pose/action、location、camera/framing 不得被省略或改成別的內容。
+6. 使用肯定、明確的敘述，不用堆疊反向 negative constraints。
 """.strip()
 
     resp = await app.gemini_client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
-        config=app.types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        config=app.types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )
     data = _extract_json(getattr(resp, "text", ""))
-    compiled = _clean(data.get("compiled_scene_prompt"))
-    if not compiled:
-        compiled = _clean(f"{scene_delta}. Camera/framing: {camera_delta}. Mood/lighting: {mood_delta}.")
+    rewritten = _clean(data.get("rewritten_prompt"))
+    if not rewritten:
+        rewritten = _clean(
+            f"Use <image1>, <image2>, <image3>, <image4>, and <image5> only as identity sources for the same adult woman. "
+            f"Create a completely new scene. Environment: {scene_delta}. Subject: {subject_delta}. "
+            f"Camera and framing: {camera_delta}. Atmosphere: {mood_delta}."
+        )
+
+    wh_ratio = _clean(data.get("wh_ratio") or "3:4")
+    ratio_follow = _clean(data.get("ratio_follow") or "")
+    if ratio_follow:
+        ratio_follow = ""
+
     return {
-        "compiled_scene_prompt": compiled,
+        "rewritten_prompt": rewritten,
+        "wh_ratio": wh_ratio,
+        "ratio_follow": "",
         "scene_summary": _clean(data.get("scene_summary") or scene_delta)[:80],
         "camera_summary": _clean(data.get("camera_summary") or camera_delta)[:60],
         "mood_summary": _clean(data.get("mood_summary") or mood_delta)[:60],
     }
 
 
-def _build_qwen_prompt(compiled_scene: str, subject_delta: str) -> str:
-    return (
-        _QWEN_SCENE_CORE
-        + "\n\nCOMPILED SCENE — environment/camera/mood only:\n"
-        + _clean(compiled_scene)
-        + "\n\nSUBJECT DELTA — direct user wording; follow precisely:\n"
-        + str(subject_delta or "").strip()
-        + "\n\nSPECIAL PRESENTATION BLOCK — fixed production wording:\n"
-        + _SPECIAL_USER_DELTA
-    ).strip()
+def _build_qwen_prompt(rewritten_prompt: str) -> str:
+    return _clean(_QWEN_SCENE_CORE + " " + str(rewritten_prompt or "").strip())
 
 
 async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str) -> dict:
     refs = _refs()
     scene = await _compile_scene_with_gemini(
-        app, scene_delta=scene_delta, camera_delta=camera_delta, mood_delta=mood_delta
+        app,
+        scene_delta=scene_delta,
+        subject_delta=subject_delta,
+        camera_delta=camera_delta,
+        mood_delta=mood_delta,
     )
-    prompt = _build_qwen_prompt(scene["compiled_scene_prompt"], subject_delta)
+    prompt = _build_qwen_prompt(scene["rewritten_prompt"])
 
     # True reference-scene path: all five refs are worker-staged and remain
     # vision references only. No reference image is uploaded as an edit canvas,
@@ -156,6 +177,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         prompt=prompt,
         seed=seed,
         steps=40,
+        wh_ratio=scene["wh_ratio"],
         extra_images={
             _REF_FILES["body_full"]: refs["body_full"].read_bytes(),
             _REF_FILES["body_half"]: refs["body_half"].read_bytes(),
@@ -180,8 +202,8 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "topic": "【Photo】Qwen 特殊場景",
         "event": "大俠使用 /photo 的 Qwen-2.1 模式生成一張特殊場景照片。",
         "composition": scene["scene_summary"] or scene_delta,
-        "authoritative_scene": scene["compiled_scene_prompt"],
-        "root_prompt_base": scene["compiled_scene_prompt"],
+        "authoritative_scene": scene["rewritten_prompt"],
+        "root_prompt_base": scene["rewritten_prompt"],
         "scene_text": scene["scene_summary"] or scene_delta,
         "scene_summary": scene["scene_summary"] or scene_delta,
         "action_summary": _clean(subject_delta)[:120],
@@ -214,12 +236,15 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
             _REF_FILES["body_clothed"],
         ],
         "qwen_reference_mode": "official_multiref_with_vae_reference_latents",
-        "qwen_scene_workflow_mode": "five_ref_new_scene",
+        "qwen_scene_workflow_mode": "five_ref_official_no_canvas",
+        "qwen_wh_ratio": scene["wh_ratio"],
+        "qwen_ratio_follow": scene["ratio_follow"],
+        "qwen_final_prompt": prompt,
         "qwen_scene_delta": scene_delta,
         "qwen_subject_delta": subject_delta,
         "qwen_camera_delta": camera_delta,
         "qwen_mood_delta": mood_delta,
-        "qwen_compiled_scene_prompt": scene["compiled_scene_prompt"],
+        "qwen_compiled_scene_prompt": scene["rewritten_prompt"],
     }
 
 
