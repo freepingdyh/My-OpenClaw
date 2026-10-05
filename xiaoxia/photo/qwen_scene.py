@@ -14,8 +14,9 @@ import discord
 from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
+from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.4.0-qwen-photo-scene-v11-zh-prompts"
+VERSION = "1.5.0-qwen-photo-scene-v12-editable-special-delta"
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
@@ -150,11 +151,18 @@ async def _compile_scene_with_gemini(
     }
 
 
-def _build_qwen_prompt(rewritten_prompt: str) -> str:
-    return _clean(_QWEN_SCENE_CORE + " " + str(rewritten_prompt or "").strip())
+def _build_qwen_prompt(rewritten_prompt: str, special_delta: str = "") -> str:
+    parts = [
+        _QWEN_SCENE_CORE,
+        str(rewritten_prompt or "").strip(),
+    ]
+    special = str(special_delta or "").strip()
+    if special:
+        parts.append(special)
+    return _clean("\n\n".join(parts))
 
 
-async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str) -> dict:
+async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str, special_delta: str = "") -> dict:
     scene = await _compile_scene_with_gemini(
         app,
         scene_delta=scene_delta,
@@ -162,7 +170,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         camera_delta=camera_delta,
         mood_delta=mood_delta,
     )
-    prompt = _build_qwen_prompt(scene["rewritten_prompt"])
+    prompt = _build_qwen_prompt(scene["rewritten_prompt"], special_delta=special_delta)
 
     # Dedicated reference-scene workflow: all five refs are staged on the
     # RunPod worker and feed Qwen's multi-reference conditioning. No edit image
@@ -236,6 +244,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "qwen_subject_delta": subject_delta,
         "qwen_camera_delta": camera_delta,
         "qwen_mood_delta": mood_delta,
+        "qwen_special_delta": str(special_delta or "").strip(),
         "qwen_compiled_scene_prompt": scene["rewritten_prompt"],
     }
 
@@ -300,10 +309,18 @@ class _QwenPhotoModal(discord.ui.Modal):
             max_length=800,
             required=True,
         )
+        self.special_delta = discord.ui.TextInput(
+            label="特別要求（可清空）",
+            style=discord.TextStyle.paragraph,
+            default=_DEFAULT_SPECIAL_DELTA,
+            max_length=1800,
+            required=False,
+        )
         self.add_item(self.scene_delta)
         self.add_item(self.subject_delta)
         self.add_item(self.camera_delta)
         self.add_item(self.mood_delta)
+        self.add_item(self.special_delta)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
@@ -317,6 +334,7 @@ class _QwenPhotoModal(discord.ui.Modal):
                 subject_delta=str(self.subject_delta.value or "").strip(),
                 camera_delta=str(self.camera_delta.value or "").strip(),
                 mood_delta=str(self.mood_delta.value or "").strip(),
+                special_delta=str(self.special_delta.value or "").strip(),
             )
 
             db = self.app.load_memory()
@@ -410,7 +428,7 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
             initial = re.sub(r"^(?:qwen(?:-?2\.1)?|特殊(?:圖)?|special)\s*", "", body, flags=re.I).strip()
             await message.channel.send(
                 "🧪 **/photo｜Qwen-2.1 特殊圖**\n"
-                "四個欄位都是自然語言，可直接改範例；Gemini 只整理場景／鏡頭／氣氛，人物動作欄原文直接交給 Qwen。",
+                "五個欄位都可直接修改；前四欄交給 Gemini 整理，「特別要求」原文直接附加給 Qwen，若這次不需要可整欄清空。",
                 view=_OpenQwenPhotoView(app, message, initial_scene=initial),
             )
             return None
@@ -446,7 +464,7 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
         await interaction.response.send_message(
             "📸 **/photo｜請選擇生圖引擎**\n"
             "🌱 Seedream v4.5：一般圖（原流程）\n"
-            "🧪 Qwen-2.1：特殊圖（reference scene generation）",
+            "🧪 Qwen-2.1：特殊圖（參考圖新場景生成）",
             view=_PhotoEngineView(app, original, proxy_message),
             ephemeral=True,
         )
@@ -480,9 +498,11 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
     return {
         "version": VERSION,
         "photo_modes": ["seedream_v4.5", "qwen_2.1_special"],
-        "qwen_input_fields": ["scene_delta", "subject_delta", "camera_delta", "mood_delta"],
+        "qwen_input_fields": ["scene_delta", "subject_delta", "camera_delta", "mood_delta", "special_delta"],
         "gemini_reads": ["scene_delta", "subject_delta", "camera_delta", "mood_delta"],
         "subject_delta_rewritten": True,
+        "special_delta_rewritten": False,
+        "special_delta_default_source": "special_intimacy._SPECIAL_USER_DELTA",
         "qwen_refs": list(_REF_FILES.values()),
         "native_slash": "/photo",
         "legacy_text_photo_preserved": True,
