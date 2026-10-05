@@ -15,13 +15,13 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 
-VERSION = "1.3.0-qwen-photo-scene-v9-dedicated-workflow"
+VERSION = "1.3.1-qwen-photo-scene-v10-staged-refs"
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
     "face_45": "image_3_face_45.png",
-    "body_full": "image_4_body_full_clothed.png",
-    "body_half": "image_5_body_half_clothed.png",
+    "body_full": "image_4_body_full.png",
+    "body_half": "image_5_body_half.png",
     "body_clothed": "image_6_body_clothed.png",
 }
 
