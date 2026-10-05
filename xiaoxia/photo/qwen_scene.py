@@ -44,7 +44,7 @@ Do not add clones, duplicate subjects, extra people, extra limbs, or unrelated p
 
 
 def _clean(value: Any) -> str:
-    return re.sub(r"\\s+", " ", str(value or "")).strip()
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def _refs() -> Dict[str, Path]:
@@ -57,13 +57,13 @@ def _refs() -> Dict[str, Path]:
 
 def _extract_json(text: str) -> dict:
     raw = str(text or "").strip()
-    raw = re.sub(r"^~~~(?:json)?\\s*", "", raw, flags=re.I)
-    raw = re.sub(r"\\s*~~~$", "", raw)
+    raw = re.sub(r"^~~~(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"\s*~~~$", "", raw)
     try:
         data = json.loads(raw)
         return data if isinstance(data, dict) else {}
     except Exception:
-        m = re.search(r"\\{[\\s\\S]*\\}", raw)
+        m = re.search(r"\{[\s\S]*\}", raw)
         if not m:
             return {}
         try:
@@ -123,11 +123,11 @@ async def _compile_scene_with_gemini(app: Any, *, scene_delta: str, camera_delta
 def _build_qwen_prompt(compiled_scene: str, subject_delta: str) -> str:
     return (
         _QWEN_SCENE_CORE
-        + "\\n\\nCOMPILED SCENE — environment/camera/mood only:\\n"
+        + "\n\nCOMPILED SCENE — environment/camera/mood only:\n"
         + _clean(compiled_scene)
-        + "\\n\\nSUBJECT DELTA — direct user wording; follow precisely:\\n"
+        + "\n\nSUBJECT DELTA — direct user wording; follow precisely:\n"
         + str(subject_delta or "").strip()
-        + "\\n\\nSPECIAL PRESENTATION BLOCK — fixed production wording:\\n"
+        + "\n\nSPECIAL PRESENTATION BLOCK — fixed production wording:\n"
         + _SPECIAL_USER_DELTA
     ).strip()
 
@@ -377,29 +377,29 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
             )
 
         raw = str(user_input or "").strip()
-        body = re.sub(r"^/photo\\b", "", raw, flags=re.I).strip()
+        body = re.sub(r"^/photo\b", "", raw, flags=re.I).strip()
         lower = body.lower()
 
         if body and not lower.startswith(("qwen", "特殊", "special", "seedream", "一般")):
             return await original(message, user_input)
 
         if lower.startswith(("qwen", "特殊", "special")):
-            initial = re.sub(r"^(?:qwen(?:-?2\\.1)?|特殊(?:圖)?|special)\\s*", "", body, flags=re.I).strip()
+            initial = re.sub(r"^(?:qwen(?:-?2\.1)?|特殊(?:圖)?|special)\s*", "", body, flags=re.I).strip()
             await message.channel.send(
-                "🧪 **/photo｜Qwen-2.1 特殊圖**\\n"
+                "🧪 **/photo｜Qwen-2.1 特殊圖**\n"
                 "四個欄位都是自然語言，可直接改範例；Gemini 只整理場景／鏡頭／氣氛，人物動作欄原文直接交給 Qwen。",
                 view=_OpenQwenPhotoView(app, message, initial_scene=initial),
             )
             return None
 
         if lower.startswith(("seedream", "一般")):
-            cleaned = re.sub(r"^(?:seedream(?:\\s*v?4\\.5)?|一般(?:圖)?)\\s*", "", body, flags=re.I).strip()
+            cleaned = re.sub(r"^(?:seedream(?:\s*v?4\.5)?|一般(?:圖)?)\s*", "", body, flags=re.I).strip()
             if cleaned:
                 return await original(message, "/photo " + cleaned)
 
         await message.channel.send(
-            "📸 **/photo｜請選擇生圖引擎**\\n"
-            "🌱 Seedream v4.5：一般圖（原流程）\\n"
+            "📸 **/photo｜請選擇生圖引擎**\n"
+            "🌱 Seedream v4.5：一般圖（原流程）\n"
             "🧪 Qwen-2.1：特殊圖（reference scene generation）",
             view=_PhotoEngineView(app, original, message),
         )
