@@ -16,9 +16,8 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 
-VERSION = "1.2.1-qwen-photo-scene-v8-official-25steps"
+VERSION = "1.3.0-qwen-photo-scene-v9-dedicated-workflow"
 
-_REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
     "face_45": "image_3_face_45.png",
@@ -48,13 +47,6 @@ provide identity; the rewritten instruction provides the new scene and compositi
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
-
-def _refs() -> Dict[str, Path]:
-    refs = {k: _REFS_DIR / v for k, v in _REF_FILES.items()}
-    missing = [str(p) for p in refs.values() if not p.is_file()]
-    if missing:
-        raise RuntimeError("QWEN_SCENE_REFERENCE_MISSING: " + ", ".join(missing))
-    return refs
 
 
 def _extract_json(text: str) -> dict:
@@ -159,7 +151,6 @@ def _build_qwen_prompt(rewritten_prompt: str) -> str:
 
 
 async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str) -> dict:
-    refs = _refs()
     scene = await _compile_scene_with_gemini(
         app,
         scene_delta=scene_delta,
@@ -169,19 +160,15 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     )
     prompt = _build_qwen_prompt(scene["rewritten_prompt"])
 
-    # True reference-scene path: all five refs are worker-staged and remain
-    # vision references only. No reference image is uploaded as an edit canvas,
-    # and the scene job removes VAE reference-latent injection.
+    # Dedicated reference-scene workflow: all five refs are staged on the
+    # RunPod worker and feed Qwen's multi-reference conditioning. No edit image
+    # and no per-request reference upload are used in this path.
     seed = secrets.randbelow(2**63 - 1)
     results = await run_qwen21_reference_scene(
         prompt=prompt,
         seed=seed,
         steps=25,
         wh_ratio=scene["wh_ratio"],
-        extra_images={
-            _REF_FILES["body_full"]: refs["body_full"].read_bytes(),
-            _REF_FILES["body_half"]: refs["body_half"].read_bytes(),
-        },
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
@@ -236,7 +223,8 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
             _REF_FILES["body_clothed"],
         ],
         "qwen_reference_mode": "official_multiref_with_vae_reference_latents",
-        "qwen_scene_workflow_mode": "five_ref_official_no_canvas",
+        "qwen_scene_workflow_mode": "dedicated_five_ref_no_canvas_api_v1",
+        "qwen_scene_workflow_file": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
         "qwen_wh_ratio": scene["wh_ratio"],
         "qwen_ratio_follow": scene["ratio_follow"],
         "qwen_final_prompt": prompt,
@@ -489,8 +477,8 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
         "version": VERSION,
         "photo_modes": ["seedream_v4.5", "qwen_2.1_special"],
         "qwen_input_fields": ["scene_delta", "subject_delta", "camera_delta", "mood_delta"],
-        "gemini_reads": ["scene_delta", "camera_delta", "mood_delta"],
-        "subject_delta_rewritten": False,
+        "gemini_reads": ["scene_delta", "subject_delta", "camera_delta", "mood_delta"],
+        "subject_delta_rewritten": True,
         "qwen_refs": list(_REF_FILES.values()),
         "native_slash": "/photo",
         "legacy_text_photo_preserved": True,
