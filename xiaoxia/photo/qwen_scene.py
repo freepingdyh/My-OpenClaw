@@ -17,7 +17,7 @@ from discord import app_commands
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.1.1-qwen-photo-scene-v5-upload-two-new-refs"
+VERSION = "1.1.2-qwen-photo-scene-v6-official-multiref"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -213,8 +213,8 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
             _REF_FILES["body_half"],
             _REF_FILES["body_clothed"],
         ],
-        "qwen_reference_mode": "vision_only_no_vae_reference_latents",
-        "qwen_scene_workflow_mode": "five_ref_fresh_latent",
+        "qwen_reference_mode": "official_multiref_with_vae_reference_latents",
+        "qwen_scene_workflow_mode": "five_ref_new_scene",
         "qwen_scene_delta": scene_delta,
         "qwen_subject_delta": subject_delta,
         "qwen_camera_delta": camera_delta,
