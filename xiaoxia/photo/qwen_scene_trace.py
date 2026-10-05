@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.3.0-qwen-scene-trace-v4-official-no-canvas"
+VERSION = "1.3.1-qwen-scene-trace-v5-25steps"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -56,7 +56,7 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "scene_workflow_mode_expected": "five_ref_official_no_canvas",
             "edit_target_expected": False,
             "ratio_follow_expected": "",
-            "steps_expected": 40,
+            "steps_expected": 25,
         }
         _write(trace)
 
