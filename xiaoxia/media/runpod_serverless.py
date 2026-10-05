@@ -41,16 +41,13 @@ _FIXED_REFS = {
     "image_6_body_clothed.png",
 }
 
-# Reference-scene mode uses the official Qwen 2.1 multi-reference conditioning:
-# five references are seen by the text encoder and, with VAE connected, are
-# also encoded as reference latents. The node still provides an empty output
-# latent for the newly generated composition.
+# Reference-scene A/B mode intentionally uses only three identity references:
+# one full-body source plus two face views. This reduces the number of body
+# reference latents that can be instantiated as duplicate subjects.
 _SCENE_REF_ORDER = (
     "image_4_body_full.png",
     "image_2_face_front.png",
     "image_3_face_45.png",
-    "image_5_body_half.png",
-    "image_6_body_clothed.png",
 )
 
 
@@ -292,12 +289,11 @@ def build_qwen21_reference_scene_job(
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
 ) -> dict[str, Any]:
-    """Build a dedicated Qwen 2.1 five-reference NEW-SCENE job.
+    """Build a dedicated Qwen 2.1 three-reference NEW-SCENE job.
 
     Unlike the edit/fix path, this does not mutate the production edit workflow.
-    It loads a separate API workflow derived from ComfyUI's Qwen 2.1 generation
-    graph: five worker-staged references feed TextEncodeQwenImage21, while the
-    sampler starts from a fresh EmptyLatentImage canvas.
+    The scene A/B path uses one full-body reference plus two face views while
+    the sampler starts from a fresh EmptyLatentImage canvas.
     """
     workflow = copy.deepcopy(load_qwen21_reference_scene_workflow())
 
@@ -330,7 +326,7 @@ def build_qwen21_reference_scene_job(
     return {
         "input": {
             "workflow": workflow,
-            # All five references are staged at worker cold start.
+            # The three references are staged at worker cold start.
             # No request image is an edit canvas and no base64 references are uploaded.
             "images": [],
         }
