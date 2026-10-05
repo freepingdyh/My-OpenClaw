@@ -17,7 +17,7 @@ from discord import app_commands
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.0.1-qwen-photo-scene-v2-slash"
+VERSION = "1.0.2-qwen-photo-scene-v3-fixed-refs"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -30,7 +30,7 @@ _REF_FILES = {
 
 _QWEN_SCENE_CORE = """QWEN PHOTO — NEW SCENE FROM REFERENCES
 
-<image1>, <image2>, <image3>, <image4>, and <image5> are reference images of the SAME single adult woman.
+<image1>, <image3>, and <image6> are reference images of the SAME single adult woman.
 They are identity and body-proportion references only. They are NOT an edit canvas. Do not copy their
 original backgrounds, poses, clothing, framing, or composition unless explicitly requested.
 
@@ -141,19 +141,15 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     )
     prompt = _build_qwen_prompt(scene["compiled_scene_prompt"], subject_delta)
 
+    # Keep the RunPod request below its 10 MiB body limit.
+    # image_3_face_45.png and image_6_body_clothed.png are already staged inside
+    # the worker at cold start, so do NOT upload them again as base64 payload data.
+    # For the first scene-generation baseline we use:
+    #   image1 = dynamic face-front ref
+    #   image3 = worker-staged 45-degree face ref
+    #   image6 = worker-staged clothed body ref
+    # Slots 2/4/5 are disabled to avoid duplicate/unclothed references.
     image1 = refs["face_front"].read_bytes()
-    extra = {
-        "qwen_scene_face45.png": refs["face_45"].read_bytes(),
-        "qwen_scene_body_full_clothed.png": refs["body_full"].read_bytes(),
-        "qwen_scene_body_half_clothed.png": refs["body_half"].read_bytes(),
-        "qwen_scene_body_clothed.png": refs["body_clothed"].read_bytes(),
-    }
-    replacements = {
-        "image_2_face_front.png": "qwen_scene_face45.png",
-        "image_3_face_45.png": "qwen_scene_body_full_clothed.png",
-        "image_4_body_full.png": "qwen_scene_body_half_clothed.png",
-        "image_5_body_half.png": "qwen_scene_body_clothed.png",
-    }
 
     seed = secrets.randbelow(2**63 - 1)
     results = await run_qwen21(
@@ -161,9 +157,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         prompt=prompt,
         seed=seed,
         steps=40,
-        workflow_image_replacements=replacements,
-        extra_images=extra,
-        disabled_image_slots={6},
+        disabled_image_slots={2, 4, 5},
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
@@ -210,7 +204,11 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "qwen_model_label": "Qwen-Image-2.1",
         "qwen_seed": seed,
         "qwen_steps": 40,
-        "qwen_reference_set": list(_REF_FILES.values()),
+        "qwen_reference_set": [
+            _REF_FILES["face_front"],
+            _REF_FILES["face_45"],
+            _REF_FILES["body_clothed"],
+        ],
         "qwen_scene_delta": scene_delta,
         "qwen_subject_delta": subject_delta,
         "qwen_camera_delta": camera_delta,
