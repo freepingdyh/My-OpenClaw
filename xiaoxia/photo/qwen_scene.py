@@ -9,13 +9,15 @@ import secrets
 import uuid
 from pathlib import Path
 from typing import Any, Dict
+from types import SimpleNamespace
 
 import discord
+from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.0.0-qwen-photo-scene-v1"
+VERSION = "1.0.1-qwen-photo-scene-v2-slash"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -406,6 +408,53 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
         return None
 
     app.handle_unified_photo_command = routed
+
+    # Native /photo entrypoint.
+    # Legacy text "/photo <scene>" remains untouched for attachment-heavy workflows,
+    # while bare /photo can now be selected from Discord's slash-command UI.
+    bot = app.girlfriend_bot
+    tree = bot.tree
+
+    async def photo_slash(interaction: discord.Interaction):
+        proxy_message = SimpleNamespace(
+            channel=interaction.channel,
+            author=interaction.user,
+            attachments=[],
+            content="/photo",
+        )
+        await interaction.response.send_message(
+            "📸 **/photo｜請選擇生圖引擎**\n"
+            "🌱 Seedream v4.5：一般圖（原流程）\n"
+            "🧪 Qwen-2.1：特殊圖（reference scene generation）",
+            view=_PhotoEngineView(app, original, proxy_message),
+            ephemeral=True,
+        )
+
+    command = app_commands.Command(
+        name="photo",
+        description="小俠照片工作台：選擇 Seedream v4.5 或 Qwen-2.1",
+        callback=photo_slash,
+    )
+    tree.add_command(command, override=True)
+
+    original_ready = getattr(bot, "on_ready", None)
+    slash_synced = False
+
+    async def on_ready_with_photo_sync():
+        nonlocal slash_synced
+        if original_ready is not None:
+            await original_ready()
+        if slash_synced:
+            return
+        try:
+            synced_cmds = await tree.sync()
+            slash_synced = True
+            print(f"✅ [QWEN_PHOTO_SLASH_SYNC] version={VERSION} synced={len(synced_cmds)}")
+        except Exception as exc:
+            print(f"❌ [QWEN_PHOTO_SLASH_SYNC_FAILED] {type(exc).__name__}: {exc}")
+
+    bot.on_ready = on_ready_with_photo_sync
+
     print(f"✅ [QWEN_PHOTO_SCENE_INSTALLED] version={VERSION} refs={list(_REF_FILES.values())}")
     return {
         "version": VERSION,
@@ -414,4 +463,6 @@ def install_qwen_photo_scene(app: Any) -> Dict[str, Any]:
         "gemini_reads": ["scene_delta", "camera_delta", "mood_delta"],
         "subject_delta_rewritten": False,
         "qwen_refs": list(_REF_FILES.values()),
+        "native_slash": "/photo",
+        "legacy_text_photo_preserved": True,
     }
