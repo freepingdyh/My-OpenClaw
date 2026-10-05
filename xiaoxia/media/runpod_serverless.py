@@ -27,6 +27,10 @@ _WORKFLOW_PATH = Path(
     os.environ.get("XIAOXIA_QWEN21_API_WORKFLOW")
     or "/data/memory/qwen21/workflows/xiaoxia_qwen21_special_v1_api.json"
 )
+_SCENE_WORKFLOW_PATH = Path(
+    os.environ.get("XIAOXIA_QWEN21_SCENE_API_WORKFLOW")
+    or (Path(__file__).resolve().parents[1] / "serverless" / "workflows" / "qwen21_reference_scene_api.json")
+)
 _DYNAMIC_IMAGE_NAME = "image_1.png"
 
 _FIXED_REFS = {
@@ -232,6 +236,54 @@ def _size_from_ratio(wh_ratio: str, *, megapixels: float = 1.0) -> tuple[int, in
     return max(32, int(width)), max(32, int(height))
 
 
+def _validate_scene_workflow_contract(workflow: dict[str, Any]) -> None:
+    load_nodes = _nodes_of_type(workflow, "LoadImage")
+    filenames = {
+        str((node.get("inputs") or {}).get("image") or "")
+        for _, node in load_nodes
+    }
+    required = set(_SCENE_REF_ORDER)
+    if filenames != required:
+        missing = sorted(required - filenames)
+        extra = sorted(filenames - required)
+        raise RunPodServerlessError(
+            "Qwen21 reference-scene workflow reference set mismatch: "
+            f"missing={missing} extra={extra}"
+        )
+
+    _single_node(workflow, "TextEncodeQwenImage21")
+    _single_node(workflow, "QwenImage21Cache")
+    _single_node(workflow, "EmptyLatentImage")
+    _single_node(workflow, "KSampler")
+    _single_node(workflow, "VAEDecode")
+
+    output_nodes = (
+        _nodes_of_type(workflow, "SaveImage")
+        + _nodes_of_type(workflow, "SaveImageAdvanced")
+    )
+    if len(output_nodes) != 1:
+        raise RunPodServerlessError(
+            f"Expected exactly one scene output image node, found {len(output_nodes)}"
+        )
+
+
+def load_qwen21_reference_scene_workflow() -> dict[str, Any]:
+    if not _SCENE_WORKFLOW_PATH.is_file():
+        raise RunPodServerlessError(
+            f"Qwen21 reference-scene API workflow not found: {_SCENE_WORKFLOW_PATH}"
+        )
+    try:
+        workflow = json.loads(_SCENE_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RunPodServerlessError(
+            f"Could not read Qwen21 reference-scene API workflow: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(workflow, dict) or not workflow:
+        raise RunPodServerlessError("Qwen21 reference-scene API workflow is empty or invalid")
+    _validate_scene_workflow_contract(workflow)
+    return workflow
+
+
 def build_qwen21_reference_scene_job(
     *,
     prompt: str,
@@ -239,109 +291,50 @@ def build_qwen21_reference_scene_job(
     steps: int | None = None,
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
-    extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
-    """Build a five-reference NEW-SCENE job from the existing Qwen 2.1 workflow.
+    """Build a dedicated Qwen 2.1 five-reference NEW-SCENE job.
 
-    The production workflow is used as a node/model scaffold. For official
-    no-canvas reference-scene generation we:
-      - map five reference files into image_1..image_5;
-      - keep the encoder VAE connection for Qwen 2.1 multi-reference identity conditioning;
-      - create an explicit EmptyLatentImage at the requested no-canvas aspect ratio;
-      - route KSampler latent_image to that fresh latent instead of following a reference;
-      - disable image_6.
+    Unlike the edit/fix path, this does not mutate the production edit workflow.
+    It loads a separate API workflow derived from ComfyUI's Qwen 2.1 generation
+    graph: five worker-staged references feed TextEncodeQwenImage21, while the
+    sampler starts from a fresh EmptyLatentImage canvas.
     """
-    workflow = copy.deepcopy(load_qwen21_workflow())
-
-    load_nodes = _nodes_of_type(workflow, "LoadImage")
-    by_name = {
-        str((node.get("inputs") or {}).get("image") or ""): node
-        for _, node in load_nodes
-    }
-    scaffold_names = (
-        _DYNAMIC_IMAGE_NAME,
-        "image_2_face_front.png",
-        "image_3_face_45.png",
-        "image_4_body_full.png",
-        "image_5_body_half.png",
-    )
-    missing = [name for name in scaffold_names if name not in by_name]
-    if missing:
-        raise RunPodServerlessError(
-            "Reference-scene scaffold is missing LoadImage inputs: "
-            + ", ".join(missing)
-        )
-
-    for source_name, ref_name in zip(scaffold_names, _SCENE_REF_ORDER):
-        by_name[source_name]["inputs"]["image"] = ref_name
+    workflow = copy.deepcopy(load_qwen21_reference_scene_workflow())
 
     _, encoder = _single_node(workflow, "TextEncodeQwenImage21")
     encoder_inputs = encoder.get("inputs")
     if not isinstance(encoder_inputs, dict):
-        raise RunPodServerlessError("TextEncodeQwenImage21 inputs are invalid")
-
-    # Keep VAE connected: Qwen-Image 2.1's official multi-reference path
-    # uses both visual/text-encoder references and reference latents.
-    encoder_inputs.pop("images.image_6", None)
+        raise RunPodServerlessError("Scene TextEncodeQwenImage21 inputs are invalid")
     encoder_inputs["prompt"] = str(prompt)
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
 
-    sampler_id, sampler = _single_node(workflow, "KSampler")
+    _, latent = _single_node(workflow, "EmptyLatentImage")
+    latent_inputs = latent.get("inputs")
+    if not isinstance(latent_inputs, dict):
+        raise RunPodServerlessError("Scene EmptyLatentImage inputs are invalid")
+    width, height = _size_from_ratio(wh_ratio)
+    latent_inputs["width"] = int(width)
+    latent_inputs["height"] = int(height)
+    latent_inputs["batch_size"] = 1
+
+    _, sampler = _single_node(workflow, "KSampler")
     sampler_inputs = sampler.get("inputs")
     if not isinstance(sampler_inputs, dict):
-        raise RunPodServerlessError("KSampler inputs are invalid")
+        raise RunPodServerlessError("Scene KSampler inputs are invalid")
     if seed is not None:
         sampler_inputs["seed"] = int(seed)
     if steps is not None:
         sampler_inputs["steps"] = int(steps)
 
-    # Official Qwen no-canvas scene generation chooses an output ratio rather
-    # than following a reference image. ComfyUI's official Qwen 2.1 t2i
-    # template feeds KSampler from EmptyLatentImage, so mirror that here.
-    width, height = _size_from_ratio(wh_ratio)
-    latent_node_id = "990001"
-    while latent_node_id in workflow:
-        latent_node_id = str(int(latent_node_id) + 1)
-    workflow[latent_node_id] = {
-        "inputs": {
-            "width": width,
-            "height": height,
-            "batch_size": 1,
-        },
-        "class_type": "EmptyLatentImage",
-        "_meta": {"title": "Qwen Scene No-Canvas Latent"},
-    }
-    sampler_inputs["latent_image"] = [latent_node_id, 0]
-
-    images: list[dict[str, str]] = []
-    for name, blob in (extra_images or {}).items():
-        clean_name = str(name or "").strip()
-        if clean_name not in _SCENE_REF_ORDER:
-            raise RunPodServerlessError(
-                f"Invalid reference-scene extra image name: {clean_name!r}"
-            )
-        if not blob:
-            raise RunPodServerlessError(
-                f"Reference-scene extra image is empty: {clean_name}"
-            )
-        images.append(
-            {
-                "name": clean_name,
-                "image": "data:image/png;base64,"
-                + base64.b64encode(blob).decode("ascii"),
-            }
-        )
-
     return {
         "input": {
             "workflow": workflow,
-            # Legacy refs are worker-staged. New clothed refs may be uploaded
-            # per request until all workers have the refreshed cold-start set.
-            "images": images,
+            # All five references are staged at worker cold start.
+            # No request image is an edit canvas and no base64 references are uploaded.
+            "images": [],
         }
     }
-
 
 async def run_qwen21_reference_scene(
     *,
@@ -350,7 +343,6 @@ async def run_qwen21_reference_scene(
     steps: int | None = None,
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
-    extra_images: dict[str, bytes] | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -360,7 +352,6 @@ async def run_qwen21_reference_scene(
         steps=steps,
         negative_prompt=negative_prompt,
         wh_ratio=wh_ratio,
-        extra_images=extra_images,
     )
     submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
     job_id = str(submitted.get("id") or "").strip()
