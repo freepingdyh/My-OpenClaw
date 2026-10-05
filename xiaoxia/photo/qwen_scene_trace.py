@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.0.0-qwen-scene-trace-v1"
+VERSION = "1.1.0-qwen-scene-trace-v2-five-ref"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -46,11 +46,15 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "subject_delta_length": len(str(subject_delta or "")),
             "subject_delta_sha256": _fingerprint(subject_delta),
             "reference_slots_expected": {
-                "image1": "image_2_face_front.png",
+                "image1": "image_4_body_full_clothed.png",
+                "image2": "image_2_face_front.png",
                 "image3": "image_3_face_45.png",
-                "image6": "image_6_body_clothed.png",
+                "image4": "image_5_body_half_clothed.png",
+                "image5": "image_6_body_clothed.png",
             },
-            "disabled_slots_expected": [2, 4, 5],
+            "reference_mode_expected": "vision_only_no_vae_reference_latents",
+            "scene_workflow_mode_expected": "five_ref_fresh_latent",
+            "edit_target_expected": false,
             "steps_expected": 40,
         }
         _write(trace)
@@ -76,6 +80,8 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "completed_at": app_obj.datetime.now(app_obj.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
             "compiled_scene_prompt": result.get("qwen_compiled_scene_prompt"),
             "reference_set": result.get("qwen_reference_set"),
+            "reference_mode": result.get("qwen_reference_mode"),
+            "scene_workflow_mode": result.get("qwen_scene_workflow_mode"),
             "seed": result.get("qwen_seed"),
             "steps": result.get("qwen_steps"),
             "result_url": result.get("local_url") or result.get("image_url"),
