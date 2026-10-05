@@ -16,7 +16,7 @@ from discord import app_commands
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.5.0-qwen-photo-scene-v12-editable-special-delta"
+VERSION = "1.6.0-qwen-photo-scene-v13-three-ref-ab"
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
@@ -28,17 +28,15 @@ _REF_FILES = {
 
 _QWEN_SCENE_CORE = """QWEN IMAGE 2.1 — 多參考圖新場景生成（無既有畫布）
 
-五張輸入圖都是同一位成年女性的人物一致性參考來源，沒有任何一張是要被直接編修的原始畫布。
+三張輸入圖都是同一位成年女性的人物一致性參考來源，沒有任何一張是要被直接編修的原始畫布。
 
 參考圖角色：
 - <image1>：全身人物一致性與整體身材比例參考。
 - <image2>：正面臉部人物一致性參考。
 - <image3>：45 度臉部人物一致性參考。
-- <image4>：半身人物一致性與上半身比例參考。
-- <image5>：穿衣全身人物一致性與整體輪廓參考。
 
 依照後面的重寫提示詞生成一個全新的場景與構圖。
-保留五張參考圖所代表的同一人物身分與整體外觀一致性。
+保留三張參考圖所代表的同一人物身分與整體外觀一致性。
 場景、穿著或人物狀態、動作與姿勢、表情、鏡頭方向、取景範圍、光線與整體氣氛，
 都以後面的重寫提示詞為準；不要沿用任何參考圖原本的背景、姿勢、服裝或構圖。
 
@@ -83,12 +81,10 @@ async def _compile_scene_with_gemini(
     prompt = f"""
 你是 Qwen-Image-2.1 的 prompt rewrite 階段。這是「多張 reference、沒有 canvas、重新生成新場景」任務。
 
-五張 reference 都是同一位成年女性的 identity source：
+三張 reference 都是同一位成年女性的 identity source：
 <image1> 全身 identity／整體身材比例
 <image2> 正面臉部 identity
 <image3> 45 度臉部 identity
-<image4> 半身 identity／上半身比例
-<image5> 穿衣全身 identity／silhouette
 
 使用者原始要求：
 【場景／環境】
@@ -105,7 +101,7 @@ async def _compile_scene_with_gemini(
 
 請依 Qwen-Image-2.1 官方 scene-generation/no-canvas rewrite 原則，只回傳 JSON：
 {{
-  "rewritten_prompt": "一個完整、連續、沒有換行的繁體中文提示詞。逐一引用 <image1> 到 <image5> 作為人物一致性參考來源；完整保留使用者指定的場景、人物狀態/穿著、動作姿勢、表情、鏡頭構圖與氣氛。不要把任何參考圖當成既有畫布，不要改寫成沿用參考圖原本的姿勢、背景或服裝。不要加入使用者未要求的狀態。",
+  "rewritten_prompt": "一個完整、連續、沒有換行的繁體中文提示詞。逐一引用 <image1>、<image2>、<image3> 作為人物一致性參考來源；完整保留使用者指定的場景、人物狀態/穿著、動作姿勢、表情、鏡頭構圖與氣氛。不要把任何參考圖當成既有畫布，不要改寫成沿用參考圖原本的姿勢、背景或服裝。不要加入使用者未要求的狀態。",
   "wh_ratio": "輸出比例，例如 3:4、2:3、3:2、16:9；若使用者未明講比例，依官方 no-canvas scene semantics 決定。",
   "ratio_follow": "",
   "scene_summary": "繁體中文，40字內",
@@ -117,7 +113,7 @@ async def _compile_scene_with_gemini(
 1. 這是 no-canvas scene generation；ratio_follow 必須為空字串。
 2. 若是 full-body scene，預設 wh_ratio=3:4；portrait/half-body 預設 2:3；landscape-oriented scene 預設 3:2。若使用者明確指定比例，使用指定比例。
 3. rewritten_prompt 必須使用繁體中文，且為一個完整連續段落，不含比例資訊。
-4. identity 直接以 <image1>...<image5> 指向來源，不用額外發明人物外貌描述。
+4. identity 直接以 <image1>、<image2>、<image3> 指向來源，不用額外發明人物外貌描述。
 5. 使用者明確指定的 clothing/state、pose/action、location、camera/framing 不得被省略或改成別的內容。
 6. 使用肯定、明確的敘述，不用堆疊反向 negative constraints。
 """.strip()
@@ -131,7 +127,7 @@ async def _compile_scene_with_gemini(
     rewritten = _clean(data.get("rewritten_prompt"))
     if not rewritten:
         rewritten = _clean(
-            f"將 <image1>、<image2>、<image3>、<image4>、<image5> 僅作為同一位成年女性的人物一致性參考來源，"
+            f"將 <image1>、<image2>、<image3> 僅作為同一位成年女性的人物一致性參考來源，"
             f"生成一個全新的場景。場景／環境：{scene_delta}。人物動作／表情／劇情／穿著狀態：{subject_delta}。"
             f"鏡頭／構圖：{camera_delta}。整體氣氛：{mood_delta}。"
         )
@@ -231,11 +227,9 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
             _REF_FILES["body_full"],
             _REF_FILES["face_front"],
             _REF_FILES["face_45"],
-            _REF_FILES["body_half"],
-            _REF_FILES["body_clothed"],
         ],
         "qwen_reference_mode": "official_multiref_with_vae_reference_latents",
-        "qwen_scene_workflow_mode": "dedicated_five_ref_no_canvas_api_v1",
+        "qwen_scene_workflow_mode": "dedicated_three_ref_no_canvas_ab_v1",
         "qwen_scene_workflow_file": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
         "qwen_wh_ratio": scene["wh_ratio"],
         "qwen_ratio_follow": scene["ratio_follow"],
