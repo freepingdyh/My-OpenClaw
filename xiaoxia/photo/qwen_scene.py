@@ -14,10 +14,10 @@ from types import SimpleNamespace
 import discord
 from discord import app_commands
 
-from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
+from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.0.2-qwen-photo-scene-v3-fixed-refs"
+VERSION = "1.1.0-qwen-photo-scene-v4-five-ref-scene"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -28,15 +28,22 @@ _REF_FILES = {
     "body_clothed": "image_6_body_clothed.png",
 }
 
-_QWEN_SCENE_CORE = """QWEN PHOTO — NEW SCENE FROM REFERENCES
+_QWEN_SCENE_CORE = """QWEN PHOTO — NEW SCENE FROM FIVE REFERENCES
 
-<image1>, <image3>, and <image6> are reference images of the SAME single adult woman.
-They are identity and body-proportion references only. They are NOT an edit canvas. Do not copy their
-original backgrounds, poses, clothing, framing, or composition unless explicitly requested.
+All five reference images show the SAME single adult woman.
+They are identity/body-consistency references only, not an edit target and not a canvas.
+
+Reference roles:
+- <image1>: full-body reference for overall height, long-legged proportions, waist, and body scale.
+- <image2>: front-face identity reference.
+- <image3>: 45-degree face identity reference.
+- <image4>: half-body reference for upper-body proportions.
+- <image5>: clothed body reference for silhouette and overall body consistency.
 
 Create a completely NEW photorealistic scene containing exactly ONE woman: the same woman shown in the
-references. Preserve her recognizable adult facial identity, long brown-hair identity, fair skin, tall and
-slender overall build, long-legged proportions, defined waist, and established overall body identity.
+references. Preserve her recognizable identity and established body proportions, but DO NOT copy any
+reference pose, background, clothing, framing, camera angle, or composition unless the user explicitly
+requests it.
 
 The COMPILED SCENE block defines environment, lighting, camera/framing, and mood.
 The SUBJECT DELTA block is direct user authority for the woman's action, pose, expression, and story beat.
@@ -141,23 +148,14 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     )
     prompt = _build_qwen_prompt(scene["compiled_scene_prompt"], subject_delta)
 
-    # Keep the RunPod request below its 10 MiB body limit.
-    # image_3_face_45.png and image_6_body_clothed.png are already staged inside
-    # the worker at cold start, so do NOT upload them again as base64 payload data.
-    # For the first scene-generation baseline we use:
-    #   image1 = dynamic face-front ref
-    #   image3 = worker-staged 45-degree face ref
-    #   image6 = worker-staged clothed body ref
-    # Slots 2/4/5 are disabled to avoid duplicate/unclothed references.
-    image1 = refs["face_front"].read_bytes()
-
+    # True reference-scene path: all five refs are worker-staged and remain
+    # vision references only. No reference image is uploaded as an edit canvas,
+    # and the scene job removes VAE reference-latent injection.
     seed = secrets.randbelow(2**63 - 1)
-    results = await run_qwen21(
-        image1,
+    results = await run_qwen21_reference_scene(
         prompt=prompt,
         seed=seed,
         steps=40,
-        disabled_image_slots={2, 4, 5},
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
@@ -205,10 +203,14 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "qwen_seed": seed,
         "qwen_steps": 40,
         "qwen_reference_set": [
+            _REF_FILES["body_full"],
             _REF_FILES["face_front"],
             _REF_FILES["face_45"],
+            _REF_FILES["body_half"],
             _REF_FILES["body_clothed"],
         ],
+        "qwen_reference_mode": "vision_only_no_vae_reference_latents",
+        "qwen_scene_workflow_mode": "five_ref_fresh_latent",
         "qwen_scene_delta": scene_delta,
         "qwen_subject_delta": subject_delta,
         "qwen_camera_delta": camera_delta,
