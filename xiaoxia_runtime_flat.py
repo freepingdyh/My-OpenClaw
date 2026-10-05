@@ -69,6 +69,7 @@ from xiaoxia.photo.repair_reference_patch import install_repair_reference_patch
 from xiaoxia.photo.seedream_prompt_boundary import install_seedream_photo_prompt_boundary
 from xiaoxia.photo.special_intimacy import install_special_intimacy_button
 from xiaoxia.photo.qwen_scene import install_qwen_photo_scene
+from xiaoxia.photo.qwen_scene_trace import install_qwen_scene_trace
 from xiaoxia.photo.beauty_portrait import install_beauty_portrait
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
@@ -207,6 +208,7 @@ def _activate_flat():
     activated["qwen_lab"] = install_qwen_lab(app)
     activated["qwen_fix"] = install_qwen_fix(app)
     activated["qwen_photo_scene"] = install_qwen_photo_scene(app)
+    activated["qwen_scene_trace"] = install_qwen_scene_trace(app)
     activated["director_signature"] = install_director_signature_fix(app)
     activated["photo_pose_input"] = install_photo_pose_input(app)
     activated["repair"] = install_repair_reference_patch(app)
@@ -217,7 +219,7 @@ def _activate_flat():
     # UI-only final wrapper: retire unused buttons, preserve H3, add 收藏寫真.
     activated["beauty_portrait"] = install_beauty_portrait(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
-    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab,qwen_fix,qwen_photo_scene")
+    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab,qwen_fix,qwen_photo_scene,qwen_scene_trace")
     return activated
 
 _ACTIVATED = _activate_flat()
