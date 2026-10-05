@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.2.0-qwen-scene-trace-v3-official-multiref"
+VERSION = "1.3.0-qwen-scene-trace-v4-official-no-canvas"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -53,8 +53,9 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
                 "image5": "image_6_body_clothed.png",
             },
             "reference_mode_expected": "official_multiref_with_vae_reference_latents",
-            "scene_workflow_mode_expected": "five_ref_new_scene",
+            "scene_workflow_mode_expected": "five_ref_official_no_canvas",
             "edit_target_expected": False,
+            "ratio_follow_expected": "",
             "steps_expected": 40,
         }
         _write(trace)
@@ -78,7 +79,10 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
         trace.update({
             "status": "completed",
             "completed_at": app_obj.datetime.now(app_obj.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
-            "compiled_scene_prompt": result.get("qwen_compiled_scene_prompt"),
+            "rewritten_prompt": result.get("qwen_compiled_scene_prompt"),
+            "final_qwen_prompt": result.get("qwen_final_prompt"),
+            "wh_ratio": result.get("qwen_wh_ratio"),
+            "ratio_follow": result.get("qwen_ratio_follow"),
             "reference_set": result.get("qwen_reference_set"),
             "reference_mode": result.get("qwen_reference_mode"),
             "scene_workflow_mode": result.get("qwen_scene_workflow_mode"),
