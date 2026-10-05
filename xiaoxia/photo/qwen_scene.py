@@ -16,7 +16,7 @@ from discord import app_commands
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 
-VERSION = "1.2.0-qwen-photo-scene-v7-official-no-canvas"
+VERSION = "1.2.1-qwen-photo-scene-v8-official-25steps"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -176,7 +176,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     results = await run_qwen21_reference_scene(
         prompt=prompt,
         seed=seed,
-        steps=40,
+        steps=25,
         wh_ratio=scene["wh_ratio"],
         extra_images={
             _REF_FILES["body_full"]: refs["body_full"].read_bytes(),
@@ -227,7 +227,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "seedream_model_label": "Qwen-Image-2.1",
         "qwen_model_label": "Qwen-Image-2.1",
         "qwen_seed": seed,
-        "qwen_steps": 40,
+        "qwen_steps": 25,
         "qwen_reference_set": [
             _REF_FILES["body_full"],
             _REF_FILES["face_front"],
