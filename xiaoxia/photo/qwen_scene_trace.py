@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.4.1-qwen-scene-trace-v7-staged-refs"
+VERSION = "1.5.0-qwen-scene-trace-v8-special-delta"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -33,7 +33,7 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
     if getattr(original, "_xiaoxia_qwen_scene_trace_installed", False):
         return {"version": VERSION, "installed": False, "trace_path": str(TRACE_PATH)}
 
-    async def traced_generate(app_obj: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str) -> dict:
+    async def traced_generate(app_obj: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str, special_delta: str = "") -> dict:
         trace = {
             "mode": "reference_scene_generation",
             "status": "starting",
@@ -45,6 +45,9 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "subject_delta_present": bool(str(subject_delta or "").strip()),
             "subject_delta_length": len(str(subject_delta or "")),
             "subject_delta_sha256": _fingerprint(subject_delta),
+            "special_delta_present": bool(str(special_delta or "").strip()),
+            "special_delta_length": len(str(special_delta or "")),
+            "special_delta_sha256": _fingerprint(special_delta),
             "reference_slots_expected": {
                 "image1": "image_4_body_full.png",
                 "image2": "image_2_face_front.png",
@@ -68,6 +71,7 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
                 subject_delta=subject_delta,
                 camera_delta=camera_delta,
                 mood_delta=mood_delta,
+                special_delta=special_delta,
             )
         except Exception as exc:
             trace["status"] = "failed"
@@ -95,6 +99,7 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "scene_summary": result.get("scene_summary"),
             "camera_summary": result.get("camera_summary"),
             "mood_summary": result.get("mood_summary"),
+            "special_delta": result.get("qwen_special_delta"),
         })
         _write(trace)
         result["qwen_scene_trace_path"] = str(TRACE_PATH)
