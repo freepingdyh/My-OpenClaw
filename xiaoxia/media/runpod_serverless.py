@@ -216,6 +216,21 @@ def build_qwen21_job(
         }
     }
 
+def _size_from_ratio(wh_ratio: str, *, megapixels: float = 1.0) -> tuple[int, int]:
+    raw = str(wh_ratio or "").strip()
+    try:
+        left, right = raw.split(":", 1)
+        rw, rh = float(left), float(right)
+        if rw <= 0 or rh <= 0:
+            raise ValueError
+    except Exception:
+        rw, rh = 3.0, 4.0
+
+    total = float(megapixels) * 1024.0 * 1024.0
+    width = round((total * rw / rh) ** 0.5 / 32.0) * 32
+    height = round((total * rh / rw) ** 0.5 / 32.0) * 32
+    return max(32, int(width)), max(32, int(height))
+
 
 def build_qwen21_reference_scene_job(
     *,
@@ -223,16 +238,17 @@ def build_qwen21_reference_scene_job(
     seed: int | None = None,
     steps: int | None = None,
     negative_prompt: str | None = None,
+    wh_ratio: str = "3:4",
     extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Build a five-reference NEW-SCENE job from the existing Qwen 2.1 workflow.
 
-    The production workflow is used as a node/model scaffold. For reference
-    scene generation we:
+    The production workflow is used as a node/model scaffold. For official
+    no-canvas reference-scene generation we:
       - map five reference files into image_1..image_5;
-      - KEEP the encoder VAE connection so Qwen receives the official
-        multi-reference latent conditioning used for identity preservation;
-      - sample from the encoder's empty output latent for a new composition;
+      - keep the encoder VAE connection for Qwen 2.1 multi-reference identity conditioning;
+      - create an explicit EmptyLatentImage at the requested no-canvas aspect ratio;
+      - route KSampler latent_image to that fresh latent instead of following a reference;
       - disable image_6.
     """
     workflow = copy.deepcopy(load_qwen21_workflow())
@@ -271,7 +287,7 @@ def build_qwen21_reference_scene_job(
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
 
-    _, sampler = _single_node(workflow, "KSampler")
+    sampler_id, sampler = _single_node(workflow, "KSampler")
     sampler_inputs = sampler.get("inputs")
     if not isinstance(sampler_inputs, dict):
         raise RunPodServerlessError("KSampler inputs are invalid")
@@ -279,6 +295,24 @@ def build_qwen21_reference_scene_job(
         sampler_inputs["seed"] = int(seed)
     if steps is not None:
         sampler_inputs["steps"] = int(steps)
+
+    # Official Qwen no-canvas scene generation chooses an output ratio rather
+    # than following a reference image. ComfyUI's official Qwen 2.1 t2i
+    # template feeds KSampler from EmptyLatentImage, so mirror that here.
+    width, height = _size_from_ratio(wh_ratio)
+    latent_node_id = "990001"
+    while latent_node_id in workflow:
+        latent_node_id = str(int(latent_node_id) + 1)
+    workflow[latent_node_id] = {
+        "inputs": {
+            "width": width,
+            "height": height,
+            "batch_size": 1,
+        },
+        "class_type": "EmptyLatentImage",
+        "_meta": {"title": "Qwen Scene No-Canvas Latent"},
+    }
+    sampler_inputs["latent_image"] = [latent_node_id, 0]
 
     images: list[dict[str, str]] = []
     for name, blob in (extra_images or {}).items():
@@ -315,6 +349,7 @@ async def run_qwen21_reference_scene(
     seed: int | None = None,
     steps: int | None = None,
     negative_prompt: str | None = None,
+    wh_ratio: str = "3:4",
     extra_images: dict[str, bytes] | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
@@ -324,6 +359,7 @@ async def run_qwen21_reference_scene(
         seed=seed,
         steps=steps,
         negative_prompt=negative_prompt,
+        wh_ratio=wh_ratio,
         extra_images=extra_images,
     )
     submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
