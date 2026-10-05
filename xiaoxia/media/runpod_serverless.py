@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """RunPod Serverless client for Xiaoxia Qwen Image 2.1.
 
-This module is intentionally standalone and is NOT installed into
-xiaoxia_runtime_flat.py yet.
+Two API workflows are intentionally separate:
+- Edit/fix keeps using the production workflow on Zeabur persistent storage.
+- Reference-scene generation uses the dedicated repo workflow
+  xiaoxia/serverless/workflows/qwen21_reference_scene_api.json.
 
-The API-format ComfyUI workflow is owned by Zeabur persistent storage:
-    /data/memory/qwen21/workflows/xiaoxia_qwen21_special_v1_api.json
-
-Per request, only image_1 is uploaded dynamically. Fixed image_2-image_6
-are staged into /comfyui/input by the worker cold-start asset sync.
+Fixed identity references are staged into /comfyui/input by the worker
+cold-start asset sync. Scene generation sends no edit canvas and no per-request
+reference-image payload.
 """
 from __future__ import annotations
 
