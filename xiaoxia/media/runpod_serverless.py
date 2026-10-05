@@ -37,9 +37,10 @@ _FIXED_REFS = {
     "image_6_body_clothed.png",
 }
 
-# Reference-scene mode deliberately uses five staged references and no VAE
-# reference latents. This keeps the references in the Qwen vision path while
-# the TextEncodeQwenImage21 latent output remains a fresh/empty canvas.
+# Reference-scene mode uses the official Qwen 2.1 multi-reference conditioning:
+# five references are seen by the text encoder and, with VAE connected, are
+# also encoded as reference latents. The node still provides an empty output
+# latent for the newly generated composition.
 _SCENE_REF_ORDER = (
     "image_4_body_full_clothed.png",
     "image_2_face_front.png",
@@ -226,12 +227,12 @@ def build_qwen21_reference_scene_job(
 ) -> dict[str, Any]:
     """Build a five-reference NEW-SCENE job from the existing Qwen 2.1 workflow.
 
-    The production edit workflow is used only as a node/model scaffold. For
+    The production workflow is used as a node/model scaffold. For reference
     scene generation we:
-      - map five staged reference files into image_1..image_5;
-      - remove the encoder's VAE input, so refs stay vision-only and are not
-        injected as reference latents;
-      - keep the encoder's own zero latent as the sampling canvas;
+      - map five reference files into image_1..image_5;
+      - KEEP the encoder VAE connection so Qwen receives the official
+        multi-reference latent conditioning used for identity preservation;
+      - sample from the encoder's empty output latent for a new composition;
       - disable image_6.
     """
     workflow = copy.deepcopy(load_qwen21_workflow())
@@ -263,8 +264,8 @@ def build_qwen21_reference_scene_job(
     if not isinstance(encoder_inputs, dict):
         raise RunPodServerlessError("TextEncodeQwenImage21 inputs are invalid")
 
-    # Critical separation from edit mode: no VAE reference latents.
-    encoder_inputs.pop("vae", None)
+    # Keep VAE connected: Qwen-Image 2.1's official multi-reference path
+    # uses both visual/text-encoder references and reference latents.
     encoder_inputs.pop("images.image_6", None)
     encoder_inputs["prompt"] = str(prompt)
     if negative_prompt is not None:
