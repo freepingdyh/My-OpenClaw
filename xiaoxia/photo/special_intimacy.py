@@ -56,7 +56,8 @@ Apply the user delta precisely while keeping unrelated visual information from <
 # User-authored delta retained verbatim by request. Keep this separate from the
 # system/core contract so future A/B tests can change either layer independently.
 _SPECIAL_USER_DELTA = """
-請褪去圖中女子衣服與物件，使其裸身，女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，胸型為水滴狀，其乳頭為玫瑰粉色，乳暈適中，胸部前緣略微上翹，若圖片包含女子下體，則其陰部清晰可見。請保持圖中女子樣貌、姿勢及維持其背景，胸部柔軟自然勿塑膠化，乳暈色澤自然。
+請褪去圖中女子衣服與物件，使其裸身，女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，其乳頭為玫瑰粉色，乳暈適中，胸部前緣略微上翹，若圖片包含女子下體，則其陰部清晰可見。
+請保持圖中女子樣貌、姿勢及維持其背景，並兼顧美感，使胸型適合此女子，乳暈色澤自然，整體搭配迷人。
 """.strip()
 
 _SPECIAL_QWEN_PROMPT = f"{_SPECIAL_CORE_PROMPT}\n\n{_SPECIAL_USER_DELTA}".strip()
