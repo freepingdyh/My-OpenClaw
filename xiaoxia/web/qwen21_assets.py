@@ -23,7 +23,9 @@ _ALLOWED_REFS = {
     "image_2_face_front.png",
     "image_3_face_45.png",
     "image_4_body_full.png",
+    "image_4_body_full_clothed.png",
     "image_5_body_half.png",
+    "image_5_body_half_clothed.png",
     "image_6_body_clothed.png",
     # qwen2.1_special_v2 reference assets selected through /qwen_lab
     "image_4_body_full_v2.png",
