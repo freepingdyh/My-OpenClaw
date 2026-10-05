@@ -222,6 +222,7 @@ def build_qwen21_reference_scene_job(
     seed: int | None = None,
     steps: int | None = None,
     negative_prompt: str | None = None,
+    extra_images: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Build a five-reference NEW-SCENE job from the existing Qwen 2.1 workflow.
 
@@ -278,11 +279,31 @@ def build_qwen21_reference_scene_job(
     if steps is not None:
         sampler_inputs["steps"] = int(steps)
 
+    images: list[dict[str, str]] = []
+    for name, blob in (extra_images or {}).items():
+        clean_name = str(name or "").strip()
+        if clean_name not in _SCENE_REF_ORDER:
+            raise RunPodServerlessError(
+                f"Invalid reference-scene extra image name: {clean_name!r}"
+            )
+        if not blob:
+            raise RunPodServerlessError(
+                f"Reference-scene extra image is empty: {clean_name}"
+            )
+        images.append(
+            {
+                "name": clean_name,
+                "image": "data:image/png;base64,"
+                + base64.b64encode(blob).decode("ascii"),
+            }
+        )
+
     return {
         "input": {
             "workflow": workflow,
-            # All five refs are staged in /comfyui/input at worker cold start.
-            "images": [],
+            # Legacy refs are worker-staged. New clothed refs may be uploaded
+            # per request until all workers have the refreshed cold-start set.
+            "images": images,
         }
     }
 
@@ -293,6 +314,7 @@ async def run_qwen21_reference_scene(
     seed: int | None = None,
     steps: int | None = None,
     negative_prompt: str | None = None,
+    extra_images: dict[str, bytes] | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -301,6 +323,7 @@ async def run_qwen21_reference_scene(
         seed=seed,
         steps=steps,
         negative_prompt=negative_prompt,
+        extra_images=extra_images,
     )
     submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
     job_id = str(submitted.get("id") or "").strip()
