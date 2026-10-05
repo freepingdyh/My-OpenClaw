@@ -17,7 +17,7 @@ from discord import app_commands
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA
 
-VERSION = "1.1.0-qwen-photo-scene-v4-five-ref-scene"
+VERSION = "1.1.1-qwen-photo-scene-v5-upload-two-new-refs"
 
 _REFS_DIR = Path("/data/memory/qwen21/refs")
 _REF_FILES = {
@@ -156,6 +156,10 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         prompt=prompt,
         seed=seed,
         steps=40,
+        extra_images={
+            _REF_FILES["body_full"]: refs["body_full"].read_bytes(),
+            _REF_FILES["body_half"]: refs["body_half"].read_bytes(),
+        },
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
