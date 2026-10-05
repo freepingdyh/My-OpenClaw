@@ -37,6 +37,17 @@ _FIXED_REFS = {
     "image_6_body_clothed.png",
 }
 
+# Reference-scene mode deliberately uses five staged references and no VAE
+# reference latents. This keeps the references in the Qwen vision path while
+# the TextEncodeQwenImage21 latent output remains a fresh/empty canvas.
+_SCENE_REF_ORDER = (
+    "image_4_body_full_clothed.png",
+    "image_2_face_front.png",
+    "image_3_face_45.png",
+    "image_5_body_half_clothed.png",
+    "image_6_body_clothed.png",
+)
+
 
 class RunPodServerlessError(RuntimeError):
     pass
@@ -203,6 +214,113 @@ def build_qwen21_job(
             "images": images,
         }
     }
+
+
+def build_qwen21_reference_scene_job(
+    *,
+    prompt: str,
+    seed: int | None = None,
+    steps: int | None = None,
+    negative_prompt: str | None = None,
+) -> dict[str, Any]:
+    """Build a five-reference NEW-SCENE job from the existing Qwen 2.1 workflow.
+
+    The production edit workflow is used only as a node/model scaffold. For
+    scene generation we:
+      - map five staged reference files into image_1..image_5;
+      - remove the encoder's VAE input, so refs stay vision-only and are not
+        injected as reference latents;
+      - keep the encoder's own zero latent as the sampling canvas;
+      - disable image_6.
+    """
+    workflow = copy.deepcopy(load_qwen21_workflow())
+
+    load_nodes = _nodes_of_type(workflow, "LoadImage")
+    by_name = {
+        str((node.get("inputs") or {}).get("image") or ""): node
+        for _, node in load_nodes
+    }
+    scaffold_names = (
+        _DYNAMIC_IMAGE_NAME,
+        "image_2_face_front.png",
+        "image_3_face_45.png",
+        "image_4_body_full.png",
+        "image_5_body_half.png",
+    )
+    missing = [name for name in scaffold_names if name not in by_name]
+    if missing:
+        raise RunPodServerlessError(
+            "Reference-scene scaffold is missing LoadImage inputs: "
+            + ", ".join(missing)
+        )
+
+    for source_name, ref_name in zip(scaffold_names, _SCENE_REF_ORDER):
+        by_name[source_name]["inputs"]["image"] = ref_name
+
+    _, encoder = _single_node(workflow, "TextEncodeQwenImage21")
+    encoder_inputs = encoder.get("inputs")
+    if not isinstance(encoder_inputs, dict):
+        raise RunPodServerlessError("TextEncodeQwenImage21 inputs are invalid")
+
+    # Critical separation from edit mode: no VAE reference latents.
+    encoder_inputs.pop("vae", None)
+    encoder_inputs.pop("images.image_6", None)
+    encoder_inputs["prompt"] = str(prompt)
+    if negative_prompt is not None:
+        encoder_inputs["negative_prompt"] = str(negative_prompt)
+
+    _, sampler = _single_node(workflow, "KSampler")
+    sampler_inputs = sampler.get("inputs")
+    if not isinstance(sampler_inputs, dict):
+        raise RunPodServerlessError("KSampler inputs are invalid")
+    if seed is not None:
+        sampler_inputs["seed"] = int(seed)
+    if steps is not None:
+        sampler_inputs["steps"] = int(steps)
+
+    return {
+        "input": {
+            "workflow": workflow,
+            # All five refs are staged in /comfyui/input at worker cold start.
+            "images": [],
+        }
+    }
+
+
+async def run_qwen21_reference_scene(
+    *,
+    prompt: str,
+    seed: int | None = None,
+    steps: int | None = None,
+    negative_prompt: str | None = None,
+    timeout_seconds: float = 600.0,
+    poll_seconds: float = 2.0,
+) -> list[tuple[str, bytes]]:
+    job = build_qwen21_reference_scene_job(
+        prompt=prompt,
+        seed=seed,
+        steps=steps,
+        negative_prompt=negative_prompt,
+    )
+    submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
+    job_id = str(submitted.get("id") or "").strip()
+    if not job_id:
+        raise RunPodServerlessError(
+            f"RunPod submit response has no job id: {submitted}"
+        )
+
+    completed = await wait_for_job(
+        job_id,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+    state = str(completed.get("status") or "").upper()
+    if state != "COMPLETED":
+        raise RunPodServerlessError(
+            f"RunPod job ended with status={state or 'UNKNOWN'} "
+            f"job_id={job_id} error={completed.get('error')}"
+        )
+    return decode_qwen21_output_images(completed)
 
 
 def build_qwen21_job_from_path(
