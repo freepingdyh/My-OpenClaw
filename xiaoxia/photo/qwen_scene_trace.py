@@ -54,7 +54,7 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             },
             "reference_mode_expected": "vision_only_no_vae_reference_latents",
             "scene_workflow_mode_expected": "five_ref_fresh_latent",
-            "edit_target_expected": false,
+            "edit_target_expected": False,
             "steps_expected": 40,
         }
         _write(trace)
