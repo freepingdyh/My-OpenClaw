@@ -46,10 +46,10 @@ _FIXED_REFS = {
 # also encoded as reference latents. The node still provides an empty output
 # latent for the newly generated composition.
 _SCENE_REF_ORDER = (
-    "image_4_body_full_clothed.png",
+    "image_4_body_full.png",
     "image_2_face_front.png",
     "image_3_face_45.png",
-    "image_5_body_half_clothed.png",
+    "image_5_body_half.png",
     "image_6_body_clothed.png",
 )
 
