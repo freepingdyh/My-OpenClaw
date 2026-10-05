@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.5.0-qwen-scene-trace-v8-special-delta"
+VERSION = "1.6.0-qwen-scene-trace-v9-three-ref-ab"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -52,11 +52,9 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
                 "image1": "image_4_body_full.png",
                 "image2": "image_2_face_front.png",
                 "image3": "image_3_face_45.png",
-                "image4": "image_5_body_half.png",
-                "image5": "image_6_body_clothed.png",
             },
             "reference_mode_expected": "official_multiref_with_vae_reference_latents",
-            "scene_workflow_mode_expected": "dedicated_five_ref_no_canvas_api_v1",
+            "scene_workflow_mode_expected": "dedicated_three_ref_no_canvas_ab_v1",
             "scene_workflow_file_expected": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
             "edit_target_expected": False,
             "ratio_follow_expected": "",
