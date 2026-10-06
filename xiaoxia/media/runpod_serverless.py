@@ -179,20 +179,6 @@ def build_qwen21_job(
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
 
-    request_images = []
-    if outfit_image_bytes:
-        outfit_name = "qwen_scene_outfit_ref.png"
-        workflow["35"] = {
-            "class_type": "LoadImage",
-            "inputs": {"image": outfit_name},
-            "_meta": {"title": "Optional Outfit Reference"},
-        }
-        encoder_inputs["images.image_4"] = ["35", 0]
-        request_images.append({
-            "name": outfit_name,
-            "image": "data:image/png;base64," + base64.b64encode(outfit_image_bytes).decode("ascii"),
-        })
-
     if seed is not None or steps is not None:
         _, sampler = _single_node(workflow, "KSampler")
         sampler_inputs = sampler.get("inputs")
@@ -319,6 +305,20 @@ def build_qwen21_reference_scene_job(
     encoder_inputs["prompt"] = str(prompt)
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
+
+    request_images = []
+    if outfit_image_bytes:
+        outfit_name = "qwen_scene_outfit_ref.png"
+        workflow["35"] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": outfit_name},
+            "_meta": {"title": "Optional Outfit Reference"},
+        }
+        encoder_inputs["images.image_4"] = ["35", 0]
+        request_images.append({
+            "name": outfit_name,
+            "image": "data:image/png;base64," + base64.b64encode(outfit_image_bytes).decode("ascii"),
+        })
 
     _, latent = _single_node(workflow, "EmptyLatentImage")
     latent_inputs = latent.get("inputs")
