@@ -22,7 +22,7 @@ import discord
 
 from xiaoxia.photo.qwen_scene import generate_qwen_scene_from_prompt
 
-VERSION = "1.0.3-love-qwen-fallback-button-owner-fix"
+VERSION = "1.1.0-love-qwen-fallback-sanitized-prompt"
 
 _PENDING_BY_TASK: dict[int, dict] = {}
 _LATEST_PENDING: dict | None = None
@@ -143,6 +143,95 @@ def _wardrobe_item(app: Any, context: Dict[str, Any]) -> dict | None:
     return None
 
 
+def _sanitize_seedream_prompt_for_qwen(prompt_text: str, wardrobe_id: str = "") -> str:
+    """Preserve Xiaoxia's authored scene while removing Seedream-only scaffolding.
+
+    This is intentionally deterministic: no Gemini rewrite and no creative
+    reinterpretation. It removes provider/reference/meta wrappers, retry-style
+    layers, and duplicated role instructions that can encourage Qwen to
+    instantiate multiple versions of the same subject.
+    """
+    raw = str(prompt_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return ""
+
+    # Anything after these markers belongs to Seedream retry/style fallback, not
+    # to Xiaoxia's original scene intent. Keep only the original contract above it.
+    cut = len(raw)
+    for marker in (
+        "SAFETY-PRESERVING STYLE LAYER",
+        "ULTIMATE SAFE STYLE LAYER",
+        "STYLE DESCRIPTION TO RENDER:",
+    ):
+        pos = raw.find(marker)
+        if pos >= 0:
+            cut = min(cut, pos)
+    raw = raw[:cut].strip()
+
+    kept: list[str] = []
+    removed = 0
+    for original_line in raw.split("\n"):
+        line = original_line.strip()
+        if not line:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+
+        upper = line.upper()
+        if (
+            re.match(r"^REFERENCES?\s*:", line, flags=re.I)
+            or re.match(r"^XIAOXIA\s+BODY\s+IDENTITY\b", line, flags=re.I)
+            or re.match(r"^TITLE\s*\+\s*SCENE\b", line, flags=re.I)
+            or re.match(r"^IDENTITY\s*:", line, flags=re.I)
+            or re.match(r"^PEOPLE\s*:", line, flags=re.I)
+            or re.match(r"^PRIORITY\s*:", line, flags=re.I)
+            or re.match(r"^RENDER\s+THIS\s+WITH\b", line, flags=re.I)
+            or re.match(r"^QUALITY\s*:", line, flags=re.I)
+            or upper.startswith("LOVE INTENT SOLO RULES:")
+            or upper.startswith("LOVE INTENT POSE RULES:")
+            or upper.startswith("LOVE INTENT OUTFIT LOCK:")
+            or upper.startswith("OUTFIT CONTINUITY:")
+            or re.search(r"\bFIGURES?\s*\d+(?:\s*[-–]\s*\d+)?\b", line, flags=re.I)
+        ):
+            removed += 1
+            continue
+
+        # "Request:" is Seedream wrapper text; keep the actual authored sentence.
+        if re.match(r"^REQUEST\s*:", line, flags=re.I):
+            line = re.sub(r"^REQUEST\s*:\s*", "", line, flags=re.I).strip()
+            if not line:
+                removed += 1
+                continue
+
+        kept.append(line)
+
+    while kept and kept[-1] == "":
+        kept.pop()
+
+    authored = "\n".join(kept).strip()
+    single_subject = (
+        "QWEN LOVE INTENT SCENE CONTRACT:\n"
+        "Create exactly ONE final Xiaoxia in the image. All identity references describe the SAME single woman; "
+        "never instantiate them as separate people, alternate versions, background copies, partial bodies, or overlapping duplicates.\n"
+        "Do not create simultaneous clothed/unclothed variants of Xiaoxia. Resolve every reference into one coherent final subject.\n"
+        "Preserve the authored scene, action, expression, camera intent and mood below without inventing another person."
+    )
+    wardrobe = str(wardrobe_id or "").strip().upper()
+    if wardrobe:
+        single_subject += (
+            f"\nWardrobe selection: {wardrobe}. If an outfit reference image is supplied, "
+            "use it only as clothing authority for that same single Xiaoxia, never as another subject."
+        )
+
+    sanitized = (single_subject + ("\n\n" + authored if authored else "")).strip()
+    print(
+        f"🧹 [LOVE_QWEN_PROMPT_SANITIZED] version={VERSION} "
+        f"raw_chars={len(prompt_text or '')} sanitized_chars={len(sanitized)} "
+        f"removed_lines={removed} wardrobe={wardrobe or '-'}"
+    )
+    return sanitized
+
+
 async def _send_qwen_result(app: Any, interaction: discord.Interaction, source: dict, result: dict) -> None:
     db = app.load_memory()
     db.insert(0, app._photo_db_payload(result, type_override=app._context_db_type(result)))
@@ -182,15 +271,20 @@ class LoveQwenFallbackView(discord.ui.View):
     async def use_qwen(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
         source = dict(self.pending.get("context") or {})
-        prompt = _prompt_from_context(source)
-        if not prompt:
+        raw_prompt = _prompt_from_context(source)
+        if not raw_prompt:
             await interaction.followup.send("⚠️ 找不到小俠原本的愛意提示詞，這次先不改走 Qwen。", ephemeral=True)
             return
 
         item = _wardrobe_item(self.app, source)
         wid = _wardrobe_id_from_context(source)
+        prompt = _sanitize_seedream_prompt_for_qwen(raw_prompt, wardrobe_id=wid)
+        if not prompt:
+            await interaction.followup.send("⚠️ 小俠原本的愛意提示詞整理後為空，這次先不改走 Qwen。", ephemeral=True)
+            return
+
         status = await interaction.followup.send(
-            "🧪 正在沿用小俠原本的愛意構想，改用 RunPod + Qwen-2.1 生成…",
+            "🧪 正在保留小俠原本的愛意構想、整理 Seedream 專用語法後，改用 RunPod + Qwen-2.1 生成…",
             wait=True,
         )
         try:
@@ -201,6 +295,10 @@ class LoveQwenFallbackView(discord.ui.View):
                 wardrobe_item=item,
                 wh_ratio=str(source.get("qwen_wh_ratio") or source.get("wh_ratio") or "3:4"),
             )
+            result["love_qwen_prompt_sanitized"] = True
+            result["love_qwen_prompt_sanitizer_version"] = VERSION
+            result["love_qwen_original_prompt_chars"] = len(raw_prompt)
+            result["love_qwen_sanitized_prompt"] = prompt
             await _send_qwen_result(self.app, interaction, source, result)
             try:
                 await status.delete()
