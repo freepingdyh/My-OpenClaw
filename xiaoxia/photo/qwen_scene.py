@@ -19,7 +19,7 @@ from PIL import Image
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.7.0-qwen-photo-scene-v14-love-fallback-ready"
+VERSION = "1.8.0-qwen-photo-scene-v15-love-single-identity-ref"
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
@@ -47,6 +47,25 @@ _QWEN_SCENE_CORE = """QWEN IMAGE 2.1 — 多參考圖新場景生成（無既有
 避免重複肢體、額外手腳、肢體融合或其他明顯人體結構錯誤。
 
 參考圖負責人物一致性；重寫提示詞負責新的場景與構圖。
+""".strip()
+
+
+_QWEN_LOVE_SINGLE_REF_CORE = """QWEN IMAGE 2.1 — 小俠愛意單一人物參考新場景生成
+
+這是全新的場景生成，不是既有圖片編修。
+
+參考圖角色：
+- <image1>：唯一的小俠人物參考圖。它提供同一位成年女性的臉部身分、全身比例與整體外觀一致性。
+- 若存在 <image2>：它是純服飾參考圖，只提供服裝款式、材質、顏色與剪裁；它不是人物參考。
+
+生成規則：
+- 最終畫面只出現一位小俠。
+- 不要生成第二位、第三位、背景副本、重疊人物、被遮住的另一位人物、局部人物或鏡中分身。
+- 不要把參考圖拆解成多個版本的小俠，也不要同時生成不同穿著版本的小俠。
+- <image1> 只負責人物身分與整體外觀一致性；後面的愛意提示詞負責場景、動作、表情、鏡頭與氣氛。
+- 若存在 <image2>，請讓唯一的小俠穿著 <image2> 的服裝；不要沿用 <image1> 原本的衣服。
+- 不要沿用參考圖原本的背景、姿勢或構圖。
+- 人體結構自然且完整，維持正常兩隻手臂與兩條腿，避免重複肢體、額外手腳、肢體融合或其他明顯人體結構錯誤。
 """.strip()
 
 
@@ -162,12 +181,17 @@ def _build_qwen_prompt(rewritten_prompt: str, special_delta: str = "") -> str:
 
 
 def _build_direct_qwen_prompt(prompt_text: str, *, has_outfit_ref: bool = False) -> str:
-    parts = [_QWEN_SCENE_CORE, str(prompt_text or "").strip()]
+    """Build the Love Intent Qwen prompt.
+
+    Love Intent intentionally uses a single Xiaoxia identity reference:
+    <image1> = full-body identity
+    <image2> = optional pure-clothing authority
+    """
+    parts = [_QWEN_LOVE_SINGLE_REF_CORE, str(prompt_text or "").strip()]
     if has_outfit_ref:
         parts.append(
-            "<image4> 是純服飾參考圖，只提供服裝款式、材質、顏色與剪裁；"
-            "不可把 <image4> 解讀成另一個人物，也不可改變 <image1>～<image3> 所代表的人物身分。"
-            "最終畫面仍只出現一位女子，並讓她穿著 <image4> 的服裝。"
+            "<image2> 是純服飾參考圖。請讓唯一的小俠穿著 <image2> 的服裝，"
+            "只取其服裝款式、材質、顏色與剪裁；不可把 <image2> 解讀成第二位人物。"
         )
     return _clean("\n\n".join(x for x in parts if str(x or "").strip()))
 
@@ -234,6 +258,8 @@ async def generate_qwen_scene_from_prompt(
 
     This path deliberately skips Gemini rewrite and special_delta. It is used by
     flows that already own their prompt semantics, such as Love Intent fallback.
+    Love Intent uses exactly one Xiaoxia identity ref (full body), plus an
+    optional pure-clothing ref.
     """
     source = dict(source_context or {})
     outfit_bytes = await _outfit_reference_png_bytes(app, wardrobe_item)
@@ -249,6 +275,7 @@ async def generate_qwen_scene_from_prompt(
         steps=25,
         wh_ratio=wh_ratio or "3:4",
         outfit_image_bytes=outfit_bytes,
+        reference_mode="single_identity_ref",
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
@@ -290,11 +317,9 @@ async def generate_qwen_scene_from_prompt(
         "qwen_steps": 25,
         "qwen_reference_set": [
             _REF_FILES["body_full"],
-            _REF_FILES["face_front"],
-            _REF_FILES["face_45"],
         ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else []),
-        "qwen_reference_mode": "three_identity_refs_plus_optional_outfit",
-        "qwen_scene_workflow_mode": "dedicated_three_ref_plus_optional_outfit_v1",
+        "qwen_reference_mode": "single_identity_ref_plus_optional_outfit",
+        "qwen_scene_workflow_mode": "love_single_identity_ref_plus_optional_outfit_v1",
         "qwen_scene_workflow_file": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
         "qwen_wh_ratio": wh_ratio or "3:4",
         "qwen_final_prompt": prompt,
