@@ -269,7 +269,7 @@ async def generate_qwen_scene_from_prompt(
 
     This path deliberately skips Gemini rewrite and special_delta. It is used by
     flows that already own their prompt semantics, such as Love Intent fallback.
-    Love Intent uses exactly one Xiaoxia identity ref (full body), plus an
+    Love Intent uses exactly one Xiaoxia identity ref (clothed master), plus an
     optional pure-clothing ref.
     """
     source = dict(source_context or {})
@@ -299,11 +299,11 @@ async def generate_qwen_scene_from_prompt(
         "original_prompt": str(prompt_text or "").strip(),
         "final_qwen_prompt": prompt,
         "reference_slots_expected": {
-            "image1": _REF_FILES["body_full"],
+            "image1": _REF_FILES["body_clothed"],
             "image2": "wardrobe_pure_clothing_ref" if outfit_bytes else None,
         },
         "reference_set_expected": [
-            _REF_FILES["body_full"],
+            _REF_FILES["body_clothed"],
         ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else []),
         "reference_mode_expected": "single_identity_ref_plus_optional_outfit",
         "scene_workflow_mode_expected": "love_single_identity_ref_plus_optional_outfit_v1",
@@ -372,7 +372,7 @@ async def generate_qwen_scene_from_prompt(
         "qwen_seed": seed,
         "qwen_steps": 25,
         "qwen_reference_set": [
-            _REF_FILES["body_full"],
+            _REF_FILES["body_clothed"],
         ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else []),
         "qwen_reference_mode": "single_identity_ref_plus_optional_outfit",
         "qwen_scene_workflow_mode": "love_single_identity_ref_plus_optional_outfit_v1",
