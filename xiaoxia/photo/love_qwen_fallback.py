@@ -22,12 +22,13 @@ import discord
 
 from xiaoxia.photo.qwen_scene import generate_qwen_scene_from_prompt
 
-VERSION = "1.0.0-love-qwen-fallback"
+VERSION = "1.0.1-love-qwen-fallback-concrete-send"
 
 _PENDING_BY_TASK: dict[int, dict] = {}
 _LATEST_PENDING: dict | None = None
 _ORIGINAL_GENERATE = None
 _ORIGINAL_MESSAGEABLE_SEND = None
+_ORIGINAL_CHANNEL_SENDS: dict[type, Any] = {}
 
 
 def _is_love_context(context: Any) -> bool:
@@ -247,31 +248,53 @@ def install_love_qwen_fallback(app: Any) -> Dict[str, Any]:
     app._generate_photo_from_context = wrapped_generate
 
     # Existing Love Intent code owns its retry count and final failure wording.
-    # Intercept only that final outbound error card, replacing the long provider
-    # log with a concise user-confirmed Qwen option.
+    # The runtime emits the final error through concrete Discord channel classes,
+    # so patch both the base Messageable method and concrete channel send methods.
+    def _wrap_send(current_send):
+        async def wrapped_send(self, content=None, *args, **kwargs):
+            if _looks_like_love_failure_message(content):
+                pending = _pending_for_current_task()
+                if pending is not None:
+                    ctx = pending.get("context") or {}
+                    wid = _wardrobe_id_from_context(ctx)
+                    concise = (
+                        "⚠️ 小俠這次用 Seedream v4.5 表達愛意失敗了。\n"
+                        "要改用 RunPod + Qwen-2.1，沿用小俠原本的提示詞繼續生成嗎？"
+                    )
+                    if wid:
+                        concise += f"\n衣著：{wid}"
+                    kwargs["view"] = LoveQwenFallbackView(app, pending)
+                    print(
+                        f"💞 [LOVE_QWEN_FALLBACK_UI_INTERCEPTED] version={VERSION} "
+                        f"channel_type={type(self).__name__} wardrobe={wid or '-'}"
+                    )
+                    return await current_send(self, concise, *args, **kwargs)
+            return await current_send(self, content, *args, **kwargs)
+
+        wrapped_send._xiaoxia_love_qwen_fallback = True
+        wrapped_send._xiaoxia_love_qwen_fallback_original = current_send
+        return wrapped_send
+
     messageable = discord.abc.Messageable
     current_send = messageable.send
     _ORIGINAL_MESSAGEABLE_SEND = current_send
+    messageable.send = _wrap_send(current_send)
 
-    async def wrapped_send(self, content=None, *args, **kwargs):
-        if _looks_like_love_failure_message(content):
-            pending = _pending_for_current_task()
-            if pending is not None:
-                ctx = pending.get("context") or {}
-                wid = _wardrobe_id_from_context(ctx)
-                concise = (
-                    "⚠️ 小俠這次用 Seedream v4.5 表達愛意失敗了。\n"
-                    "要改用 RunPod + Qwen-2.1，沿用小俠原本的提示詞繼續生成嗎？"
-                )
-                if wid:
-                    concise += f"\n衣著：{wid}"
-                kwargs["view"] = LoveQwenFallbackView(app, pending)
-                return await current_send(self, concise, *args, **kwargs)
-        return await current_send(self, content, *args, **kwargs)
-
-    wrapped_send._xiaoxia_love_qwen_fallback = True
-    wrapped_send._xiaoxia_love_qwen_fallback_original = current_send
-    messageable.send = wrapped_send
+    for channel_cls in (
+        getattr(discord, "TextChannel", None),
+        getattr(discord, "Thread", None),
+        getattr(discord, "DMChannel", None),
+        getattr(discord, "GroupChannel", None),
+    ):
+        if channel_cls is None:
+            continue
+        concrete_send = getattr(channel_cls, "send", None)
+        if not callable(concrete_send):
+            continue
+        if getattr(concrete_send, "_xiaoxia_love_qwen_fallback", False):
+            continue
+        _ORIGINAL_CHANNEL_SENDS[channel_cls] = concrete_send
+        setattr(channel_cls, "send", _wrap_send(concrete_send))
 
     app._xiaoxia_love_qwen_fallback_installed = True
     print(f"✅ [LOVE_QWEN_FALLBACK_INSTALLED] version={VERSION}")
