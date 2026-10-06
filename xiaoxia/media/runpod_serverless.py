@@ -301,7 +301,7 @@ def build_qwen21_reference_scene_job(
         This remains the /photo Qwen behavior.
 
     reference_mode="single_identity_ref":
-        Keep only image_4_body_full.png as the sole Xiaoxia identity reference.
+        Keep only image_6_body_clothed.png as the sole Xiaoxia identity reference.
         If a pure-clothing image is provided, attach it as <image2>.
         This is the Love Intent path and intentionally avoids multiple Xiaoxia
         reference latents that may be instantiated as duplicate subjects.
@@ -318,14 +318,17 @@ def build_qwen21_reference_scene_job(
         raise RunPodServerlessError("Scene TextEncodeQwenImage21 inputs are invalid")
 
     if mode == _SCENE_REF_MODE_SINGLE:
-        # The base workflow is validated first, then pruned only for this job.
-        # image1 remains the full-body identity reference.
+        # The base workflow is validated first, then adapted only for this job.
+        # Love Intent uses the higher-quality clothed reference as image1.
         remove_filenames = {"image_2_face_front.png", "image_3_face_45.png"}
         for node_id, node in list(workflow.items()):
             if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
                 continue
-            filename = str((node.get("inputs") or {}).get("image") or "")
-            if filename in remove_filenames:
+            node_inputs = node.get("inputs") or {}
+            filename = str(node_inputs.get("image") or "")
+            if filename == "image_4_body_full.png":
+                node_inputs["image"] = "image_6_body_clothed.png"
+            elif filename in remove_filenames:
                 workflow.pop(node_id, None)
 
         encoder_inputs.pop("images.image_2", None)
@@ -372,7 +375,7 @@ def build_qwen21_reference_scene_job(
         "input": {
             "workflow": workflow,
             # Identity references are staged at worker cold start. In single
-            # identity mode only the full-body ref remains in the workflow.
+            # identity mode only image_6_body_clothed.png remains in the workflow.
             # The optional pure-clothing reference is uploaded per request.
             "images": request_images,
         }
