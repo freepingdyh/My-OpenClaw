@@ -10,6 +10,7 @@ import secrets
 import uuid
 from typing import Any, Dict
 from types import SimpleNamespace
+from pathlib import Path
 
 import aiohttp
 import discord
@@ -19,7 +20,17 @@ from PIL import Image
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.8.0-qwen-photo-scene-v15-love-single-identity-ref"
+VERSION = "1.8.1-qwen-photo-scene-v16-love-trace"
+
+LOVE_TRACE_PATH = Path("/data/memory/qwen21/meta/latest_love_scene.json")
+
+
+def _write_love_trace(payload: Dict[str, Any]) -> None:
+    LOVE_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LOVE_TRACE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, LOVE_TRACE_PATH)
+
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
@@ -268,16 +279,64 @@ async def generate_qwen_scene_from_prompt(
         has_outfit_ref=bool(outfit_bytes),
     )
 
+    wardrobe_id = str((wardrobe_item or {}).get("id") or source.get("wardrobe_id") or "").strip().upper()
+    wardrobe_name = str((wardrobe_item or {}).get("name") or source.get("wardrobe_name") or "").strip()
     seed = secrets.randbelow(2**63 - 1)
-    results = await run_qwen21_reference_scene(
-        prompt=prompt,
-        seed=seed,
-        steps=25,
-        wh_ratio=wh_ratio or "3:4",
-        outfit_image_bytes=outfit_bytes,
-        reference_mode="single_identity_ref",
-    )
+
+    trace = {
+        "mode": "love_intent_qwen_reference_scene",
+        "status": "starting",
+        "trace_version": VERSION,
+        "created_at": app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "source_mode": source.get("source_mode") or "love_intent",
+        "title": source.get("title") or source.get("photo_name") or "",
+        "scene_summary": source.get("scene_summary") or "",
+        "action_summary": source.get("action_summary") or "",
+        "mood_summary": source.get("mood_summary") or source.get("mood") or "",
+        "wardrobe_id": wardrobe_id,
+        "wardrobe_name": wardrobe_name,
+        "outfit_ref_used": bool(outfit_bytes),
+        "original_prompt": str(prompt_text or "").strip(),
+        "final_qwen_prompt": prompt,
+        "reference_slots_expected": {
+            "image1": _REF_FILES["body_full"],
+            "image2": "wardrobe_pure_clothing_ref" if outfit_bytes else None,
+        },
+        "reference_set_expected": [
+            _REF_FILES["body_full"],
+        ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else []),
+        "reference_mode_expected": "single_identity_ref_plus_optional_outfit",
+        "scene_workflow_mode_expected": "love_single_identity_ref_plus_optional_outfit_v1",
+        "scene_workflow_file_expected": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
+        "steps_expected": 25,
+        "wh_ratio_expected": wh_ratio or "3:4",
+        "seed": seed,
+        "special_delta": "",
+        "prompt_rewrite": False,
+    }
+    _write_love_trace(trace)
+
+    try:
+        results = await run_qwen21_reference_scene(
+            prompt=prompt,
+            seed=seed,
+            steps=25,
+            wh_ratio=wh_ratio or "3:4",
+            outfit_image_bytes=outfit_bytes,
+            reference_mode="single_identity_ref",
+        )
+    except Exception as exc:
+        trace["status"] = "failed"
+        trace["failed_at"] = app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        trace["error"] = f"{type(exc).__name__}: {exc}"
+        _write_love_trace(trace)
+        raise
+
     if not results:
+        trace["status"] = "failed"
+        trace["failed_at"] = app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        trace["error"] = "RunPodServerlessError: Qwen scene generation returned no image"
+        _write_love_trace(trace)
         raise RunPodServerlessError("Qwen scene generation returned no image")
 
     _, blob = results[0]
@@ -295,9 +354,6 @@ async def generate_qwen_scene_from_prompt(
             result = inherit(source, result, action="love_qwen_fallback")
         except Exception:
             result = dict(source)
-
-    wardrobe_id = str((wardrobe_item or {}).get("id") or source.get("wardrobe_id") or "").strip().upper()
-    wardrobe_name = str((wardrobe_item or {}).get("name") or source.get("wardrobe_name") or "").strip()
 
     result.update({
         "id": str(uuid.uuid4()),
@@ -330,6 +386,24 @@ async def generate_qwen_scene_from_prompt(
         "love_qwen_outfit_ref_used": bool(outfit_bytes),
         "love_qwen_prompt_rewrite": False,
     })
+
+    trace.update({
+        "status": "completed",
+        "completed_at": app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "result_url": local_url,
+        "result_filename": filename,
+        "reference_set": result.get("qwen_reference_set"),
+        "reference_mode": result.get("qwen_reference_mode"),
+        "scene_workflow_mode": result.get("qwen_scene_workflow_mode"),
+        "scene_workflow_file": result.get("qwen_scene_workflow_file"),
+        "wh_ratio": result.get("qwen_wh_ratio"),
+        "steps": result.get("qwen_steps"),
+        "love_qwen_outfit_ref_used": result.get("love_qwen_outfit_ref_used"),
+        "compiled_scene_prompt": result.get("qwen_compiled_scene_prompt"),
+        "final_qwen_prompt": result.get("qwen_final_prompt"),
+    })
+    _write_love_trace(trace)
+    result["qwen_love_scene_trace_path"] = str(LOVE_TRACE_PATH)
     return result
 
 
