@@ -306,7 +306,8 @@ class _QwenPhotoModal(discord.ui.Modal):
         self.special_delta = discord.ui.TextInput(
             label="特別要求（可清空）",
             style=discord.TextStyle.paragraph,
-            default=_DEFAULT_SPECIAL_DELTA,
+            default="女子高挑苗條，皮膚白皙，其上圍雄偉豐滿，其乳頭為玫瑰粉色，乳暈適中，胸部前緣略微上翹，並兼顧美感，使胸型適合此女子，乳暈色澤自然，整體搭配迷人。
+                    若圖片生成女子陰部，則其陰部為玫瑰粉色且清晰可見。",
             max_length=1800,
             required=False,
         )
