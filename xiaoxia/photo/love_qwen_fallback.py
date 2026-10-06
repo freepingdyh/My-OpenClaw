@@ -93,9 +93,9 @@ def _prompt_from_context(context: Dict[str, Any]) -> str:
     for key in (
         "love_intent_prompt",
         "love_prompt",
+        "authoritative_scene",
         "root_prompt_base",
         "prompt_base",
-        "authoritative_scene",
         "scene_text",
         "composition",
     ):
