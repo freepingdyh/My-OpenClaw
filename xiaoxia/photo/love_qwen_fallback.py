@@ -22,13 +22,15 @@ import discord
 
 from xiaoxia.photo.qwen_scene import generate_qwen_scene_from_prompt
 
-VERSION = "1.0.1-love-qwen-fallback-concrete-send"
+VERSION = "1.0.2-love-qwen-fallback-webhook-edit"
 
 _PENDING_BY_TASK: dict[int, dict] = {}
 _LATEST_PENDING: dict | None = None
 _ORIGINAL_GENERATE = None
 _ORIGINAL_MESSAGEABLE_SEND = None
 _ORIGINAL_CHANNEL_SENDS: dict[type, Any] = {}
+_ORIGINAL_WEBHOOK_SEND = None
+_ORIGINAL_MESSAGE_EDIT = None
 
 
 def _is_love_context(context: Any) -> bool:
@@ -295,6 +297,48 @@ def install_love_qwen_fallback(app: Any) -> Dict[str, Any]:
             continue
         _ORIGINAL_CHANNEL_SENDS[channel_cls] = concrete_send
         setattr(channel_cls, "send", _wrap_send(concrete_send))
+
+    # Background Love Intent generation is launched from a button interaction.
+    # Its terminal result may therefore be emitted via Interaction.followup
+    # (discord.Webhook.send) or by editing an existing status message rather
+    # than through channel.send. Cover those concrete exits too.
+    webhook_cls = getattr(discord, "Webhook", None)
+    if webhook_cls is not None:
+        webhook_send = getattr(webhook_cls, "send", None)
+        if callable(webhook_send) and not getattr(webhook_send, "_xiaoxia_love_qwen_fallback", False):
+            _ORIGINAL_WEBHOOK_SEND = webhook_send
+            setattr(webhook_cls, "send", _wrap_send(webhook_send))
+
+    message_cls = getattr(discord, "Message", None)
+    if message_cls is not None:
+        message_edit = getattr(message_cls, "edit", None)
+        if callable(message_edit) and not getattr(message_edit, "_xiaoxia_love_qwen_fallback", False):
+            _ORIGINAL_MESSAGE_EDIT = message_edit
+
+            async def wrapped_message_edit(self, *args, **kwargs):
+                content = kwargs.get("content")
+                if _looks_like_love_failure_message(content):
+                    pending = _pending_for_current_task()
+                    if pending is not None:
+                        ctx = pending.get("context") or {}
+                        wid = _wardrobe_id_from_context(ctx)
+                        concise = (
+                            "⚠️ 小俠這次用 Seedream v4.5 表達愛意失敗了。\n"
+                            "要改用 RunPod + Qwen-2.1，沿用小俠原本的提示詞繼續生成嗎？"
+                        )
+                        if wid:
+                            concise += f"\n衣著：{wid}"
+                        kwargs["content"] = concise
+                        kwargs["view"] = LoveQwenFallbackView(app, pending)
+                        print(
+                            f"💞 [LOVE_QWEN_FALLBACK_UI_INTERCEPTED_EDIT] version={VERSION} "
+                            f"message_id={getattr(self, 'id', None)} wardrobe={wid or '-'}"
+                        )
+                return await message_edit(self, *args, **kwargs)
+
+            wrapped_message_edit._xiaoxia_love_qwen_fallback = True
+            wrapped_message_edit._xiaoxia_love_qwen_fallback_original = message_edit
+            setattr(message_cls, "edit", wrapped_message_edit)
 
     app._xiaoxia_love_qwen_fallback_installed = True
     print(f"✅ [LOVE_QWEN_FALLBACK_INSTALLED] version={VERSION}")
