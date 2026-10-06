@@ -179,6 +179,20 @@ def build_qwen21_job(
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
 
+    request_images = []
+    if outfit_image_bytes:
+        outfit_name = "qwen_scene_outfit_ref.png"
+        workflow["35"] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": outfit_name},
+            "_meta": {"title": "Optional Outfit Reference"},
+        }
+        encoder_inputs["images.image_4"] = ["35", 0]
+        request_images.append({
+            "name": outfit_name,
+            "image": "data:image/png;base64," + base64.b64encode(outfit_image_bytes).decode("ascii"),
+        })
+
     if seed is not None or steps is not None:
         _, sampler = _single_node(workflow, "KSampler")
         sampler_inputs = sampler.get("inputs")
@@ -288,6 +302,7 @@ def build_qwen21_reference_scene_job(
     steps: int | None = None,
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
+    outfit_image_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Build a dedicated Qwen 2.1 three-reference NEW-SCENE job.
 
@@ -326,9 +341,9 @@ def build_qwen21_reference_scene_job(
     return {
         "input": {
             "workflow": workflow,
-            # The three references are staged at worker cold start.
-            # No request image is an edit canvas and no base64 references are uploaded.
-            "images": [],
+            # The three identity references are staged at worker cold start.
+            # An optional pure-clothing reference can be uploaded as image4.
+            "images": request_images,
         }
     }
 
@@ -339,6 +354,7 @@ async def run_qwen21_reference_scene(
     steps: int | None = None,
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
+    outfit_image_bytes: bytes | None = None,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -348,6 +364,7 @@ async def run_qwen21_reference_scene(
         steps=steps,
         negative_prompt=negative_prompt,
         wh_ratio=wh_ratio,
+        outfit_image_bytes=outfit_image_bytes,
     )
     submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
     job_id = str(submitted.get("id") or "").strip()
