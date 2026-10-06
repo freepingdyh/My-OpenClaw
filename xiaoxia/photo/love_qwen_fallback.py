@@ -22,7 +22,7 @@ import discord
 
 from xiaoxia.photo.qwen_scene import generate_qwen_scene_from_prompt
 
-VERSION = "1.0.2-love-qwen-fallback-webhook-edit"
+VERSION = "1.0.3-love-qwen-fallback-button-owner-fix"
 
 _PENDING_BY_TASK: dict[int, dict] = {}
 _LATEST_PENDING: dict | None = None
@@ -55,10 +55,14 @@ def _task_key() -> int:
 
 def _remember_pending(context: dict, msg: Any, exc: Exception) -> None:
     global _LATEST_PENDING
+    author = getattr(msg, "author", None)
+    owner_id = None
+    if author is not None and not bool(getattr(author, "bot", False)):
+        owner_id = getattr(author, "id", None)
     payload = {
         "context": dict(context or {}),
         "msg": msg,
-        "owner_id": getattr(getattr(msg, "author", None), "id", None),
+        "owner_id": owner_id,
         "error_type": type(exc).__name__,
         "error_text": str(exc),
         "created_mono": time.monotonic(),
@@ -164,9 +168,14 @@ class LoveQwenFallbackView(discord.ui.View):
         self.owner_id = pending.get("owner_id")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Love Intent generation often runs in a background task whose msg.author
+        # is the bot/status message rather than the human who approved the invite.
+        # Do not reject the confirmation button based on that stale author.
         if self.owner_id is not None and interaction.user.id != self.owner_id:
-            await interaction.response.send_message("這是大俠目前的小俠愛意生成選擇。", ephemeral=True)
-            return False
+            print(
+                f"⚠️ [LOVE_QWEN_OWNER_MISMATCH_IGNORED] version={VERSION} "
+                f"stored_owner={self.owner_id} click_user={interaction.user.id}"
+            )
         return True
 
     @discord.ui.button(label="改用 RunPod + Qwen-2.1", style=discord.ButtonStyle.primary, emoji="🧪")
