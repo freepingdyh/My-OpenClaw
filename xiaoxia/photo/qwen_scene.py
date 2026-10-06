@@ -2,6 +2,7 @@
 """Qwen Image 2.1 reference-scene mode for /photo."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -10,13 +11,15 @@ import uuid
 from typing import Any, Dict
 from types import SimpleNamespace
 
+import aiohttp
 import discord
 from discord import app_commands
+from PIL import Image
 
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.6.0-qwen-photo-scene-v13-three-ref-ab"
+VERSION = "1.7.0-qwen-photo-scene-v14-love-fallback-ready"
 
 _REF_FILES = {
     "face_front": "image_2_face_front.png",
@@ -156,6 +159,153 @@ def _build_qwen_prompt(rewritten_prompt: str, special_delta: str = "") -> str:
     if special:
         parts.append(special)
     return _clean("\n\n".join(parts))
+
+
+def _build_direct_qwen_prompt(prompt_text: str, *, has_outfit_ref: bool = False) -> str:
+    parts = [_QWEN_SCENE_CORE, str(prompt_text or "").strip()]
+    if has_outfit_ref:
+        parts.append(
+            "<image4> 是純服飾參考圖，只提供服裝款式、材質、顏色與剪裁；"
+            "不可把 <image4> 解讀成另一個人物，也不可改變 <image1>～<image3> 所代表的人物身分。"
+            "最終畫面仍只出現一位女子，並讓她穿著 <image4> 的服裝。"
+        )
+    return _clean("\n\n".join(x for x in parts if str(x or "").strip()))
+
+
+async def _outfit_reference_png_bytes(app: Any, wardrobe_item: dict | None) -> bytes | None:
+    if not isinstance(wardrobe_item, dict):
+        return None
+
+    candidates = []
+    local_path = str(wardrobe_item.get("reference_image_path") or "").strip()
+    if local_path:
+        candidates.append(local_path)
+
+    ref_url = str(
+        wardrobe_item.get("local_url")
+        or wardrobe_item.get("reference_item_url")
+        or ""
+    ).strip()
+
+    mapper = getattr(app, "_gallery_url_to_local_path", None)
+    if ref_url and callable(mapper):
+        try:
+            mapped = mapper(ref_url)
+        except Exception:
+            mapped = None
+        if mapped:
+            candidates.append(str(mapped))
+
+    raw = None
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            with open(candidate, "rb") as fh:
+                raw = fh.read()
+            if raw:
+                break
+
+    if raw is None and ref_url.startswith(("http://", "https://")):
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(ref_url) as response:
+                if response.status == 200:
+                    raw = await response.read()
+
+    if not raw:
+        return None
+
+    with Image.open(io.BytesIO(raw)) as image:
+        image = image.convert("RGBA")
+        image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        image.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+
+
+async def generate_qwen_scene_from_prompt(
+    app: Any,
+    *,
+    prompt_text: str,
+    source_context: dict | None = None,
+    wardrobe_item: dict | None = None,
+    wh_ratio: str = "3:4",
+) -> dict:
+    """Generate a Qwen reference scene from an already-authored prompt.
+
+    This path deliberately skips Gemini rewrite and special_delta. It is used by
+    flows that already own their prompt semantics, such as Love Intent fallback.
+    """
+    source = dict(source_context or {})
+    outfit_bytes = await _outfit_reference_png_bytes(app, wardrobe_item)
+    prompt = _build_direct_qwen_prompt(
+        prompt_text,
+        has_outfit_ref=bool(outfit_bytes),
+    )
+
+    seed = secrets.randbelow(2**63 - 1)
+    results = await run_qwen21_reference_scene(
+        prompt=prompt,
+        seed=seed,
+        steps=25,
+        wh_ratio=wh_ratio or "3:4",
+        outfit_image_bytes=outfit_bytes,
+    )
+    if not results:
+        raise RunPodServerlessError("Qwen scene generation returned no image")
+
+    _, blob = results[0]
+    filename = f"qwen_love_scene_{uuid.uuid4().hex[:12]}.png"
+    os.makedirs(app.OUTPUT_DIR, exist_ok=True)
+    local_path = os.path.join(app.OUTPUT_DIR, filename)
+    with open(local_path, "wb") as fh:
+        fh.write(blob)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+
+    result = dict(source)
+    inherit = getattr(app, "_inherit_photo_lineage", None)
+    if callable(inherit):
+        try:
+            result = inherit(source, result, action="love_qwen_fallback")
+        except Exception:
+            result = dict(source)
+
+    wardrobe_id = str((wardrobe_item or {}).get("id") or source.get("wardrobe_id") or "").strip().upper()
+    wardrobe_name = str((wardrobe_item or {}).get("name") or source.get("wardrobe_name") or "").strip()
+
+    result.update({
+        "id": str(uuid.uuid4()),
+        "image_url": local_url,
+        "local_url": local_url,
+        "local_filename": filename,
+        "local_path": local_path,
+        "type": source.get("type") or "photo",
+        "db_type": source.get("db_type") or "photo",
+        "source_mode": "love_intent",
+        "source_module": "love_intent",
+        "image_role": "qwen_love_fallback",
+        "generation_level": "QWEN_LOVE_FALLBACK",
+        "final_level": "QWEN_LOVE_FALLBACK",
+        "qwen_model_label": "Qwen-Image-2.1",
+        "qwen_seed": seed,
+        "qwen_steps": 25,
+        "qwen_reference_set": [
+            _REF_FILES["body_full"],
+            _REF_FILES["face_front"],
+            _REF_FILES["face_45"],
+        ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else []),
+        "qwen_reference_mode": "three_identity_refs_plus_optional_outfit",
+        "qwen_scene_workflow_mode": "dedicated_three_ref_plus_optional_outfit_v1",
+        "qwen_scene_workflow_file": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
+        "qwen_wh_ratio": wh_ratio or "3:4",
+        "qwen_final_prompt": prompt,
+        "qwen_compiled_scene_prompt": str(prompt_text or "").strip(),
+        "qwen_special_delta": "",
+        "wardrobe_id": wardrobe_id or source.get("wardrobe_id"),
+        "wardrobe_name": wardrobe_name or source.get("wardrobe_name"),
+        "love_qwen_outfit_ref_used": bool(outfit_bytes),
+        "love_qwen_prompt_rewrite": False,
+    })
+    return result
 
 
 async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str, special_delta: str = "") -> dict:
