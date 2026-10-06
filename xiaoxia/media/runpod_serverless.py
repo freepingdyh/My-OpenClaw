@@ -41,14 +41,17 @@ _FIXED_REFS = {
     "image_6_body_clothed.png",
 }
 
-# Reference-scene A/B mode intentionally uses only three identity references:
-# one full-body source plus two face views. This reduces the number of body
-# reference latents that can be instantiated as duplicate subjects.
+# Reference-scene base workflow keeps three staged identity references for the
+# /photo Qwen path. Love Intent can request single_identity_ref mode at runtime,
+# which prunes the two face references after the workflow is loaded.
 _SCENE_REF_ORDER = (
     "image_4_body_full.png",
     "image_2_face_front.png",
     "image_3_face_45.png",
 )
+
+_SCENE_REF_MODE_THREE = "three_identity_refs"
+_SCENE_REF_MODE_SINGLE = "single_identity_ref"
 
 
 class RunPodServerlessError(RuntimeError):
@@ -289,19 +292,45 @@ def build_qwen21_reference_scene_job(
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
     outfit_image_bytes: bytes | None = None,
+    reference_mode: str = _SCENE_REF_MODE_THREE,
 ) -> dict[str, Any]:
-    """Build a dedicated Qwen 2.1 three-reference NEW-SCENE job.
+    """Build a dedicated Qwen 2.1 NEW-SCENE job.
 
-    Unlike the edit/fix path, this does not mutate the production edit workflow.
-    The scene A/B path uses one full-body reference plus two face views while
-    the sampler starts from a fresh EmptyLatentImage canvas.
+    reference_mode="three_identity_refs":
+        Keep the repo workflow unchanged: full-body + two face identity refs.
+        This remains the /photo Qwen behavior.
+
+    reference_mode="single_identity_ref":
+        Keep only image_4_body_full.png as the sole Xiaoxia identity reference.
+        If a pure-clothing image is provided, attach it as <image2>.
+        This is the Love Intent path and intentionally avoids multiple Xiaoxia
+        reference latents that may be instantiated as duplicate subjects.
     """
     workflow = copy.deepcopy(load_qwen21_reference_scene_workflow())
+
+    mode = str(reference_mode or _SCENE_REF_MODE_THREE).strip()
+    if mode not in {_SCENE_REF_MODE_THREE, _SCENE_REF_MODE_SINGLE}:
+        raise RunPodServerlessError(f"Unsupported Qwen scene reference mode: {mode}")
 
     _, encoder = _single_node(workflow, "TextEncodeQwenImage21")
     encoder_inputs = encoder.get("inputs")
     if not isinstance(encoder_inputs, dict):
         raise RunPodServerlessError("Scene TextEncodeQwenImage21 inputs are invalid")
+
+    if mode == _SCENE_REF_MODE_SINGLE:
+        # The base workflow is validated first, then pruned only for this job.
+        # image1 remains the full-body identity reference.
+        remove_filenames = {"image_2_face_front.png", "image_3_face_45.png"}
+        for node_id, node in list(workflow.items()):
+            if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+                continue
+            filename = str((node.get("inputs") or {}).get("image") or "")
+            if filename in remove_filenames:
+                workflow.pop(node_id, None)
+
+        encoder_inputs.pop("images.image_2", None)
+        encoder_inputs.pop("images.image_3", None)
+
     encoder_inputs["prompt"] = str(prompt)
     if negative_prompt is not None:
         encoder_inputs["negative_prompt"] = str(negative_prompt)
@@ -314,7 +343,8 @@ def build_qwen21_reference_scene_job(
             "inputs": {"image": outfit_name},
             "_meta": {"title": "Optional Outfit Reference"},
         }
-        encoder_inputs["images.image_4"] = ["35", 0]
+        outfit_slot = 2 if mode == _SCENE_REF_MODE_SINGLE else 4
+        encoder_inputs[f"images.image_{outfit_slot}"] = ["35", 0]
         request_images.append({
             "name": outfit_name,
             "image": "data:image/png;base64," + base64.b64encode(outfit_image_bytes).decode("ascii"),
@@ -341,8 +371,9 @@ def build_qwen21_reference_scene_job(
     return {
         "input": {
             "workflow": workflow,
-            # The three identity references are staged at worker cold start.
-            # An optional pure-clothing reference can be uploaded as image4.
+            # Identity references are staged at worker cold start. In single
+            # identity mode only the full-body ref remains in the workflow.
+            # The optional pure-clothing reference is uploaded per request.
             "images": request_images,
         }
     }
@@ -355,6 +386,7 @@ async def run_qwen21_reference_scene(
     negative_prompt: str | None = None,
     wh_ratio: str = "3:4",
     outfit_image_bytes: bytes | None = None,
+    reference_mode: str = _SCENE_REF_MODE_THREE,
     timeout_seconds: float = 600.0,
     poll_seconds: float = 2.0,
 ) -> list[tuple[str, bytes]]:
@@ -365,6 +397,7 @@ async def run_qwen21_reference_scene(
         negative_prompt=negative_prompt,
         wh_ratio=wh_ratio,
         outfit_image_bytes=outfit_image_bytes,
+        reference_mode=reference_mode,
     )
     submitted = await _request("POST", "/run", json_body=job, timeout_seconds=30.0)
     job_id = str(submitted.get("id") or "").strip()
