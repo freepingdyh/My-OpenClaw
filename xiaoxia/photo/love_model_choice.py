@@ -11,6 +11,7 @@ The creative decision remains Xiaoxia's; this module changes only the renderer.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any, Dict
 
 import discord
@@ -286,7 +287,7 @@ def install_love_model_choice(app: Any) -> Dict[str, Any]:
 
         candidate = dict(pending)
         candidate["status"] = "approved"
-        candidate["approved_at"] = app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
+        candidate["approved_at"] = datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
         candidate["approved_by"] = getattr(getattr(interaction, "user", None), "id", None)
         love["pending_request"] = candidate
         app.save_state(state)
