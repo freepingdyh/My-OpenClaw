@@ -662,6 +662,10 @@ class _PhotoBrainMessage:
         self.mentions = []
         self.role_mentions = []
         self.channel_mentions = []
+        self.mention_everyone = False
+        self.raw_mentions = []
+        self.raw_role_mentions = []
+        self.raw_channel_mentions = []
         self.stickers = []
 
     async def reply(self, content=None, **kwargs):
@@ -851,11 +855,28 @@ class _QwenPhotoModal(discord.ui.Modal):
             # she treats the scene as her current lived state, just like Seedream /photo.
             qwen_image_url = str(context.get("local_url") or context.get("image_url") or "").strip()
             if qwen_image_url:
-                await _dispatch_existing_photo_through_xiaoxia_brain(
-                    self.app,
-                    self.source_message,
-                    qwen_image_url,
-                )
+                try:
+                    await _dispatch_existing_photo_through_xiaoxia_brain(
+                        self.app,
+                        self.source_message,
+                        qwen_image_url,
+                    )
+                except Exception as reaction_exc:
+                    # The image has already been generated and delivered successfully.
+                    # A follow-up vision/chat failure must never be misreported as a
+                    # Qwen generation failure.
+                    print(
+                        f"⚠️ [QWEN_PHOTO_REACTION_FAILED] "
+                        f"{type(reaction_exc).__name__}: {reaction_exc}"
+                    )
+                    try:
+                        await interaction.followup.send(
+                            "⚠️ Qwen-2.1 圖片已成功生成，但小俠這次看圖後的即時反應沒有接上；"
+                            "圖片本身沒有失敗。",
+                            ephemeral=True,
+                        )
+                    except Exception:
+                        pass
 
             try:
                 await status.delete()
