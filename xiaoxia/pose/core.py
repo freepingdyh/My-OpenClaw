@@ -383,7 +383,11 @@ def install_pose_commands(app: Any) -> Dict[str, Any]:
                 "source": "pose_library",
             }
             app.save_state(state)
-            await ctx.reply(f"💃 已穿上 **{row.get('id')}｜{row.get('name')}**。下一張 `/photo` 會使用這個姿勢。", mention_author=False)
+            await ctx.reply(
+                f"💃 已穿上 **{row.get('id')}｜{row.get('name')}**。下一張 `/photo` 會使用這個姿勢；"
+                "Seedream 會使用姿勢圖＋文字，Qwen-2.1 只使用 Pose Library 文字。",
+                mention_author=False,
+            )
             return
 
         if re.match(r"^新增(?:\s|$)", text):
