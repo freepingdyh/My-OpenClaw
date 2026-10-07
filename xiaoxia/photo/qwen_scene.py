@@ -20,7 +20,8 @@ from PIL import Image
 from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21_reference_scene
 from xiaoxia.photo.special_intimacy import _SPECIAL_USER_DELTA as _DEFAULT_SPECIAL_DELTA
 
-VERSION = "1.8.1-qwen-photo-scene-v16-love-trace"
+VERSION = "1.9.0-qwen-photo-pose-text-wardrobe-trace"
+POSE_STATE_KEY = "photo_pending_pose_reference"
 
 LOVE_TRACE_PATH = Path("/data/memory/qwen21/meta/latest_love_scene.json")
 
@@ -83,6 +84,79 @@ _QWEN_LOVE_SINGLE_REF_CORE = """QWEN IMAGE 2.1 — 小俠愛意單一人物參�
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
+
+
+def _pending_pose_state(app: Any) -> dict | None:
+    try:
+        state = app.load_state()
+    except Exception:
+        return None
+    pose = state.get(POSE_STATE_KEY) if isinstance(state, dict) else None
+    if not isinstance(pose, dict) or not str(pose.get("pose_id") or "").strip():
+        return None
+    return dict(pose)
+
+
+def _consume_pending_pose_state(app: Any, pose_id: str = "") -> bool:
+    try:
+        state = app.load_state()
+        if not isinstance(state, dict):
+            return False
+        pending = state.get(POSE_STATE_KEY)
+        if not isinstance(pending, dict):
+            return False
+        expected = str(pose_id or "").strip().upper()
+        actual = str(pending.get("pose_id") or "").strip().upper()
+        if expected and actual and expected != actual:
+            return False
+        state[POSE_STATE_KEY] = None
+        app.save_state(state)
+        return True
+    except Exception as exc:
+        print(f"⚠️ [QWEN_PHOTO_POSE_CONSUME_FAILED] {type(exc).__name__}: {exc}")
+        return False
+
+
+def _pending_wardrobe_item(app: Any) -> dict | None:
+    getter = getattr(app, "_get_pending_wardrobe_state", None)
+    if not callable(getter):
+        return None
+    try:
+        item = getter()
+        refresher = getattr(app, "_refresh_pending_wardrobe_from_current_db", None)
+        if callable(refresher):
+            item = refresher(item)
+        usable = getattr(app, "_pending_wardrobe_has_usable_reference", None)
+        if isinstance(item, dict) and (not callable(usable) or usable(item)):
+            return dict(item)
+    except Exception as exc:
+        print(f"⚠️ [QWEN_PHOTO_WARDROBE_READ_FAILED] {type(exc).__name__}: {exc}")
+    return None
+
+
+def _pose_text_contract(pose: dict | None) -> str:
+    if not isinstance(pose, dict):
+        return ""
+    pose_id = str(pose.get("pose_id") or "").strip().upper()
+    camera = str(pose.get("camera_intent") or "").strip()
+    visible = str(pose.get("visible_pose_scope") or "").strip()
+    action = str(pose.get("pose_description") or "").strip()
+    composition = str(pose.get("composition_feature") or "").strip()
+    if not any((camera, visible, action, composition)):
+        return ""
+    return (
+        "POSE LIBRARY TEXT AUTHORITY — TEXT ONLY. "
+        f"Selected pose: {pose_id or 'unknown'}. "
+        "Do not use or expect a pose reference image. "
+        "The following stored Pose Library metadata is the authoritative source for pose, camera, visible body scope, and composition. "
+        f"Camera: {camera or 'unspecified'}. "
+        f"Visible: {visible or 'unspecified'}. "
+        f"Pose: {action or 'unspecified'}. "
+        f"Composition: {composition or 'unspecified'}. "
+        "Preserve these instructions as closely as possible. "
+        "If the authored scene conflicts with this pose geometry, camera, framing, crop, support/contact relationship, or subject-to-camera spatial relationship, follow this Pose Library text. "
+        "Do not reinterpret it into a different standing, sitting, kneeling, crouching, lying, or leaning geometry."
+    )
 
 
 def _extract_json(text: str) -> dict:
@@ -407,7 +481,17 @@ async def generate_qwen_scene_from_prompt(
     return result
 
 
-async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str, special_delta: str = "") -> dict:
+async def _generate_qwen_scene(
+    app: Any,
+    *,
+    scene_delta: str,
+    subject_delta: str,
+    camera_delta: str,
+    mood_delta: str,
+    special_delta: str = "",
+    pose_state: dict | None = None,
+    wardrobe_item: dict | None = None,
+) -> dict:
     scene = await _compile_scene_with_gemini(
         app,
         scene_delta=scene_delta,
@@ -415,17 +499,36 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         camera_delta=camera_delta,
         mood_delta=mood_delta,
     )
-    prompt = _build_qwen_prompt(scene["rewritten_prompt"], special_delta=special_delta)
 
-    # Dedicated reference-scene workflow: all five refs are staged on the
-    # RunPod worker and feed Qwen's multi-reference conditioning. No edit image
-    # and no per-request reference upload are used in this path.
+    pose_contract = _pose_text_contract(pose_state)
+    outfit_bytes = await _outfit_reference_png_bytes(app, wardrobe_item)
+
+    prompt_parts = [_build_qwen_prompt(scene["rewritten_prompt"], special_delta=special_delta)]
+    if pose_contract:
+        prompt_parts.append(pose_contract)
+    if outfit_bytes:
+        prompt_parts.append(
+            "<image4> is a pure clothing reference only. "
+            "Apply its garment design, material, color, silhouette, and cut to the same single Xiaoxia. "
+            "Do not treat <image4> as a person, pose authority, camera authority, or scene reference."
+        )
+    prompt = _clean("\n\n".join(x for x in prompt_parts if str(x or "").strip()))
+
+    pose_id = str((pose_state or {}).get("pose_id") or "").strip().upper()
+    wardrobe_id = str((wardrobe_item or {}).get("id") or "").strip().upper()
+    wardrobe_name = str((wardrobe_item or {}).get("name") or "").strip()
+
+    # /photo Qwen keeps its existing three Xiaoxia identity references.
+    # Wardrobe may add a pure-clothing <image4>. Pose Library is TEXT ONLY here:
+    # no Pxxx image is uploaded or connected to the workflow.
     seed = secrets.randbelow(2**63 - 1)
     results = await run_qwen21_reference_scene(
         prompt=prompt,
         seed=seed,
         steps=25,
         wh_ratio=scene["wh_ratio"],
+        outfit_image_bytes=outfit_bytes,
+        reference_mode="three_identity_refs",
     )
     if not results:
         raise RunPodServerlessError("Qwen scene generation returned no image")
@@ -437,6 +540,12 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     with open(local_path, "wb") as f:
         f.write(blob)
     local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+
+    reference_set = [
+        _REF_FILES["body_full"],
+        _REF_FILES["face_front"],
+        _REF_FILES["face_45"],
+    ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else [])
 
     now_text = app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
     return {
@@ -454,7 +563,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "camera_summary": scene["camera_summary"],
         "mood": scene["mood_summary"] or mood_delta,
         "mood_summary": scene["mood_summary"] or mood_delta,
-        "outfit_summary": "Qwen 特殊場景",
+        "outfit_summary": wardrobe_name or "Qwen 特殊場景",
         "message": "大俠用 Qwen-2.1 特殊場景模式留下這一刻。",
         "image_url": local_url,
         "local_url": local_url,
@@ -472,11 +581,7 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "qwen_model_label": "Qwen-Image-2.1",
         "qwen_seed": seed,
         "qwen_steps": 25,
-        "qwen_reference_set": [
-            _REF_FILES["body_full"],
-            _REF_FILES["face_front"],
-            _REF_FILES["face_45"],
-        ],
+        "qwen_reference_set": reference_set,
         "qwen_reference_mode": "official_multiref_with_vae_reference_latents",
         "qwen_scene_workflow_mode": "dedicated_three_ref_no_canvas_ab_v1",
         "qwen_scene_workflow_file": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
@@ -489,6 +594,21 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
         "qwen_mood_delta": mood_delta,
         "qwen_special_delta": str(special_delta or "").strip(),
         "qwen_compiled_scene_prompt": scene["rewritten_prompt"],
+        "pose_id": pose_id,
+        "pose_name": str((pose_state or {}).get("name") or "").strip(),
+        "pose_camera_intent": str((pose_state or {}).get("camera_intent") or "").strip(),
+        "pose_visible_scope": str((pose_state or {}).get("visible_pose_scope") or "").strip(),
+        "pose_description": str((pose_state or {}).get("pose_description") or "").strip(),
+        "pose_composition_feature": str((pose_state or {}).get("composition_feature") or "").strip(),
+        "pose_contract": pose_contract,
+        "pose_contract_used": bool(pose_contract),
+        "pose_reference_mode": "text_only" if pose_contract else "none",
+        "pose_image_sent": False,
+        "pose_text_sent": bool(pose_contract),
+        "wardrobe_id": wardrobe_id,
+        "wardrobe_name": wardrobe_name,
+        "wardrobe_ref_used": bool(outfit_bytes),
+        "wardrobe_reference_mode": "image" if outfit_bytes else "none",
     }
 
 
@@ -649,6 +769,8 @@ class _QwenPhotoModal(discord.ui.Modal):
             "🧪 Qwen-2.1 正在整理場景並用小俠參考圖生成新畫面…", wait=True
         )
         try:
+            pending_pose = _pending_pose_state(self.app)
+            pending_wardrobe = _pending_wardrobe_item(self.app)
             context = await _generate_qwen_scene(
                 self.app,
                 scene_delta=str(self.scene_delta.value or "").strip(),
@@ -656,6 +778,8 @@ class _QwenPhotoModal(discord.ui.Modal):
                 camera_delta=str(self.camera_delta.value or "").strip(),
                 mood_delta=str(self.mood_delta.value or "").strip(),
                 special_delta=str(self.special_delta.value or "").strip(),
+                pose_state=pending_pose,
+                wardrobe_item=pending_wardrobe,
             )
 
             db = self.app.load_memory()
@@ -669,6 +793,29 @@ class _QwenPhotoModal(discord.ui.Modal):
             context["message_id"] = sent.id
             self.app.photo_generation_contexts[sent.id] = context
             view.context = context
+
+            # Match the established /photo semantics: pose and explicitly selected
+            # wardrobe are one-shot pending inputs and are consumed only after a
+            # successful image has been delivered.
+            pose_consumed = False
+            if isinstance(pending_pose, dict):
+                pose_consumed = _consume_pending_pose_state(
+                    self.app, str(pending_pose.get("pose_id") or "")
+                )
+            wardrobe_consumed = False
+            if isinstance(pending_wardrobe, dict):
+                clearer = getattr(self.app, "_clear_pending_wardrobe_state", None)
+                if callable(clearer):
+                    try:
+                        clearer()
+                        wardrobe_consumed = True
+                    except Exception as clear_exc:
+                        print(
+                            f"⚠️ [QWEN_PHOTO_WARDROBE_CONSUME_FAILED] "
+                            f"{type(clear_exc).__name__}: {clear_exc}"
+                        )
+            context["pending_pose_consumed_after_success"] = pose_consumed
+            context["pending_wardrobe_consumed_after_success"] = wardrobe_consumed
 
             # Qwen /photo is generated outside the legacy /photo on_message path.
             # Feed the finished image back into Xiaoxia's normal vision/chat brain so
