@@ -374,6 +374,8 @@ def install_pose_commands(app: Any) -> Dict[str, Any]:
                 "url": url,
                 "content_type": row.get("mime_type") or "image/jpeg",
                 "pose_id": row.get("id"),
+                "name": row.get("name") or "",
+                "file_path": row.get("file_path") or "",
                 "camera_intent": row.get("camera_intent") or "",
                 "visible_pose_scope": row.get("visible_pose_scope") or "",
                 "pose_description": row.get("pose_description") or "",
