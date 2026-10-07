@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-VERSION = "1.6.0-qwen-scene-trace-v9-three-ref-ab"
+VERSION = "1.7.0-qwen-scene-trace-v10-pose-text-wardrobe"
 TRACE_PATH = Path("/data/memory/qwen21/meta/latest_scene.json")
 
 
@@ -33,7 +33,17 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
     if getattr(original, "_xiaoxia_qwen_scene_trace_installed", False):
         return {"version": VERSION, "installed": False, "trace_path": str(TRACE_PATH)}
 
-    async def traced_generate(app_obj: Any, *, scene_delta: str, subject_delta: str, camera_delta: str, mood_delta: str, special_delta: str = "") -> dict:
+    async def traced_generate(
+        app_obj: Any,
+        *,
+        scene_delta: str,
+        subject_delta: str,
+        camera_delta: str,
+        mood_delta: str,
+        special_delta: str = "",
+        pose_state: dict | None = None,
+        wardrobe_item: dict | None = None,
+    ) -> dict:
         trace = {
             "mode": "reference_scene_generation",
             "status": "starting",
@@ -52,7 +62,21 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
                 "image1": "image_4_body_full.png",
                 "image2": "image_2_face_front.png",
                 "image3": "image_3_face_45.png",
+                "image4": "wardrobe_pure_clothing_ref" if isinstance(wardrobe_item, dict) else None,
             },
+            "pose_id": str((pose_state or {}).get("pose_id") or "").strip().upper(),
+            "pose_name": str((pose_state or {}).get("name") or "").strip(),
+            "pose_camera_intent": str((pose_state or {}).get("camera_intent") or "").strip(),
+            "pose_visible_scope": str((pose_state or {}).get("visible_pose_scope") or "").strip(),
+            "pose_description": str((pose_state or {}).get("pose_description") or "").strip(),
+            "pose_composition_feature": str((pose_state or {}).get("composition_feature") or "").strip(),
+            "pose_reference_mode_expected": "text_only" if isinstance(pose_state, dict) else "none",
+            "pose_image_sent_expected": False,
+            "pose_text_sent_expected": bool(isinstance(pose_state, dict)),
+            "wardrobe_id": str((wardrobe_item or {}).get("id") or "").strip().upper(),
+            "wardrobe_name": str((wardrobe_item or {}).get("name") or "").strip(),
+            "wardrobe_reference_mode_expected": "image" if isinstance(wardrobe_item, dict) else "none",
+            "wardrobe_ref_used_expected": bool(isinstance(wardrobe_item, dict)),
             "reference_mode_expected": "official_multiref_with_vae_reference_latents",
             "scene_workflow_mode_expected": "dedicated_three_ref_no_canvas_ab_v1",
             "scene_workflow_file_expected": "xiaoxia/serverless/workflows/qwen21_reference_scene_api.json",
@@ -70,6 +94,8 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
                 camera_delta=camera_delta,
                 mood_delta=mood_delta,
                 special_delta=special_delta,
+                pose_state=pose_state,
+                wardrobe_item=wardrobe_item,
             )
         except Exception as exc:
             trace["status"] = "failed"
@@ -98,6 +124,23 @@ def install_qwen_scene_trace(app: Any) -> Dict[str, Any]:
             "camera_summary": result.get("camera_summary"),
             "mood_summary": result.get("mood_summary"),
             "special_delta": result.get("qwen_special_delta"),
+            "pose_id": result.get("pose_id"),
+            "pose_name": result.get("pose_name"),
+            "pose_camera_intent": result.get("pose_camera_intent"),
+            "pose_visible_scope": result.get("pose_visible_scope"),
+            "pose_description": result.get("pose_description"),
+            "pose_composition_feature": result.get("pose_composition_feature"),
+            "pose_contract": result.get("pose_contract"),
+            "pose_contract_used": result.get("pose_contract_used"),
+            "pose_reference_mode": result.get("pose_reference_mode"),
+            "pose_image_sent": result.get("pose_image_sent"),
+            "pose_text_sent": result.get("pose_text_sent"),
+            "wardrobe_id": result.get("wardrobe_id"),
+            "wardrobe_name": result.get("wardrobe_name"),
+            "wardrobe_ref_used": result.get("wardrobe_ref_used"),
+            "wardrobe_reference_mode": result.get("wardrobe_reference_mode"),
+            "pending_pose_consumed_after_success": result.get("pending_pose_consumed_after_success"),
+            "pending_wardrobe_consumed_after_success": result.get("pending_wardrobe_consumed_after_success"),
         })
         _write(trace)
         result["qwen_scene_trace_path"] = str(TRACE_PATH)
