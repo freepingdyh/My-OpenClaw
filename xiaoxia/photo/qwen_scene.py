@@ -547,6 +547,26 @@ async def _generate_qwen_scene(
         _REF_FILES["face_45"],
     ] + (["wardrobe_pure_clothing_ref"] if outfit_bytes else [])
 
+    # One-shot inputs are consumed after Qwen has successfully produced the image.
+    # This also lets latest_scene.json record the real consumed state.
+    pose_consumed = False
+    if isinstance(pose_state, dict):
+        pose_consumed = _consume_pending_pose_state(
+            app, str(pose_state.get("pose_id") or "")
+        )
+    wardrobe_consumed = False
+    if isinstance(wardrobe_item, dict):
+        clearer = getattr(app, "_clear_pending_wardrobe_state", None)
+        if callable(clearer):
+            try:
+                clearer()
+                wardrobe_consumed = True
+            except Exception as clear_exc:
+                print(
+                    f"⚠️ [QWEN_PHOTO_WARDROBE_CONSUME_FAILED] "
+                    f"{type(clear_exc).__name__}: {clear_exc}"
+                )
+
     now_text = app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S")
     return {
         "id": str(uuid.uuid4()),
@@ -609,6 +629,8 @@ async def _generate_qwen_scene(
         "wardrobe_name": wardrobe_name,
         "wardrobe_ref_used": bool(outfit_bytes),
         "wardrobe_reference_mode": "image" if outfit_bytes else "none",
+        "pending_pose_consumed_after_success": pose_consumed,
+        "pending_wardrobe_consumed_after_success": wardrobe_consumed,
     }
 
 
@@ -793,29 +815,6 @@ class _QwenPhotoModal(discord.ui.Modal):
             context["message_id"] = sent.id
             self.app.photo_generation_contexts[sent.id] = context
             view.context = context
-
-            # Match the established /photo semantics: pose and explicitly selected
-            # wardrobe are one-shot pending inputs and are consumed only after a
-            # successful image has been delivered.
-            pose_consumed = False
-            if isinstance(pending_pose, dict):
-                pose_consumed = _consume_pending_pose_state(
-                    self.app, str(pending_pose.get("pose_id") or "")
-                )
-            wardrobe_consumed = False
-            if isinstance(pending_wardrobe, dict):
-                clearer = getattr(self.app, "_clear_pending_wardrobe_state", None)
-                if callable(clearer):
-                    try:
-                        clearer()
-                        wardrobe_consumed = True
-                    except Exception as clear_exc:
-                        print(
-                            f"⚠️ [QWEN_PHOTO_WARDROBE_CONSUME_FAILED] "
-                            f"{type(clear_exc).__name__}: {clear_exc}"
-                        )
-            context["pending_pose_consumed_after_success"] = pose_consumed
-            context["pending_wardrobe_consumed_after_success"] = wardrobe_consumed
 
             # Qwen /photo is generated outside the legacy /photo on_message path.
             # Feed the finished image back into Xiaoxia's normal vision/chat brain so
