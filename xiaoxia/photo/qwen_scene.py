@@ -530,6 +530,35 @@ async def _dispatch_seedream_through_xiaoxia_brain(app: Any, source_message: Any
     await handler(proxy)
 
 
+class _GeneratedPhotoAttachment:
+    """Minimal attachment proxy for feeding an already-generated image to Xiaoxia vision."""
+
+    def __init__(self, url: str, content_type: str = "image/png"):
+        self.url = str(url or "").strip()
+        self.proxy_url = self.url
+        self.content_type = content_type
+
+
+async def _dispatch_existing_photo_through_xiaoxia_brain(
+    app: Any,
+    source_message: Any,
+    image_url: str,
+) -> None:
+    """Let Xiaoxia see an already-generated /photo result as her current lived state."""
+    current_state_prompt = (
+        "這張照片代表妳此刻正在經歷的真實當下狀態，不是外部來歷不明的照片，也不是大俠變出來或交給妳看的圖片。"
+        "請直接把照片中的服裝、場景、光線、姿勢與動作視為妳現在此刻的狀態與周遭環境，"
+        "並結合剛才與大俠的對話脈絡，用小俠自己的口吻自然地從這個當下接續互動。"
+        "不要詢問這張照片從哪裡來、誰拍的、為什麼會有，也不要提到生成、AI、魔法、合成、模型或任何幕後流程。"
+    )
+    proxy = _PhotoBrainMessage(source_message, current_state_prompt)
+    proxy.attachments = [_GeneratedPhotoAttachment(image_url, content_type="image/png")]
+    handler = getattr(app.girlfriend_bot, "on_message", None)
+    if not callable(handler):
+        raise RuntimeError("girlfriend on_message handler not available")
+    await handler(proxy)
+
+
 class _SeedreamPhotoModal(discord.ui.Modal):
     def __init__(self, app: Any, original_handler: Any, source_message: Any):
         super().__init__(title="Photo｜Seedream v4.5")
@@ -640,6 +669,18 @@ class _QwenPhotoModal(discord.ui.Modal):
             context["message_id"] = sent.id
             self.app.photo_generation_contexts[sent.id] = context
             view.context = context
+
+            # Qwen /photo is generated outside the legacy /photo on_message path.
+            # Feed the finished image back into Xiaoxia's normal vision/chat brain so
+            # she treats the scene as her current lived state, just like Seedream /photo.
+            qwen_image_url = str(context.get("local_url") or context.get("image_url") or "").strip()
+            if qwen_image_url:
+                await _dispatch_existing_photo_through_xiaoxia_brain(
+                    self.app,
+                    self.source_message,
+                    qwen_image_url,
+                )
+
             try:
                 await status.delete()
             except Exception:
