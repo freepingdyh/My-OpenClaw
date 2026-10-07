@@ -492,6 +492,44 @@ async def _generate_qwen_scene(app: Any, *, scene_delta: str, subject_delta: str
     }
 
 
+class _PhotoBrainMessage:
+    """Minimal Discord-message proxy that re-enters Xiaoxia's normal chat brain.
+
+    Native /photo interactions do not create a normal user Message event.  Calling
+    the Seedream generator directly therefore skips the legacy on_message
+    continuation that lets Xiaoxia actually see the finished photo and react to it.
+    This proxy carries the small Message surface that the girlfriend on_message path
+    expects, so the generated image and the follow-up response stay on the same path
+    as the original text /photo command.
+    """
+
+    def __init__(self, source_message: Any, content: str):
+        self.content = str(content or "")
+        self.author = getattr(source_message, "author", None)
+        self.channel = getattr(source_message, "channel", None)
+        self.guild = getattr(source_message, "guild", None) or getattr(self.channel, "guild", None)
+        self.id = getattr(source_message, "id", None) or uuid.uuid4().int >> 64
+        self.attachments = list(getattr(source_message, "attachments", []) or [])
+        self.mentions = []
+        self.role_mentions = []
+        self.channel_mentions = []
+        self.stickers = []
+
+    async def reply(self, content=None, **kwargs):
+        kwargs.pop("mention_author", None)
+        return await self.channel.send(content, **kwargs)
+
+
+async def _dispatch_seedream_through_xiaoxia_brain(app: Any, source_message: Any, scene_text: str) -> None:
+    """Run Seedream /photo through the normal girlfriend on_message continuation."""
+    content = "/photo " + str(scene_text or "").strip()
+    proxy = _PhotoBrainMessage(source_message, content)
+    handler = getattr(app.girlfriend_bot, "on_message", None)
+    if not callable(handler):
+        raise RuntimeError("girlfriend on_message handler not available")
+    await handler(proxy)
+
+
 class _SeedreamPhotoModal(discord.ui.Modal):
     def __init__(self, app: Any, original_handler: Any, source_message: Any):
         super().__init__(title="Photo｜Seedream v4.5")
@@ -510,8 +548,15 @@ class _SeedreamPhotoModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            await self.original_handler(self.source_message, "/photo " + str(self.scene.value or "").strip())
-            await interaction.followup.send("✅ 已交給 Seedream v4.5。", ephemeral=True)
+            # Important: do not call the generator directly here.  Re-enter the
+            # normal Xiaoxia on_message path so the finished photo is attached to
+            # her vision turn and she can naturally react / continue the interaction.
+            await _dispatch_seedream_through_xiaoxia_brain(
+                self.app,
+                self.source_message,
+                str(self.scene.value or "").strip(),
+            )
+            await interaction.followup.send("✅ Seedream v4.5 已完成，小俠也看過照片了。", ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(
                 f"⚠️ Seedream /photo 失敗：{type(exc).__name__}: {str(exc)[:1200]}", ephemeral=True
