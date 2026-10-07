@@ -629,6 +629,13 @@ async def _generate_qwen_scene(
         "wardrobe_name": wardrobe_name,
         "wardrobe_ref_used": bool(outfit_bytes),
         "wardrobe_reference_mode": "image" if outfit_bytes else "none",
+        "reference_item_path": str((wardrobe_item or {}).get("reference_image_path") or "").strip() or None,
+        "reference_item_url": str(
+            (wardrobe_item or {}).get("local_url")
+            or (wardrobe_item or {}).get("reference_item_url")
+            or ""
+        ).strip() or None,
+        "reference_item_summary": str((wardrobe_item or {}).get("style_summary") or wardrobe_name).strip(),
         "pending_pose_consumed_after_success": pose_consumed,
         "pending_wardrobe_consumed_after_success": wardrobe_consumed,
     }
@@ -807,6 +814,29 @@ class _QwenPhotoModal(discord.ui.Modal):
             db = self.app.load_memory()
             db.insert(0, self.app._photo_db_payload(context, type_override="photo"))
             self.app.save_memory(db)
+
+            # Keep outfit continuity consistent with Seedream /photo when a
+            # /衣櫃 穿 Wxxxx selection was actually used by Qwen.
+            if isinstance(pending_wardrobe, dict) and context.get("wardrobe_ref_used"):
+                build_outfit_state = getattr(self.app, "_build_outfit_state_from_context", None)
+                set_outfit_state = getattr(self.app, "_set_current_outfit_state", None)
+                if callable(build_outfit_state) and callable(set_outfit_state):
+                    try:
+                        set_outfit_state(build_outfit_state(context))
+                    except Exception as outfit_exc:
+                        print(
+                            f"⚠️ [QWEN_PHOTO_CURRENT_OUTFIT_SYNC_FAILED] "
+                            f"{type(outfit_exc).__name__}: {outfit_exc}"
+                        )
+                usage_logger = getattr(self.app, "_log_wardrobe_usage_from_context", None)
+                if callable(usage_logger):
+                    try:
+                        usage_logger(context, purpose="photo")
+                    except Exception as usage_exc:
+                        print(
+                            f"⚠️ [QWEN_PHOTO_WARDROBE_USAGE_LOG_FAILED] "
+                            f"{type(usage_exc).__name__}: {usage_exc}"
+                        )
 
             view = self.app.PhotoResultView(context)
             sent = await self.app._send_photo_message(
