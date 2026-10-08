@@ -1,0 +1,24 @@
+FROM runpod/worker-comfyui:5.10.0-base
+
+ARG COMFYUI_COMMIT=a7169322485d0049380fb207fa17e9fb3ec40486
+
+# Keep the exact ComfyUI revision already verified by the Qwen-2.1 worker.
+# This commit also contains MiniMax H3 native nodes and SaveVideo support.
+RUN rm -rf /comfyui && \
+    git clone https://github.com/Comfy-Org/ComfyUI.git /comfyui && \
+    cd /comfyui && \
+    git checkout "${COMFYUI_COMMIT}" && \
+    test "$(git rev-parse HEAD)" = "${COMFYUI_COMMIT}" && \
+    grep -q "class MiniMaxH3ImageToVideo" comfy_extras/nodes_minimax_h3.py && \
+    grep -q "class SaveVideo" comfy_extras/nodes_video.py && \
+    uv pip install -r /comfyui/requirements.txt && \
+    uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" && \
+    timeout 300 python /comfyui/main.py --quick-test-for-ci --cpu && \
+    rm -rf /comfyui/.git
+
+COPY xiaoxia/serverless/prepare_h3_models.py /xiaoxia/prepare_h3_models.py
+COPY xiaoxia/serverless/start_h3_worker.sh /xiaoxia/start_h3_worker.sh
+
+RUN chmod +x /xiaoxia/start_h3_worker.sh
+
+CMD ["/xiaoxia/start_h3_worker.sh"]
