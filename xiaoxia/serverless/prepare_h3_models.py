@@ -25,6 +25,7 @@ HF_CACHE_ROOT = Path("/runpod-volume/huggingface-cache/hub")
 MODEL_ID = "Comfy-Org/MiniMax-H3"
 MODEL_ROOT = HF_CACHE_ROOT / "models--Comfy-Org--MiniMax-H3"
 SNAPSHOTS_DIR = MODEL_ROOT / "snapshots"
+EXTRA_MODEL_PATHS = Path("/comfyui/extra_model_paths.yaml")
 
 REQUIRED_FILES = (
     "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -93,10 +94,11 @@ def model_path_yaml(snapshot: Path) -> str:
 def main() -> int:
     snapshot = _resolve_snapshot()
     validate_snapshot(snapshot)
+    EXTRA_MODEL_PATHS.write_text(model_path_yaml(snapshot), encoding="utf-8")
     print(
-        f"[H3_MODEL_CACHE] ready model_id={MODEL_ID} snapshot={snapshot.name}"
+        f"[H3_MODEL_CACHE] mapped model_id={MODEL_ID} snapshot={snapshot.name} "
+        f"config={EXTRA_MODEL_PATHS}"
     )
-    print(model_path_yaml(snapshot), end="")
     return 0
 
 
