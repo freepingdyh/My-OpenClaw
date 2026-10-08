@@ -6,7 +6,10 @@ on:
     branches:
       - refactor/v1.12.05-scene-direct-contract
     paths:
-      - "xiaoxia/serverless/**"
+      - "xiaoxia/serverless/Dockerfile.qwen21"
+      - "xiaoxia/serverless/start_qwen21_worker.sh"
+      - "xiaoxia/serverless/prepare_qwen21_models.py"
+      - "xiaoxia/serverless/fetch_qwen21_assets.py"
       - ".github/workflows/build-qwen21-serverless.yml"
 
 permissions:
