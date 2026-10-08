@@ -47,6 +47,8 @@ Current Qwen worker already provides:
 - pinned ComfyUI replacement inside the worker image;
 - job submit/status polling on the Zeabur side.
 
+Current repository check: the Qwen worker pins ComfyUI commit `a7169322485d0049380fb207fa17e9fb3ec40486`, and that exact commit already contains `comfy_extras/nodes_minimax_h3.py` with the native `MiniMaxH3ImageToVideo` implementation.  Therefore the first H3 trial should **not** upgrade ComfyUI pre-emptively; reuse the pinned commit unless the official I2V API workflow proves a missing-node incompatibility.
+
 Preferred deployment sequence:
 
 1. inspect the current RunPod endpoint GPU / VRAM / cached model / storage;
