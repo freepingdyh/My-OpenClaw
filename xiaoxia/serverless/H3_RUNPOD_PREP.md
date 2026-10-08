@@ -138,3 +138,52 @@ with no second confirmation.
 
 Do not confuse this fix with H3 provider routing; they should share the same UX
 principle but remain separate implementations.
+
+
+## Preparation completed in repository
+
+The repository now also contains:
+
+- `xiaoxia/serverless/workflows/minimax_h3_fl2va_api.json`
+  - API-format first-frame FL2VA graph derived from the official Comfy-Org H3 I2V template.
+  - Baseline: 864×480, 5 seconds, 20 steps, `res_multistep` + `simple`.
+  - Output is explicit MP4 through ComfyUI `SaveVideo`.
+- `xiaoxia/serverless/validate_h3_workflow.py`
+  - offline graph-contract validation; no RunPod login/GPU required.
+- `xiaoxia/media/h3_runpod.py`
+  - inactive RunPod submit/poll/decode client.
+  - supports a separate `XIAOXIA_H3_RUNPOD_ENDPOINT_ID` and falls back to the existing RunPod endpoint id.
+- `xiaoxia/video/h3_provider_router.py`
+  - inactive provider routing primitive for `fal.ai | RunPod | auto`.
+  - auto is true automatic fallback: fal.ai failure immediately tries RunPod with no second confirmation.
+  - contains the Chinese solo-subject / scene-continuation Director contract.
+
+### Important worker-comfyui compatibility finding
+
+A custom video-return handler is **not required** for the current worker-comfyui transport.
+
+At the pinned ComfyUI commit, `PreviewVideo.as_dict()` intentionally serializes
+saved video results under the UI key `images` with `animated=true`.
+RunPod worker-comfyui already processes `output.images[]` by fetching each
+saved result through ComfyUI's `/view` endpoint, preserving the original file
+extension, and returning the bytes as base64 when S3 output is not configured.
+
+Therefore an H3 `SaveVideo` result such as `.mp4` can travel through the
+existing worker response shape:
+
+`output.images[] -> { filename: "*.mp4", type: "base64", data: "..." }`
+
+The inactive H3 client already decodes that contract and rejects non-video
+extensions.
+
+### Activation boundary
+
+Nothing above is imported by `xiaoxia_runtime_flat.py` yet.
+The existing fal.ai H3 flow and Qwen-2.1 RunPod flow remain unchanged.
+
+Before activation, the only remaining infrastructure facts to verify in RunPod are:
+
+1. current endpoint GPU / VRAM;
+2. cached-model storage capacity and model id layout;
+3. whether H3 should be added to a cloned test endpoint first or directly to
+   the existing template after a test clone proves coexistence.
