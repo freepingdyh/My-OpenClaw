@@ -208,8 +208,12 @@
         0
       ],
       "filename_prefix": "video/Xiaoxia_H3_RunPod",
-      "format": "auto",
-      "codec": "auto"
+      "format": {
+        "format": "mp4",
+        "codec": {
+          "codec": "auto"
+        }
+      }
     },
     "_meta": {
       "title": "Save H3 MP4"
