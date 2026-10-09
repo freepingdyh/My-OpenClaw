@@ -11,8 +11,12 @@ RUN rm -rf /comfyui && \
     test "$(git rev-parse HEAD)" = "${COMFYUI_COMMIT}" && \
     grep -q "class MiniMaxH3ImageToVideo" comfy_extras/nodes_minimax_h3.py && \
     grep -q "class SaveVideo" comfy_extras/nodes_video.py && \
-    uv pip install -r /comfyui/requirements.txt && \
-    uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" && \
+    uv pip install --python /opt/venv/bin/python --upgrade \
+      torch torchvision torchaudio \
+      --extra-index-url https://download.pytorch.org/whl/cu130 && \
+    /opt/venv/bin/python -c "import torch; v=tuple(map(int, torch.version.cuda.split('.')[:2])); assert v >= (13, 0), torch.version.cuda; print('H3 torch', torch.__version__, 'CUDA', torch.version.cuda)" && \
+    uv pip install --python /opt/venv/bin/python -r /comfyui/requirements.txt && \
+    uv pip install --python /opt/venv/bin/python "transformers>=4.50.3,<5" "huggingface-hub<1.0" && \
     timeout 300 python /comfyui/main.py --quick-test-for-ci --cpu && \
     rm -rf /comfyui/.git
 
