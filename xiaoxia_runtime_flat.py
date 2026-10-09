@@ -56,6 +56,7 @@ from xiaoxia.video.fal_native_image_transport import install_fal_native_image_tr
 from xiaoxia.video.director_audio_separation import install_director_audio_separation
 from xiaoxia.video.prompt_retry_recovery import install_prompt_retry_recovery
 from xiaoxia.video.h3_native_voice import install_h3_native_voice
+from xiaoxia.video.h3_provider_choice import install_h3_provider_choice
 from xiaoxia.pose.core import install_pose_commands
 from xiaoxia.pose.wardrobe_pose_test import install_wardrobe_pose_test
 from xiaoxia.video.h3_typeerror_fix import install_h3_typeerror_fix
@@ -76,7 +77,7 @@ from xiaoxia.photo.beauty_portrait import install_beauty_portrait
 from xiaoxia.pose.pose_output_guard import install_pose_output_guard
 from xiaoxia.pose.final_prompt_pose_patch import install_final_pose_prompt_patch
 
-MIGRATION_VERSION = "1.14.11"
+MIGRATION_VERSION = "1.14.12"
 
 def _activate_photo_modules():
     autonomy_recover = app._autonomy_display_share_text
@@ -222,14 +223,15 @@ def _activate_flat():
     activated["pose_final_prompt_guard"] = install_final_pose_prompt_patch(app)
     # UI-only final wrapper: retire unused buttons, preserve H3, add 收藏寫真.
     activated["beauty_portrait"] = install_beauty_portrait(app)
+    activated["h3_provider_choice"] = install_h3_provider_choice(app)
     app.LOBSTER_VERSION=MIGRATION_VERSION
-    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab,qwen_fix,qwen_photo_scene,qwen_scene_trace,love_qwen_fallback,love_model_choice")
+    print("🧱 [RUNTIME_FLAT_ACTIVE] version=1.14.11 features=beauty_portrait,qwen_lab,qwen_fix,qwen_photo_scene,qwen_scene_trace,love_qwen_fallback,love_model_choice,h3_provider_choice")
     return activated
 
 _ACTIVATED = _activate_flat()
 
 if __name__ == "__main__":
-    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.11-flat stable_base=1.11.17.2")
+    print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.12-flat stable_base=1.11.17.2")
     try:
         app.asyncio.run(app.main())
     except Exception as exc:
