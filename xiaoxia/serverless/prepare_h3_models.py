@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prepare ComfyUI model paths for MiniMax H3 on RunPod Cached Model.
+"""Prepare ComfyUI model paths for MiniMax H3 from a RunPod Global Volume.
 
-This file is intentionally NOT wired into the current Qwen worker startup yet.
-It is deployment preparation only.  Activate it after the H3 cached-model
-layout has been verified in RunPod.
+Serverless Global Volumes mount at /runpod-volume.  The H3 files are kept in a
+dedicated /runpod-volume/h3_models tree so they can coexist with unrelated
+assets already stored on xiaoxia-models.
 
-Baseline follows the official Comfy-Org MiniMax H3 I2V template:
-- FL2VA pruned INT8 ConvRot diffusion model
-- Qwen3-VL-32B NVFP4 AWQ text encoder
-- H3 INT8 ConvRot video VAE
-- H3 FP32 audio VAE
+Expected layout:
+  /runpod-volume/h3_models/
+    diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+    text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+    vae/minimax_h3_video_vae_int8_convrot.safetensors
+    vae/minimax_h3_audio_vae_fp32.safetensors
 
-The existing Qwen 2.1 endpoint may eventually share one ComfyUI worker with H3;
-this script therefore appends an H3 model-path stanza rather than replacing
-the Qwen stanza when requested by the future worker bootstrap.
+This script only validates and maps existing files.  It never downloads model
+weights during Serverless startup.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-HF_CACHE_ROOT = Path("/runpod-volume/huggingface-cache/hub")
-MODEL_ID = "Comfy-Org/MiniMax-H3"
-MODEL_ROOT = HF_CACHE_ROOT / "models--Comfy-Org--MiniMax-H3"
-SNAPSHOTS_DIR = MODEL_ROOT / "snapshots"
+MODEL_ROOT = Path("/runpod-volume/h3_models")
 EXTRA_MODEL_PATHS = Path("/comfyui/extra_model_paths.yaml")
 
 REQUIRED_FILES = (
@@ -35,68 +31,42 @@ REQUIRED_FILES = (
 )
 
 
-def _resolve_snapshot() -> Path:
-    requested = (os.environ.get("MINIMAX_H3_HF_REVISION") or "").strip()
-    if requested:
-        candidate = SNAPSHOTS_DIR / requested
-        if candidate.is_dir():
-            print(f"[H3_MODEL_CACHE] using requested revision={requested}")
-            return candidate
-        raise RuntimeError(f"requested cached revision not found: {candidate}")
+def validate_volume() -> None:
+    if not MODEL_ROOT.is_dir():
+        raise RuntimeError(
+            f"H3 Global Volume directory not found: {MODEL_ROOT}. "
+            "Attach xiaoxia-models to this endpoint and populate h3_models first."
+        )
 
-    refs_main = MODEL_ROOT / "refs" / "main"
-    if refs_main.is_file():
-        snapshot_hash = refs_main.read_text(encoding="utf-8").strip()
-        candidate = SNAPSHOTS_DIR / snapshot_hash
-        if candidate.is_dir():
-            print(f"[H3_MODEL_CACHE] using refs/main revision={snapshot_hash}")
-            return candidate
-
-    if not SNAPSHOTS_DIR.is_dir():
-        raise RuntimeError(f"cached model snapshots directory not found: {SNAPSHOTS_DIR}")
-
-    snapshots = sorted(p for p in SNAPSHOTS_DIR.iterdir() if p.is_dir())
-    if len(snapshots) == 1:
-        print(f"[H3_MODEL_CACHE] using sole cached snapshot={snapshots[0].name}")
-        return snapshots[0]
-    if not snapshots:
-        raise RuntimeError(f"no cached model snapshots found under: {SNAPSHOTS_DIR}")
-    raise RuntimeError(
-        "multiple cached snapshots found; set MINIMAX_H3_HF_REVISION explicitly"
-    )
-
-
-def validate_snapshot(snapshot: Path) -> None:
     missing: list[str] = []
     for rel in REQUIRED_FILES:
-        path = snapshot / rel
+        path = MODEL_ROOT / rel
         if not path.is_file():
             missing.append(rel)
         else:
-            print(f"[H3_MODEL_CACHE] ok file={rel} bytes={path.stat().st_size}")
+            print(f"[H3_GLOBAL_VOLUME] ok file={rel} bytes={path.stat().st_size}")
+
     if missing:
         raise RuntimeError(
-            "cached MiniMax H3 model is missing required files: " + ", ".join(missing)
+            "H3 Global Volume is missing required files: " + ", ".join(missing)
         )
 
 
-def model_path_yaml(snapshot: Path) -> str:
+def model_path_yaml() -> str:
     return (
-        "xiaoxia_minimax_h3_cached_model:\n"
-        f"  base_path: {snapshot}\n"
+        "xiaoxia_minimax_h3_global_volume:\n"
+        f"  base_path: {MODEL_ROOT}\n"
         "  diffusion_models: diffusion_models\n"
         "  text_encoders: text_encoders\n"
         "  vae: vae\n"
-        "  loras: loras\n"
     )
 
 
 def main() -> int:
-    snapshot = _resolve_snapshot()
-    validate_snapshot(snapshot)
-    EXTRA_MODEL_PATHS.write_text(model_path_yaml(snapshot), encoding="utf-8")
+    validate_volume()
+    EXTRA_MODEL_PATHS.write_text(model_path_yaml(), encoding="utf-8")
     print(
-        f"[H3_MODEL_CACHE] mapped model_id={MODEL_ID} snapshot={snapshot.name} "
+        f"[H3_GLOBAL_VOLUME] mapped root={MODEL_ROOT} "
         f"config={EXTRA_MODEL_PATHS}"
     )
     return 0
