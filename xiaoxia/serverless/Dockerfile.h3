@@ -2,6 +2,15 @@ FROM runpod/worker-comfyui:5.10.0-base
 
 ARG COMFYUI_COMMIT=a7169322485d0049380fb207fa17e9fb3ec40486
 
+# PyTorch/Triton native CUDA kernels compile a tiny C/C++ helper at runtime.
+# The slim worker image does not include a compiler by default.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++
+
 # Keep the exact ComfyUI revision already verified by the Qwen-2.1 worker.
 # This commit also contains MiniMax H3 native nodes and SaveVideo support.
 RUN rm -rf /comfyui && \
