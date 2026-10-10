@@ -7,11 +7,18 @@ ownership for the photo action surface lives outside the monolith.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import traceback
+import uuid
 from typing import Any
 
-EXTRACTION_VERSION = "1.12.02b"
+import discord
+
+from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
+from xiaoxia.qwen_fix import run_mark_fix_bytes
+
+EXTRACTION_VERSION = "1.12.02c-repair-engine-selector"
 
 
 async def more(view: Any, interaction: Any, app: Any) -> None:
@@ -404,8 +411,309 @@ async def adopt_v5(view: Any, interaction: Any, app: Any) -> None:
         await interaction.followup.send(f"⚠️ 採用 v5.0 場景升級版取代來源失敗：`{str(exc)[:1500]}`", ephemeral=True)
 
 
+def _qwen_text_effective_prompt(delta: str) -> str:
+    request = str(delta or "").strip()
+    return (
+        "QWEN REPAIR — TEXT-GUIDED EDIT\n\n"
+        "<image1> is the completed source image to repair.\n"
+        "Apply only the user's requested correction. Preserve unrelated identity, face, hairstyle, "
+        "expression, pose, body orientation, camera angle, framing, crop, background, scene layout, "
+        "lighting, color, texture, clothing, props, and composition as closely as possible.\n"
+        "Do not restage the image or make broad global changes unless the user explicitly asks for them.\n\n"
+        "USER REPAIR REQUEST:\n"
+        + request
+    ).strip()
+
+
+async def _qwen_repair_context(
+    app: Any,
+    context: dict,
+    repair_request: str,
+    *,
+    mark_bytes: bytes | None = None,
+    steps: int = 40,
+) -> dict:
+    request_text = str(repair_request or "").strip()
+    if not request_text:
+        raise RuntimeError("修正內容不能是空白。")
+
+    if mark_bytes is None:
+        source_path = await app._ensure_context_local_path(context)
+        with open(source_path, "rb") as f:
+            input_bytes = f.read()
+        prompt = _qwen_text_effective_prompt(request_text)
+        input_mode = "text_only"
+    else:
+        input_mode = "mark"
+
+    if input_mode == "mark":
+        # IMPORTANT: reuse the exact /qwen_fix marked-image core.
+        # Do not duplicate prompt assembly / seed / reference-slot behavior here.
+        blob, qwen_seed = await run_mark_fix_bytes(
+            mark_bytes,
+            request_text,
+            steps=int(steps),
+        )
+    else:
+        results = await run_qwen21(
+            input_bytes,
+            prompt=prompt,
+            steps=int(steps),
+            disabled_image_slots={2, 3, 4, 5, 6},
+        )
+        if not results:
+            raise RunPodServerlessError("Qwen-2.1 repair returned no image")
+        _, blob = results[0]
+        qwen_seed = None
+    filename = f"qwen_repair_{uuid.uuid4().hex[:12]}.png"
+    os.makedirs(app.OUTPUT_DIR, exist_ok=True)
+    local_path = os.path.join(app.OUTPUT_DIR, filename)
+    with open(local_path, "wb") as f:
+        f.write(blob)
+    local_url = f"https://xiaoxia0320.zeabur.app/gallery/{filename}"
+
+    repaired = dict(context)
+    repaired.update({
+        "id": str(uuid.uuid4()),
+        "image_url": local_url,
+        "local_url": local_url,
+        "local_filename": filename,
+        "local_path": local_path,
+        "repair_request": request_text,
+        "repair_engine": "qwen-2.1",
+        "repair_input_mode": input_mode,
+        "qwen_seed": qwen_seed,
+        "seedream_model_id": None,
+        "seedream_model_label": None,
+        "repaired_at": app.datetime.now(app.TZ_TPE).strftime("%Y-%m-%d %H:%M:%S"),
+        "composition": context.get("composition") or context.get("scene_summary") or "Qwen 修正版照片",
+        "mood_summary": context.get("mood_summary") or context.get("mood") or "保留原本氛圍的 Qwen 修正版",
+        "message": context.get("message") or "大俠，這張我只整理了你指定的地方。",
+        "source_mode": context.get("source_mode", context.get("type", "photo_repair")),
+        "type": context.get("type", context.get("source_mode", "photo")),
+        "final_level": context.get("final_level") or context.get("generation_level") or "REPAIR",
+        "generation_level": context.get("final_level") or context.get("generation_level") or "REPAIR",
+    })
+    print(
+        f"✅ [PHOTO_REPAIR_QWEN] engine=qwen-2.1 mode={input_mode} "
+        f"steps={steps} seed={qwen_seed} output={filename}"
+    )
+    return repaired
+
+
+async def _send_qwen_repair_preview(
+    app: Any,
+    interaction: discord.Interaction,
+    original_context: dict,
+    repaired_context: dict,
+) -> None:
+    # Reuse the existing preview/adoption path intentionally:
+    # PhotoRepairPreviewView -> _overwrite_generated_photo().
+    # This preserves current DB / diary / Discord / Cloud Villa replacement behavior
+    # and deletes the superseded old gallery file only after explicit adoption.
+    preview = app.PhotoRepairPreviewView(original_context, repaired_context)
+    file, filename = app._photo_discord_file(repaired_context)
+    embed = app._build_result_embed(
+        repaired_context,
+        title_prefix="🩹 Qwen-2.1 修正版預覽",
+        attachment_filename=filename if file else None,
+    )
+    if file:
+        await interaction.followup.send(embed=embed, file=file, view=preview)
+    else:
+        await interaction.followup.send(embed=embed, view=preview)
+
+
+class _QwenTextRepairModal(discord.ui.Modal):
+    def __init__(self, app: Any, context: dict):
+        super().__init__(title="Qwen-2.1｜文字修正")
+        self.app = app
+        self.context = dict(context)
+        self.repair_request = discord.ui.TextInput(
+            label="請描述要修正什麼",
+            placeholder="例如：把左手多出的手指修成自然五指，其餘不變。",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=True,
+        )
+        self.add_item(self.repair_request)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        request_text = str(self.repair_request.value or "").strip()
+        if not request_text:
+            await interaction.response.send_message("修正內容不能是空白喔。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        status = await interaction.followup.send(
+            "🩹 Qwen-2.1 正在依文字修正這張照片…",
+            wait=True,
+        )
+        try:
+            repaired = await _qwen_repair_context(
+                self.app,
+                self.context,
+                request_text,
+                mark_bytes=None,
+                steps=40,
+            )
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            await _send_qwen_repair_preview(self.app, interaction, self.context, repaired)
+        except Exception as exc:
+            try:
+                await status.edit(content=f"⚠️ Qwen-2.1 修正失敗：`{str(exc)[:1500]}`")
+            except Exception:
+                await interaction.followup.send(
+                    f"⚠️ Qwen-2.1 修正失敗：`{str(exc)[:1500]}`",
+                    ephemeral=True,
+                )
+
+
+class _QwenMarkRepairModal(discord.ui.Modal):
+    def __init__(self, app: Any, context: dict):
+        super().__init__(title="Qwen-2.1｜Mark 局部修正")
+        self.app = app
+        self.context = dict(context)
+        self.repair_request = discord.ui.TextInput(
+            label="標記區域要怎麼修改？",
+            placeholder="例如：將紅圈中的六指手修成自然五指。",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=True,
+        )
+        self.add_item(self.repair_request)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        request_text = str(self.repair_request.value or "").strip()
+        if not request_text:
+            await interaction.response.send_message("修正內容不能是空白喔。", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "🖍️ 請在 **5 分鐘內**於這個頻道上傳一張已畫好圈選／標記的圖片。\n"
+            "只要上傳 marked image 即可，不必再附原圖；Qwen 會把它當唯一 Local Edit 輸入。",
+            ephemeral=True,
+        )
+
+        author_id = interaction.user.id
+        channel_id = interaction.channel_id
+
+        def _check(message):
+            if getattr(message.author, "id", None) != author_id:
+                return False
+            if getattr(message.channel, "id", None) != channel_id:
+                return False
+            attachments = list(getattr(message, "attachments", []) or [])
+            return any(
+                str(getattr(a, "content_type", "") or "").lower().startswith("image/")
+                or str(getattr(a, "filename", "") or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                for a in attachments
+            )
+
+        try:
+            message = await self.app.girlfriend_bot.wait_for("message", timeout=300.0, check=_check)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⌛ 等待 mark 圖逾時，這次修正已取消。", ephemeral=True)
+            return
+
+        attachment = next(
+            a for a in message.attachments
+            if str(getattr(a, "content_type", "") or "").lower().startswith("image/")
+            or str(getattr(a, "filename", "") or "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        )
+        mark_bytes = await attachment.read()
+        if not mark_bytes:
+            await interaction.followup.send("⚠️ 讀不到這張 mark 圖，請再試一次。", ephemeral=True)
+            return
+
+        status = await interaction.followup.send(
+            "🩹 已收到 mark 圖，Qwen-2.1 正在只修標記區域…",
+            wait=True,
+        )
+        try:
+            repaired = await _qwen_repair_context(
+                self.app,
+                self.context,
+                request_text,
+                mark_bytes=mark_bytes,
+                steps=40,
+            )
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            await _send_qwen_repair_preview(self.app, interaction, self.context, repaired)
+        except Exception as exc:
+            try:
+                await status.edit(content=f"⚠️ Qwen-2.1 Mark 修正失敗：`{str(exc)[:1500]}`")
+            except Exception:
+                await interaction.followup.send(
+                    f"⚠️ Qwen-2.1 Mark 修正失敗：`{str(exc)[:1500]}`",
+                    ephemeral=True,
+                )
+
+
+class _QwenRepairModeView(discord.ui.View):
+    def __init__(self, app: Any, context: dict, owner_id: int | None):
+        super().__init__(timeout=300)
+        self.app = app
+        self.context = dict(context)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的修圖操作。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="文字輸入", style=discord.ButtonStyle.secondary, emoji="📝")
+    async def text_only(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_QwenTextRepairModal(self.app, self.context))
+
+    @discord.ui.button(label="載入 Mark 圖片", style=discord.ButtonStyle.primary, emoji="🖍️")
+    async def marked(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_QwenMarkRepairModal(self.app, self.context))
+
+
+class _RepairEngineView(discord.ui.View):
+    def __init__(self, app: Any, context: dict, owner_id: int | None):
+        super().__init__(timeout=300)
+        self.app = app
+        self.context = dict(context)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的修圖操作。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Seedream v4.5", style=discord.ButtonStyle.secondary, emoji="🌱")
+    async def seedream(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Existing Seedream modal/path is kept untouched as the rollback route.
+        await interaction.response.send_modal(self.app.PhotoRepairModal(self.context))
+
+    @discord.ui.button(label="Qwen-2.1", style=discord.ButtonStyle.primary, emoji="🩹")
+    async def qwen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=(
+                "🩹 **Qwen-2.1 修正方式**\n"
+                "• **文字輸入**：直接以目前原圖做 edit。\n"
+                "• **載入 Mark 圖片**：先在手機上圈選／標記，再上傳 marked image 做 Local Edit。"
+            ),
+            view=_QwenRepairModeView(self.app, self.context, self.owner_id),
+        )
+
+
 async def repair(view: Any, interaction: Any, app: Any) -> None:
-    await interaction.response.send_modal(app.PhotoRepairModal(view.context))
+    await interaction.response.send_message(
+        "🩹 **修正這張｜請選擇修圖引擎**\n"
+        "Seedream v4.5 保留原本純文字修正；Qwen-2.1 可選純文字或 Mark 局部修正。",
+        view=_RepairEngineView(app, view.context, getattr(interaction.user, "id", None)),
+        ephemeral=True,
+    )
 
 
 async def save_wardrobe(view: Any, interaction: Any, app: Any) -> None:

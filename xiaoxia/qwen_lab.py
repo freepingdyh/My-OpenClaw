@@ -1,0 +1,460 @@
+# -*- coding: utf-8 -*-
+"""Temporary Qwen Image 2.1 reference sculpting lab for Xiaoxia."""
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import shutil
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
+
+import discord
+from discord import app_commands
+
+from xiaoxia.media.runpod_serverless import RunPodServerlessError, run_qwen21
+
+VERSION = "1.14.16-qwen-lab-v6"
+
+_ROOT = Path("/data/memory/qwen21")
+_PROMPT_PATH = _ROOT / "lab_prompts.json"
+_RUNS_DIR = _ROOT / "lab_runs"
+_REFS_DIR = _ROOT / "refs"
+_PROMPT_REVISION = 6
+
+_MODE_TO_V2_REF = {
+    "front_view": "image_5_body_half_front_v2.png",
+    "45_view": "image_7_body_half_45_v2.png",
+    "side_view": "image_8_body_half_90_v2.png",
+    "full_view": "image_4_body_full_v2.png",
+}
+
+SYSTEM_CORE_PROMPT = """REFERENCE-ASSET LAB — FIXED CORE CONTRACT
+
+<image1> is the ONLY visual authority and the ONLY image to be edited.
+
+The final image must contain exactly ONE woman: the woman from <image1>.
+
+Preserve the woman in <image1> as the same person.
+Preserve her facial identity, hairstyle, facial expression, pose, body orientation, hand placement,
+camera angle, framing, crop, background, scene layout, lighting, and overall composition unless
+the user delta explicitly asks to change one of those things.
+
+Xiaoxia is a 24-year-old adult woman with these stable traits:
+- fair skin
+- tall and slender overall build
+- long-legged, slim body proportions
+- a naturally very full and prominent bust
+- youthful adult facial identity
+
+The user delta is the only per-run change instruction.
+Apply it precisely. If the user delta asks for a different view, crop, framing, pose, body feature,
+clothing state, or any other change, follow that request. Otherwise preserve <image1> as closely as possible.
+
+Do not reinterpret the scene and do not rebuild the image from other references.
+Do not create a collage, lineup, comparison sheet, grouped portrait, clones, twins, duplicate subjects,
+extra heads, torsos, arms, legs, or foreign body parts.
+"""
+
+_DEFAULTS = {
+    "system_base_prompt": """Apply only the user-requested delta to <image1>.
+
+Keep <image1> as the edit target and preserve all unrelated identity, anatomy, pose, framing, crop,
+camera, expression, hairstyle, lighting, background, and composition as closely as possible.
+
+Keep the result photorealistic and natural.
+Do not introduce extra subjects or unrelated visual changes."""
+}
+
+
+def _ensure_dirs() -> None:
+    _ROOT.mkdir(parents=True, exist_ok=True)
+    _RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    _REFS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_prompts() -> Dict[str, str]:
+    _ensure_dirs()
+    data = dict(_DEFAULTS)
+    migrate = False
+    try:
+        stored = json.loads(_PROMPT_PATH.read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            revision = int(stored.get("_prompt_revision") or 0)
+            if revision == _PROMPT_REVISION:
+                for key in data:
+                    value = stored.get(key)
+                    if isinstance(value, str) and value.strip():
+                        data[key] = value.strip()
+            else:
+                # v1 Lab prompts encouraged "create/reference composition" semantics and
+                # caused Qwen to synthesize the reference people into one group image.
+                # Reset once to the v2 edit-target defaults; subsequent UI edits persist.
+                migrate = True
+    except Exception:
+        migrate = True
+    if migrate:
+        _save_prompts(data)
+    return data
+
+
+def _save_prompts(data: Dict[str, str]) -> None:
+    _ensure_dirs()
+    payload = {"_prompt_revision": _PROMPT_REVISION}
+    payload.update({k: str(data.get(k) or _DEFAULTS[k]).strip() for k in _DEFAULTS})
+    tmp = _PROMPT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, _PROMPT_PATH)
+
+
+def _effective_prompt(delta: str) -> str:
+    prompts = _load_prompts()
+    return (
+        SYSTEM_CORE_PROMPT.strip()
+        + "\n\n"
+        + prompts["system_base_prompt"].strip()
+        + "\n\nUSER DELTA — apply this requested change precisely:\n"
+        + (str(delta or "").strip() or "No additional delta. Preserve <image1> as closely as possible.")
+    )
+
+
+def _run_dir(run_id: str) -> Path:
+    path = _RUNS_DIR / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_meta(run_id: str, data: Dict[str, Any]) -> None:
+    (_run_dir(run_id) / "run.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_meta(run_id: str) -> Dict[str, Any]:
+    try:
+        value = json.loads((_run_dir(run_id) / "run.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _image_ext(filename: str, content_type: str) -> str:
+    lower = str(filename or "").lower()
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        if lower.endswith(ext):
+            return ext
+    return ".png" if "png" in str(content_type or "").lower() else ".jpg"
+
+
+def _run_text(meta: Dict[str, Any], index: int, seed: int) -> str:
+    delta = str(meta.get("delta") or "").replace("\n", " ").strip()
+    if len(delta) > 450:
+        delta = delta[:447] + "..."
+    return (
+        "🧪 Qwen Lab\n"
+        f"Delta: {delta or '—'}\n"
+        f"Steps: {meta.get('steps')} | Candidate: {index}/{meta.get('count')} | Seed: {seed}\n"
+        f"Run: {meta.get('run_id')}"
+    )
+
+
+async def _generate_run(app: Any, interaction: discord.Interaction, source_path: Path, delta: str, count: int, steps: int, parent_run_id: str = "") -> str:
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+    run_dir = _run_dir(run_id)
+    source_copy = run_dir / ("source" + source_path.suffix.lower())
+    shutil.copy2(source_path, source_copy)
+    source_bytes = source_copy.read_bytes()
+    prompt = _effective_prompt(delta)
+
+    meta = {
+        "run_id": run_id,
+        "created_at": datetime.now().astimezone().isoformat(),
+        "delta": delta,
+        "steps": int(steps),
+        "count": int(count),
+        "source_path": str(source_copy),
+        "parent_run_id": parent_run_id,
+        "effective_prompt": prompt,
+        "reference_policy": "image1_only",
+        "outputs": [],
+    }
+    _write_meta(run_id, meta)
+
+    status = await interaction.followup.send(f"🧪 Qwen Lab 正在產生 {count} 張候選圖...", wait=True)
+    completed = 0
+    try:
+        for index in range(1, int(count) + 1):
+            seed = secrets.randbelow(2**63 - 1)
+            results = await run_qwen21(
+                source_bytes,
+                prompt=prompt,
+                seed=seed,
+                steps=int(steps),
+                disabled_image_slots={2, 3, 4, 5, 6},
+            )
+            if not results:
+                raise RunPodServerlessError(f"candidate {index} returned no image")
+            _, blob = results[0]
+            out_path = run_dir / f"candidate_{index}.png"
+            out_path.write_bytes(blob)
+            meta["outputs"].append({"index": index, "seed": seed, "path": str(out_path), "bytes": len(blob)})
+            _write_meta(run_id, meta)
+            view = LabCandidateView(app, run_id, out_path, getattr(interaction.user, "id", None))
+            await interaction.followup.send(_run_text(meta, index, seed), file=discord.File(str(out_path), filename=out_path.name), view=view)
+            completed += 1
+            try:
+                await status.edit(content=f"🧪 Qwen Lab: 已完成 {completed}/{count} 張...")
+            except Exception:
+                pass
+    finally:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    print(f"✅ [QWEN_LAB_RUN] version={VERSION} run_id={run_id} refs=image1_only count={completed}/{count} steps={steps}")
+    return run_id
+
+
+class DeltaModal(discord.ui.Modal):
+    def __init__(self, app: Any, run_id: str, source_path: Path, title: str, initial: str, owner_id: int | None):
+        super().__init__(title=title[:45], timeout=600)
+        self.app = app
+        self.run_id = run_id
+        self.source_path = source_path
+        self.owner_id = owner_id
+        self.delta_input = discord.ui.TextInput(label="這一輪要調整的部分", style=discord.TextStyle.paragraph, default=str(initial or "")[:4000], required=False, max_length=4000)
+        self.add_item(self.delta_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab 操作。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        meta = _read_meta(self.run_id)
+        await _generate_run(self.app, interaction, self.source_path, str(self.delta_input.value or "").strip(), int(meta.get("count") or 4), int(meta.get("steps") or 25), self.run_id)
+
+
+class ConfirmAdoptView(discord.ui.View):
+    def __init__(self, run_id: str, candidate_path: Path, target_mode: str, owner_id: int | None):
+        super().__init__(timeout=300)
+        self.run_id = run_id
+        self.candidate_path = candidate_path
+        self.target_mode = target_mode
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab 操作。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="確認採用", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        filename = _MODE_TO_V2_REF.get(self.target_mode)
+        if not filename:
+            await interaction.response.send_message("⚠️ 找不到這個 v2 底圖位置。", ephemeral=True)
+            return
+        target = _REFS_DIR / filename
+        backup = None
+        if target.exists():
+            backup = target.with_name(target.stem + "_previous" + target.suffix)
+            shutil.copy2(target, backup)
+        shutil.copy2(self.candidate_path, target)
+        text = f"✅ 已採用為 {self.target_mode} 的 qwen2.1_special_v2 底圖：{target.name}"
+        if backup:
+            text += f"\n上一版備份：{backup.name}"
+        await interaction.response.edit_message(content=text, view=None)
+        print(f"✅ [QWEN_LAB_ADOPT] target={self.target_mode} source={self.candidate_path} target_file={target}")
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="已取消採用。", view=None)
+
+
+class AdoptTargetSelect(discord.ui.Select):
+    def __init__(self, run_id: str, candidate_path: Path, owner_id: int | None):
+        options = [
+            discord.SelectOption(label="正面 front_view", value="front_view", description=_MODE_TO_V2_REF["front_view"]),
+            discord.SelectOption(label="45度 45_view", value="45_view", description=_MODE_TO_V2_REF["45_view"]),
+            discord.SelectOption(label="側面 side_view", value="side_view", description=_MODE_TO_V2_REF["side_view"]),
+            discord.SelectOption(label="全身 full_view", value="full_view", description=_MODE_TO_V2_REF["full_view"]),
+        ]
+        super().__init__(placeholder="選擇要存入哪一個 v2 reference slot", min_values=1, max_values=1, options=options)
+        self.run_id = run_id
+        self.candidate_path = candidate_path
+        self.owner_id = owner_id
+
+    async def callback(self, interaction: discord.Interaction):
+        target_mode = self.values[0]
+        await interaction.response.edit_message(
+            content=f"要把這張採用為 {target_mode} 的正式 v2 底圖 {_MODE_TO_V2_REF[target_mode]} 嗎？",
+            view=ConfirmAdoptView(self.run_id, self.candidate_path, target_mode, self.owner_id),
+        )
+
+
+class AdoptTargetView(discord.ui.View):
+    def __init__(self, run_id: str, candidate_path: Path, owner_id: int | None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.add_item(AdoptTargetSelect(run_id, candidate_path, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab 操作。", ephemeral=True)
+            return False
+        return True
+
+
+class LabCandidateView(discord.ui.View):
+    def __init__(self, app: Any, run_id: str, candidate_path: Path, owner_id: int | None):
+        super().__init__(timeout=1800)
+        self.app = app
+        self.run_id = run_id
+        self.candidate_path = candidate_path
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab 操作。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="用此圖續修", style=discord.ButtonStyle.primary, row=0)
+    async def refine(self, interaction: discord.Interaction, button: discord.ui.Button):
+        meta = _read_meta(self.run_id)
+        await interaction.response.send_modal(DeltaModal(self.app, self.run_id, self.candidate_path, "用此圖續修", str(meta.get("delta") or ""), self.owner_id))
+
+    @discord.ui.button(label="同條件再生4張", style=discord.ButtonStyle.secondary, row=0)
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        meta = _read_meta(self.run_id)
+        source = Path(str(meta.get("source_path") or ""))
+        if not source.is_file():
+            await interaction.followup.send("⚠️ 找不到這一輪原始 image_1。", ephemeral=True)
+            return
+        await _generate_run(self.app, interaction, source, str(meta.get("delta") or ""), 4, int(meta.get("steps") or 25), self.run_id)
+
+    @discord.ui.button(label="修改提示詞重跑", style=discord.ButtonStyle.secondary, row=1)
+    async def reprompt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        meta = _read_meta(self.run_id)
+        source = Path(str(meta.get("source_path") or ""))
+        if not source.is_file():
+            await interaction.response.send_message("⚠️ 找不到這一輪原始 image_1。", ephemeral=True)
+            return
+        await interaction.response.send_modal(DeltaModal(self.app, self.run_id, source, "修改 Delta 後重跑", str(meta.get("delta") or ""), self.owner_id))
+
+    @discord.ui.button(label="採用為 v2 底圖", style=discord.ButtonStyle.success, row=1)
+    async def adopt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "請選擇這張候選圖要存入哪一個 v2 reference slot：",
+            view=AdoptTargetView(self.run_id, self.candidate_path, self.owner_id),
+            ephemeral=True,
+        )
+
+
+class PromptEditModal(discord.ui.Modal):
+    def __init__(self, current: str):
+        super().__init__(title="修改 SYSTEM_BASE_PROMPT", timeout=600)
+        self.body = discord.ui.TextInput(
+            label="system_base_prompt",
+            style=discord.TextStyle.paragraph,
+            default=str(current or "")[:4000],
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.body)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = _load_prompts()
+        data["system_base_prompt"] = str(self.body.value or "").strip()
+        _save_prompts(data)
+        await interaction.response.send_message("✅ 已更新 SYSTEM_BASE_PROMPT。下一次 Qwen Lab 立即生效，不需 redeploy。", ephemeral=True)
+
+
+class PromptEditorView(discord.ui.View):
+    def __init__(self, owner_id: int | None):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is not None and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("這是大俠目前的 Qwen Lab Prompt 編輯器。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="修改 SYSTEM_BASE_PROMPT", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_base(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = _load_prompts()
+        await interaction.response.send_modal(PromptEditModal(data["system_base_prompt"]))
+
+    @discord.ui.button(label="查看目前組裝結果", style=discord.ButtonStyle.primary, row=1)
+    async def preview(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = _load_prompts()
+        text = (
+            "SYSTEM_CORE_PROMPT（固定不可編輯）\n"
+            + SYSTEM_CORE_PROMPT.strip()
+            + "\n\nSYSTEM_BASE_PROMPT\n"
+            + data["system_base_prompt"]
+            + "\n\n[執行時再接 USER DELTA；不再有 mode/view template]"
+        )
+        chunks = [text[i:i+1800] for i in range(0, len(text), 1800)]
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)
+
+    @discord.ui.button(label="還原預設", style=discord.ButtonStyle.danger, row=1)
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _save_prompts(dict(_DEFAULTS))
+        await interaction.response.send_message("✅ 已還原 SYSTEM_BASE_PROMPT。", ephemeral=True)
+
+
+
+def install_qwen_lab(app: Any) -> Dict[str, Any]:
+    bot = app.girlfriend_bot
+    tree = bot.tree
+    group = app_commands.Group(name="qwen_lab", description="Qwen Image 2.1 小俠底圖雕塑工具")
+
+    @group.command(name="提示詞", description="上傳 image_1，輸入 Delta，產生底圖候選")
+    @app_commands.describe(image_1="這一輪要修改的主圖", delta="只寫這一輪想修改的部分；視角/構圖需要時也直接寫在這裡", count="一次產生幾張候選圖", steps="Qwen sampling steps")
+    async def generate(interaction: discord.Interaction, image_1: discord.Attachment, delta: str = "", count: app_commands.Range[int, 1, 4] = 4, steps: app_commands.Range[int, 20, 50] = 25):
+        content_type = str(image_1.content_type or "").lower()
+        filename = str(image_1.filename or "")
+        if not (content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))):
+            await interaction.response.send_message("⚠️ image_1 必須是圖片。", ephemeral=True)
+            return
+        if not os.environ.get("XIAOXIA_RUNPOD_SERVERLESS_ENDPOINT_ID") or not (os.environ.get("XIAOXIA_RUNPOD_SERVERLESS_API_KEY") or os.environ.get("RUNPOD_API_KEY")):
+            await interaction.response.send_message("⚠️ RunPod Qwen21 Serverless 尚未設定。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        upload_dir = _RUNS_DIR / "_uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        source = upload_dir / f"upload_{interaction.id}_{uuid.uuid4().hex[:6]}{_image_ext(filename, content_type)}"
+        source.write_bytes(await image_1.read())
+        await _generate_run(app, interaction, source, str(delta or "").strip(), int(count), int(steps))
+
+    @group.command(name="修改提示詞", description="修改 Qwen Lab 固定 Prompt")
+    async def prompts(interaction: discord.Interaction):
+        _ensure_dirs()
+        if not _PROMPT_PATH.exists():
+            _save_prompts(dict(_DEFAULTS))
+        await interaction.response.send_message("🧪 Qwen Lab Prompt 編輯器\nSYSTEM_CORE_PROMPT 固定不開放修改；SYSTEM_BASE_PROMPT 修改後立即生效。視角/構圖需求直接寫在 Delta。", view=PromptEditorView(getattr(interaction.user, "id", None)), ephemeral=True)
+
+    tree.add_command(group, override=True)
+    original_ready = getattr(bot, "on_ready", None)
+    synced = False
+
+    async def on_ready_with_qwen_lab_sync():
+        nonlocal synced
+        if original_ready is not None:
+            await original_ready()
+        if synced:
+            return
+        try:
+            synced_cmds = await tree.sync()
+            synced = True
+            print(f"✅ [QWEN_LAB_SLASH_SYNC] version={VERSION} synced={len(synced_cmds)}")
+        except Exception as exc:
+            print(f"❌ [QWEN_LAB_SLASH_SYNC_FAILED] {type(exc).__name__}: {exc}")
+
+    bot.on_ready = on_ready_with_qwen_lab_sync
+    return {"version": VERSION, "group": "qwen_lab", "commands": ["提示詞", "修改提示詞"], "generation_mode": "image1_only_delta_driven", "default_count": 4, "prompt_storage": str(_PROMPT_PATH), "v2_refs": dict(_MODE_TO_V2_REF)}
