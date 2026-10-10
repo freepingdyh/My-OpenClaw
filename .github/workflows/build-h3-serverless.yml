@@ -55,6 +55,7 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:h3
+            ${{ env.IMAGE_NAME }}:h3-gcc-v2
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
