@@ -216,7 +216,7 @@ async def _generate_runpod(app: Any, context: Dict[str, Any]) -> Dict[str, Any]:
             height=height,
             steps=steps,
             seed=seed,
-            timeout_seconds=float(os.environ.get("H3_RUNPOD_TIMEOUT_SECONDS") or 3600),
+            timeout_seconds=max(3600.0, float(os.environ.get("H3_RUNPOD_TIMEOUT_SECONDS") or 3600)),
         )
         output_dir = Path(str(getattr(app, "OUTPUT_DIR", "") or "/tmp"))
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -279,6 +279,20 @@ async def _render_selected(app: Any, view: Any, interaction: discord.Interaction
 
     h3._ACTIVE_JOBS.add(job_key)
     await interaction.response.defer(thinking=True)
+
+    # RunPod H3 cold starts can take 20+ minutes. Do not leave Discord looking
+    # dead while the worker is loading models; post a durable channel message
+    # that survives the interaction webhook lifetime.
+    channel = getattr(interaction, "channel", None)
+    if provider == "runpod" and channel is not None:
+        try:
+            await channel.send(
+                "🎬 RunPod H3 已送出，正在載入模型與生成 5 秒影片；"
+                "這條路徑冷啟動可能需要 20 分鐘以上。完成後我會直接把影片送回這個頻道。"
+            )
+        except discord.HTTPException as ack_exc:
+            print(f"⚠️ [H3_RUNPOD_ACK_FAILED] {type(ack_exc).__name__}: {ack_exc}")
+
     context = dict(getattr(view, "context", {}) or {})
 
     try:
