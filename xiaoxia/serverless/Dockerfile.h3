@@ -3,9 +3,10 @@ FROM runpod/worker-comfyui:5.10.0-base
 ARG COMFYUI_COMMIT=a7169322485d0049380fb207fa17e9fb3ec40486
 
 # PyTorch/Triton native CUDA kernels compile a tiny C/C++ helper at runtime.
-# The slim worker image does not include a compiler by default.
+# The slim worker image does not include a compiler or Python development headers
+# required by Triton's driver.c (#include <Python.h>).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential && \
+    apt-get install -y --no-install-recommends build-essential python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ENV CC=/usr/bin/gcc \
