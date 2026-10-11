@@ -135,16 +135,39 @@ async def _send_success_to_interaction(view, interaction: discord.Interaction, r
 
     local_path = str(result.get("local_path") or "")
     max_bytes = int(cfg.get("send_file_max_mb") or 24) * 1024 * 1024
-    if local_path and os.path.exists(local_path) and os.path.getsize(local_path) <= max_bytes:
-        await interaction.followup.send(
-            "\n".join(lines),
-            file=discord.File(local_path, filename=os.path.basename(local_path)),
-        )
-    else:
-        link = result.get("local_url") or result.get("video_url")
-        if link:
-            lines.append(f"📎 {link}")
-        await interaction.followup.send("\n".join(lines))
+    link = result.get("local_url") or result.get("video_url")
+    if (not local_path or not os.path.exists(local_path) or os.path.getsize(local_path) > max_bytes) and link:
+        lines.append(f"📎 {link}")
+
+    async def _send_via_followup() -> None:
+        if local_path and os.path.exists(local_path) and os.path.getsize(local_path) <= max_bytes:
+            await interaction.followup.send(
+                "\n".join(lines),
+                file=discord.File(local_path, filename=os.path.basename(local_path)),
+            )
+        else:
+            await interaction.followup.send("\n".join(lines))
+
+    async def _send_via_channel() -> None:
+        channel = getattr(interaction, "channel", None)
+        if channel is None:
+            raise RuntimeError("H3 Discord interaction expired and originating channel is unavailable")
+        if local_path and os.path.exists(local_path) and os.path.getsize(local_path) <= max_bytes:
+            await channel.send(
+                "\n".join(lines),
+                file=discord.File(local_path, filename=os.path.basename(local_path)),
+            )
+        else:
+            await channel.send("\n".join(lines))
+
+    try:
+        await _send_via_followup()
+    except discord.HTTPException as exc:
+        # RunPod H3 cold starts can exceed Discord's interaction-webhook lifetime.
+        # The video job may have completed successfully even though followup.send
+        # can no longer use the original interaction token.
+        print(f"⚠️ [H3_SUCCESS_FOLLOWUP_EXPIRED] {type(exc).__name__}: {exc}")
+        await _send_via_channel()
 
     view.context["last_h3_video_url"] = result.get("local_url") or result.get("video_url")
     view.context["last_h3_video_model_id"] = result.get("model_id")
