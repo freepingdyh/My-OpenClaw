@@ -327,7 +327,17 @@ async def _render_selected(app: Any, view: Any, interaction: discord.Interaction
         context["h3_provider_requested"] = provider
         context["h3_provider_final"] = result.get("provider_final")
         view.context.update(context)
-        await diagnostics._send_success_to_interaction(view, interaction, result)
+
+        # RunPod cold-start jobs routinely outlive Discord interaction webhooks.
+        # Once the job is complete, deliver directly to the originating channel
+        # instead of attempting followup.send() first.
+        if result.get("provider_final") == "runpod":
+            channel = getattr(interaction, "channel", None)
+            if channel is None:
+                raise RuntimeError("H3 RunPod completed but originating Discord channel is unavailable")
+            await diagnostics._send_success_to_channel(view, channel, result)
+        else:
+            await diagnostics._send_success_to_interaction(view, interaction, result)
 
     except Exception as exc:
         print(f"❌ [H3_PROVIDER_ERROR] provider={provider} {type(exc).__name__}: {exc!r}")
