@@ -33,7 +33,15 @@ RUN rm -rf /comfyui && \
 COPY xiaoxia/serverless/prepare_h3_models.py /xiaoxia/prepare_h3_models.py
 COPY xiaoxia/serverless/start_h3_worker.sh /xiaoxia/start_h3_worker.sh
 
-RUN chmod +x /xiaoxia/start_h3_worker.sh
+# Preserve RunPod's stock worker handler, then replace /handler.py with an
+# H3-only shim. The shim delegates execution to the stock handler and only
+# recovers a newly generated MP4/WebM/MOV/MKV when stock worker-comfyui
+# reports no output nodes for ComfyUI SaveVideo.
+RUN cp /handler.py /handler_base.py
+COPY xiaoxia/serverless/h3_handler.py /handler.py
+
+RUN chmod +x /xiaoxia/start_h3_worker.sh && \
+    /opt/venv/bin/python -m py_compile /handler.py /handler_base.py
 
 # The base RunPod image defines its own ENTRYPOINT (/start.sh).
 # Using CMD here does NOT replace that ENTRYPOINT, so our compiler/bootstrap wrapper
