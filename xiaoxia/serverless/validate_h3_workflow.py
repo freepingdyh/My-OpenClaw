@@ -77,8 +77,11 @@ def main() -> int:
 
     save = _nodes(graph, "SaveVideo")[0][1]["inputs"]
     fmt = save.get("format")
-    if not isinstance(fmt, dict) or fmt.get("format") != "mp4":
-        raise RuntimeError("SaveVideo must use explicit MP4 dynamic-combo payload")
+    codec = save.get("codec")
+    if fmt != "mp4":
+        raise RuntimeError("SaveVideo format must be the API-safe string 'mp4'")
+    if not isinstance(codec, dict) or codec.get("codec") != "auto":
+        raise RuntimeError("SaveVideo codec must remain explicit auto codec payload")
 
     print(
         "[H3_WORKFLOW_VALIDATE] ok "
