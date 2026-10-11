@@ -34,4 +34,9 @@ COPY xiaoxia/serverless/start_h3_worker.sh /xiaoxia/start_h3_worker.sh
 
 RUN chmod +x /xiaoxia/start_h3_worker.sh
 
-CMD ["/xiaoxia/start_h3_worker.sh"]
+# The base RunPod image defines its own ENTRYPOINT (/start.sh).
+# Using CMD here does NOT replace that ENTRYPOINT, so our compiler/bootstrap wrapper
+# would be skipped. Override ENTRYPOINT explicitly, then chain back to /start.sh
+# from start_h3_worker.sh after validation.
+ENTRYPOINT ["/xiaoxia/start_h3_worker.sh"]
+CMD []
