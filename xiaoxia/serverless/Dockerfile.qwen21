@@ -1,0 +1,26 @@
+FROM runpod/worker-comfyui:5.10.0-base
+
+ARG COMFYUI_COMMIT=a7169322485d0049380fb207fa17e9fb3ec40486
+
+# worker-comfyui 5.10.0 base is the latest published Docker Hub base tag as of 2026-09-30.\n# Its bundled ComfyUI predates the Qwen Image
+# 2.1 nodes used by Xiaoxia's verified workflow. Replace only ComfyUI itself,
+# while keeping RunPod's official handler and /start.sh.
+RUN rm -rf /comfyui && \
+    git clone https://github.com/Comfy-Org/ComfyUI.git /comfyui && \
+    cd /comfyui && \
+    git checkout "${COMFYUI_COMMIT}" && \
+    test "$(git rev-parse HEAD)" = "${COMFYUI_COMMIT}" && \
+    grep -q "TextEncodeQwenImage21" comfy_extras/nodes_qwen.py && \
+    grep -q "QwenImage21Cache" comfy_extras/nodes_qwen.py && \
+    uv pip install -r /comfyui/requirements.txt && \
+    uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" && \
+    timeout 300 python /comfyui/main.py --quick-test-for-ci --cpu && \
+    rm -rf /comfyui/.git
+
+COPY xiaoxia/serverless/prepare_qwen21_models.py /xiaoxia/prepare_qwen21_models.py
+COPY xiaoxia/serverless/fetch_qwen21_assets.py /xiaoxia/fetch_qwen21_assets.py
+COPY xiaoxia/serverless/start_qwen21_worker.sh /xiaoxia/start_qwen21_worker.sh
+
+RUN chmod +x /xiaoxia/start_qwen21_worker.sh
+
+CMD ["/xiaoxia/start_qwen21_worker.sh"]
