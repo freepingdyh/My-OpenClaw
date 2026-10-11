@@ -9,6 +9,7 @@ on:
       - "xiaoxia/serverless/Dockerfile.h3"
       - "xiaoxia/serverless/start_h3_worker.sh"
       - "xiaoxia/serverless/prepare_h3_models.py"
+      - "xiaoxia/serverless/h3_handler.py"
       - ".github/workflows/build-h3-serverless.yml"
 
 permissions:
