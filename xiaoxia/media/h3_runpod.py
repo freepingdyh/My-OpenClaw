@@ -200,7 +200,7 @@ async def _request(
 async def wait_for_h3_job(
     job_id: str,
     *,
-    timeout_seconds: float = 1200.0,
+    timeout_seconds: float = 3600.0,
     poll_seconds: float = 3.0,
 ) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
@@ -269,7 +269,7 @@ async def run_h3(
     height: int = 480,
     steps: int = 20,
     seed: int = 1,
-    timeout_seconds: float = 1200.0,
+    timeout_seconds: float = 3600.0,
 ) -> tuple[str, bytes, dict[str, Any]]:
     job = build_h3_job(
         first_frame_bytes,
