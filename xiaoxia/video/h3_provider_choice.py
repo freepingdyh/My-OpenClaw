@@ -216,7 +216,7 @@ async def _generate_runpod(app: Any, context: Dict[str, Any]) -> Dict[str, Any]:
             height=height,
             steps=steps,
             seed=seed,
-            timeout_seconds=float(os.environ.get("H3_RUNPOD_TIMEOUT_SECONDS") or 1200),
+            timeout_seconds=float(os.environ.get("H3_RUNPOD_TIMEOUT_SECONDS") or 3600),
         )
         output_dir = Path(str(getattr(app, "OUTPUT_DIR", "") or "/tmp"))
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -317,10 +317,23 @@ async def _render_selected(app: Any, view: Any, interaction: discord.Interaction
 
     except Exception as exc:
         print(f"❌ [H3_PROVIDER_ERROR] provider={provider} {type(exc).__name__}: {exc!r}")
-        await interaction.followup.send(
-            f"⚠️ H3影片生成失敗（{provider}）：`{type(exc).__name__}: {str(exc)[:1200]}`",
-            ephemeral=True,
+        failure_text = (
+            f"⚠️ H3影片生成失敗（{provider}）："
+            f"`{type(exc).__name__}: {str(exc)[:1200]}`"
         )
+        try:
+            await interaction.followup.send(failure_text, ephemeral=True)
+        except discord.HTTPException as followup_exc:
+            # Discord interaction webhooks expire (long RunPod cold-start H3 jobs
+            # can exceed that window). Fall back to the originating channel so
+            # the user is never left with a silent job result.
+            print(
+                "⚠️ [H3_FOLLOWUP_EXPIRED] "
+                f"provider={provider} {type(followup_exc).__name__}: {followup_exc}"
+            )
+            channel = getattr(interaction, "channel", None)
+            if channel is not None:
+                await channel.send(failure_text)
     finally:
         h3._ACTIVE_JOBS.discard(job_key)
 
