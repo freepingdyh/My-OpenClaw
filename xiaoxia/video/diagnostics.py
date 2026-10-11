@@ -121,6 +121,38 @@ def format_h3_error(exc: Exception, cfg: Optional[Dict[str, Any]] = None) -> str
     return "\n".join(lines)
 
 
+async def _send_success_to_channel(view, channel, result: Dict[str, Any]) -> None:
+    """Send an H3 success result without relying on an interaction webhook."""
+    cfg = h3._config()
+    lines = [
+        "🎬 **H3影片生成完成**",
+        f"規格：{result.get('duration')} 秒｜{result.get('resolution')}",
+    ]
+    if result.get("used_voice") and result.get("voice_script"):
+        label = "Sulafat 聲音參考" if result.get("voice_mode") == "reference_audio" else "H3 原生語音"
+        lines.append(f"🗣️ {label}：{result.get('voice_script')}")
+    elif result.get("voice_mode") == "silent_turbo":
+        lines.append("🔇 本次為無語音 H3 fallback")
+
+    local_path = str(result.get("local_path") or "")
+    max_bytes = int(cfg.get("send_file_max_mb") or 24) * 1024 * 1024
+    link = result.get("local_url") or result.get("video_url")
+
+    if local_path and os.path.exists(local_path) and os.path.getsize(local_path) <= max_bytes:
+        await channel.send(
+            "\n".join(lines),
+            file=discord.File(local_path, filename=os.path.basename(local_path)),
+        )
+    else:
+        if link:
+            lines.append(f"📎 {link}")
+        await channel.send("\n".join(lines))
+
+    view.context["last_h3_video_url"] = result.get("local_url") or result.get("video_url")
+    view.context["last_h3_video_model_id"] = result.get("model_id")
+    view.context["last_h3_voice_script"] = result.get("voice_script") or ""
+
+
 async def _send_success_to_interaction(view, interaction: discord.Interaction, result: Dict[str, Any]) -> None:
     cfg = h3._config()
     lines = [
@@ -167,7 +199,8 @@ async def _send_success_to_interaction(view, interaction: discord.Interaction, r
         # The video job may have completed successfully even though followup.send
         # can no longer use the original interaction token.
         print(f"⚠️ [H3_SUCCESS_FOLLOWUP_EXPIRED] {type(exc).__name__}: {exc}")
-        await _send_via_channel()
+        await _send_success_to_channel(view, getattr(interaction, "channel", None), result)
+        return
 
     view.context["last_h3_video_url"] = result.get("local_url") or result.get("video_url")
     view.context["last_h3_video_model_id"] = result.get("model_id")
