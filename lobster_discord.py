@@ -9174,9 +9174,11 @@ async def _send_girlfriend_with_safe_retry(
 
     若完整 context 被安全機制攔截，才以最小安全 context 重試一次。
     """
+    # Follow the existing Zeabur model setting for both primary chat and safe retry.
+    chat_model = (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=chat_model,
             contents=msg_parts,
             config=types.GenerateContentConfig(
                 system_instruction=full_system_instruction,
@@ -9236,7 +9238,7 @@ async def _send_girlfriend_with_safe_retry(
     )
     try:
         retry = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=chat_model,
             contents=text_query,
             config=types.GenerateContentConfig(
                 system_instruction=minimal_system,
