@@ -293,14 +293,15 @@ async def _review_beauty_result(
 來源模式：{str(source.get("source_mode") or source.get("type") or source.get("db_type") or "photo")}
 """.strip()
 
+    default_model = (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     configured_model = (
         os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL")
         or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL")
-        or "gemini-2.5-flash"
+        or default_model
     ).strip()
     models = [configured_model]
-    if configured_model != "gemini-2.5-flash":
-        models.append("gemini-2.5-flash")
+    if configured_model != default_model:
+        models.append(default_model)
 
     attempts = [("exact", image_bytes, "image/png", base_prompt)]
     if variant == "nude":

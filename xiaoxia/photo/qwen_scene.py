@@ -226,7 +226,7 @@ async def _compile_scene_with_gemini(
 """.strip()
 
     resp = await app.gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=getattr(app, "XIAOXIA_GEMINI_MODEL", "gemini-3.5-flash-lite"),
         contents=prompt,
         config=app.types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )

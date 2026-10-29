@@ -86,7 +86,7 @@ CONSISTENCY CHECK before answering:
 """
 
     try:
-        model = getattr(app, "GEMINI_FLASH_MODEL", None) or getattr(app, "GEMINI_MODEL", None) or "gemini-2.5-flash"
+        model = getattr(app, "GEMINI_FLASH_MODEL", None) or getattr(app, "GEMINI_MODEL", None) or getattr(app, "XIAOXIA_GEMINI_MODEL", "gemini-3.5-flash-lite")
         image_part = types.Part.from_uri(file_uri=pose_url, mime_type=mime_type)
         resp = await app.gemini_client.aio.models.generate_content(
             model=model,

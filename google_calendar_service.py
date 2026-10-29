@@ -652,7 +652,7 @@ class GoogleCalendarService:
         )
         self.model = os.environ.get(
             "GOOGLE_CALENDAR_ROUTER_MODEL",
-            "gemini-2.5-flash",
+            (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite"),
         )
         self.sessions: dict[tuple[int, int], PendingAction] = {}
         self.session_minutes = max(

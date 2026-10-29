@@ -67,7 +67,7 @@ async def _review_photo_scene_fidelity(raw_scene_text, scene_data):
 """
     try:
         resp = await app.gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=getattr(app, "XIAOXIA_GEMINI_MODEL", "gemini-3.5-flash-lite"),
             contents=review_prompt,
             config=app.types.GenerateContentConfig(
                 response_mime_type="application/json",

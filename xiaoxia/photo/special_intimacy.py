@@ -225,7 +225,7 @@ async def _public_scene_rejection(
 最近對話：
 {dialogue[:4500]}
 """.strip()
-    model = (os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or "gemini-2.5-flash").strip()
+    model = (os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     try:
         response = await app.gemini_client.aio.models.generate_content(model=model, contents=prompt)
         text = str(getattr(response, "text", "") or "").strip()
@@ -412,7 +412,7 @@ recent dialogue:
 {dialogue[:6000]}
 """.strip()
 
-    model = (os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or "gemini-2.5-flash").strip()
+    model = (os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL") or os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     try:
         contents = [
             prompt,
@@ -528,14 +528,15 @@ recent dialogue:
 {dialogue[:6000]}
 """.strip()
 
+    default_model = (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
     configured_model = (
         os.environ.get("XIAOXIA_SPECIAL_REVIEW_MODEL")
         or os.environ.get("XIAOXIA_SPECIAL_DIRECTOR_MODEL")
-        or "gemini-2.5-flash"
+        or default_model
     ).strip()
     models = [configured_model]
-    if configured_model != "gemini-2.5-flash":
-        models.append("gemini-2.5-flash")
+    if configured_model != default_model:
+        models.append(default_model)
 
     normalized_pre = re.sub(r"[^\\w\\u4e00-\\u9fff]+", "", pre_reply).lower()
     attempts = [

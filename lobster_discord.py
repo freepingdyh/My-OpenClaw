@@ -730,6 +730,10 @@ XIAOXIA_AUTONOMY_CHANNEL_ID = _env_int("XIAOXIA_AUTONOMY_CHANNEL_ID", 0, 0, None
 XIAOXIA_AUTONOMY_CHANNEL_NAME = os.environ.get("XIAOXIA_AUTONOMY_CHANNEL_NAME", "唐分糕").strip() or "唐分糕"
 
 
+# All Gemini calls use the configured Zeabur models; keep TTS separate from text/vision.
+XIAOXIA_GEMINI_MODEL = (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
+XIAOXIA_TTS_MODEL = (os.environ.get("XIAOXIA_TTS_MODEL") or "gemini-3.1-flash-tts-preview").strip()
+
 # 📅 v1.10.32：女友小俠專用 Google Calendar
 # 與既有小夏/工作用 GOOGLE_* OAuth 完全分離，避免覆蓋原本服務。
 XIAOXIA_GOOGLE_CLIENT_ID = (os.environ.get("XIAOXIA_GOOGLE_CLIENT_ID") or "").strip()
@@ -836,7 +840,7 @@ WARDROBE_USAGE_LOG_PATH = os.path.join(MEMORY_DIR, "wardrobe_usage_log.json")
 # 👗 v1.5.31：衣櫃圖片 metadata 以 OpenAI vision 為主，Gemini 為備援；不改既有 JSON schema。
 WARDROBE_VISION_PROVIDER = (os.environ.get("WARDROBE_VISION_PROVIDER", "openai") or "openai").strip().lower()
 WARDROBE_OPENAI_MODEL = (os.environ.get("WARDROBE_OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini").strip()
-WARDROBE_GEMINI_MODEL = (os.environ.get("WARDROBE_GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+WARDROBE_GEMINI_MODEL = (os.environ.get("WARDROBE_GEMINI_MODEL") or XIAOXIA_GEMINI_MODEL).strip()
 WARDROBE_ANALYSIS_TRACE_PATH = os.path.join(MEMORY_DIR, "wardrobe_analysis_trace.jsonl")
 # 👗 v1.5.32：不修改衣櫃 JSON schema，另建語意快取供選衣器使用。
 WARDROBE_SEMANTIC_CACHE_PATH = os.path.join(MEMORY_DIR, "wardrobe_semantic_cache.json")
@@ -1460,7 +1464,7 @@ async def _xiaoxia_generate_today_mainline(today_events, now_dt=None):
 只回傳一行繁體中文，40~90字，不要標題、不用 JSON。"""
         try:
             r = await gemini_client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=XIAOXIA_GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.35),
             )
@@ -3904,7 +3908,7 @@ async def _xiaoxia_sport_xiaoxia_participation_reply(row, state=None):
 - 不要虛構妳自己也實際跑了某距離、心率或時間。"""
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.7),
         )
@@ -4557,7 +4561,7 @@ async def _xiaoxia_sport_generate_plan(window_start=None, replace_future=False):
 
     prompt = _xiaoxia_sport_planner_prompt(window_start, window_end, events)
     response = await gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=XIAOXIA_GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.25),
     )
@@ -5718,7 +5722,7 @@ async def _choose_wardrobe_item_for_free_mode(scene_text, purpose="photo", targe
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.45),
         )
@@ -6373,7 +6377,7 @@ Episode ID：{latest.get('episode_id') or ''}
 """.strip()
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.72),
         )
@@ -6617,7 +6621,7 @@ async def _maybe_update_autonomy_followup_from_chat(user_text, xiaoxia_reply):
 小俠答：{str(xiaoxia_reply)[:1800]}
 """
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.25),
         )
@@ -7127,7 +7131,7 @@ async def _autonomy_choose_wardrobe(activity, visual_mode, shared_pool_mode=""):
     confidence = None
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35),
         )
@@ -7366,7 +7370,7 @@ composition={str((result_context or {}).get('composition') or '')}
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.72),
         )
@@ -8907,7 +8911,7 @@ async def _llm_daily_memory_organize(profile, events, directives, logs, now_dt):
 }}
 """
     resp = await gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=XIAOXIA_GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -9175,7 +9179,7 @@ async def _send_girlfriend_with_safe_retry(
     若完整 context 被安全機制攔截，才以最小安全 context 重試一次。
     """
     # Follow the existing Zeabur model setting for both primary chat and safe retry.
-    chat_model = (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
+    chat_model = XIAOXIA_GEMINI_MODEL
     try:
         response = await gemini_client.aio.models.generate_content(
             model=chat_model,
@@ -10208,7 +10212,7 @@ async def _love_build_candidate(trigger_type="chat_review", trigger_detail="", n
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -11934,7 +11938,7 @@ TEMP_CHAT：
 只回 JSON：{{"summary":["..."],"possible_xiaoxia_promises":["小俠明確具體承諾候選，可空陣列"]}}
 """
     try:
-        resp=await gemini_client.aio.models.generate_content(model="gemini-2.5-flash",contents=prompt,config=types.GenerateContentConfig(response_mime_type="application/json",temperature=0.1)); data=_extract_json_object(getattr(resp,"text","") or "")
+        resp=await gemini_client.aio.models.generate_content(model=XIAOXIA_GEMINI_MODEL,contents=prompt,config=types.GenerateContentConfig(response_mime_type="application/json",temperature=0.1)); data=_extract_json_object(getattr(resp,"text","") or "")
     except Exception as exc:
         print(f"⚠️ [DAILY_LIFE_LOG_LLM_FAILED] {type(exc).__name__}: {exc}"); data={"summary":[narrative_safe_text(x,max_len=160) for x in logs[-6:]]}
     facts=[narrative_safe_text(x,max_len=220) for x in (data.get("summary",[]) if isinstance(data,dict) else []) if narrative_safe_text(x,max_len=220)]
@@ -12116,7 +12120,7 @@ TEMP_CHAT：
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
         )
@@ -12818,7 +12822,7 @@ async def _rewrite_reply_for_directives(reply, directives):
     """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
         )
         rewritten = str(resp.text or "").strip().strip('"').strip("「").strip("」")
@@ -13479,7 +13483,7 @@ async def capture_life_events_from_chat(user_text, recent_chat_text="", now_dt=N
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -14003,7 +14007,7 @@ async def capture_xiaoxia_promises_to_board_from_text(source_text, *, origin="ch
 只回傳 JSON：{{"promises":["一句可驗收承諾", "..."]}}
 """
     try:
-        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
+        response = await gemini_client.aio.models.generate_content(model=XIAOXIA_GEMINI_MODEL, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
         data = _extract_json_object(getattr(response, "text", "") or "")
         raw_items = data.get("promises", []) if isinstance(data, dict) else []
     except Exception as exc:
@@ -14042,7 +14046,7 @@ active：{json.dumps(candidates, ensure_ascii=False)}
 本次文字：{source_text[-2400:]}
 只回 JSON：{{"completed_ids":[],"reasons":{{}}}}"""
     try:
-        response = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
+        response = await gemini_client.aio.models.generate_content(model=XIAOXIA_GEMINI_MODEL, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0))
         data = _extract_json_object(getattr(response, "text", "") or "")
     except Exception as exc:
         print(f"⚠️ [XIAOXIA_PROMISE_AUTO_CLOSE_FAILED] {type(exc).__name__}: {exc}")
@@ -14164,7 +14168,7 @@ B. 同一段今日聊天中，小俠明確答應、承諾、說會補上或會�
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -14296,7 +14300,7 @@ async def capture_diary_promises_from_chat(user_text, xiaoxia_reply):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt,
+            model=XIAOXIA_GEMINI_MODEL, contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         data = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
@@ -14326,7 +14330,7 @@ async def enforce_diary_promise_delivery(result, due_promises, entry_content, se
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt,
+            model=XIAOXIA_GEMINI_MODEL, contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         repaired = json.loads(response.text.replace("```json", "").replace("```", "").strip(), strict=False)
@@ -14390,7 +14394,7 @@ async def enforce_diary_creative_layer(result, entry_content, chat_context, curr
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -15123,7 +15127,7 @@ async def _fate_xiaoxia_commentary(card, role=None, situation=None, phase="revea
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.7),
         )
@@ -16210,7 +16214,7 @@ family 代號：{family.get('family')}
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -16335,7 +16339,7 @@ async def _draft_cosplay_post_text(story, vibe_request=None):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -16504,7 +16508,7 @@ async def _build_cosplay_today_scene(story, post_text, vibe_request=None, user_o
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -16651,7 +16655,7 @@ async def _write_cosplay_ending_from_scene(story, post_text, scene_caption):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -16743,7 +16747,7 @@ async def generate_story_legacy(mode):
         )
 
     response = await gemini_client.aio.models.generate_content(
-        model='gemini-2.5-flash',
+        model=XIAOXIA_GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=f"妳是成年虛擬角色小俠，深愛著大俠，負責規劃 Cosplay 題材。{system_mod}",
@@ -17037,7 +17041,7 @@ async def plan_cosplay_visual_state(topic, event, persona, force_half_body=False
 
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=planner_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -17362,7 +17366,7 @@ async def plan_diary_visual_state(entry_content, chat_context, xiaoxia_diary, re
 }}"""
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=planner_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -17853,7 +17857,7 @@ Rules:
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -18402,7 +18406,7 @@ Rules:
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=data, mime_type=mime), qa_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
         )
@@ -19050,7 +19054,7 @@ DANBOORU_ALLOWED_IMAGE_HOST_SUFFIXES = (".donmai.us",)
 
 # v1.10.31：Danbooru tag 只做寬鬆候選搜尋；真正「是不是這個角色/作品」
 # 改由 Gemini Vision 依圖片的非臉部證據做相容性 Gate，再送 Nano Banana 2 Lite。
-DANBOORU_VISION_GATE_MODEL = (os.environ.get("DANBOORU_VISION_GATE_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+DANBOORU_VISION_GATE_MODEL = (os.environ.get("DANBOORU_VISION_GATE_MODEL") or XIAOXIA_GEMINI_MODEL).strip()
 DANBOORU_VISION_GATE_MIN_CONFIDENCE = _env_int("DANBOORU_VISION_GATE_MIN_CONFIDENCE", 70, 0, 100)
 DANBOORU_VISION_GATE_MAX_CANDIDATES = _env_int("DANBOORU_VISION_GATE_MAX_CANDIDATES", 5, 1, 10)
 
@@ -19357,7 +19361,7 @@ topic: {topic or 'N/A'}
 persona: {persona or 'N/A'}
 """
             response = await gemini_client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model=XIAOXIA_GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
             )
@@ -19418,7 +19422,7 @@ work_title: {work_title or 'N/A'}
 raw_request: {raw_request or 'N/A'}
 """
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
         )
@@ -19959,7 +19963,7 @@ async def _analyze_cosplay_clothing_reference_image(local_path, *, title_hint=""
 }}
 """
     response = await gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=XIAOXIA_GEMINI_MODEL,
         contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
     )
@@ -22733,7 +22737,7 @@ async def _ask_xiaoxia_about_wardrobe(ctx, payload):
     try:
         parts.append(prompt)
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=parts,
             config=types.GenerateContentConfig(temperature=0.75),
         )
@@ -24232,7 +24236,7 @@ async def _summarize_scene_for_photo(raw_scene_text, source_mode, has_reference,
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
         )
@@ -24348,7 +24352,7 @@ why_this_photo：{photo_selection.get('why_this_photo') or result.get('why_this_
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
         )
@@ -24361,7 +24365,7 @@ why_this_photo：{photo_selection.get('why_this_photo') or result.get('why_this_
                 if not wardrobe_item and len(outfit_summary) < 30:
                     try:
                         outfit_resp = await gemini_client.aio.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model=XIAOXIA_GEMINI_MODEL,
                             contents=(
                                 "請把以下小俠服裝方向擴寫成 30~70 個繁體中文字的具體視覺描述，只寫服裝與配件，"
                                 "包含主色、版型/剪裁、材質或結構、至少一個視覺特色與必要配件；不要寫人物身材、場景或動作。\n"
@@ -24504,7 +24508,7 @@ Parent episode：{_clean_text_compact(episode_plan.get('parent_episode_id') or '
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
         )
@@ -25918,7 +25922,7 @@ async def _xiaoxia_review_photobook_wardrobe_page(grid_path, items, scene_text, 
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=raw, mime_type="image/jpeg"), types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.35),
         )
@@ -26187,7 +26191,7 @@ Shot：第 {shot_no} 張
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.25),
         )
@@ -27755,7 +27759,7 @@ async def _analyze_photobook_more_scene(image_url):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
         )
@@ -27926,7 +27930,7 @@ score 為 0.0～1.0 的符合程度。
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=data, mime_type=mime), types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
         )
@@ -29423,7 +29427,7 @@ async def strengthen_diary_reply_to_daxia(result, entry_content, chat_context, l
     """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
         )
         improved = str(resp.text or "").strip().strip("```").strip()
@@ -29539,7 +29543,7 @@ async def select_diary_photo_memory(
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -29596,7 +29600,7 @@ async def evaluate_diary_wardrobe_match(image_url, diary_wardrobe):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[
                 types.Part.from_bytes(data=ref_data, mime_type=ref_mime),
                 types.Part.from_bytes(data=generated_data, mime_type=generated_mime),
@@ -29627,7 +29631,7 @@ async def evaluate_diary_body_adherence(image_url):
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=image_data, mime_type=image_mime), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -29700,7 +29704,7 @@ outfit：{expected['outfit'] or '未提供'}
 """
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -29950,7 +29954,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             """
 
             mem_resp = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
+                model=XIAOXIA_GEMINI_MODEL,
                 contents=mem_prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -30123,7 +30127,7 @@ async def process_diary_reply(channel, target_date=None, retry_mode=False):
             
             print(f"💡 正在處理 {entry_date} 的雙向日記...")
             response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
+                model=XIAOXIA_GEMINI_MODEL,
                 contents=eval_prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -31863,7 +31867,7 @@ async def refocus_intimate_reply(reply, user_text):
 """
     try:
         resp = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=XIAOXIA_GEMINI_MODEL,
             contents=prompt,
         )
         revised = str(resp.text or "").strip().strip('"').strip("「").strip("」")
@@ -33698,7 +33702,7 @@ async def _send_morning_voice_for_interaction(interaction, voice_script_base):
 【晨報資料】
 {voice_script_base}
 """
-        text_resp = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        text_resp = await gemini_client.aio.models.generate_content(model=XIAOXIA_GEMINI_MODEL, contents=prompt)
         body_text = text_resp.text.strip().strip('"').strip("「」").strip()
         for _ in range(3):
             before = body_text
@@ -33718,7 +33722,7 @@ async def _send_morning_voice_for_interaction(interaction, voice_script_base):
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Sulafat")))
         )
-        audio_resp = await gemini_client.aio.models.generate_content(model="gemini-2.5-flash-preview-tts", contents=[tts_prompt], config=tts_config)
+        audio_resp = await gemini_client.aio.models.generate_content(model=XIAOXIA_TTS_MODEL, contents=[tts_prompt], config=tts_config)
         pcm_data = audio_resp.candidates[0].content.parts[0].inline_data.data
         raw_path = f"/tmp/voice_{uuid.uuid4().hex[:8]}.raw"
         mp3_path = raw_path.replace(".raw", ".mp3")
@@ -34045,7 +34049,7 @@ async def _build_memory_update_case(user_request, feedback=""):
     6. search_terms 要足以找出舊錯誤資料，但不要放太泛的詞。
     """
     parse_resp = await gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=XIAOXIA_GEMINI_MODEL,
         contents=parse_prompt,
     )
     plan = _extract_json_object(parse_resp.text)
@@ -34128,7 +34132,7 @@ async def _build_memory_update_case(user_request, feedback=""):
     8. temp_chat 若是模型自己說錯的歷史回覆可 delete；若含重要對話脈絡則 rewrite 成絕對日期。
     """
     proposal_resp = await gemini_client.aio.models.generate_content(
-        model="gemini-2.5-flash",
+        model=XIAOXIA_GEMINI_MODEL,
         contents=proposal_prompt,
     )
     proposal = _extract_json_object(proposal_resp.text)
@@ -35077,7 +35081,7 @@ async def save_knowledge(ctx):
         """
         
         resp = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model=XIAOXIA_GEMINI_MODEL,
             contents=knowledge_prompt,
             config=types.GenerateContentConfig(
                 safety_settings=[
@@ -35352,7 +35356,7 @@ async def on_message(message):
         try:
             if session_key not in architect_chat_sessions:
                 architect_chat_sessions[session_key] = gemini_client.aio.chats.create(
-                    model="gemini-2.5-flash",
+                    model=XIAOXIA_GEMINI_MODEL,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         safety_settings=[

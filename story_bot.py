@@ -74,7 +74,7 @@ async def on_message(message):
             # 發動 Gemini 產生首題
             msg = await message.channel.send("✨ 準備中...")
             response = gemini_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=(os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite"),
                 contents=f"你好，我是{nickname}，{age}。請開始故事，給出三個題材選項。",
                 config=types.GenerateContentConfig(system_instruction=XIAOXIA_SYSTEM_PROMPT)
             )

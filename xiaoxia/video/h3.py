@@ -77,10 +77,10 @@ def _config() -> Dict[str, Any]:
         "send_file_max_mb": _env_int("H3_VIDEO_SEND_FILE_MAX_MB", 24, 1, 200),
         "voice_enabled": _env_bool("XIAOXIA_H3_VOICE_ENABLED", True),
         "voice_mode": voice_mode,
-        "tts_model": (os.environ.get("XIAOXIA_H3_TTS_MODEL") or "gemini-2.5-flash-preview-tts").strip(),
+        "tts_model": (os.environ.get("XIAOXIA_H3_TTS_MODEL") or os.environ.get("XIAOXIA_TTS_MODEL") or "gemini-3.1-flash-tts-preview").strip(),
         "tts_voice": (os.environ.get("XIAOXIA_H3_TTS_VOICE") or "Sulafat").strip() or "Sulafat",
         "tts_language": (os.environ.get("XIAOXIA_H3_TTS_LANGUAGE") or "zh-TW").strip() or "zh-TW",
-        "script_model": (os.environ.get("XIAOXIA_H3_SCRIPT_MODEL") or "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+        "script_model": (os.environ.get("XIAOXIA_H3_SCRIPT_MODEL") or os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite",
     }
 
 
