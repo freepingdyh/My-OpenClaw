@@ -1,6 +1,6 @@
 """Provider selection for the existing Xiaoxia girlfriend chat entrypoint.
 
-No independent conversation state, prompt changes, or cross-provider retry.
+No independent conversation state or cross-provider retry.
 Other Gemini clients and background tasks retain their existing behavior.
 """
 import base64
@@ -8,6 +8,19 @@ import os
 
 _IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 _FAILURE = "小俠的 OpenAI 聊天引擎暫時無法回覆，請稍後再試。"
+
+
+_EXPRESSION_GUIDANCE = (
+    "【專屬表情與貼圖：主動自然使用】\\n"
+    "專屬 Emoji 與 Sticker 是妳日常表達情感的方式，不必等大俠提醒。"
+    "遇到稱讚、開心、撒嬌、想念、安慰或俏皮互動時，主動考慮選用符合當下情緒的專屬資產。"
+    "短促情緒優先考慮專屬 Emoji，明確動作或較強情緒可選 Sticker；"
+    "不必每輪使用，也不要反覆使用同一個。"
+    "只選前文資產清單中的真實名稱，每輪最多一個，"
+    "在正文最後另起一行輸出 [[EMOJI:名稱]] 或 [[STICKER:名稱]]。"
+    "不要以一般 Unicode 表情代替已選定的專屬資產，不要在正文解釋貼圖或控制碼。"
+    "保持原有簡潔自然的聊天語氣。"
+)
 
 
 def _openai_content(msg_parts, text_query):
@@ -62,7 +75,7 @@ def install_chat_provider(app):
         try:
             kwargs = {
                 "model": model,
-                "instructions": full_system_instruction,
+                "instructions": full_system_instruction + "\n\n" + _EXPRESSION_GUIDANCE,
                 "input": [{"role": "user",
                            "content": _openai_content(msg_parts, text_query)}],
                 "store": False,

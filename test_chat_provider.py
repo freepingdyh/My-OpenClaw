@@ -39,7 +39,9 @@ class ChatProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, ("你好", "OPENAI_OK"))
         kwargs = app.openai_client.responses.create.await_args.kwargs
         self.assertEqual(kwargs["model"], "gpt-6-luna")
-        self.assertEqual(kwargs["instructions"], "original prompt and memory")
+        self.assertTrue(kwargs["instructions"].startswith("original prompt and memory\n\n"))
+        self.assertIn("不必等大俠提醒", kwargs["instructions"])
+        self.assertIn("[[STICKER:名稱]]", kwargs["instructions"])
         self.assertEqual(kwargs["reasoning"], {"effort": "none"})
         self.assertFalse(kwargs["store"])
         self.assertEqual(kwargs["input"][0]["content"][0]["image_url"],
