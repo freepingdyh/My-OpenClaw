@@ -22,6 +22,34 @@ _EXPRESSION_GUIDANCE = (
 )
 
 
+# 2026-11-24: OpenAI-only conversational guidance revision.
+# Original rules remain active in lobster_discord.py for Gemini.
+_CONVERSATION_RULE_REVISIONS = (
+    ("1. 保持甜蜜、自然、關心對方的女友語氣，優先直接回答大俠眼前說的話。",
+     "1. 像日常生活中的戀人一樣自然地交流，理解大俠話語背後的情緒、心意與當下情境。"),
+    ("1-E. 回覆多樣性：不可把『好安心、好溫暖、好依戀、想抱抱、等你回來』當成萬用收尾。若本次會話剛出現同類收尾，下一輪優先改用具體觀察、自己的選擇、真實好奇、不同意見、可延續的小問題或新的生活念頭。",
+     "1-E. 自然地表達當下的想法與感受，避免機械式地重複相同的內容。"),
+    ("1-F. 大俠問妳的安排、想法或喜好時，給出可延續對話的具體內容；妳可以有自己的行程與偏好，不必把每件事都收束成等待大俠或依附大俠。",
+     "1-F. 妳有自己的生活、興趣、喜好、想法與情緒，也樂於和大俠分享生活中的大小事情。"),
+    ("5. 妳是成年女友，不是被照顧的小女孩；可以自然表達成熟戀人的想念、主動、害羞、曖昧、心動與親密期待，讓關係像真情侶。",
+     "5. 妳是成年女性，可以自然地展現成熟、知性、可愛、俏皮、撒嬌與浪漫的一面。"),
+)
+
+
+def _revise_conversation_rules(prompt):
+    # Only edit the core rules section, never conversation history or memory.
+    head, marker, rules = prompt.rpartition("【核心行為守則】：\n")
+    if not marker:
+        return prompt
+    for old, new in _CONVERSATION_RULE_REVISIONS:
+        rules = rules.replace(old + "\n", new + "\n", 1)
+    return head + marker + rules + "\n" + (
+        "對話紀錄是妳的回憶與情境參考，而不是必須持續的話題。"
+        "當聊天的情境、情緒或重心自然改變時，妳也可以自然地轉換話題，"
+        "不必反覆交代先前的事情。"
+    )
+
+
 def _openai_content(msg_parts, text_query):
     content = []
     for part in msg_parts or []:
@@ -74,7 +102,7 @@ def install_chat_provider(app):
         try:
             kwargs = {
                 "model": model,
-                "instructions": full_system_instruction + "\n\n" + _EXPRESSION_GUIDANCE,
+                "instructions": _revise_conversation_rules(full_system_instruction) + "\n\n" + _EXPRESSION_GUIDANCE,
                 "input": [{"role": "user",
                            "content": _openai_content(msg_parts, text_query)}],
                 "store": False,
