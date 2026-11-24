@@ -230,6 +230,10 @@ def _activate_flat():
 
 _ACTIVATED = _activate_flat()
 
+# Main girlfriend chat provider; leave other Gemini functionality unchanged.
+from xiaoxia.chat_provider import install_chat_provider
+_ACTIVATED["chat_provider"] = install_chat_provider(app)
+
 if __name__ == "__main__":
     print("🚀 [LOBSTER_ENTRYPOINT] version=1.14.12-flat stable_base=1.11.17.2")
     try:
