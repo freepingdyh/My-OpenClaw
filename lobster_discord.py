@@ -14486,7 +14486,8 @@ async def save_to_vault(url):
         print(f"Vault save error: {e}")
         return None
 
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+# Explicit API version for Gemini system instruction compatibility.
+gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"), http_options=types.HttpOptions(api_version="v1beta"))
 openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # 🎴 今晚命運牌：遊戲只保存狀態；所有說話仍由同一個小俠人格完成。
