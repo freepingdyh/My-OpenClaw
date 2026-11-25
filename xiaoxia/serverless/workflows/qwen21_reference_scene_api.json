@@ -1,0 +1,174 @@
+{
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "image_4_body_full.png"
+    },
+    "_meta": {
+      "title": "Reference 1 - Full Body"
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "image_2_face_front.png"
+    },
+    "_meta": {
+      "title": "Reference 2 - Face Front"
+    }
+  },
+  "12": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "image_3_face_45.png"
+    },
+    "_meta": {
+      "title": "Reference 3 - Face 45"
+    }
+  },
+  "20": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "21": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "22": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "23": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": [
+        "20",
+        0
+      ],
+      "device": "auto",
+      "dtype": "default"
+    },
+    "_meta": {
+      "title": "Qwen Image 2.1 Cache"
+    }
+  },
+  "30": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "21",
+        0
+      ],
+      "prompt": "Use <image1>, <image2>, and <image3> as identity references for the same adult woman and generate a completely new scene.",
+      "negative_prompt": "",
+      "vae": [
+        "22",
+        0
+      ],
+      "resolution": 1024,
+      "images.image_1": [
+        "10",
+        0
+      ],
+      "images.image_2": [
+        "11",
+        0
+      ],
+      "images.image_3": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Qwen 2.1 Multi-Reference Scene Conditioning"
+    }
+  },
+  "31": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 896,
+      "height": 1184,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "New Scene Canvas"
+    }
+  },
+  "32": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "23",
+        0
+      ],
+      "positive": [
+        "30",
+        0
+      ],
+      "negative": [
+        "30",
+        1
+      ],
+      "latent_image": [
+        "31",
+        0
+      ],
+      "seed": 0,
+      "steps": 25,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    },
+    "_meta": {
+      "title": "Qwen Scene Sampler"
+    }
+  },
+  "33": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "32",
+        0
+      ],
+      "vae": [
+        "22",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Decode Scene"
+    }
+  },
+  "34": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "33",
+        0
+      ],
+      "filename_prefix": "Qwen_scene_2.1"
+    },
+    "_meta": {
+      "title": "Save Scene Image"
+    }
+  }
+}

@@ -595,7 +595,7 @@ class BusinessCardService:
         self.architect_channel_id = int(architect_channel_id)
         self.vision_model = os.environ.get(
             "BUSINESS_CARD_VISION_MODEL",
-            "gemini-2.5-flash",
+            (os.environ.get("XIAOXIA_GEMINI_MODEL") or "gemini-3.5-flash-lite"),
         )
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
         self.sheet_id = os.environ.get("BUSINESS_CARD_SHEET_ID", "")
