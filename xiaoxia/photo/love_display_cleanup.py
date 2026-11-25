@@ -91,20 +91,28 @@ def _display_copy(context: Dict[str, Any]) -> Dict[str, Any]:
 def install_love_display_cleanup(app: Any) -> Dict[str, Any]:
     if getattr(app, "_xiaoxia_love_display_cleanup_installed", False):
         return {"patched": False, "reason": "already_installed"}
-    original = getattr(app, "_build_result_embed", None)
-    if not callable(original):
-        return {"patched": False, "reason": "_build_result_embed_not_found"}
+    # Initial delivery uses _build_photo_embed directly; result/re-roll may use
+    # _build_result_embed. Sanitize both display entry points, not generation.
+    def wrap(builder):
+        def wrapped(context, *args, **kwargs):
+            return builder(_display_copy(context), *args, **kwargs)
+        return wrapped
 
-    def wrapped(context, *args, **kwargs):
-        return original(_display_copy(context), *args, **kwargs)
-
-    app._build_result_embed = wrapped
+    patched_builders = []
+    for name in ("_build_photo_embed", "_build_result_embed"):
+        original = getattr(app, name, None)
+        if callable(original):
+            setattr(app, name, wrap(original))
+            patched_builders.append(name)
+    if not patched_builders:
+        return {"patched": False, "reason": "display_builders_not_found"}
     app._xiaoxia_love_display_cleanup_installed = True
     return {
         "patched": True,
         "scope": "love_intent_display_only",
         "generation_prompt_unchanged": True,
         "strategy": "remove_internal_segment_before_display_render",
+        "patched_builders": patched_builders,
         "removed_markers": [
             "LOVE INTENT SOLO RULES",
             "LOVE INTENT POSE RULES",
