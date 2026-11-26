@@ -82,10 +82,9 @@ def _openai_content(msg_parts, text_query):
 def install_chat_provider(app):
     provider = (os.getenv("XIAOXIA_CHAT_PROVIDER") or "gemini").strip().lower()
     original = app._send_girlfriend_with_safe_retry
-    if provider in {"gemini", "google"}:
-        print(f"[XIAOXIA_CHAT_PROVIDER] gemini model={app.XIAOXIA_GEMINI_MODEL}")
-        return "gemini"
-    if provider != "openai":
+    if provider == "google":
+        provider = "gemini"
+    if provider not in {"gemini", "openai"}:
         raise ValueError("XIAOXIA_CHAT_PROVIDER must be gemini or openai")
 
     model = (os.getenv("XIAOXIA_OPENAI_MODEL") or "gpt-6-luna").strip()
@@ -122,7 +121,61 @@ def install_chat_provider(app):
                   f"status={getattr(exc, 'status_code', None)}")
         return _FAILURE, "OPENAI_FALLBACK"
 
-    # Original handler is unchanged and remains the default on the next restart.
-    app._send_girlfriend_with_safe_retry = send_openai
-    print(f"[XIAOXIA_CHAT_PROVIDER] openai model={model} reasoning={effort or 'default'}")
-    return "openai"
+    default_provider = provider
+    active_provider = default_provider
+
+    async def dispatch(*args, **kwargs):
+        handler = send_openai if active_provider == "openai" else original
+        return await handler(*args, **kwargs)
+
+    app._send_girlfriend_with_safe_retry = dispatch
+
+    import discord
+    from discord import app_commands
+
+    bot = app.girlfriend_bot
+    group = app_commands.Group(name="provider", description="管理聊天模型")
+
+    async def manage(interaction, action):
+        nonlocal active_provider
+        # Use the existing private-command authorization, fail closed.
+        from types import SimpleNamespace
+        ctx = SimpleNamespace(author=interaction.user, guild=interaction.guild,
+                              channel=interaction.channel, bot=bot,
+                              message=SimpleNamespace(author=interaction.user,
+                                                      guild=interaction.guild,
+                                                      channel=interaction.channel))
+        try:
+            authorized = app.private_command_authorized(ctx)
+        except Exception:
+            authorized = False
+        if not authorized:
+            await interaction.response.send_message("無權使用此指令。", ephemeral=True)
+            return
+        if action != "status":
+            active_provider = default_provider if action == "default" else action
+        current_model = model if active_provider == "openai" else app.XIAOXIA_GEMINI_MODEL
+        await interaction.response.send_message(
+            f"目前 Provider：{active_provider}\\n模型：{current_model}\\n環境預設：{default_provider}",
+            ephemeral=True,
+        )
+
+    @group.command(name="gemini", description="切換至 Gemini")
+    async def gemini_command(interaction: discord.Interaction):
+        await manage(interaction, "gemini")
+
+    @group.command(name="openai", description="切換至 OpenAI")
+    async def openai_command(interaction: discord.Interaction):
+        await manage(interaction, "openai")
+
+    @group.command(name="default", description="恢復環境預設")
+    async def default_command(interaction: discord.Interaction):
+        await manage(interaction, "default")
+
+    @group.command(name="status", description="查看聊天模型")
+    async def status_command(interaction: discord.Interaction):
+        await manage(interaction, "status")
+
+    bot.tree.add_command(group, override=True)
+    print(f"[XIAOXIA_CHAT_PROVIDER] default={default_provider}")
+    return default_provider
